@@ -1,0 +1,22 @@
+﻿name: Rollback Skeleton
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance:
+        description: Runtime instance to roll back
+        required: true
+      rollback_ref:
+        description: Previous image or release ref
+        required: true
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dry-run only
+        run: |
+          echo "Rollback is not enabled yet."
+          echo "instance=${{ inputs.instance }}"
+          echo "rollback_ref=${{ inputs.rollback_ref }}"

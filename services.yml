@@ -1,0 +1,315 @@
+﻿# AI Service Platform registry.
+#
+# Source of truth for platform services, runtime instances, compose profiles,
+# edge routing hints, health checks, and CI/CD service selection.
+#
+# AromaFlowAI currently runs as a legacy root Django service. Runtime
+# identifiers are migrated only through a dedicated deploy/data migration.
+
+version: 2
+
+platform:
+  name: AI Service Platform
+  repository_name: AI_Service_Platform
+  repository_note: This repository owns platform orchestration only; product code stays in product repositories.
+  source_policy:
+    deploy_from_archives: false
+    deploy_from_git_only: true
+
+defaults:
+  platform_structure:
+    services: services/
+    bots: bots/
+    packages: packages/
+    edge: infra/edge/
+    tools: tools/
+  edge:
+    router: haproxy
+    site_proxy: per-site-nginx
+  docker:
+    compose_strategy: profiles-and-fragments
+  local:
+    cache_backend: locmem
+    postgres_strategy: one-local-server-multiple-databases
+  vps:
+    cache_backend: dedicated-redis-per-stack
+  bots:
+    framework: aiogram3
+    dev_mode: polling
+    preprod_mode: webhook
+    prod_mode: webhook
+
+projects:
+  aromaflowai:
+    display_name: AromaFlowAI
+    type: django-site
+    status: legacy-root-service
+    owner: airiga1897
+    source:
+      policy: github
+      repository: https://github.com/airiga1897/AromaFlowAI
+      current_path: .
+      branch_policy:
+        work: current-working-branch
+        demo: same-commit-as-work
+    future_paths:
+      backend: services/aromaflow/backend
+      frontend: services/aromaflow/frontend
+    runtime_legacy_names:
+      django_package: mypet_project
+      deploy_dir: /opt/mypet01
+      compose_project_hint: mypet01
+      note: do-not-rename-without-data-and-deploy-migration
+
+  ai_e_retail:
+    display_name: AI_E_Retail
+    type: django-react-site
+    status: external-github-managed
+    owner: airiga1897
+    source_policy: github-only
+    source:
+      policy: github
+      repository: https://github.com/airiga1897/AI_E_Retail
+      reference_branch: codex/feature/fixmvp01
+      mvp_source: tag-or-release-branch-from-reference-commit
+      dev_source: development-branch-from-same-reference-commit
+      archive_usage: read-only-reference-only
+    future_paths:
+      backend: services/ai-retail/backend
+      frontend: services/ai-retail/frontend
+
+runtime_instances:
+  aromaflow-work:
+    project: aromaflowai
+    role: working-site
+    profile: aromaflow-work
+    env:
+      prefix: AROMAFLOW_WORK
+      file: .env.aromaflow.work
+      example_file: .env.aromaflow.work.example
+    local:
+      backend_port: 5000
+      frontend_port: 5170
+      cache_backend: locmem
+    domains:
+      local:
+        - http://localhost:5000
+      preprod:
+        - site.mine-craft.su
+      prod:
+        - www.mine-craft.su
+        - mine-craft.su
+    containers:
+      current:
+        - web
+        - db
+        - nginx
+        - haproxy
+        - certbot
+        - softether
+      future:
+        - aromaflow-work-backend
+        - aromaflow-work-frontend
+        - aromaflow-work-db
+        - aromaflow-work-redis
+        - aromaflow-work-nginx
+    healthcheck:
+      path: /health/
+      expected_status: 200
+      timeout_seconds: 5
+    data:
+      database: aromaflow_work
+      cache:
+        local: locmem
+        vps: dedicated-redis
+      volumes:
+        static: aromaflow_work_static
+        media: aromaflow_work_media
+        postgres: aromaflow_work_postgres
+        redis: aromaflow_work_redis
+    seed:
+      automatic_demo_data: false
+    deploy:
+      branches:
+        preprod: release/*
+        prod: main
+      environments:
+        preprod: VPS2
+        prod: VPS1
+
+  aromaflow-demo:
+    project: aromaflowai
+    role: demo-data-site
+    profile: aromaflow-demo
+    env:
+      prefix: AROMAFLOW_DEMO
+      file: .env.aromaflow.demo
+      example_file: .env.aromaflow.demo.example
+    local:
+      backend_port: 5010
+      frontend_port: 5171
+      cache_backend: locmem
+    domains:
+      local:
+        - http://localhost:5010
+      preprod:
+        - demo-aromaflow.example.invalid
+      prod: []
+    containers:
+      future:
+        - aromaflow-demo-backend
+        - aromaflow-demo-frontend
+        - aromaflow-demo-db
+        - aromaflow-demo-redis
+        - aromaflow-demo-nginx
+    healthcheck:
+      path: /health/
+      expected_status: 200
+      timeout_seconds: 5
+    data:
+      database: aromaflow_demo
+      cache:
+        local: locmem
+        vps: dedicated-redis
+      volumes:
+        static: aromaflow_demo_static
+        media: aromaflow_demo_media
+        postgres: aromaflow_demo_postgres
+        redis: aromaflow_demo_redis
+    seed:
+      automatic_demo_data: true
+      command: python manage.py setup_demo_content
+    deploy:
+      branches:
+        preprod: release/*
+      environments:
+        preprod: VPS2
+
+  ai-retail-mvp:
+    project: ai_e_retail
+    role: frozen-mvp
+    profile: ai-retail-mvp
+    source_policy: github-only
+    env:
+      prefix: AI_RETAIL_MVP
+      file: .env.ai-retail.mvp
+      example_file: .env.ai-retail.mvp.example
+    local:
+      backend_port: 8000
+      frontend_port: 5173
+      vite_proxy_target: http://host.docker.internal:8000
+      cache_backend: locmem
+    domains:
+      local:
+        - http://localhost:5173
+      preprod:
+        - mvp-ai-retail.example.invalid
+      prod: []
+    containers:
+      future:
+        - ai-retail-mvp-web
+        - ai-retail-mvp-frontend-dev
+        - ai-retail-mvp-db
+        - ai-retail-mvp-redis
+        - ai-retail-mvp-nginx
+    healthcheck:
+      path: /health/
+      expected_status: 200
+      timeout_seconds: 5
+    data:
+      database: ai_retail_mvp
+      cache:
+        local: locmem
+        vps: dedicated-redis
+      volumes:
+        static: ai_retail_mvp_static
+        media: ai_retail_mvp_media
+        postgres: ai_retail_mvp_postgres
+        redis: ai_retail_mvp_redis
+    seed:
+      automatic_demo_data: true
+      command: python manage.py load_demo_data
+    deploy:
+      source:
+        repository: https://github.com/airiga1897/AI_E_Retail
+        branch: codex/feature/fixmvp01
+        future_mvp_tag: ai-retail-mvp-v1
+      branches:
+        preprod: release/*
+      environments:
+        preprod: VPS2
+
+  ai-retail-dev:
+    project: ai_e_retail
+    role: future-development
+    profile: ai-retail-dev
+    source_policy: github-only
+    env:
+      prefix: AI_RETAIL_DEV
+      file: .env.ai-retail.dev
+      example_file: .env.ai-retail.dev.example
+    local:
+      backend_port: 8010
+      frontend_port: 5174
+      vite_proxy_target: http://host.docker.internal:8010
+      cache_backend: locmem
+    domains:
+      local:
+        - http://localhost:5174
+      preprod:
+        - dev-ai-retail.example.invalid
+      prod: []
+    containers:
+      future:
+        - ai-retail-dev-web
+        - ai-retail-dev-frontend-dev
+        - ai-retail-dev-db
+        - ai-retail-dev-redis
+        - ai-retail-dev-nginx
+    healthcheck:
+      path: /health/
+      expected_status: 200
+      timeout_seconds: 5
+    data:
+      database: ai_retail_dev
+      cache:
+        local: locmem
+        vps: dedicated-redis
+      volumes:
+        static: ai_retail_dev_static
+        media: ai_retail_dev_media
+        postgres: ai_retail_dev_postgres
+        redis: ai_retail_dev_redis
+    seed:
+      automatic_demo_data: false
+    deploy:
+      source:
+        repository: https://github.com/airiga1897/AI_E_Retail
+        branch: ai-retail-dev
+        starts_from: codex/feature/fixmvp01
+      branches:
+        preprod: release/*
+      environments:
+        preprod: VPS2
+
+future_service_template:
+  site:
+    type: site
+    required:
+      - profile
+      - env.prefix
+      - domains
+      - healthcheck
+      - containers
+      - data.database
+      - data.cache
+  bot:
+    type: telegram-bot
+    required:
+      - profile
+      - env.prefix
+      - webhook.preprod
+      - webhook.prod
+      - containers
+      - healthcheck
+

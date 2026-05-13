@@ -1,0 +1,21 @@
+﻿name: Validate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate repository layout
+        run: |
+          test -f services.yml
+          test -f README.md
+          test -d infra/stacks/aromaflow-work
+          test -d infra/stacks/aromaflow-demo
+          test -d infra/stacks/ai-retail-mvp
+          test -d infra/stacks/ai-retail-dev
