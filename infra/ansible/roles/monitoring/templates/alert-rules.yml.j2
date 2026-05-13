@@ -1,0 +1,67 @@
+groups:
+  - name: server_alerts
+    rules:
+      - alert: InstanceDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Сервер недоступен: {{ $labels.instance }}"
+          description: "Node exporter не отвечает более 2 минут."
+
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Высокая нагрузка CPU: {{ $labels.instance }}"
+          description: "CPU > 85% в течение 5 минут. Текущее: {{ $value | printf \"%.1f\" }}%"
+
+      - alert: HighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Высокое потребление памяти: {{ $labels.instance }}"
+          description: "RAM > 90%. Свободно: {{ $value | printf \"%.1f\" }}%"
+
+      - alert: DiskSpaceLow
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100 < 15
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Мало места на диске: {{ $labels.instance }}"
+          description: "Свободно менее 15% на /. Осталось: {{ $value | printf \"%.1f\" }}%"
+
+      - alert: DiskSpaceCritical
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100 < 5
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Критически мало места: {{ $labels.instance }}"
+          description: "Свободно менее 5% на /. Срочно освободи место!"
+
+  - name: postgres_alerts
+    rules:
+      - alert: PostgresReplicationLag
+        expr: pg_replication_lag > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Отставание репликации PostgreSQL"
+          description: "Standby отстаёт от primary более чем на 5 минут ({{ $value }}с)."
+
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL недоступен: {{ $labels.instance }}"
+          description: "Postgres exporter не может подключиться к БД."

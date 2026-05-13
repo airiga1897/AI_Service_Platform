@@ -9,6 +9,8 @@ Product source code lives in separate repositories:
 
 This repository owns platform-level runtime metadata, VPS layout, edge routing templates, stack templates, deployment playbooks, and CI/CD orchestration rules. It must not vendor product source code and does not use git submodules in the first stage.
 
+Migration source policy is documented in `docs/MIGRATION_SOURCES.md`. SoftEther VPN is a required platform edge/infrastructure component, independent of product ownership, and is documented in `docs/SOFTETHER_VPN.md`. CDN, GeoIP, GeoDNS, and VPN acceleration research are documented in `docs/CDN_GEO_POLICY.md`. The target VPN topology has SoftEther on VPS1, VPS2, and VPS3; HAProxy publishes the current TCP entrypoints.
+
 ## Runtime Instances
 
 - `aromaflow-work` - working AromaFlowAI site.

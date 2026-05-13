@@ -1,0 +1,59 @@
+---
+- name: Установить зависимости бэкап-клиента
+  apt:
+    name:
+      - rsync
+      - python3
+      - python3-pip
+    state: present
+    update_cache: true
+
+- name: Установить boto3 и зависимости для S3
+  pip:
+    name:
+      - boto3
+      - requests
+      - python-dotenv
+    state: present
+
+- name: Создать директорию скриптов
+  file:
+    path: /opt/scripts
+    state: directory
+    mode: "0755"
+
+- name: Скопировать backup.py
+  copy:
+    src: "{{ playbook_dir }}/../scripts/backup.py"
+    dest: /opt/scripts/backup.py
+    mode: "0750"
+
+- name: Скопировать конфиг backup (.env)
+  template:
+    src: backup.env.j2
+    dest: /opt/scripts/backup.env
+    mode: "0600"
+
+- name: Настроить cron для ежедневных бэкапов
+  cron:
+    name: "Ежедневный бэкап MyPet01"
+    cron_file: mypet01-backup
+    user: root
+    job: "python3 /opt/scripts/backup.py >> /var/log/mypet01-backup.log 2>&1"
+    hour: "2"
+    minute: "0"
+
+- name: Скопировать скрипт pg_backup
+  template:
+    src: pg_backup.sh.j2
+    dest: /opt/scripts/pg_backup.sh
+    mode: "0750"
+
+- name: Настроить cron для pg_dump
+  cron:
+    name: "Ежедневный pg_dump PostgreSQL"
+    cron_file: mypet01-pgbackup
+    user: root
+    job: "bash /opt/scripts/pg_backup.sh >> /var/log/pg-backup.log 2>&1"
+    hour: "3"
+    minute: "0"

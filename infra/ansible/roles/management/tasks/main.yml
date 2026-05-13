@@ -1,0 +1,48 @@
+---
+- name: Установить Ansible и зависимости
+  apt:
+    name:
+      - ansible
+      - python3-pip
+      - rsync
+      - git
+    state: present
+    update_cache: true
+
+- name: Создать директорию Ansible control
+  file:
+    path: "{{ ansible_control_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Создать директорию скриптов
+  file:
+    path: "{{ geoip_script_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Скопировать скрипт обновления GeoIP
+  copy:
+    src: "{{ playbook_dir }}/../scripts/update-geoip.sh"
+    dest: "{{ geoip_script_dir }}/update-geoip.sh"
+    mode: "0755"
+
+- name: Скопировать Ansible inventory
+  template:
+    src: inventory.ini.j2
+    dest: "{{ ansible_control_dir }}/inventory.ini"
+    mode: "0600"
+
+- name: Настроить cron обновления GeoIP с VPS3
+  cron:
+    name: "Обновление GeoIP и деплой на VPS1"
+    cron_file: geoip-update
+    user: root
+    job: "{{ geoip_script_dir }}/update-geoip.sh && ansible-playbook -i {{ ansible_control_dir }}/inventory.ini {{ ansible_control_dir }}/site.yml --tags geoip >> /var/log/geoip-update.log 2>&1"
+    special_time: weekly
+
+- name: Скопировать SSH ключ для управления VPS1 и VPS2
+  copy:
+    content: "{{ vault_ssh_private_key }}"
+    dest: /root/.ssh/id_rsa
+    mode: "0600"

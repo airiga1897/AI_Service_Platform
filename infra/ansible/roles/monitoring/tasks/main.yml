@@ -1,0 +1,135 @@
+---
+# Node exporter — на всех VPS
+- name: Создать пользователя node_exporter
+  user:
+    name: node_exporter
+    system: true
+    shell: /bin/false
+    create_home: false
+
+- name: Скачать node_exporter
+  get_url:
+    url: "https://github.com/prometheus/node_exporter/releases/download/v1.8.1/node_exporter-1.8.1.linux-amd64.tar.gz"
+    dest: /tmp/node_exporter.tar.gz
+    mode: "0644"
+
+- name: Распаковать node_exporter
+  unarchive:
+    src: /tmp/node_exporter.tar.gz
+    dest: /tmp/
+    remote_src: true
+
+- name: Установить node_exporter
+  copy:
+    src: /tmp/node_exporter-1.8.1.linux-amd64/node_exporter
+    dest: /usr/local/bin/node_exporter
+    mode: "0755"
+    remote_src: true
+
+- name: Создать systemd unit для node_exporter
+  template:
+    src: node_exporter.service.j2
+    dest: /etc/systemd/system/node_exporter.service
+    mode: "0644"
+  notify: restart node_exporter
+
+- name: Запустить node_exporter
+  systemd:
+    name: node_exporter
+    state: started
+    enabled: true
+    daemon_reload: true
+
+# Promtail — на всех VPS (отправляет логи в Loki на VPS3)
+- name: Создать директорию конфига Promtail
+  file:
+    path: /etc/promtail
+    state: directory
+    mode: "0755"
+
+- name: Скопировать конфиг Promtail
+  template:
+    src: promtail-config.yml.j2
+    dest: /etc/promtail/config.yml
+    mode: "0644"
+
+- name: Запустить Promtail в Docker
+  community.docker.docker_container:
+    name: promtail
+    image: grafana/promtail:latest
+    state: started
+    restart_policy: always
+    volumes:
+      - /etc/promtail/config.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/log:/var/log:ro
+    command: -config.file=/etc/promtail/config.yml
+
+# Prometheus + Grafana + Loki + Alertmanager — только VPS3
+- name: Создать директории мониторинга
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ monitoring_dir }}"
+    - "{{ monitoring_dir }}/provisioning/datasources"
+    - "{{ monitoring_dir }}/provisioning/dashboards"
+    - "{{ monitoring_dir }}/dashboards"
+  when: "'management' in group_names"
+
+- name: Скопировать docker-compose мониторинга
+  template:
+    src: docker-compose.monitoring.yml.j2
+    dest: "{{ monitoring_dir }}/docker-compose.yml"
+    mode: "0644"
+  when: "'management' in group_names"
+
+- name: Создать конфиг Prometheus
+  template:
+    src: prometheus.yml.j2
+    dest: "{{ monitoring_dir }}/prometheus.yml"
+    mode: "0644"
+  when: "'management' in group_names"
+
+- name: Создать правила алертов
+  template:
+    src: alert-rules.yml.j2
+    dest: "{{ monitoring_dir }}/alert-rules.yml"
+    mode: "0644"
+  when: "'management' in group_names"
+
+- name: Создать конфиг Alertmanager
+  template:
+    src: alertmanager.yml.j2
+    dest: "{{ monitoring_dir }}/alertmanager.yml"
+    mode: "0600"
+  when: "'management' in group_names"
+
+- name: Создать конфиг Loki
+  template:
+    src: loki-config.yml.j2
+    dest: "{{ monitoring_dir }}/loki-config.yml"
+    mode: "0644"
+  when: "'management' in group_names"
+
+- name: Создать Grafana datasources provisioning
+  template:
+    src: grafana-datasources.yml.j2
+    dest: "{{ monitoring_dir }}/provisioning/datasources/datasources.yml"
+    mode: "0644"
+  when: "'management' in group_names"
+
+- name: Создать Grafana dashboards provisioning
+  template:
+    src: grafana-dashboards-provisioning.yml.j2
+    dest: "{{ monitoring_dir }}/provisioning/dashboards/dashboards.yml"
+    mode: "0644"
+  when: "'management' in group_names"
+
+- name: Запустить Prometheus + Grafana + Loki + Alertmanager
+  community.docker.docker_compose_v2:
+    project_src: "{{ monitoring_dir }}"
+    state: present
+    pull: always
+  when: "'management' in group_names"

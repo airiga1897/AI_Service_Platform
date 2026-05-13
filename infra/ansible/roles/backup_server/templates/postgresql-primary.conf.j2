@@ -1,0 +1,15 @@
+# PostgreSQL primary — настройки репликации
+# Добавляется к базовому конфигу контейнера
+
+# WAL для streaming replication
+wal_level = replica
+max_wal_senders = 3
+wal_keep_size = 256MB
+max_replication_slots = 3
+
+# Производительность
+wal_compression = on
+synchronous_commit = on     # 'off' = быстрее, но риск потери данных при сбое
+
+# Логирование для мониторинга
+log_replication_commands = on

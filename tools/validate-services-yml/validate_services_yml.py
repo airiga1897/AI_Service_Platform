@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+"""Validate the AI Service Platform registry contract."""
+
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+try:
+    import yaml
+except ImportError as exc:  # pragma: no cover - exercised in bare environments.
+    raise SystemExit(
+        "PyYAML is required. Install with: python -m pip install pyyaml"
+    ) from exc
+
+
+ROOT = Path(__file__).resolve().parents[2]
+SERVICES_YML = ROOT / "services.yml"
+ENV_PREFIX_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+
+def fail(errors: list[str], message: str) -> None:
+    errors.append(message)
+
+
+def require_mapping(errors: list[str], value: Any, path: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        fail(errors, f"{path} must be a mapping")
+        return {}
+    return value
+
+
+def require_list(errors: list[str], value: Any, path: str) -> list[Any]:
+    if not isinstance(value, list):
+        fail(errors, f"{path} must be a list")
+        return []
+    return value
+
+
+def nested_has_key(value: Any, key: str) -> bool:
+    if isinstance(value, dict):
+        return key in value or any(nested_has_key(child, key) for child in value.values())
+    if isinstance(value, list):
+        return any(nested_has_key(child, key) for child in value)
+    return False
+
+
+def validate_platform(errors: list[str], data: dict[str, Any]) -> None:
+    platform = require_mapping(errors, data.get("platform"), "platform")
+    source_policy = require_mapping(errors, platform.get("source_policy"), "platform.source_policy")
+    if source_policy.get("source_from_git_only") is not True:
+        fail(errors, "platform.source_policy.source_from_git_only must be true")
+    if source_policy.get("deploy_from_archives") is not False:
+        fail(errors, "platform.source_policy.deploy_from_archives must be false")
+    if source_policy.get("deploy_from_git_only") is not False:
+        fail(errors, "platform.source_policy.deploy_from_git_only must be false")
+    if source_policy.get("preferred_deploy_artifact") != "immutable_docker_image_ref":
+        fail(
+            errors,
+            "platform.source_policy.preferred_deploy_artifact must be immutable_docker_image_ref",
+        )
+    if source_policy.get("branch_names_are_build_policy_only") is not True:
+        fail(errors, "platform.source_policy.branch_names_are_build_policy_only must be true")
+
+    vps_layout = require_mapping(errors, platform.get("vps_layout"), "platform.vps_layout")
+    for node in ("VPS1", "VPS2", "VPS3"):
+        node_data = require_mapping(errors, vps_layout.get(node), f"platform.vps_layout.{node}")
+        for field in ("role", "country", "resources_hint", "notes"):
+            if not node_data.get(field):
+                fail(errors, f"platform.vps_layout.{node}.{field} is required")
+
+    edge_vpn = require_mapping(errors, platform.get("edge_vpn"), "platform.edge_vpn")
+    expected_pairs = {
+        "provider": "softether",
+        "status": "required-platform-component",
+        "ownership": "infrastructure",
+    }
+    for field, expected in expected_pairs.items():
+        if edge_vpn.get(field) != expected:
+            fail(errors, f"platform.edge_vpn.{field} must be {expected!r}")
+
+    if edge_vpn.get("not_owned_by_runtime_instances") is not True:
+        fail(errors, "platform.edge_vpn.not_owned_by_runtime_instances must be true")
+    if edge_vpn.get("preserve_during_migration") is not True:
+        fail(errors, "platform.edge_vpn.preserve_during_migration must be true")
+
+    deployment_scope = require_mapping(
+        errors, edge_vpn.get("deployment_scope"), "platform.edge_vpn.deployment_scope"
+    )
+    target_nodes = set(
+        require_list(
+            errors,
+            deployment_scope.get("target_nodes"),
+            "platform.edge_vpn.deployment_scope.target_nodes",
+        )
+    )
+    for node in ("VPS1", "VPS2", "VPS3"):
+        if node not in target_nodes:
+            fail(errors, f"platform.edge_vpn.deployment_scope.target_nodes must include {node}")
+    if deployment_scope.get("bootstrap_node") not in target_nodes:
+        fail(errors, "platform.edge_vpn.deployment_scope.bootstrap_node must be one of target_nodes")
+    if deployment_scope.get("supports_vpn_only_expansion_nodes") is not True:
+        fail(errors, "platform.edge_vpn.deployment_scope.supports_vpn_only_expansion_nodes must be true")
+    expansion_contract = require_mapping(
+        errors,
+        deployment_scope.get("expansion_node_contract"),
+        "platform.edge_vpn.deployment_scope.expansion_node_contract",
+    )
+    if expansion_contract.get("role") != "vpn-only-edge":
+        fail(errors, "platform.edge_vpn.deployment_scope.expansion_node_contract.role must be vpn-only-edge")
+    if expansion_contract.get("product_runtime_allowed") is not False:
+        fail(
+            errors,
+            "platform.edge_vpn.deployment_scope.expansion_node_contract.product_runtime_allowed must be false",
+        )
+
+    ports = require_mapping(errors, edge_vpn.get("ports"), "platform.edge_vpn.ports")
+    tcp_ports = set(require_list(errors, ports.get("tcp"), "platform.edge_vpn.ports.tcp"))
+    for port in (443, 992, 1194, 5555):
+        if port not in tcp_ports:
+            fail(errors, f"platform.edge_vpn.ports.tcp must include {port}")
+    if "udp" in ports:
+        fail(errors, "platform.edge_vpn.ports.udp must not describe current listeners")
+    future_udp = require_mapping(
+        errors,
+        ports.get("future_optional_udp"),
+        "platform.edge_vpn.ports.future_optional_udp",
+    )
+    future_udp_ports = set(
+        require_list(
+            errors,
+            future_udp.get("ports"),
+            "platform.edge_vpn.ports.future_optional_udp.ports",
+        )
+    )
+    for port in (500, 4500, 1701, 1194):
+        if port not in future_udp_ports:
+            fail(errors, f"platform.edge_vpn.ports.future_optional_udp.ports must include {port}")
+
+    publish_model = require_mapping(
+        errors, edge_vpn.get("publish_model"), "platform.edge_vpn.publish_model"
+    )
+    expected_publish = {
+        "external_owner": "haproxy",
+        "softether_container_publish_directly": False,
+        "softether_container_visibility": "docker-network-only",
+        "udp_domain_routing_supported": False,
+        "udp_currently_enabled": False,
+    }
+    for field, expected in expected_publish.items():
+        if publish_model.get(field) != expected:
+            fail(errors, f"platform.edge_vpn.publish_model.{field} must be {expected!r}")
+    routing = require_mapping(
+        errors, publish_model.get("routing"), "platform.edge_vpn.publish_model.routing"
+    )
+    for route in ("443/tcp", "992/tcp", "1194/tcp", "5555/tcp"):
+        if route not in routing:
+            fail(errors, f"platform.edge_vpn.publish_model.routing must include {route}")
+
+    volumes = require_mapping(errors, edge_vpn.get("volumes"), "platform.edge_vpn.volumes")
+    if volumes.get("config") != "softether_data":
+        fail(errors, "platform.edge_vpn.volumes.config must be softether_data")
+    if volumes.get("logs") != "softether_logs":
+        fail(errors, "platform.edge_vpn.volumes.logs must be softether_logs")
+
+    backup_scope = set(require_list(errors, edge_vpn.get("backup_scope"), "platform.edge_vpn.backup_scope"))
+    for item in ("softether_data", "softether_logs", "certbot_conf", "haproxy_vpn_routing"):
+        if item not in backup_scope:
+            fail(errors, f"platform.edge_vpn.backup_scope must include {item}")
+
+    legacy_edge = require_mapping(
+        errors, platform.get("legacy_edge_colocation"), "platform.legacy_edge_colocation"
+    )
+    legacy_containers = set(
+        require_list(errors, legacy_edge.get("containers"), "platform.legacy_edge_colocation.containers")
+    )
+    if "softether" not in legacy_containers:
+        fail(errors, "platform.legacy_edge_colocation.containers must record historical softether")
+
+    geo_policy = require_mapping(errors, platform.get("geo_policy"), "platform.geo_policy")
+    if geo_policy.get("status") != "planned-shared-platform-service":
+        fail(errors, "platform.geo_policy.status must be planned-shared-platform-service")
+    outputs = set(require_list(errors, geo_policy.get("data_outputs"), "platform.geo_policy.data_outputs"))
+    for output in (
+        "haproxy_country_lists",
+        "vpn_geodns_targets",
+        "egress_country_rules",
+        "cdn_country_policy_inputs",
+    ):
+        if output not in outputs:
+            fail(errors, f"platform.geo_policy.data_outputs must include {output}")
+
+    site_cdn = require_mapping(errors, platform.get("site_cdn"), "platform.site_cdn")
+    if site_cdn.get("status") != "future-optional":
+        fail(errors, "platform.site_cdn.status must be future-optional")
+    excluded = set(require_list(errors, site_cdn.get("does_not_apply_to"), "platform.site_cdn.does_not_apply_to"))
+    if "softether-vpn-through-standard-web-cdn" not in excluded:
+        fail(
+            errors,
+            "platform.site_cdn.does_not_apply_to must include softether-vpn-through-standard-web-cdn",
+        )
+
+    vpn_acceleration = require_mapping(errors, platform.get("vpn_acceleration"), "platform.vpn_acceleration")
+    if vpn_acceleration.get("status") != "future-research":
+        fail(errors, "platform.vpn_acceleration.status must be future-research")
+    if vpn_acceleration.get("not_standard_site_cdn") is not True:
+        fail(errors, "platform.vpn_acceleration.not_standard_site_cdn must be true")
+
+
+def validate_projects(errors: list[str], data: dict[str, Any]) -> None:
+    projects = require_mapping(errors, data.get("projects"), "projects")
+    for project_name, project in projects.items():
+        project_data = require_mapping(errors, project, f"projects.{project_name}")
+        source = require_mapping(errors, project_data.get("source"), f"projects.{project_name}.source")
+        for field in ("repository", "bootstrap_ref"):
+            if not source.get(field):
+                fail(errors, f"projects.{project_name}.source.{field} is required")
+
+        stable = require_mapping(
+            errors, source.get("stable_branches"), f"projects.{project_name}.source.stable_branches"
+        )
+        for field in ("development", "production"):
+            if not stable.get(field):
+                fail(errors, f"projects.{project_name}.source.stable_branches.{field} is required")
+
+        deploy_refs = require_mapping(
+            errors, source.get("deploy_refs"), f"projects.{project_name}.source.deploy_refs"
+        )
+        if deploy_refs.get("preferred") != "image_ref":
+            fail(errors, f"projects.{project_name}.source.deploy_refs.preferred must be image_ref")
+        allowed = require_list(
+            errors,
+            deploy_refs.get("allowed_source_refs"),
+            f"projects.{project_name}.source.deploy_refs.allowed_source_refs",
+        )
+        if source.get("bootstrap_ref") and source["bootstrap_ref"] not in allowed:
+            fail(errors, f"projects.{project_name}.source.bootstrap_ref must be an allowed source ref")
+
+
+def validate_runtime_instances(errors: list[str], data: dict[str, Any]) -> None:
+    platform = require_mapping(errors, data.get("platform"), "platform")
+    valid_vps = set(require_mapping(errors, platform.get("vps_layout"), "platform.vps_layout").keys())
+    instances = require_mapping(errors, data.get("runtime_instances"), "runtime_instances")
+
+    for instance_name, instance in instances.items():
+        instance_data = require_mapping(errors, instance, f"runtime_instances.{instance_name}")
+
+        if nested_has_key(instance_data, "edge_vpn"):
+            fail(errors, f"runtime_instances.{instance_name} must not define edge_vpn")
+
+        current_containers = instance_data.get("containers", {}).get("current", [])
+        if isinstance(current_containers, list) and "softether" in current_containers:
+            fail(errors, f"runtime_instances.{instance_name}.containers.current must not include softether")
+
+        for field in ("project", "profile", "role"):
+            if not instance_data.get(field):
+                fail(errors, f"runtime_instances.{instance_name}.{field} is required")
+
+        env = require_mapping(errors, instance_data.get("env"), f"runtime_instances.{instance_name}.env")
+        prefix = env.get("prefix")
+        if not isinstance(prefix, str) or not ENV_PREFIX_RE.fullmatch(prefix):
+            fail(errors, f"runtime_instances.{instance_name}.env.prefix must be uppercase snake case")
+        for field in ("file", "example_file"):
+            if not env.get(field):
+                fail(errors, f"runtime_instances.{instance_name}.env.{field} is required")
+
+        healthcheck = require_mapping(
+            errors, instance_data.get("healthcheck"), f"runtime_instances.{instance_name}.healthcheck"
+        )
+        for field in ("path", "expected_status", "timeout_seconds"):
+            if healthcheck.get(field) in (None, ""):
+                fail(errors, f"runtime_instances.{instance_name}.healthcheck.{field} is required")
+
+        deploy = require_mapping(errors, instance_data.get("deploy"), f"runtime_instances.{instance_name}.deploy")
+        environments = require_mapping(
+            errors, deploy.get("environments"), f"runtime_instances.{instance_name}.deploy.environments"
+        )
+        for env_name, target in environments.items():
+            if target not in valid_vps:
+                fail(errors, f"runtime_instances.{instance_name}.deploy.environments.{env_name} targets unknown {target}")
+
+
+def main() -> int:
+    if not SERVICES_YML.exists():
+        print(f"Missing {SERVICES_YML}", file=sys.stderr)
+        return 1
+
+    with SERVICES_YML.open("r", encoding="utf-8-sig") as handle:
+        data = yaml.safe_load(handle)
+
+    errors: list[str] = []
+    registry = require_mapping(errors, data, "services.yml")
+    if registry.get("version") != 2:
+        fail(errors, "version must be 2")
+
+    validate_platform(errors, registry)
+    validate_projects(errors, registry)
+    validate_runtime_instances(errors, registry)
+
+    if errors:
+        print("services.yml validation failed:", file=sys.stderr)
+        for error in errors:
+            print(f"- {error}", file=sys.stderr)
+        return 1
+
+    print("services.yml validation passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

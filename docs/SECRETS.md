@@ -11,4 +11,5 @@ Secret categories:
 - database passwords;
 - application secret keys;
 - Sentry and provider API keys;
-- TLS/account credentials.
+- TLS/account credentials;
+- SoftEther VPN users, server config, management passwords, and private keys.

@@ -1,0 +1,27 @@
+---
+# Общие переменные для всех серверов
+
+# SSH
+ssh_port: 22
+ssh_allowed_users:
+  - root
+
+# ufw — открытые порты
+ufw_allowed_ports:
+  - "22"
+  - "80"
+  - "443"
+
+# fail2ban
+fail2ban_bantime: 3600       # 1 час
+fail2ban_findtime: 600       # 10 минут
+fail2ban_maxretry: 5
+
+# Docker
+docker_compose_version: "2.27.0"
+
+# Временная зона
+timezone: "UTC"
+
+# PostgreSQL backup retention
+pg_backup_retention_days: 7

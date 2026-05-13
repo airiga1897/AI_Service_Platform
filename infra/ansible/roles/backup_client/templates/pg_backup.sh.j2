@@ -1,0 +1,42 @@
+#!/bin/bash
+# pg_backup.sh — ежедневный дамп PostgreSQL
+# Запускается по cron, хранит {{ pg_backup_retention_days }} дней
+
+set -euo pipefail
+
+BACKUP_DIR="{{ backup_dir }}/db"
+DATE=$(date +%Y%m%d_%H%M%S)
+DUMP_FILE="$BACKUP_DIR/pg_dump_$DATE.sql.gz"
+RETENTION_DAYS="{{ pg_backup_retention_days }}"
+LOG="/var/log/pg-backup.log"
+
+TELEGRAM_TOKEN="{{ vault_telegram_token }}"
+TELEGRAM_CHAT_ID="{{ vault_telegram_chat_id }}"
+
+log()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
+notify() {
+    [ -z "$TELEGRAM_TOKEN" ] && return
+    local msg="$1"
+    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+        -d "chat_id=${TELEGRAM_CHAT_ID}&text=${msg}" > /dev/null 2>&1 || true
+}
+
+mkdir -p "$BACKUP_DIR"
+
+log "Начинаю дамп PostgreSQL..."
+if docker exec mypet01-db-1 pg_dumpall -U {{ vault_db_user }} | gzip > "$DUMP_FILE"; then
+    SIZE=$(du -sh "$DUMP_FILE" | cut -f1)
+    log "Дамп создан: $DUMP_FILE ($SIZE)"
+else
+    log "ОШИБКА: дамп не создан!"
+    notify "🔴 [{{ inventory_hostname }}] Ошибка создания дампа PostgreSQL!"
+    exit 1
+fi
+
+# Ротация старых дампов
+log "Удаляю дампы старше $RETENTION_DAYS дней..."
+find "$BACKUP_DIR" -name "pg_dump_*.sql.gz" -mtime +"$RETENTION_DAYS" -delete
+COUNT=$(find "$BACKUP_DIR" -name "pg_dump_*.sql.gz" | wc -l)
+log "Актуальных дампов: $COUNT"
+
+log "Дамп завершён успешно."

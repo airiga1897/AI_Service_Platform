@@ -1,0 +1,28 @@
+---
+- name: Base setup for all platform VPS nodes
+  hosts: all
+  become: true
+  roles:
+    - docker
+    - security
+    - monitoring
+
+- name: Production node backup client duties
+  hosts: prod
+  become: true
+  roles:
+    - backup_client
+
+- name: Preprod, standby, and backup node duties
+  hosts: backup
+  become: true
+  roles:
+    - backup_server
+
+- name: Management node duties
+  hosts: management
+  become: true
+  roles:
+    - management
+    - semaphore
+    - monitoring

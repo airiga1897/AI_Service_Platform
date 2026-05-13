@@ -1,0 +1,12 @@
+# pg_hba.conf — разрешения подключений
+
+# Локальные подключения
+local   all             all                                     trust
+host    all             all             127.0.0.1/32            scram-sha-256
+host    all             all             ::1/128                 scram-sha-256
+
+# Приложение внутри Docker-сети
+host    all             {{ vault_db_user }}     172.0.0.0/8     scram-sha-256
+
+# Репликация: разрешить VPS2 подключаться для streaming replication
+host    replication     {{ pg_replication_user }}   {{ groups['backup'][0] }}/32   scram-sha-256

@@ -8,6 +8,8 @@ Required runbooks:
 - rollback selected stack;
 - rotate env secrets;
 - restore database backup;
+- restore SoftEther VPN config and certificates;
 - fail over from VPS1 to VPS2;
 - renew and validate TLS certificates;
-- inspect HAProxy/Nginx routing.
+- inspect HAProxy/Nginx routing;
+- inspect SoftEther VPN routing, management access, and logs.

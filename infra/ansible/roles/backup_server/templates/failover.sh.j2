@@ -1,0 +1,50 @@
+#!/bin/bash
+# failover.sh — Переключение VPS2 в боевой режим при сбое VPS1
+#
+# Запускать ВРУЧНУЮ после подтверждения что VPS1 недоступен:
+#   /opt/scripts/failover.sh
+#
+# Что делает:
+#   1. Промоутирует PostgreSQL из standby в primary
+#   2. Запускает полный стек (HAProxy, Nginx, Gunicorn)
+#   3. Выводит инструкцию по переключению DNS
+
+set -euo pipefail
+
+APP_DIR="{{ app_dir }}"
+LOG="/var/log/failover.log"
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
+
+log "========================================="
+log "FAILOVER VPS2 → БОЕВОЙ РЕЖИМ"
+log "========================================="
+
+# 1. Промоут PostgreSQL standby → primary
+log "Промоутирую PostgreSQL standby в primary..."
+docker exec mypet01-db-1 pg_ctl promote -D /var/lib/postgresql/data \
+    && log "PostgreSQL промоутирован успешно" \
+    || { log "ОШИБКА: Не удалось промоутировать PostgreSQL"; exit 1; }
+
+# 2. Запустить полный стек (HAProxy + все порты)
+log "Запускаю полный production стек..."
+cd "$APP_DIR"
+docker compose -f docker-compose.prod.yml up -d \
+    && log "Стек запущен успешно" \
+    || { log "ОШИБКА: Не удалось запустить стек"; exit 1; }
+
+# 3. Инструкция по переключению DNS
+VPS2_IP="{{ ansible_host }}"
+
+log ""
+log "========================================="
+log "FAILOVER ЗАВЕРШЁН"
+log "========================================="
+log ""
+log "СЛЕДУЮЩИЙ ШАГ — переключи DNS:"
+log "  mine-craft.su     A → $VPS2_IP"
+log "  www.mine-craft.su A → $VPS2_IP"
+log ""
+log "TTL уже должен быть 300 сек — изменение разойдётся за 5 минут."
+log ""
+log "После восстановления VPS1 выполни: /opt/scripts/failback.sh"

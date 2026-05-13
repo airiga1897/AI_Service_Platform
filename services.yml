@@ -14,9 +14,180 @@ platform:
   repository_note: This repository owns platform orchestration only; product code stays in product repositories.
   source_policy:
     deploy_from_archives: false
-    deploy_from_git_only: true
+    source_from_git_only: true
+    deploy_from_git_only: false
     preferred_deploy_artifact: immutable_docker_image_ref
     branch_names_are_build_policy_only: true
+  vps_layout:
+    VPS1:
+      role: production-runtime
+      country: Latvia
+      initial_runtime: aromaflow-work
+      resources_hint: 4cpu-4gb-40gb
+      notes: production traffic and primary data live here first
+    VPS2:
+      role: preprod-hot-standby-backup
+      country: Kazakhstan
+      resources_hint: 4cpu-4gb-80gb
+      notes: preprod validation, hot standby, local backups, failover target
+    VPS3:
+      role: management-monitoring-orchestration
+      country: Russia
+      resources_hint: 2cpu-2gb-40gb
+      notes: Ansible control node, monitoring, backup orchestration; not application runtime
+  edge_vpn:
+    provider: softether
+    status: required-platform-component
+    ownership: infrastructure
+    not_owned_by_runtime_instances: true
+    preserve_during_migration: true
+    deployment_scope:
+      target_nodes:
+        - VPS1
+        - VPS2
+        - VPS3
+      bootstrap_node: VPS1
+      per_node_role: client-ingress-and-controlled-egress
+      supports_vpn_only_expansion_nodes: true
+      expansion_node_contract:
+        role: vpn-only-edge
+        product_runtime_allowed: false
+        required_layers:
+          - haproxy-tcp-entrypoints
+          - softether
+          - monitoring-agent
+          - backup-agent-for-softether-config
+      note: SoftEther is intended on every VPS; current known listener set is TCP-only and comes from the existing VPS1 setup.
+    sni_routing:
+      router: haproxy
+      tls_entrypoint: 443
+    ports:
+      tcp:
+        - 443
+        - 992
+        - 1194
+        - 5555
+      future_optional_udp:
+        note: Not active in the current SoftEther listener set. Use only if IPsec, L2TP, or OpenVPN UDP is enabled later.
+        ports:
+          - 500
+          - 4500
+          - 1701
+          - 1194
+    publish_model:
+      external_owner: haproxy
+      softether_container_publish_directly: false
+      softether_container_visibility: docker-network-only
+      routing:
+        443/tcp: haproxy-sni-to-softether-or-site
+        992/tcp: haproxy-port-to-softether
+        1194/tcp: haproxy-port-to-softether
+        5555/tcp: haproxy-port-to-softether-management-allowlist
+      udp_domain_routing_supported: false
+      udp_currently_enabled: false
+    tls:
+      source: certbot_nginx_tls_copy
+      mounted_path: /etc/ssl/vpn
+    volumes:
+      config: softether_data
+      logs: softether_logs
+    backup_scope:
+      - softether_data
+      - softether_logs
+      - certbot_conf
+      - haproxy_vpn_routing
+      - vpn_management_allowlist
+    monitoring:
+      healthcheck: tcp-endpoint-check
+      include_in_alerting: true
+    security:
+      management_port: 5555
+      management_access: ip-allowlist-only
+      note: do-not-commit-vpn-server-config-with-secrets
+  edge_protection:
+    status: required-platform-capability
+    owner: infrastructure
+    source_hint: historical-aromaflowai-siteproject01-haproxy
+    layers:
+      geoip:
+        purpose: country-based access control for selected public services
+        current_reference: ru_networks.lst
+        update_strategy: generated-list-with-scheduled-refresh
+        geo_policy_relation: shared-data-source-separate-enforcement
+      manual_ip_lists:
+        blacklist: blocked_ips.lst
+        management_allowlist: vpn_mgmt_ips.lst
+      rate_limiting:
+        tcp: stick-table-connection-rate
+        http: stick-table-request-and-error-rate
+      acme_bypass:
+        enabled: true
+        path_prefix: /.well-known/acme-challenge/
+    note: GeoIP is a protection/filtering capability, not the same thing as VPN GeoDNS or egress country selection.
+  site_cdn:
+    status: future-optional
+    owner: infrastructure
+    applies_to:
+      - public-web-sites
+      - static-assets
+      - media-assets-after-storage-policy
+    does_not_apply_to:
+      - softether-vpn-through-standard-web-cdn
+      - vpn-management
+      - database-traffic
+      - private-overlay-traffic
+    origin_strategy:
+      primary_origin: haproxy-web-entrypoint
+      failover_origin: planned-after-vps2-standby-readiness
+    protection_features:
+      - cache-static-assets
+      - tls-edge
+      - waf-or-basic-bot-filtering
+      - rate-limiting
+      - origin-ip-shielding-when-supported
+    note: Standard web CDN is for site delivery and protection. VPN may be evaluated later only through L4 TCP proxy, Anycast, or GeoDNS-style services.
+  geo_policy:
+    status: planned-shared-platform-service
+    owner: infrastructure
+    purpose: one shared geo decision source for edge protection, VPN nearest routing, egress policy, and CDN policy inputs
+    data_outputs:
+      - haproxy_country_lists
+      - vpn_geodns_targets
+      - egress_country_rules
+      - cdn_country_policy_inputs
+    enforcement_boundaries:
+      site_protection: haproxy-or-cdn
+      vpn_nearest_ingress: geodns
+      vpn_egress_selection: routing-policy-controller
+      product_ha: not-handled-by-geo-policy
+    safety:
+      dry_run_first: true
+      audit_log_required: true
+      manual_override_required: true
+    note: Use one shared geo policy service for data and recommendations, but keep enforcement policies separate per traffic type.
+  vpn_acceleration:
+    status: future-research
+    owner: infrastructure
+    candidates:
+      - geodns
+      - anycast-l4-provider
+      - tcp-l4-proxy-provider
+    not_standard_site_cdn: true
+    applies_to:
+      - softether-443-tcp
+      - softether-992-tcp
+      - softether-1194-tcp
+    excludes:
+      - softether-management-5555
+    note: Evaluate separately from website CDN because VPN traffic is not normal HTTP site traffic.
+  legacy_edge_colocation:
+    source_hint: historical-aromaflowai-mypet01-compose
+    ownership_after_migration: infrastructure
+    containers:
+      - haproxy
+      - certbot
+      - softether
+    note: These containers may exist in the historical product compose, but the platform owns them after migration.
 
 defaults:
   platform_structure:
@@ -28,6 +199,10 @@ defaults:
   edge:
     router: haproxy
     site_proxy: per-site-nginx
+    vpn:
+      provider: softether
+      status: required-platform-component
+      preserve_during_migration: true
   docker:
     compose_strategy: profiles-and-fragments
   local:
@@ -133,9 +308,6 @@ runtime_instances:
         - web
         - db
         - nginx
-        - haproxy
-        - certbot
-        - softether
       future:
         - aromaflow-work-backend
         - aromaflow-work-frontend

@@ -1,0 +1,36 @@
+[DEFAULT]
+bantime  = {{ fail2ban_bantime }}
+findtime = {{ fail2ban_findtime }}
+maxretry = {{ fail2ban_maxretry }}
+backend  = systemd
+
+# Игнорировать локальные адреса
+ignoreip = 127.0.0.1/8 ::1
+
+[sshd]
+enabled  = true
+port     = {{ ssh_port }}
+logpath  = %(sshd_log)s
+maxretry = 3
+bantime  = 86400
+
+{% if 'prod' in group_names %}
+# Защита Nginx — читаем реальный IP из X-Forwarded-For (за HAProxy)
+[nginx-req-limit]
+enabled  = true
+filter   = nginx-req-limit
+port     = http,https
+logpath  = /var/log/nginx/error.log
+maxretry = 10
+findtime = 60
+bantime  = 3600
+
+[nginx-botsearch]
+enabled  = true
+filter   = nginx-botsearch
+port     = http,https
+logpath  = /var/log/nginx/access.log
+maxretry = 2
+findtime = 300
+bantime  = 86400
+{% endif %}
