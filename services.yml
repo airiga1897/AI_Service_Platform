@@ -1,4 +1,4 @@
-﻿# AI Service Platform registry.
+# AI Service Platform registry.
 #
 # Source of truth for platform services, runtime instances, compose profiles,
 # edge routing hints, health checks, and CI/CD service selection.
@@ -15,6 +15,8 @@ platform:
   source_policy:
     deploy_from_archives: false
     deploy_from_git_only: true
+    preferred_deploy_artifact: immutable_docker_image_ref
+    branch_names_are_build_policy_only: true
 
 defaults:
   platform_structure:
@@ -48,10 +50,22 @@ projects:
     source:
       policy: github
       repository: https://github.com/airiga1897/AromaFlowAI
+      bootstrap_ref: codex/feature/new_infra02
       current_path: .
-      branch_policy:
-        work: current-working-branch
-        demo: same-commit-as-work
+      stable_branches:
+        development: develop
+        production: main
+      release_policy:
+        production: release-tag-or-main
+        demo: develop-or-release-tag
+      deploy_refs:
+        preferred: image_ref
+        allowed_source_refs:
+          - codex/feature/new_infra02
+          - develop
+          - main
+          - release/*
+        note: bootstrap_ref is temporary until product branches are promoted.
     future_paths:
       backend: services/aromaflow/backend
       frontend: services/aromaflow/frontend
@@ -70,9 +84,24 @@ projects:
     source:
       policy: github
       repository: https://github.com/airiga1897/AI_E_Retail
-      reference_branch: codex/feature/fixmvp01
-      mvp_source: tag-or-release-branch-from-reference-commit
-      dev_source: development-branch-from-same-reference-commit
+      bootstrap_ref: codex/feature/fixmvp08
+      stable_branches:
+        development: develop
+        production: main
+      release_policy:
+        mvp: frozen-release-tag
+        dev: develop
+      deploy_refs:
+        preferred: image_ref
+        allowed_source_refs:
+          - codex/feature/fixmvp08
+          - develop
+          - main
+          - release/*
+          - ai-retail-mvp-v*
+        note: bootstrap_ref is temporary until MVP/dev branches or tags are promoted.
+      mvp_source: frozen-release-tag-from-bootstrap-ref
+      dev_source: develop-after-bootstrap-promotion
       archive_usage: read-only-reference-only
     future_paths:
       backend: services/ai-retail/backend
@@ -232,8 +261,9 @@ runtime_instances:
     deploy:
       source:
         repository: https://github.com/airiga1897/AI_E_Retail
-        branch: codex/feature/fixmvp01
+        bootstrap_ref: codex/feature/fixmvp08
         future_mvp_tag: ai-retail-mvp-v1
+        preferred_deploy_artifact: image_ref
       branches:
         preprod: release/*
       environments:
@@ -285,8 +315,9 @@ runtime_instances:
     deploy:
       source:
         repository: https://github.com/airiga1897/AI_E_Retail
-        branch: ai-retail-dev
-        starts_from: codex/feature/fixmvp01
+        bootstrap_ref: codex/feature/fixmvp08
+        future_branch: develop
+        preferred_deploy_artifact: image_ref
       branches:
         preprod: release/*
       environments:

@@ -20,4 +20,6 @@ This repository owns platform-level runtime metadata, VPS layout, edge routing t
 
 Products build and publish images. This platform repository validates `services.yml` and deploys selected image refs to selected VPS stacks.
 
+Product repository branches are tracked as build/source policy, not as deployment artifacts. While product `main` and `develop` branches are still being prepared, `services.yml` records temporary `bootstrap_ref` values for the current working product branches. Real deployment should use immutable Docker image refs tagged by commit SHA or release tag.
+
 Initial workflows are validate-only or manual skeletons. Real deploy is enabled only after product image builds are stable.
