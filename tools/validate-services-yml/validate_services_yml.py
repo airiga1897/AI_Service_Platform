@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
@@ -19,10 +20,19 @@ except ImportError as exc:  # pragma: no cover - exercised in bare environments.
 ROOT = Path(__file__).resolve().parents[2]
 SERVICES_YML = ROOT / "services.yml"
 ENV_PREFIX_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+DB_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+REPLIT_RESERVED_PORT = 5000
+SOFTETHER_TCP_PORTS = (443, 992, 1194, 5555)
+RESERVED_LOCAL_PORTS = (REPLIT_RESERVED_PORT,) + SOFTETHER_TCP_PORTS
 
 
 def fail(errors: list[str], message: str) -> None:
     errors.append(message)
+
+
+def warn(warnings: list[str], message: str) -> None:
+    warnings.append(message)
 
 
 def require_mapping(errors: list[str], value: Any, path: str) -> dict[str, Any]:
@@ -45,6 +55,15 @@ def nested_has_key(value: Any, key: str) -> bool:
     if isinstance(value, list):
         return any(nested_has_key(child, key) for child in value)
     return False
+
+
+def get_dotted(data: Any, dotted_path: str) -> Any:
+    cur = data
+    for part in dotted_path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
 
 
 def validate_platform(errors: list[str], data: dict[str, Any]) -> None:
@@ -239,70 +258,271 @@ def validate_projects(errors: list[str], data: dict[str, Any]) -> None:
             fail(errors, f"projects.{project_name}.source.bootstrap_ref must be an allowed source ref")
 
 
-def validate_runtime_instances(errors: list[str], data: dict[str, Any]) -> None:
+def expected_env_prefix(instance_name: str) -> str:
+    return instance_name.replace("-", "_").upper()
+
+
+def expected_env_file_stems(instance_name: str) -> tuple[str, str] | None:
+    """Return (env_file, env_example_file) following the project.role naming scheme.
+
+    Splits instance name on the last hyphen so ``aromaflow-work`` becomes
+    ``aromaflow.work`` and ``ai-retail-mvp`` becomes ``ai-retail.mvp``.
+    """
+    if "-" not in instance_name:
+        return None
+    project, _, role = instance_name.rpartition("-")
+    base = f".env.{project}.{role}"
+    return base, f"{base}.example"
+
+
+def validate_runtime_instances(
+    errors: list[str], warnings: list[str], data: dict[str, Any]
+) -> None:
     platform = require_mapping(errors, data.get("platform"), "platform")
     valid_vps = set(require_mapping(errors, platform.get("vps_layout"), "platform.vps_layout").keys())
     instances = require_mapping(errors, data.get("runtime_instances"), "runtime_instances")
+    template = data.get("future_service_template") or {}
+
+    seen_ports: dict[int, str] = {}
+    seen_domains: dict[str, str] = {}
+    seen_databases: dict[str, str] = {}
 
     for instance_name, instance in instances.items():
-        instance_data = require_mapping(errors, instance, f"runtime_instances.{instance_name}")
+        node_path = f"runtime_instances.{instance_name}"
+        instance_data = require_mapping(errors, instance, node_path)
 
         if nested_has_key(instance_data, "edge_vpn"):
-            fail(errors, f"runtime_instances.{instance_name} must not define edge_vpn")
+            fail(errors, f"{node_path} must not define edge_vpn")
 
         current_containers = instance_data.get("containers", {}).get("current", [])
         if isinstance(current_containers, list) and "softether" in current_containers:
-            fail(errors, f"runtime_instances.{instance_name}.containers.current must not include softether")
+            fail(errors, f"{node_path}.containers.current must not include softether")
 
         for field in ("project", "profile", "role"):
             if not instance_data.get(field):
-                fail(errors, f"runtime_instances.{instance_name}.{field} is required")
+                fail(errors, f"{node_path}.{field} is required")
 
-        env = require_mapping(errors, instance_data.get("env"), f"runtime_instances.{instance_name}.env")
+        # ---- env block ---------------------------------------------------
+        env = require_mapping(errors, instance_data.get("env"), f"{node_path}.env")
         prefix = env.get("prefix")
         if not isinstance(prefix, str) or not ENV_PREFIX_RE.fullmatch(prefix):
-            fail(errors, f"runtime_instances.{instance_name}.env.prefix must be uppercase snake case")
+            fail(errors, f"{node_path}.env.prefix must be uppercase snake case")
+        else:
+            wanted_prefix = expected_env_prefix(instance_name)
+            if prefix != wanted_prefix:
+                fail(
+                    errors,
+                    f"{node_path}.env.prefix must be {wanted_prefix!r} to match the instance name",
+                )
         for field in ("file", "example_file"):
             if not env.get(field):
-                fail(errors, f"runtime_instances.{instance_name}.env.{field} is required")
+                fail(errors, f"{node_path}.env.{field} is required")
+        wanted_files = expected_env_file_stems(instance_name)
+        if wanted_files is not None:
+            wanted_file, wanted_example = wanted_files
+            if env.get("file") and env.get("file") != wanted_file:
+                fail(
+                    errors,
+                    f"{node_path}.env.file must be {wanted_file!r} to match the instance name",
+                )
+            if env.get("example_file") and env.get("example_file") != wanted_example:
+                fail(
+                    errors,
+                    f"{node_path}.env.example_file must be {wanted_example!r} to match the instance name",
+                )
 
+        # ---- healthcheck -------------------------------------------------
         healthcheck = require_mapping(
-            errors, instance_data.get("healthcheck"), f"runtime_instances.{instance_name}.healthcheck"
+            errors, instance_data.get("healthcheck"), f"{node_path}.healthcheck"
         )
-        for field in ("path", "expected_status", "timeout_seconds"):
-            if healthcheck.get(field) in (None, ""):
-                fail(errors, f"runtime_instances.{instance_name}.healthcheck.{field} is required")
+        path_value = healthcheck.get("path")
+        if not isinstance(path_value, str) or not path_value:
+            fail(errors, f"{node_path}.healthcheck.path is required")
+        elif not path_value.startswith("/"):
+            fail(errors, f"{node_path}.healthcheck.path must start with '/'")
 
-        deploy = require_mapping(errors, instance_data.get("deploy"), f"runtime_instances.{instance_name}.deploy")
+        status_value = healthcheck.get("expected_status")
+        if not isinstance(status_value, int) or isinstance(status_value, bool):
+            fail(errors, f"{node_path}.healthcheck.expected_status must be an integer")
+        elif not 100 <= status_value <= 599:
+            fail(
+                errors,
+                f"{node_path}.healthcheck.expected_status must be between 100 and 599",
+            )
+
+        timeout_value = healthcheck.get("timeout_seconds")
+        if isinstance(timeout_value, bool) or not isinstance(timeout_value, (int, float)):
+            fail(errors, f"{node_path}.healthcheck.timeout_seconds must be a positive number")
+        elif timeout_value <= 0:
+            fail(errors, f"{node_path}.healthcheck.timeout_seconds must be a positive number")
+
+        # ---- deploy targets ---------------------------------------------
+        deploy = require_mapping(errors, instance_data.get("deploy"), f"{node_path}.deploy")
         environments = require_mapping(
-            errors, deploy.get("environments"), f"runtime_instances.{instance_name}.deploy.environments"
+            errors, deploy.get("environments"), f"{node_path}.deploy.environments"
         )
         for env_name, target in environments.items():
             if target not in valid_vps:
-                fail(errors, f"runtime_instances.{instance_name}.deploy.environments.{env_name} targets unknown {target}")
+                fail(
+                    errors,
+                    f"{node_path}.deploy.environments.{env_name} targets unknown {target}",
+                )
+
+        # ---- local ports -------------------------------------------------
+        local = instance_data.get("local") or {}
+        if isinstance(local, dict):
+            for port_field in ("backend_port", "frontend_port"):
+                port_value = local.get(port_field)
+                if port_value is None:
+                    continue
+                port_path = f"{node_path}.local.{port_field}"
+                if isinstance(port_value, bool) or not isinstance(port_value, int):
+                    fail(errors, f"{port_path} must be an integer")
+                    continue
+                if not 1 <= port_value <= 65535:
+                    fail(errors, f"{port_path} must be between 1 and 65535")
+                    continue
+                if port_value in seen_ports:
+                    fail(
+                        errors,
+                        f"{port_path} duplicates port {port_value} already used by {seen_ports[port_value]}",
+                    )
+                else:
+                    seen_ports[port_value] = port_path
+                if port_value in RESERVED_LOCAL_PORTS:
+                    if port_value == REPLIT_RESERVED_PORT:
+                        warn(
+                            warnings,
+                            f"{port_path}={port_value} collides with the Replit web preview reserved port",
+                        )
+                    else:
+                        warn(
+                            warnings,
+                            f"{port_path}={port_value} collides with a SoftEther TCP listener port",
+                        )
+
+        # ---- domain uniqueness ------------------------------------------
+        domains = instance_data.get("domains") or {}
+        if isinstance(domains, dict):
+            for scope in ("preprod", "prod"):
+                values = domains.get(scope) or []
+                if not isinstance(values, list):
+                    continue
+                for entry in values:
+                    if not isinstance(entry, str) or not entry:
+                        continue
+                    domain_path = f"{node_path}.domains.{scope}[{entry}]"
+                    if entry in seen_domains:
+                        fail(
+                            errors,
+                            f"{domain_path} duplicates domain {entry!r} already used by {seen_domains[entry]}",
+                        )
+                    else:
+                        seen_domains[entry] = domain_path
+
+        # ---- postgres database name -------------------------------------
+        data_block = instance_data.get("data") or {}
+        if isinstance(data_block, dict):
+            db_name = data_block.get("database")
+            if db_name is not None:
+                db_path = f"{node_path}.data.database"
+                if not isinstance(db_name, str) or not DB_NAME_RE.fullmatch(db_name):
+                    fail(
+                        errors,
+                        f"{db_path} must match ^[a-z][a-z0-9_]*$ (got {db_name!r})",
+                    )
+                elif db_name in seen_databases:
+                    fail(
+                        errors,
+                        f"{db_path} duplicates database {db_name!r} already used by {seen_databases[db_name]}",
+                    )
+                else:
+                    seen_databases[db_name] = db_path
+
+        # ---- future_service_template required fields --------------------
+        instance_type = instance_data.get("type")
+        if instance_type in ("site", "telegram-bot"):
+            template_key = "site" if instance_type == "site" else "bot"
+            tpl = template.get(template_key) if isinstance(template, dict) else None
+            if isinstance(tpl, dict):
+                required = tpl.get("required") or []
+                if isinstance(required, list):
+                    for required_path in required:
+                        if not isinstance(required_path, str):
+                            continue
+                        if get_dotted(instance_data, required_path) in (None, "", [], {}):
+                            fail(
+                                errors,
+                                f"{node_path}.{required_path} is required for type={instance_type!r}"
+                                f" (per future_service_template.{template_key}.required)",
+                            )
 
 
-def main() -> int:
-    if not SERVICES_YML.exists():
-        print(f"Missing {SERVICES_YML}", file=sys.stderr)
-        return 1
+def validate_data(data: Any) -> tuple[list[str], list[str]]:
+    """Run every check against an in-memory registry dict.
 
-    with SERVICES_YML.open("r", encoding="utf-8-sig") as handle:
-        data = yaml.safe_load(handle)
-
+    Returns a (errors, warnings) tuple. Used by the CLI and the test suite.
+    """
     errors: list[str] = []
+    warnings: list[str] = []
+
     registry = require_mapping(errors, data, "services.yml")
     if registry.get("version") != 2:
         fail(errors, "version must be 2")
 
     validate_platform(errors, registry)
     validate_projects(errors, registry)
-    validate_runtime_instances(errors, registry)
+    validate_runtime_instances(errors, warnings, registry)
+
+    return errors, warnings
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Validate the AI Service Platform services.yml registry contract.",
+    )
+    parser.add_argument(
+        "path",
+        nargs="?",
+        type=Path,
+        default=SERVICES_YML,
+        help="Path to services.yml (default: repository root services.yml).",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Treat warnings as errors (non-zero exit code on any warning).",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    target = args.path
+
+    if not target.exists():
+        print(f"Missing {target}", file=sys.stderr)
+        return 1
+
+    with target.open("r", encoding="utf-8-sig") as handle:
+        data = yaml.safe_load(handle)
+
+    errors, warnings = validate_data(data)
+
+    if warnings:
+        stream = sys.stderr if args.strict else sys.stdout
+        label = "warnings (treated as errors)" if args.strict else "warnings"
+        print(f"services.yml {label}:", file=stream)
+        for warning in warnings:
+            print(f"- {warning}", file=stream)
 
     if errors:
         print("services.yml validation failed:", file=sys.stderr)
         for error in errors:
             print(f"- {error}", file=sys.stderr)
+        return 1
+
+    if args.strict and warnings:
         return 1
 
     print("services.yml validation passed")
