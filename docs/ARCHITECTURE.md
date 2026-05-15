@@ -29,6 +29,25 @@ egress country rules, and CDN policy inputs. Enforcement remains separate per
 traffic type so a web protection rule cannot accidentally break VPN access or
 product failover.
 
+## Roadmap / Runtime instances
+
+The platform launches with **four runtime instances**, all defined in `runtime_instances` in [`../services.yml`](../services.yml). They are deliberately independent so ports, databases, env prefixes, and volumes never collide:
+
+| Instance         | Project       | Role                       | Notes |
+|------------------|---------------|----------------------------|-------|
+| `aromaflow-work` | AromaFlowAI   | Working public site        | Production on VPS1, preprod on VPS2. |
+| `aromaflow-demo` | AromaFlowAI   | Demo-data site             | Seeded via `setup_demo_content`. Preprod only. |
+| `ai-retail-mvp`  | AI_E_Retail   | Frozen MVP                 | Frozen at a release tag (`ai-retail-mvp-v*`). |
+| `ai-retail-dev`  | AI_E_Retail   | Future development copy    | Mirrors MVP at launch, then diverges on `develop`. |
+
+See [ADR-0003](adr/0003-four-runtime-instances.md) for the rationale.
+
+The catalog is **extensible**. New public sites and Telegram bots can be added to `runtime_instances.*` by following the `future_service_template` contract in [`../services.yml`](../services.yml) (kinds: `site`, `telegram-bot`). A `bots/` directory is already reserved alongside `services/` under `defaults.platform_structure`. See [ADR-0004](adr/0004-extensible-service-catalog.md).
+
+`services.yml` remains the single source of truth: validator (`tools/validate-services-yml/`), renderer (`tools/render-compose/`), and healthcheck (`tools/healthcheck/`) all derive their behaviour from it.
+
+For the full set of platform decisions, see [`adr/README.md`](adr/README.md).
+
 ## Non-Goals
 
 - No product source code in this repository.

@@ -1,0 +1,39 @@
+# Расширение валидатора services.yml
+
+## What & Why
+Текущий `tools/validate-services-yml/validate_services_yml.py` (313 строк) проверяет базовый контракт. По мере роста числа рантайм-инстансов (4 уже сейчас, плюс будущие сайты и Telegram-боты) нужно ловить типичные ошибки конфигурации до коммита/CI: дубли портов, рассинхрон префиксов, забытые healthcheck'и и т.п.
+
+## Done looks like
+- Валидатор по-прежнему запускается одной командой `python3 tools/validate-services-yml/validate_services_yml.py` и завершается с нулевым кодом на текущем `services.yml`.
+- Добавлены проверки (каждая выдаёт понятное сообщение с путём к проблемному узлу YAML):
+  - **Уникальность локальных портов** — `runtime_instances.*.local.backend_port` и `runtime_instances.*.local.frontend_port` уникальны в пределах всего файла; ни один не совпадает с зарезервированными `5000` (Replit web preview) и портами SoftEther (`443`, `992`, `1194`, `5555`) для локального рантайма.
+  - **Согласованность env.prefix** — `env.prefix` соответствует имени инстанса (например, `aromaflow-work` ↔ `AROMAFLOW_WORK`); `env.file` и `env.example_file` следуют той же схеме именования.
+  - **Healthcheck** — у каждого инстанса есть `healthcheck.path` (начинается с `/`), `expected_status` (целое 100–599) и `timeout_seconds` (положительное число).
+  - **Деплой-таргеты** — `deploy.environments.*` указывает только на VPS, объявленные в `platform.vps_layout` (`VPS1`/`VPS2`/`VPS3`).
+  - **Уникальность доменов** — `domains.preprod` и `domains.prod` не пересекаются между разными инстансами.
+  - **Имена Postgres-БД** — `data.database` уникальны и матчат `^[a-z][a-z0-9_]*$`.
+  - **Шаблоны будущих сервисов** — если задан `future_service_template.site`/`telegram-bot`, у новых инстансов соответствующего типа выполняются перечисленные `required` поля (валидация условная: только если в инстансе указан `type: site`/`telegram-bot`; на текущие инстансы без `type` не влияет).
+- Добавлен флаг `--strict` (опционально): включает дополнительные предупреждения как ошибки.
+- В `tools/validate-services-yml/README.md` обновлён список проверок и приведён пример вывода.
+- Добавлен мини-набор фикстур и smoke-тестов в `tools/validate-services-yml/tests/`:
+  - валидный `services.yml` (символическая ссылка или копия) → exit 0;
+  - 3–4 «битых» фикстуры (дубль порта, плохой префикс, несуществующий VPS, отсутствующий healthcheck) → exit != 0 и ожидаемые сообщения.
+  - Тесты запускаются через `python3 -m unittest discover tools/validate-services-yml/tests` или `pytest`, без внешних зависимостей кроме `pyyaml`.
+
+## Out of scope
+- Изменения в самом `services.yml` (контракт остаётся прежним; валидатор только лучше его проверяет).
+- Реализация `render-compose` и `healthcheck` (отдельные задачи).
+- CI-интеграция и pre-commit (отдельная задача).
+
+## Steps
+1. **Инвентаризация** — перечитать существующий валидатор и зафиксировать, какие проверки уже есть, чтобы не дублировать.
+2. **Реализация новых проверок** — добавить функции для каждого пункта из «Done looks like» с агрегацией ошибок (как сейчас сделано через `errors: list[str]`).
+3. **Флаг `--strict`** — добавить разбор аргументов (`argparse`) и разделение на errors/warnings.
+4. **Тесты и фикстуры** — создать `tools/validate-services-yml/tests/` с фикстурами и smoke-тестами; обеспечить запуск без сторонних зависимостей.
+5. **Документация** — обновить `tools/validate-services-yml/README.md` (список проверок, флаг `--strict`, как запускать тесты).
+6. **Регрессия** — прогнать валидатор на текущем `services.yml` и убедиться, что он всё ещё `passed`.
+
+## Relevant files
+- `tools/validate-services-yml/validate_services_yml.py`
+- `tools/validate-services-yml/README.md`
+- `services.yml`
