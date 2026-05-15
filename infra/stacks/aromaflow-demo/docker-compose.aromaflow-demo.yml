@@ -1,0 +1,64 @@
+# СГЕНЕРИРОВАННЫЙ ФАЙЛ — не редактируйте вручную.
+# Источник: services.yml + tools/render-compose/templates/django-site.yml.j2
+# Стек: aromaflow-demo (project: aromaflowai, type: django-site)
+
+services:
+  aromaflow-demo-backend:
+    image: "${AROMAFLOW_DEMO_BACKEND_IMAGE:-aromaflow-demo-backend:dev}"
+    env_file:
+      - ../../.env.aromaflow.demo
+    environment:
+      DJANGO_DB_NAME: "aromaflow_demo"
+    ports:
+      - "5010:8000"
+    depends_on:
+      - aromaflow-demo-db
+      - aromaflow-demo-redis
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - aromaflow_demo_static:/app/static
+      - aromaflow_demo_media:/app/media
+    restart: unless-stopped
+
+  aromaflow-demo-frontend:
+    image: "${AROMAFLOW_DEMO_FRONTEND_IMAGE:-aromaflow-demo-frontend:dev}"
+    env_file:
+      - ../../.env.aromaflow.demo
+    ports:
+      - "5171:5173"
+    depends_on:
+      - aromaflow-demo-backend
+    restart: unless-stopped
+
+  aromaflow-demo-db:
+    image: postgres:16-alpine
+    env_file:
+      - ../../.env.aromaflow.demo
+    environment:
+      POSTGRES_DB: "aromaflow_demo"
+    volumes:
+      - aromaflow_demo_postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  aromaflow-demo-redis:
+    image: redis:7-alpine
+    volumes:
+      - aromaflow_demo_redis:/data
+    restart: unless-stopped
+
+  aromaflow-demo-nginx:
+    image: nginx:alpine
+    depends_on:
+      - aromaflow-demo-backend
+      - aromaflow-demo-frontend
+    restart: unless-stopped
+
+volumes:
+  aromaflow_demo_static:
+  aromaflow_demo_media:
+  aromaflow_demo_postgres:
+  aromaflow_demo_redis:

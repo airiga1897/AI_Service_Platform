@@ -1,0 +1,64 @@
+# СГЕНЕРИРОВАННЫЙ ФАЙЛ — не редактируйте вручную.
+# Источник: services.yml + tools/render-compose/templates/django-site.yml.j2
+# Стек: << instance_name >> (project: << project_name >>, type: django-site)
+
+services:
+  << backend_name >>:
+    image: "${<< env_prefix >>_BACKEND_IMAGE:-<< backend_name >>:dev}"
+    env_file:
+      - ../../<< env_file >>
+    environment:
+      DJANGO_DB_NAME: "<< db_name >>"
+    ports:
+      - "<< backend_port >>:8000"
+    depends_on:
+      - << db_name_service >>
+      - << redis_name_service >>
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000<< healthcheck_path >>"]
+      interval: 30s
+      timeout: << healthcheck_timeout >>s
+      retries: 3
+    volumes:
+      - << static_volume >>:/app/static
+      - << media_volume >>:/app/media
+    restart: unless-stopped
+
+  << frontend_name >>:
+    image: "${<< env_prefix >>_FRONTEND_IMAGE:-<< frontend_name >>:dev}"
+    env_file:
+      - ../../<< env_file >>
+    ports:
+      - "<< frontend_port >>:5173"
+    depends_on:
+      - << backend_name >>
+    restart: unless-stopped
+
+  << db_name_service >>:
+    image: postgres:16-alpine
+    env_file:
+      - ../../<< env_file >>
+    environment:
+      POSTGRES_DB: "<< db_name >>"
+    volumes:
+      - << postgres_volume >>:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  << redis_name_service >>:
+    image: redis:7-alpine
+    volumes:
+      - << redis_volume >>:/data
+    restart: unless-stopped
+
+  << nginx_name >>:
+    image: nginx:alpine
+    depends_on:
+      - << backend_name >>
+      - << frontend_name >>
+    restart: unless-stopped
+
+volumes:
+  << static_volume >>:
+  << media_volume >>:
+  << postgres_volume >>:
+  << redis_volume >>:
