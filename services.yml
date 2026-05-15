@@ -292,12 +292,12 @@ runtime_instances:
       file: .env.aromaflow.work
       example_file: .env.aromaflow.work.example
     local:
-      backend_port: 5000
+      backend_port: 8020
       frontend_port: 5170
       cache_backend: locmem
     domains:
       local:
-        - http://localhost:5000
+        - http://localhost:8020
       preprod:
         - site.mine-craft.su
       prod:

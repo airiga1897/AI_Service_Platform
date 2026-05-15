@@ -10,7 +10,7 @@ services:
     environment:
       DJANGO_DB_NAME: "aromaflow_work"
     ports:
-      - "5000:8000"
+      - "8020:8000"
     depends_on:
       - aromaflow-work-db
       - aromaflow-work-redis

@@ -56,9 +56,8 @@ class ValidatorBaselineTests(unittest.TestCase):
         self.assertEqual(main([str(SERVICES_YML)]), 0)
 
     def test_strict_flags_replit_port_warning_as_error(self) -> None:
-        # aromaflow-work.local.backend_port == 5000 collides with Replit preview.
-        # Default mode tolerates it; --strict must fail.
-        self.assertEqual(main([str(SERVICES_YML), "--strict"]), 1)
+        # Real registry must pass --strict (no warnings).
+        self.assertEqual(main([str(SERVICES_YML), "--strict"]), 0)
 
 
 class ValidatorBrokenFixtureTests(unittest.TestCase):
@@ -188,6 +187,9 @@ class ValidatorBrokenFixtureTests(unittest.TestCase):
 
     # ---------- replit reserved port surfaces as a warning -----------
     def test_replit_reserved_port_is_a_warning_not_an_error(self) -> None:
+        # Force a Replit-reserved port (5000) onto an instance and confirm
+        # the validator surfaces it as a warning, not an error.
+        self.data["runtime_instances"]["aromaflow-work"]["local"]["backend_port"] = 5000
         errors, warnings = validate_data(self.data)
         self.assertEqual(errors, [])
         self.assertTrue(

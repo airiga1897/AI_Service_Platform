@@ -51,17 +51,17 @@ make check
 
 Эта цель запускает:
 
-- `make validate` — `tools/validate-services-yml/validate_services_yml.py`;
+- `make validate` — `tools/validate-services-yml/validate_services_yml.py --strict`
+  (предупреждения валидатора трактуются как ошибки);
 - `make render-check` — `tools/render-compose/render_compose.py --stack all --check`
   (фейлится, если сгенерированные `infra/stacks/<stack>/docker-compose.<stack>.yml`
   разошлись с текущим `services.yml`);
 - `make test` — smoke-тесты `tools/validate-services-yml/tests`,
   `tools/render-compose/tests`, `tools/healthcheck/tests`.
 
-Дополнительно есть `make validate-strict` — гонит валидатор с флагом
-`--strict`, при котором предупреждения трактуются как ошибки. На текущем
-реестре цель ожидаемо падает на варнинге `port=5000` (зарезервирован
-Replit web preview), поэтому она не входит в `make check` и в CI.
+Алиас `make validate-strict` сохранён для обратной совместимости и
+делает то же самое. Цель `make validate-lax` гонит валидатор без
+`--strict` — нужна только для локальной отладки сообщений-варнингов.
 
 ### pre-commit
 

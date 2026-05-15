@@ -13,10 +13,7 @@
 
 ## Рантайм-инстансы
 
-- `aromaflow-work` — рабочий сайт AromaFlowAI.
-- `aromaflow-demo` — сайт AromaFlowAI с демо-данными.
-- `ai-retail-mvp` — замороженная MVP-версия AI_E_Retail.
-- `ai-retail-dev` — копия AI_E_Retail для разработки.
+Платформа стартует с четырёх рантайм-инстансов: `aromaflow-work`, `aromaflow-demo`, `ai-retail-mvp`, `ai-retail-dev`. Полное описание — в [ADR-0003](docs/adr/0003-four-runtime-instances.md), машинно-читаемое определение — в [`services.yml`](services.yml) (`runtime_instances`).
 
 ## Модель CI/CD
 

@@ -45,7 +45,7 @@ GeoPolicy должен быть одним общим источником да�
 что одно правило применяется ко всему трафику. Один сервис готовит данные, а
 исполнение остаётся раздельным.
 
-Выходы GeoPolicy:
+Выходы GeoPolicy зафиксированы в [`services.yml`](../services.yml) под ключом `platform.geo_policy.data_outputs`; обоснование — в [ADR-0007](adr/0007-shared-geo-policy-service.md). Перечень ниже — производное для людей:
 
 - HAProxy country lists для защиты сайтов и edge endpoints;
 - VPN GeoDNS targets для выбора ближайшего VPS;

@@ -41,7 +41,7 @@ class BuildTargetsTests(unittest.TestCase):
         # У всех инстансов в local есть один localhost-домен, ни одного skipped.
         self.assertEqual(len(skipped), 0)
         urls = {t.instance: t.url for t in targets}
-        self.assertEqual(urls["aromaflow-work"], "http://localhost:5000/health/")
+        self.assertEqual(urls["aromaflow-work"], "http://localhost:8020/health/")
         self.assertEqual(urls["aromaflow-demo"], "http://localhost:5010/health/")
         self.assertEqual(urls["ai-retail-mvp"], "http://localhost:5173/health/")
         self.assertEqual(urls["ai-retail-dev"], "http://localhost:5174/health/")
@@ -196,7 +196,7 @@ class RunCliTests(unittest.TestCase):
         report = json.loads(output)
         self.assertEqual(len(report["results"]), 1)
         result = report["results"][0]
-        self.assertEqual(result["url"], "http://localhost:5000/health/")
+        self.assertEqual(result["url"], "http://localhost:8020/health/")
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["http_status"], 200)
 
