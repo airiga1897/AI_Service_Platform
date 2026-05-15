@@ -197,8 +197,9 @@ CLI читает `services.yml`, формирует URL по `healthcheck.path`,
      --image-ref 'ghcr.io/airiga1897/ai_e_retail:<sha>'
    ```
 3. В GitHub: **Actions → Deploy** → `workflow_dispatch` с `instance=ai-retail-dev`, `environment=preprod`, `image_ref=<полный ref>`.
-4. Workflow прогонит `make check` и preflight; SSH-деплой выполнится только при настроенных secrets (`SSH_HOST`, `SSH_USER`, `SSH_KEY`) в Environment `ai-retail-dev-preprod`.
-5. После деплоя — healthcheck целевого инстанса (`tools/healthcheck/`).
+4. Workflow прогонит `make check` и preflight; SSH predeploy-check выполнится только при настроенных secrets (`SSH_HOST`, `SSH_USER`, `SSH_KEY`) в Environment `ai-retail-dev-preprod`.
+5. На VPS2 заранее должен быть runtime env-файл `/opt/stacks/ai-retail-dev-preprod/.env.ai-retail.dev`.
+6. Текущий milestone проверяет `docker compose config`; реальный `pull/up` и healthcheck будут включены следующим отдельным шагом.
 
 Другие `instance`/`environment` в этом milestone **отклоняются** workflow'ом намеренно.
 

@@ -45,6 +45,7 @@ class PreflightResolveTests(unittest.TestCase):
             metadata["compose_file"],
             "infra/stacks/ai-retail-dev/docker-compose.ai-retail-dev.yml",
         )
+        self.assertEqual(metadata["env_file"], ".env.ai-retail.dev")
         self.assertEqual(metadata["deploy_dir"], "/opt/stacks/ai-retail-dev-preprod")
         self.assertEqual(
             metadata["deploy_state_tag_prefix"], "deploy/ai-retail-dev/preprod/"
@@ -54,6 +55,17 @@ class PreflightResolveTests(unittest.TestCase):
         registry = load_real()
         with self.assertRaises(PreflightError) as ctx:
             resolve_preflight(registry, "ai-retail-dev", "preprod", INVALID_DEV_REF)
+        self.assertIn("does not match", str(ctx.exception))
+
+    def test_unqualified_image_ref_rejected(self) -> None:
+        registry = load_real()
+        with self.assertRaises(PreflightError) as ctx:
+            resolve_preflight(
+                registry,
+                "ai-retail-dev",
+                "preprod",
+                "ghcr.io/airiga1897/ai_e_retailwhatever",
+            )
         self.assertIn("does not match", str(ctx.exception))
 
     def test_frozen_mvp_requires_mvp_tag(self) -> None:

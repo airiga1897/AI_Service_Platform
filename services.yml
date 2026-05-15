@@ -517,7 +517,7 @@ runtime_instances:
     seed:
       automatic_demo_data: false
     deploy:
-      allowed_image_ref_pattern: '^ghcr\.io/airiga1897/ai[_-]e[_-]retail[^:]*(:[0-9a-f]{40}|[a-zA-Z0-9._-]+|@sha256:[0-9a-f]{64})$'
+      allowed_image_ref_pattern: '^ghcr\.io/airiga1897/ai[_-]e[_-]retail[^:]*(:[0-9a-f]{40}|@sha256:[0-9a-f]{64})$'
       frozen: false
       frozen_image_ref_pattern: null
       source:
@@ -554,4 +554,3 @@ future_service_template:
       - webhook.prod
       - containers
       - healthcheck
-

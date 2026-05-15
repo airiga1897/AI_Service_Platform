@@ -7,7 +7,7 @@
 - **Единственный разрешённый rollout:** `ai-retail-dev` → окружение `preprod` → **VPS2**.
 - **Артефакт деплоя:** неизменяемый Docker `image_ref` (digest или коммит-SHA-тег), не git-ветка. См. [ADR-0006](adr/0006-deploy-from-immutable-image-refs.md).
 - **Preflight:** `tools/deploy/preflight.py` читает `services.yml`, проверяет regex image ref и отдаёт JSON с `vps`, `compose_file`, `deploy_dir`, `deploy_state_tag_prefix`.
-- **GitHub Actions:** workflow [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) — `make check` + preflight; SSH-шаги — guarded skeleton до настройки secrets в Environment `ai-retail-dev-preprod`.
+- **GitHub Actions:** workflow [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) — `make check` + preflight; при настроенных secrets выполняет SSH predeploy-check для `ai-retail-dev/preprod`: копирует compose-bundle на VPS2 и запускает `docker compose config` без `pull/up`.
 
 ## Что намеренно выключено
 
@@ -21,8 +21,8 @@
 2. Продуктовый репозиторий публикует образ в GHCR с тегами по коммит-SHA или релиз-тегам.
 3. Продуктовый репозиторий может триггернуть этот репозиторий через `repository_dispatch`.
 4. Платформенный workflow валидирует репозиторий (`make check`) и прогоняет preflight по `image_ref`.
-5. Для `ai-retail-dev/preprod` — guarded SSH deploy (после добавления secrets).
-6. Post-deploy healthcheck — через `tools/healthcheck/` на целевом хосте.
+5. Для `ai-retail-dev/preprod` — SSH predeploy-check: подготовить bundle, проверить наличие runtime env-файла и выполнить `docker compose config` на VPS2.
+6. Реальный `docker compose pull/up` и post-deploy healthcheck — следующий guarded milestone.
 
 ## Откат
 
@@ -42,3 +42,14 @@ python tools/deploy/preflight.py \
   --environment preprod \
   --image-ref 'ghcr.io/airiga1897/ai_e_retail:<40-char-sha>'
 ```
+
+## Требования к VPS2 перед первым predeploy-check
+
+На VPS2 должны быть:
+
+- доступ по SSH из GitHub Actions через Environment `ai-retail-dev-preprod`;
+- установленный Docker Compose plugin (`docker compose`);
+- каталог деплоя может отсутствовать — workflow создаст `/opt/stacks/ai-retail-dev-preprod`;
+- runtime env-файл должен существовать заранее: `/opt/stacks/ai-retail-dev-preprod/.env.ai-retail.dev`.
+
+Workflow кладёт рядом служебный файл `.env.deploy` только с `AI_RETAIL_DEV_WEB_IMAGE=<image_ref>`. Реальные секреты приложения в репозиторий не попадают.

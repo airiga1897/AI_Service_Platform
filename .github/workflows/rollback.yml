@@ -71,25 +71,33 @@ jobs:
           cat preflight.json >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
+  unsupported-rollback:
+    needs: preflight
+    runs-on: ubuntu-latest
+    if: ${{ inputs.instance != 'ai-retail-dev' || inputs.environment != 'preprod' }}
+    steps:
+      - name: Проверка разрешённого rollback
+        run: |
+          echo "Rollback is intentionally not enabled for instance=${{ inputs.instance }} environment=${{ inputs.environment }}."
+          echo "Only ai-retail-dev/preprod is enabled in this milestone."
+          exit 1
+
   rollback:
     needs: preflight
     runs-on: ubuntu-latest
-    environment: ai-retail-dev-preprod
+    if: ${{ inputs.instance == 'ai-retail-dev' && inputs.environment == 'preprod' }}
+    environment:
+      name: ai-retail-dev-preprod
     steps:
       - uses: actions/checkout@v4
-
-      - name: Проверка разрешённого rollback
-        run: |
-          if [ "${{ inputs.instance }}" != "ai-retail-dev" ] || [ "${{ inputs.environment }}" != "preprod" ]; then
-            echo "Rollback is intentionally not enabled for instance=${{ inputs.instance }} environment=${{ inputs.environment }}."
-            echo "Only ai-retail-dev/preprod is enabled in this milestone."
-            exit 1
-          fi
 
       - name: Guarded SSH rollback (re-deploy to_ref)
         env:
           IMAGE_REF: ${{ inputs.to_ref }}
           DEPLOY_DIR: ${{ fromJson(needs.preflight.outputs.deploy_metadata).deploy_dir }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
         run: |
           if [ -z "${SSH_HOST:-}" ] || [ -z "${SSH_USER:-}" ] || [ -z "${SSH_KEY:-}" ]; then
             echo "SSH rollback skipped: set SSH_HOST, SSH_USER, and SSH_KEY in GitHub Environment secrets."

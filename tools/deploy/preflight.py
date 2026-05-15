@@ -50,6 +50,10 @@ def resolve_preflight(
     instance_data = _require_mapping(
         instances[instance], f"runtime_instances.{instance}"
     )
+    env = _require_mapping(instance_data.get("env"), f"{instance}.env")
+    env_file = env.get("file")
+    if not isinstance(env_file, str) or not env_file:
+        raise PreflightError(f"{instance}.env.file is required")
     deploy = _require_mapping(instance_data.get("deploy"), f"{instance}.deploy")
 
     allowed_pattern = deploy.get("allowed_image_ref_pattern")
@@ -99,6 +103,7 @@ def resolve_preflight(
         "instance": instance,
         "environment": environment,
         "image_ref": image_ref,
+        "env_file": env_file,
         "vps": env_data["vps"],
         "compose_file": env_data["compose_file"],
         "deploy_dir": env_data["deploy_dir"],

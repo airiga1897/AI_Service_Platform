@@ -30,7 +30,7 @@
 
 | Workflow | Назначение |
 |----------|------------|
-| [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) | `make check` + `tools/deploy/preflight.py`; guarded SSH только для `ai-retail-dev` / `preprod` |
+| [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) | `make check` + `tools/deploy/preflight.py`; SSH predeploy-check только для `ai-retail-dev` / `preprod` |
 | [`.github/workflows/rollback.yml`](../.github/workflows/rollback.yml) | Re-deploy явного `to_ref`; deploy-state lookup пока не реализован |
 
 Первый включённый сценарий: **`ai-retail-dev` → `preprod` → VPS2**. Production и остальные инстансы отклоняются намеренно.
