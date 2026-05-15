@@ -1,11 +1,9 @@
-# Фикстура для тестов валидатора — committed-файл (генератора нет).
-# Источник: services.yml, мутирован под один конкретный сценарий ошибки.
 version: 2
 platform:
   name: AI Service Platform
   repository_name: AI_Service_Platform
-  repository_note: This repository owns platform orchestration only; product code
-    stays in product repositories.
+  repository_note: Этот репозиторий владеет только платформенной оркестрацией; продуктовый
+    код остаётся в продуктовых репозиториях.
   source_policy:
     deploy_from_archives: false
     source_from_git_only: true
@@ -18,18 +16,18 @@ platform:
       country: Latvia
       initial_runtime: aromaflow-work
       resources_hint: 4cpu-4gb-40gb
-      notes: production traffic and primary data live here first
+      notes: первичный продакшн-трафик и основные данные живут здесь
     VPS2:
       role: preprod-hot-standby-backup
       country: Kazakhstan
       resources_hint: 4cpu-4gb-80gb
-      notes: preprod validation, hot standby, local backups, failover target
+      notes: preprod-валидация, hot standby, локальные бэкапы, цель failover
     VPS3:
       role: management-monitoring-orchestration
       country: Russia
       resources_hint: 2cpu-2gb-40gb
-      notes: Ansible control node, monitoring, backup orchestration; not application
-        runtime
+      notes: control-нода Ansible, мониторинг, оркестрация бэкапов; не используется
+        как application runtime
   edge_vpn:
     provider: softether
     status: required-platform-component
@@ -52,8 +50,8 @@ platform:
         - softether
         - monitoring-agent
         - backup-agent-for-softether-config
-      note: SoftEther is intended on every VPS; current known listener set is TCP-only
-        and comes from the existing VPS1 setup.
+      note: SoftEther задуман на каждом VPS; текущий известный набор listener'ов —
+        только TCP, и он унаследован от существующей конфигурации VPS1.
     sni_routing:
       router: haproxy
       tls_entrypoint: 443
@@ -64,8 +62,8 @@ platform:
       - 1194
       - 5555
       future_optional_udp:
-        note: Not active in the current SoftEther listener set. Use only if IPsec,
-          L2TP, or OpenVPN UDP is enabled later.
+        note: Не активен в текущем наборе listener'ов SoftEther. Использовать только
+          если позднее включат IPsec, L2TP или OpenVPN UDP.
         ports:
         - 500
         - 4500
@@ -120,8 +118,8 @@ platform:
       acme_bypass:
         enabled: true
         path_prefix: /.well-known/acme-challenge/
-    note: GeoIP is a protection/filtering capability, not the same thing as VPN GeoDNS
-      or egress country selection.
+    note: GeoIP — это возможность защиты/фильтрации, она не равнозначна VPN GeoDNS
+      или выбору страны egress.
   site_cdn:
     status: future-optional
     owner: infrastructure
@@ -143,8 +141,9 @@ platform:
     - waf-or-basic-bot-filtering
     - rate-limiting
     - origin-ip-shielding-when-supported
-    note: Standard web CDN is for site delivery and protection. VPN may be evaluated
-      later only through L4 TCP proxy, Anycast, or GeoDNS-style services.
+    note: Стандартный web-CDN отвечает за доставку сайта и защиту. VPN-трафик может
+      рассматриваться позднее только через L4 TCP-прокси, Anycast или сервисы типа
+      GeoDNS.
   geo_policy:
     status: planned-shared-platform-service
     owner: infrastructure
@@ -164,8 +163,8 @@ platform:
       dry_run_first: true
       audit_log_required: true
       manual_override_required: true
-    note: Use one shared geo policy service for data and recommendations, but keep
-      enforcement policies separate per traffic type.
+    note: Использовать один общий сервис geo-политики для данных и рекомендаций, но
+      политики применения держать раздельно по типу трафика.
   vpn_acceleration:
     status: future-research
     owner: infrastructure
@@ -180,8 +179,8 @@ platform:
     - softether-1194-tcp
     excludes:
     - softether-management-5555
-    note: Evaluate separately from website CDN because VPN traffic is not normal HTTP
-      site traffic.
+    note: Оценивать отдельно от website-CDN, потому что VPN-трафик — это не обычный
+      HTTP-трафик сайта.
   legacy_edge_colocation:
     source_hint: historical-aromaflowai-mypet01-compose
     ownership_after_migration: infrastructure
@@ -189,8 +188,8 @@ platform:
     - haproxy
     - certbot
     - softether
-    note: These containers may exist in the historical product compose, but the platform
-      owns them after migration.
+    note: Эти контейнеры могут существовать в историческом продуктовом compose, но
+      после миграции их владелец — платформа.
 defaults:
   platform_structure:
     services: services/
@@ -241,7 +240,7 @@ projects:
         - develop
         - main
         - release/*
-        note: bootstrap_ref is temporary until product branches are promoted.
+        note: bootstrap_ref — временный, пока не будут промоутнуты продуктовые ветки.
     future_paths:
       backend: services/aromaflow/backend
       frontend: services/aromaflow/frontend
@@ -274,7 +273,8 @@ projects:
         - main
         - release/*
         - ai-retail-mvp-v*
-        note: bootstrap_ref is temporary until MVP/dev branches or tags are promoted.
+        note: bootstrap_ref — временный, пока не будут промоутнуты ветки или теги
+          MVP/dev.
       mvp_source: frozen-release-tag-from-bootstrap-ref
       dev_source: develop-after-bootstrap-promotion
       archive_usage: read-only-reference-only
@@ -291,12 +291,12 @@ runtime_instances:
       file: .env.aromaflow.work
       example_file: .env.aromaflow.work.example
     local:
-      backend_port: 5000
+      backend_port: 8020
       frontend_port: 5170
       cache_backend: locmem
     domains:
       local:
-      - http://localhost:5000
+      - http://localhost:8020
       preprod:
       - site.mine-craft.su
       prod:
@@ -330,12 +330,23 @@ runtime_instances:
     seed:
       automatic_demo_data: false
     deploy:
+      allowed_image_ref_pattern: ^ghcr\.io/airiga1897/aromaflow[^:]*(:[0-9a-f]{40}|@sha256:[0-9a-f]{64})$
+      frozen: false
+      frozen_image_ref_pattern: null
       branches:
         preprod: release/*
         prod: main
       environments:
-        preprod: VPS2
-        prod: VPS1
+        preprod:
+          vps: VPS2
+          compose_file: infra/stacks/aromaflow-work/docker-compose.aromaflow-work.yml
+          deploy_dir: /opt/stacks/aromaflow-work-preprod
+          deploy_state_tag_prefix: deploy/aromaflow-work/preprod/
+        prod:
+          vps: VPS1
+          compose_file: infra/stacks/aromaflow-work/docker-compose.aromaflow-work.yml
+          deploy_dir: /opt/stacks/aromaflow-work-prod
+          deploy_state_tag_prefix: deploy/aromaflow-work/prod/
   aromaflow-demo:
     project: aromaflowai
     role: demo-data-site
@@ -379,10 +390,17 @@ runtime_instances:
       automatic_demo_data: true
       command: python manage.py setup_demo_content
     deploy:
+      allowed_image_ref_pattern: ^ghcr\.io/airiga1897/aromaflow[^:]*(:[0-9a-f]{40}|@sha256:[0-9a-f]{64})$
+      frozen: false
+      frozen_image_ref_pattern: null
       branches:
         preprod: release/*
       environments:
-        preprod: VPS2
+        preprod:
+          vps: VPS2
+          compose_file: infra/stacks/aromaflow-demo/docker-compose.aromaflow-demo.yml
+          deploy_dir: /opt/stacks/aromaflow-demo-preprod
+          deploy_state_tag_prefix: deploy/aromaflow-demo/preprod/
   ai-retail-mvp:
     project: ai_e_retail
     role: frozen-mvp
@@ -428,6 +446,9 @@ runtime_instances:
       automatic_demo_data: true
       command: python manage.py load_demo_data
     deploy:
+      allowed_image_ref_pattern: ^ghcr\.io/airiga1897/ai[_-]e[_-]retail[^:]*:ai-retail-mvp-v[0-9a-zA-Z._-]+$
+      frozen: true
+      frozen_image_ref_pattern: ^ghcr\.io/airiga1897/ai[_-]e[_-]retail[^:]*:ai-retail-mvp-v[0-9a-zA-Z._-]+$
       source:
         repository: https://github.com/airiga1897/AI_E_Retail
         bootstrap_ref: codex/feature/fixmvp08
@@ -436,7 +457,11 @@ runtime_instances:
       branches:
         preprod: release/*
       environments:
-        preprod: VPS2
+        preprod:
+          vps: VPS2
+          compose_file: infra/stacks/ai-retail-mvp/docker-compose.ai-retail-mvp.yml
+          deploy_dir: /opt/stacks/ai-retail-mvp-preprod
+          deploy_state_tag_prefix: deploy/ai-retail-mvp/preprod/
   ai-retail-dev:
     project: ai_e_retail
     role: future-development
@@ -481,6 +506,9 @@ runtime_instances:
     seed:
       automatic_demo_data: false
     deploy:
+      allowed_image_ref_pattern: ^ghcr\.io/airiga1897/ai[_-]e[_-]retail[^:]*(:[0-9a-f]{40}|[a-zA-Z0-9._-]+|@sha256:[0-9a-f]{64})$
+      frozen: false
+      frozen_image_ref_pattern: null
       source:
         repository: https://github.com/airiga1897/AI_E_Retail
         bootstrap_ref: codex/feature/fixmvp08
@@ -489,7 +517,11 @@ runtime_instances:
       branches:
         preprod: release/*
       environments:
-        preprod: VPS2
+        preprod:
+          vps: VPS2
+          compose_file: infra/stacks/ai-retail-dev/docker-compose.ai-retail-dev.yml
+          deploy_dir: /opt/stacks/ai-retail-dev-preprod
+          deploy_state_tag_prefix: deploy/ai-retail-dev/preprod/
 future_service_template:
   site:
     type: site

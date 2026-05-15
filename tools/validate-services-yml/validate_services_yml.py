@@ -262,6 +262,96 @@ def expected_env_prefix(instance_name: str) -> str:
     return instance_name.replace("-", "_").upper()
 
 
+def validate_regex_pattern(errors: list[str], pattern: Any, path: str) -> bool:
+    if not isinstance(pattern, str) or not pattern.strip():
+        fail(errors, f"{path} is required and must be a non-empty string")
+        return False
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        fail(errors, f"{path} is not a valid regex: {exc}")
+        return False
+    return True
+
+
+def validate_instance_deploy(
+    errors: list[str],
+    instance_name: str,
+    deploy: dict[str, Any],
+    valid_vps: set[str],
+    node_path: str,
+) -> None:
+    allowed_pattern = deploy.get("allowed_image_ref_pattern")
+    if not validate_regex_pattern(
+        errors, allowed_pattern, f"{node_path}.deploy.allowed_image_ref_pattern"
+    ):
+        allowed_pattern = None
+
+    frozen = deploy.get("frozen")
+    if frozen is not True and frozen is not False:
+        fail(errors, f"{node_path}.deploy.frozen must be a boolean")
+        frozen = False
+
+    frozen_pattern = deploy.get("frozen_image_ref_pattern")
+    if frozen is True:
+        if not validate_regex_pattern(
+            errors,
+            frozen_pattern,
+            f"{node_path}.deploy.frozen_image_ref_pattern",
+        ):
+            frozen_pattern = None
+        elif allowed_pattern and frozen_pattern:
+            try:
+                allowed_re = re.compile(allowed_pattern)
+                frozen_re = re.compile(frozen_pattern)
+                if not allowed_re.pattern == frozen_re.pattern:
+                    fail(
+                        errors,
+                        f"{node_path}.deploy.allowed_image_ref_pattern must match"
+                        f" frozen_image_ref_pattern when frozen is true",
+                    )
+            except re.error:
+                pass
+    elif frozen_pattern not in (None, False, ""):
+        fail(
+            errors,
+            f"{node_path}.deploy.frozen_image_ref_pattern must be null when frozen is false",
+        )
+
+    environments = require_mapping(
+        errors, deploy.get("environments"), f"{node_path}.deploy.environments"
+    )
+    stack_prefix = f"infra/stacks/{instance_name}/"
+    for env_name, env_cfg in environments.items():
+        env_path = f"{node_path}.deploy.environments.{env_name}"
+        if isinstance(env_cfg, str):
+            fail(
+                errors,
+                f"{env_path} must be a mapping with vps, compose_file, deploy_dir,"
+                f" deploy_state_tag_prefix (got legacy VPS string {env_cfg!r})",
+            )
+            continue
+        env_data = require_mapping(errors, env_cfg, env_path)
+        vps = env_data.get("vps")
+        if vps not in valid_vps:
+            fail(errors, f"{env_path}.vps targets unknown {vps!r}")
+        compose_file = env_data.get("compose_file")
+        if not isinstance(compose_file, str) or not compose_file.startswith(stack_prefix):
+            fail(
+                errors,
+                f"{env_path}.compose_file must start with {stack_prefix!r}",
+            )
+        if not env_data.get("deploy_dir"):
+            fail(errors, f"{env_path}.deploy_dir is required")
+        tag_prefix = env_data.get("deploy_state_tag_prefix")
+        expected_tag = f"deploy/{instance_name}/{env_name}/"
+        if not isinstance(tag_prefix, str) or not tag_prefix.startswith(expected_tag):
+            fail(
+                errors,
+                f"{env_path}.deploy_state_tag_prefix must start with {expected_tag!r}",
+            )
+
+
 def expected_env_file_stems(instance_name: str) -> tuple[str, str] | None:
     """Return (env_file, env_example_file) following the project.role naming scheme.
 
@@ -356,17 +446,9 @@ def validate_runtime_instances(
         elif timeout_value <= 0:
             fail(errors, f"{node_path}.healthcheck.timeout_seconds must be a positive number")
 
-        # ---- deploy targets ---------------------------------------------
+        # ---- deploy contract --------------------------------------------
         deploy = require_mapping(errors, instance_data.get("deploy"), f"{node_path}.deploy")
-        environments = require_mapping(
-            errors, deploy.get("environments"), f"{node_path}.deploy.environments"
-        )
-        for env_name, target in environments.items():
-            if target not in valid_vps:
-                fail(
-                    errors,
-                    f"{node_path}.deploy.environments.{env_name} targets unknown {target}",
-                )
+        validate_instance_deploy(errors, instance_name, deploy, valid_vps, node_path)
 
         # ---- local ports -------------------------------------------------
         local = instance_data.get("local") or {}

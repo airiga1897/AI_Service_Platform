@@ -26,10 +26,22 @@
 
 В качестве входов деплоя предпочтительны Docker image refs, помеченные коммит-SHA или релиз-тегом. Имя ветки не должно быть единственным идентификатором продакшен-деплоя.
 
+## Deploy и rollback (GitHub Actions)
+
+| Workflow | Назначение |
+|----------|------------|
+| [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) | `make check` + `tools/deploy/preflight.py`; guarded SSH только для `ai-retail-dev` / `preprod` |
+| [`.github/workflows/rollback.yml`](../.github/workflows/rollback.yml) | Re-deploy явного `to_ref`; deploy-state lookup пока не реализован |
+
+Первый включённый сценарий: **`ai-retail-dev` → `preprod` → VPS2**. Production и остальные инстансы отклоняются намеренно.
+
+`ai-retail-mvp` защищён полем `deploy.frozen: true` и regex `frozen_image_ref_pattern` в `services.yml` (валидатор + preflight).
+
 ## GitHub Environments (окружения)
 
 Рекомендуемые окружения:
 
+- `ai-retail-dev-preprod` — secrets для первого реального rollout (`SSH_HOST`, `SSH_USER`, `SSH_KEY`)
 - `aromaflow-work`
 - `aromaflow-demo`
 - `ai-retail-mvp`
@@ -61,7 +73,11 @@ make check
   `infra/edge/nginx/sites/*.conf` разошлись с текущим `services.yml`);
 - `make test` — smoke-тесты `tools/validate-services-yml/tests`,
   `tools/render-compose/tests`, `tools/render-edge/tests`,
-  `tools/healthcheck/tests`.
+  `tools/healthcheck/tests`, `tools/deploy/tests`.
+
+Валидатор (`make validate`) дополнительно проверяет deploy-контракт в
+`runtime_instances.*.deploy`: `allowed_image_ref_pattern`, `frozen`,
+`environments.*.{vps,compose_file,deploy_dir,deploy_state_tag_prefix}`.
 
 Алиас `make validate-strict` сохранён для обратной совместимости и
 делает то же самое. Цель `make validate-lax` гонит валидатор без

@@ -87,11 +87,54 @@ class ValidatorBrokenFixtureTests(unittest.TestCase):
 
     # ---------- unknown VPS deploy target ----------------------------
     def test_deploy_target_must_be_known_vps(self) -> None:
-        self.data["runtime_instances"]["aromaflow-work"]["deploy"]["environments"]["prod"] = "VPS9"
+        self.data["runtime_instances"]["aromaflow-work"]["deploy"]["environments"]["prod"][
+            "vps"
+        ] = "VPS9"
         errors, _ = validate_data(self.data)
         self.assertTrue(
             any("VPS9" in e for e in errors),
             f"missing unknown-VPS error in: {errors}",
+        )
+
+    # ---------- deploy contract --------------------------------------
+    def test_missing_allowed_image_ref_pattern_is_an_error(self) -> None:
+        del self.data["runtime_instances"]["aromaflow-work"]["deploy"][
+            "allowed_image_ref_pattern"
+        ]
+        errors, _ = validate_data(self.data)
+        self.assertTrue(
+            any("allowed_image_ref_pattern" in e for e in errors),
+            f"missing allowed_image_ref_pattern error in: {errors}",
+        )
+
+    def test_invalid_image_ref_regex_is_an_error(self) -> None:
+        self.data["runtime_instances"]["aromaflow-work"]["deploy"][
+            "allowed_image_ref_pattern"
+        ] = "[invalid"
+        errors, _ = validate_data(self.data)
+        self.assertTrue(
+            any("not a valid regex" in e for e in errors),
+            f"missing invalid-regex error in: {errors}",
+        )
+
+    def test_frozen_instance_requires_frozen_pattern(self) -> None:
+        self.data["runtime_instances"]["ai-retail-mvp"]["deploy"][
+            "frozen_image_ref_pattern"
+        ] = None
+        errors, _ = validate_data(self.data)
+        self.assertTrue(
+            any("frozen_image_ref_pattern" in e for e in errors),
+            f"missing frozen pattern error in: {errors}",
+        )
+
+    def test_compose_file_must_be_under_instance_stack(self) -> None:
+        self.data["runtime_instances"]["ai-retail-dev"]["deploy"]["environments"][
+            "preprod"
+        ]["compose_file"] = "infra/stacks/wrong/docker-compose.yml"
+        errors, _ = validate_data(self.data)
+        self.assertTrue(
+            any("compose_file must start with" in e for e in errors),
+            f"missing compose_file path error in: {errors}",
         )
 
     # ---------- missing healthcheck.path -----------------------------
@@ -242,6 +285,21 @@ class ValidatorCliFixtureTests(unittest.TestCase):
         result = self._run("broken_missing_healthcheck.yml")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("healthcheck.path is required", result.stderr)
+
+    def test_cli_fails_on_missing_deploy_fixture(self) -> None:
+        result = self._run("broken_deploy_missing.yml")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("deploy", result.stderr)
+
+    def test_cli_fails_on_frozen_without_pattern_fixture(self) -> None:
+        result = self._run("broken_frozen_no_pattern.yml")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("frozen_image_ref_pattern", result.stderr)
+
+    def test_cli_fails_on_invalid_regex_fixture(self) -> None:
+        result = self._run("broken_pattern_invalid_regex.yml")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not a valid regex", result.stderr)
 
 
 if __name__ == "__main__":  # pragma: no cover

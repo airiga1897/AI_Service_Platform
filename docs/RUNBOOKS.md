@@ -182,14 +182,42 @@ CLI читает `services.yml`, формирует URL по `healthcheck.path`,
 
 ---
 
+## Деплой и откат (preflight + guarded rollout)
+
+См. также [`DEPLOYMENT.md`](DEPLOYMENT.md) и [ADR-0006](adr/0006-deploy-from-immutable-image-refs.md).
+
+### Деплой `ai-retail-dev` в preprod (VPS2)
+
+1. Собрать и опубликовать образ в GHCR из `AI_E_Retail` (тег по коммит-SHA).
+2. Локально проверить preflight:
+   ```bash
+   python tools/deploy/preflight.py \
+     --instance ai-retail-dev \
+     --environment preprod \
+     --image-ref 'ghcr.io/airiga1897/ai_e_retail:<sha>'
+   ```
+3. В GitHub: **Actions → Deploy** → `workflow_dispatch` с `instance=ai-retail-dev`, `environment=preprod`, `image_ref=<полный ref>`.
+4. Workflow прогонит `make check` и preflight; SSH-деплой выполнится только при настроенных secrets (`SSH_HOST`, `SSH_USER`, `SSH_KEY`) в Environment `ai-retail-dev-preprod`.
+5. После деплоя — healthcheck целевого инстанса (`tools/healthcheck/`).
+
+Другие `instance`/`environment` в этом milestone **отклоняются** workflow'ом намеренно.
+
+### Откат `ai-retail-dev` preprod
+
+1. Определить предыдущий неизменяемый `image_ref` (пока вручную; lookup deploy-state по git-тегам — follow-up).
+2. **Actions → Rollback** → `to_ref=<предыдущий ref>` (обязателен; пустой `to_ref` завершит workflow с ошибкой).
+3. Preflight проверит ref против `services.yml`; SSH-откат — re-deploy того же compose с предыдущим `IMAGE_REF`.
+
+`ai-retail-mvp` заморожен: preflight/deploy отклонят refs вне паттерна `ai-retail-mvp-v*`.
+
+---
+
 ## Запланированные runbook'и
 
 Эти процедуры будут добавлены, когда появится соответствующий код или
 автоматизация. До этого момента реальная эксплуатация выполняется
 вручную с привлечением инженера.
 
-- Деплой выбранного стека (после реализации `deploy.yml`).
-- Откат выбранного стека (после реализации `rollback.yml`).
 - Ротация ENV-секретов и обновление `*_TOKEN`/`*_PASSWORD` на VPS.
 - Восстановление БД из бэкапа (после стабилизации `backup_*` ролей).
 - Восстановление SoftEther VPN из тома `softether_data` и резервных

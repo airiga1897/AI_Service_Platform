@@ -30,5 +30,6 @@ test:
 	$(PYTHON) -m unittest discover -s tools/render-compose/tests -t .
 	$(PYTHON) -m unittest discover -s tools/render-edge/tests -t .
 	$(PYTHON) -m unittest discover -s tools/healthcheck/tests -t .
+	$(PYTHON) -m unittest discover -s tools/deploy/tests -t .
 
 check: validate render-check render-edge-check test

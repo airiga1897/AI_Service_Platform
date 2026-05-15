@@ -1,17 +1,13 @@
-# Workflow CI «Deploy Skeleton».
+# Workflow CI «Deploy».
 #
-# Каркас пайплайна деплоя. Реальный деплой пока не подключён —
-# job выполняет только dry-run и логирует выбранные параметры.
-# Логика деплоя добавляется отдельным runbook'ом и кодом.
+# Preflight + guarded rollout. Фактический SSH-деплой включён только для
+# ai-retail-dev / preprod. Остальные комбинации instance/environment
+# завершаются с явным сообщением, что rollout намеренно отключён.
 #
-# Имена шагов (`name:`) — на русском. Поля `description:` для
-# инпутов `workflow_dispatch` оставлены на английском, потому что
-# их значения (`options:`) — английские идентификаторы инстансов и
-# VPS, и UI GitHub показывает их рядом с описанием.
-# Имя самого workflow (`Deploy Skeleton`) — английский идентификатор
-# в GitHub UI, не переводится.
+# Поля description инпутов workflow_dispatch оставлены на английском —
+# значения options — машинные идентификаторы.
 
-name: Deploy Skeleton
+name: Deploy
 
 on:
   workflow_dispatch:
@@ -25,26 +21,98 @@ on:
           - aromaflow-demo
           - ai-retail-mvp
           - ai-retail-dev
-      image_ref:
-        description: Container image ref to deploy
-        required: true
-      target_vps:
-        description: Target VPS role
+      environment:
+        description: Deploy environment
         required: true
         type: choice
         options:
-          - VPS1
-          - VPS2
-          - VPS3
+          - preprod
+          - prod
+      image_ref:
+        description: Immutable container image ref to deploy
+        required: true
 
 jobs:
-  dry-run:
+  preflight:
     runs-on: ubuntu-latest
+    outputs:
+      deploy_metadata: ${{ steps.preflight.outputs.metadata }}
     steps:
       - uses: actions/checkout@v4
-      - name: Только dry-run (реальный деплой ещё не подключён)
+
+      - name: Установка Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Установка Python-зависимостей
+        run: python -m pip install --upgrade pip pyyaml jinja2
+
+      - name: Проверка репозитория (make check)
+        run: make check
+
+      - name: Deploy preflight
+        id: preflight
         run: |
-          echo "Deploy is not enabled yet."
-          echo "instance=${{ inputs.instance }}"
-          echo "image_ref=${{ inputs.image_ref }}"
-          echo "target_vps=${{ inputs.target_vps }}"
+          python tools/deploy/preflight.py \
+            --instance "${{ inputs.instance }}" \
+            --environment "${{ inputs.environment }}" \
+            --image-ref "${{ inputs.image_ref }}" \
+            > preflight.json
+          echo "metadata<<EOF" >> "$GITHUB_OUTPUT"
+          cat preflight.json >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Публикация preflight JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-preflight-${{ inputs.instance }}-${{ inputs.environment }}
+          path: preflight.json
+
+  deploy:
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment: ai-retail-dev-preprod
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Скачать preflight JSON
+        uses: actions/download-artifact@v4
+        with:
+          name: deploy-preflight-${{ inputs.instance }}-${{ inputs.environment }}
+
+      - name: Проверка разрешённого rollout
+        id: gate
+        run: |
+          if [ "${{ inputs.instance }}" != "ai-retail-dev" ] || [ "${{ inputs.environment }}" != "preprod" ]; then
+            echo "Rollout is intentionally not enabled for instance=${{ inputs.instance }} environment=${{ inputs.environment }}."
+            echo "Only ai-retail-dev/preprod is enabled in this milestone."
+            exit 1
+          fi
+
+      - name: Guarded SSH deploy (требуются secrets)
+        env:
+          IMAGE_REF: ${{ inputs.image_ref }}
+          DEPLOY_DIR: ${{ fromJson(needs.preflight.outputs.deploy_metadata).deploy_dir }}
+          COMPOSE_FILE: ${{ fromJson(needs.preflight.outputs.deploy_metadata).compose_file }}
+        run: |
+          echo "Resolved deploy metadata:"
+          cat preflight.json
+          if [ -z "${SSH_HOST:-}" ] || [ -z "${SSH_USER:-}" ] || [ -z "${SSH_KEY:-}" ]; then
+            echo "SSH deploy skipped: set SSH_HOST, SSH_USER, and SSH_KEY in GitHub Environment secrets."
+            echo "When secrets are present, the steps below will run on the target host:"
+            echo "  1. Copy/render compose file: ${COMPOSE_FILE}"
+            echo "  2. Export IMAGE_REF=${IMAGE_REF}"
+            echo "  3. docker compose -f ... pull"
+            echo "  4. docker compose -f ... up -d"
+            echo "  5. tools/healthcheck/ against the instance"
+            exit 0
+          fi
+          echo "SSH deploy would run here (not executed in skeleton without configured secrets)."
+
+      - name: Post-deploy healthcheck (локально из репозитория)
+        if: success()
+        run: |
+          echo "Post-deploy healthcheck is configured in tools/healthcheck/."
+          echo "Run against the target host once SSH deploy is wired with secrets."

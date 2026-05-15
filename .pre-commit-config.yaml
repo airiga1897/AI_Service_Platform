@@ -46,8 +46,8 @@ repos:
         pass_filenames: false
 
       - id: python-tests
-        name: Smoke-тесты (validator / render-compose / render-edge / healthcheck)
-        entry: bash -c 'python3 -m unittest discover -s tools/validate-services-yml/tests -t . && python3 -m unittest discover -s tools/render-compose/tests -t . && python3 -m unittest discover -s tools/render-edge/tests -t . && python3 -m unittest discover -s tools/healthcheck/tests -t .'
+        name: Smoke-тесты (validator / render-compose / render-edge / healthcheck / deploy)
+        entry: bash -c 'python3 -m unittest discover -s tools/validate-services-yml/tests -t . && python3 -m unittest discover -s tools/render-compose/tests -t . && python3 -m unittest discover -s tools/render-edge/tests -t . && python3 -m unittest discover -s tools/healthcheck/tests -t . && python3 -m unittest discover -s tools/deploy/tests -t .'
         language: system
         files: ^(services\.yml|tools/.*)$
         pass_filenames: false
