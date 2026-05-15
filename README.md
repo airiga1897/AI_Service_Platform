@@ -40,3 +40,30 @@ Key decisions in force today:
 - [ADR-0007](docs/adr/0007-shared-geo-policy-service.md) — single shared GeoPolicy data source, per-traffic enforcement.
 
 The current Replit-session work plan is snapshotted under [`docs/replit/`](docs/replit/README.md).
+
+## How to develop locally
+
+Установить общие Python-зависимости:
+
+```bash
+python3 -m pip install pyyaml jinja2
+```
+
+Прогнать тот же набор проверок, что и CI:
+
+```bash
+make check        # validate + render-check + smoke-тесты
+make validate     # только валидатор services.yml
+make render-check # дрейф сгенерированных compose-файлов
+make test         # smoke-тесты всех инструментов
+```
+
+Включить pre-commit, чтобы те же проверки запускались до коммита:
+
+```bash
+pip install pre-commit
+pre-commit install
+pre-commit install --hook-type pre-push
+```
+
+Подробности — в [`docs/CI_CD.md`](docs/CI_CD.md).

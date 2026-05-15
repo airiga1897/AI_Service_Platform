@@ -16,8 +16,9 @@ What is in this repo:
 ## Replit setup
 
 - **Language runtime:** Python 3.11 (installed as a Replit module).
-- **Python deps:** `pyyaml` (used by the validator).
-- **Workflow:** `Validate services.yml` runs `python3 tools/validate-services-yml/validate_services_yml.py`. It is a console workflow (one-shot), not a server. There is no port to expose and no web preview.
+- **Python deps:** `pyyaml` (validator + render-compose loader), `jinja2` (render-compose templates). Healthcheck использует только стандартную библиотеку.
+- **Workflow:** `Validate services.yml` runs `make check` — это валидатор `services.yml`, проверка дрейфа `render-compose --check` и smoke-тесты всех инструментов (`validate-services-yml`, `render-compose`, `healthcheck`). Это console workflow (one-shot), не сервер. Порт не экспонируется, web preview нет.
+- **CI / pre-commit:** `.github/workflows/validate.yml` повторяет `make check` на каждом PR/push. Локальные pre-commit хуки описаны в `.pre-commit-config.yaml` и `docs/CI_CD.md`.
 - **Deployment:** Not configured. There is no application to deploy from this repo; real deploys are performed by the GitHub Actions workflows in `.github/workflows/` against external VPS hosts.
 
 ## User preferences

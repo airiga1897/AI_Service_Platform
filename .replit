@@ -22,9 +22,9 @@ args = "Validate services.yml"
 name = "Validate services.yml"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "python3 tools/validate-services-yml/validate_services_yml.py"
-
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "make check"

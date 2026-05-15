@@ -1,4 +1,4 @@
-﻿name: Validate
+name: Validate
 
 on:
   pull_request:
@@ -11,6 +11,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip pyyaml jinja2
+
       - name: Validate repository layout
         run: |
           test -f services.yml
@@ -20,7 +30,12 @@ jobs:
           test -d infra/stacks/ai-retail-mvp
           test -d infra/stacks/ai-retail-dev
           test -d infra/edge/softether
-      - name: Install validation dependencies
-        run: python -m pip install pyyaml
+
       - name: Validate services registry
-        run: python tools/validate-services-yml/validate_services_yml.py
+        run: make validate
+
+      - name: Render-compose drift check
+        run: make render-check
+
+      - name: Run smoke tests
+        run: make test

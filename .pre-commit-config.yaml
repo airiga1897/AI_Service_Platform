@@ -1,0 +1,32 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+
+  - repo: local
+    hooks:
+      - id: validate-services-yml
+        name: validate services.yml
+        entry: python3 tools/validate-services-yml/validate_services_yml.py
+        language: system
+        files: ^(services\.yml|tools/validate-services-yml/.*)$
+        pass_filenames: false
+
+      - id: render-compose-check
+        name: render-compose --check
+        entry: python3 tools/render-compose/render_compose.py --stack all --check
+        language: system
+        files: ^(services\.yml|tools/render-compose/.*|tools/_lib/.*|infra/stacks/.*)$
+        pass_filenames: false
+
+      - id: python-tests
+        name: smoke tests (validator / render-compose / healthcheck)
+        entry: bash -c 'python3 -m unittest discover -s tools/validate-services-yml/tests -t . && python3 -m unittest discover -s tools/render-compose/tests -t . && python3 -m unittest discover -s tools/healthcheck/tests -t .'
+        language: system
+        files: ^(services\.yml|tools/.*)$
+        pass_filenames: false
+        stages: [pre-push]
