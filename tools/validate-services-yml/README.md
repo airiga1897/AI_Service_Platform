@@ -41,7 +41,10 @@ Validates the `services.yml` registry contract for the AI Service Platform.
 
 - If an instance declares `type: site`, the fields listed under
   `future_service_template.site.required` must all be present.
-- Same for `type: telegram-bot` against `future_service_template.bot.required`.
+- For `type: telegram-bot`, the validator looks under
+  `future_service_template.telegram-bot.required` first and falls back to
+  the short key `future_service_template.bot.required` (currently used in
+  `services.yml`). Either spelling is accepted.
 - Instances without an explicit `type` are unaffected (back-compat).
 
 **Warnings (informational by default, errors under `--strict`)**

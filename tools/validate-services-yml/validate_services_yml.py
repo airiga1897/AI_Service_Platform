@@ -442,8 +442,24 @@ def validate_runtime_instances(
         # ---- future_service_template required fields --------------------
         instance_type = instance_data.get("type")
         if instance_type in ("site", "telegram-bot"):
-            template_key = "site" if instance_type == "site" else "bot"
-            tpl = template.get(template_key) if isinstance(template, dict) else None
+            # Support both the short key (`site` / `bot`) and the long key
+            # (`site` / `telegram-bot`) under future_service_template, so the
+            # registry can evolve without breaking this validator.
+            candidate_keys: tuple[str, ...]
+            if instance_type == "site":
+                candidate_keys = ("site",)
+            else:
+                candidate_keys = ("telegram-bot", "bot")
+
+            tpl = None
+            template_key = candidate_keys[0]
+            if isinstance(template, dict):
+                for key in candidate_keys:
+                    if isinstance(template.get(key), dict):
+                        tpl = template[key]
+                        template_key = key
+                        break
+
             if isinstance(tpl, dict):
                 required = tpl.get("required") or []
                 if isinstance(required, list):

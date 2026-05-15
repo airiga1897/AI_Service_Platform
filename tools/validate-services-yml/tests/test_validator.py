@@ -154,6 +154,35 @@ class ValidatorBrokenFixtureTests(unittest.TestCase):
             f"missing future_service_template required-field error in: {errors}",
         )
 
+    # ---------- telegram-bot template key variants -------------------
+    def test_telegram_bot_uses_short_bot_template_key(self) -> None:
+        # Current services.yml uses future_service_template.bot.
+        instance = self.data["runtime_instances"]["aromaflow-demo"]
+        instance["type"] = "telegram-bot"
+        # Required fields from .bot include webhook.preprod / webhook.prod.
+        errors, _ = validate_data(self.data)
+        self.assertTrue(
+            any("webhook.preprod is required for type='telegram-bot'" in e for e in errors),
+            f"missing telegram-bot template error in: {errors}",
+        )
+
+    def test_telegram_bot_also_accepts_long_template_key(self) -> None:
+        # Forward-compat: future_service_template.telegram-bot must also work.
+        self.data["future_service_template"]["telegram-bot"] = self.data[
+            "future_service_template"
+        ].pop("bot")
+        instance = self.data["runtime_instances"]["aromaflow-demo"]
+        instance["type"] = "telegram-bot"
+        errors, _ = validate_data(self.data)
+        self.assertTrue(
+            any(
+                "is required for type='telegram-bot'" in e
+                and "future_service_template.telegram-bot.required" in e
+                for e in errors
+            ),
+            f"long-key template error not surfaced in: {errors}",
+        )
+
     # ---------- replit reserved port surfaces as a warning -----------
     def test_replit_reserved_port_is_a_warning_not_an_error(self) -> None:
         errors, warnings = validate_data(self.data)
