@@ -157,6 +157,35 @@ class RunCliTests(unittest.TestCase):
         rc = hc.main(["--env", "preprod", "--instance", "does-not-exist"])
         self.assertEqual(rc, 2)
 
+    def test_main_returns_exit_2_on_invalid_timeout(self) -> None:
+        rc = hc.main(["--env", "local", "--timeout", "-1"])
+        self.assertEqual(rc, 2)
+        rc_zero = hc.main(["--env", "local", "--timeout", "0"])
+        self.assertEqual(rc_zero, 2)
+
+    def test_main_returns_exit_2_on_malformed_registry(self) -> None:
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".yml", delete=False, encoding="utf-8"
+        ) as fh:
+            fh.write("runtime_instances: not-a-mapping\n")
+            path = fh.name
+        try:
+            rc = hc.main(["--env", "local", "--registry", path])
+            self.assertEqual(rc, 2)
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_preprod_url_forces_https_even_if_registry_has_http(self) -> None:
+        # Сцена: в реестре в preprod-домене кто-то ошибочно поставил http://.
+        # _build_url должен всё равно построить https://.
+        url = hc._build_url("preprod", "http://site.example.com", "/health/")
+        self.assertEqual(url, "https://site.example.com/health/")
+        url2 = hc._build_url("prod", "https://site.example.com", "/health/")
+        self.assertEqual(url2, "https://site.example.com/health/")
+        url3 = hc._build_url("preprod", "site.example.com", "/health/")
+        self.assertEqual(url3, "https://site.example.com/health/")
+
     def test_json_output_is_valid_and_includes_url(self) -> None:
         with mock.patch.object(hc.urlrequest, "urlopen", return_value=_fake_response(200)):
             args = hc.parse_args(

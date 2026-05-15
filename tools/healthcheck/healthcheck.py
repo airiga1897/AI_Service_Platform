@@ -96,12 +96,20 @@ def _build_url(env: str, domain: str, path: str) -> str:
 
     Для ``env='local'`` домен уже содержит схему и порт
     (``http://localhost:5000``); просто подменяем path. Для остальных
-    окружений домен — голый хост, и мы строим ``https://<host><path>``.
+    окружений мы всегда строим ``https://<host><path>`` — даже если в
+    реестре по ошибке оказалась схема ``http://`` (preprod/prod должны
+    проверяться только по HTTPS).
     """
+    if env == "local":
+        if "://" in domain:
+            parts = urlsplit(domain)
+            return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+        return f"http://{domain}{path}"
+    # preprod / prod: всегда HTTPS, схема в реестре игнорируется.
+    host = domain
     if "://" in domain:
-        parts = urlsplit(domain)
-        return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
-    return f"https://{domain}{path}"
+        host = urlsplit(domain).netloc or urlsplit(domain).path
+    return f"https://{host}{path}"
 
 
 def build_targets(
@@ -347,17 +355,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def run(args: argparse.Namespace) -> tuple[int, str]:
     """Главная точка входа без печати; возвращает (exit_code, output)."""
+    if args.timeout is not None and (
+        not isinstance(args.timeout, (int, float))
+        or isinstance(args.timeout, bool)
+        or args.timeout <= 0
+    ):
+        raise HealthcheckConfigError(
+            f"--timeout must be a positive number (got {args.timeout!r})"
+        )
+
     try:
         registry = load_registry(args.registry)
     except (FileNotFoundError, ValueError) as exc:
         raise HealthcheckConfigError(str(exc)) from exc
 
-    targets, skipped = build_targets(
-        registry=registry,
-        env=args.env,
-        instance_filter=args.instance,
-        timeout_override=args.timeout,
-    )
+    try:
+        targets, skipped = build_targets(
+            registry=registry,
+            env=args.env,
+            instance_filter=args.instance,
+            timeout_override=args.timeout,
+        )
+    except HealthcheckConfigError:
+        raise
+    except (TypeError, ValueError, KeyError, AttributeError) as exc:
+        raise HealthcheckConfigError(
+            f"services.yml has unexpected shape: {exc}"
+        ) from exc
 
     results: list[Result] = list(skipped)
     for target in targets:
