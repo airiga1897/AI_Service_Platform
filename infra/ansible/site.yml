@@ -1,5 +1,13 @@
 ---
-- name: Base setup for all platform VPS nodes
+# Корневой плейбук Ansible для платформенных VPS-нод.
+#
+# Применяется со control-ноды (VPS3). Группы хостов определены в
+# инвентаре оператора (этот репозиторий каркасный, реальный inventory
+# не коммитим). Параметризация ролей `backup_client`/`backup_server`
+# выполняется через `group_vars`/`host_vars` (имена приложений и
+# контейнеров — без захардкоженных legacy-значений).
+
+- name: Базовая настройка всех платформенных VPS-нод
   hosts: all
   become: true
   roles:
@@ -7,19 +15,19 @@
     - security
     - monitoring
 
-- name: Production node backup client duties
+- name: Обязанности backup-клиента на продакшн-ноде
   hosts: prod
   become: true
   roles:
     - backup_client
 
-- name: Preprod, standby, and backup node duties
+- name: Обязанности preprod / standby / backup-нод
   hosts: backup
   become: true
   roles:
     - backup_server
 
-- name: Management node duties
+- name: Обязанности control/management-ноды
   hosts: management
   become: true
   roles:

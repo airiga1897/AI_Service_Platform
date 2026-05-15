@@ -1,24 +1,24 @@
 ---
-# Переменные VPS1 — Продакшн
+# Переменные группы prod (VPS1 — продакшн).
+#
+# Базовая параметризация приложения (`app_name`, `app_dir`, `app_image`
+# и т.д.) объявлена в `all.yml` как placeholder. Конкретные значения
+# выставляются через `host_vars/<host>.yml` (см.
+# `host_vars/aromaflow-work.yml.example`) или через `--extra-vars`.
 
-app_dir: /opt/mypet01
-app_user: depuser
-app_repo: "https://github.com/riga1897/MyPet01.git"
-app_branch: main
-
-# Docker Compose
+# --- Docker Compose ---
 compose_file: docker-compose.prod.yml
 
-# GeoIP (обновление через cron)
+# --- GeoIP (обновление через cron) ---
 geoip_update_cron: "0 3 * * 0"   # каждое воскресенье в 3:00
 
-# Prometheus exporters (порты)
+# --- Prometheus exporters (порты) ---
 node_exporter_port: 9100
 postgres_exporter_port: 9187
 nginx_exporter_port: 9113
 haproxy_exporter_port: 9101
 
-# S3 (используется backup.py — заполнить перед запуском)
+# --- S3 (используется backup.py — заполнить перед запуском) ---
 s3_endpoint: ""            # например: https://s3.selcdn.ru
 s3_bucket: ""              # название бакета
 s3_access_key: "{{ vault_s3_access_key }}"

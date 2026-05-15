@@ -1,4 +1,7 @@
 ---
+# Хендлеры роли `monitoring`. Имена (`name:`) — идентификаторы для
+# `notify:`, оставлены на английском (см. handlers роли `security`).
+
 - name: restart node_exporter
   systemd:
     name: node_exporter

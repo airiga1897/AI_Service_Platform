@@ -1,3 +1,14 @@
+# Workflow CI «Validate».
+#
+# Запускается на каждом pull request, push в main и вручную.
+# Повторяет локальную команду `make check`: строгая валидация
+# `services.yml`, проверка дрейфа сгенерированных compose-файлов и
+# smoke-тесты всех инструментов.
+#
+# Имена шагов (`name:`) переведены на русский. Идентификаторы actions,
+# имена интерпретаторов, флаги CLI и пути файлов остаются на
+# английском — это машинный контракт.
+
 name: Validate
 
 on:
@@ -12,16 +23,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Установка Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
 
-      - name: Install Python dependencies
+      - name: Установка Python-зависимостей
         run: python -m pip install --upgrade pip pyyaml jinja2
 
-      - name: Validate repository layout
+      - name: Проверка раскладки репозитория
         run: |
           test -f services.yml
           test -f README.md
@@ -31,11 +42,14 @@ jobs:
           test -d infra/stacks/ai-retail-dev
           test -d infra/edge/softether
 
-      - name: Validate services registry
+      - name: Валидация реестра сервисов (services.yml)
         run: make validate
 
-      - name: Render-compose drift check
+      - name: Проверка дрейфа render-compose
         run: make render-check
 
-      - name: Run smoke tests
+      - name: Проверка дрейфа render-edge
+        run: make render-edge-check
+
+      - name: Smoke-тесты инструментов
         run: make test

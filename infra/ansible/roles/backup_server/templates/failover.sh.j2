@@ -22,7 +22,7 @@ log "========================================="
 
 # 1. Промоут PostgreSQL standby → primary
 log "Промоутирую PostgreSQL standby в primary..."
-docker exec mypet01-db-1 pg_ctl promote -D /var/lib/postgresql/data \
+docker exec {{ db_container_name }} pg_ctl promote -D /var/lib/postgresql/data \
     && log "PostgreSQL промоутирован успешно" \
     || { log "ОШИБКА: Не удалось промоутировать PostgreSQL"; exit 1; }
 
@@ -41,9 +41,13 @@ log "========================================="
 log "FAILOVER ЗАВЕРШЁН"
 log "========================================="
 log ""
-log "СЛЕДУЮЩИЙ ШАГ — переключи DNS:"
-log "  mine-craft.su     A → $VPS2_IP"
-log "  www.mine-craft.su A → $VPS2_IP"
+log "СЛЕДУЮЩИЙ ШАГ — переключи DNS на VPS2 ($VPS2_IP):"
+{% for domain in app_domains %}
+log "  {{ domain }} A → $VPS2_IP"
+{% endfor %}
+{% if not app_domains %}
+log "  (список доменов не задан — заполни 'app_domains' в host_vars)"
+{% endif %}
 log ""
 log "TTL уже должен быть 300 сек — изменение разойдётся за 5 минут."
 log ""

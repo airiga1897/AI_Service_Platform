@@ -6,8 +6,9 @@
 services:
   db:
     image: postgres:15-alpine
+    container_name: "{{ db_standby_container_name }}"
     volumes:
-      - mypet01_postgres_standby:/var/lib/postgresql/data
+      - {{ db_standby_volume }}:/var/lib/postgresql/data
     environment:
       POSTGRES_DB: "{{ vault_db_name }}"
       POSTGRES_USER: "{{ vault_db_user }}"
@@ -26,8 +27,8 @@ services:
       - backend
 
   web:
-    image: ghcr.io/{{ '${GITHUB_REPOSITORY:-local/mypet01}' }}:{{ '${IMAGE_TAG:-latest}' }}
-    command: gunicorn --bind 0.0.0.0:8000 --workers 4 --threads 2 mypet_project.wsgi:application
+    image: "{{ app_image }}:{{ '${IMAGE_TAG:-latest}' }}"
+    command: gunicorn --bind 0.0.0.0:8000 --workers 4 --threads 2 {{ app_wsgi_module }}
     volumes:
       - static_volume:/app/staticfiles
       - media_volume:/app/media
@@ -57,7 +58,7 @@ networks:
   backend:
 
 volumes:
-  mypet01_postgres_standby:
+  {{ db_standby_volume }}:
     external: true
   redis_data:
   static_volume:

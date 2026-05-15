@@ -1,4 +1,14 @@
-﻿name: Rollback Skeleton
+# Workflow CI «Rollback Skeleton».
+#
+# Каркас пайплайна отката. Реальный откат пока не подключён —
+# job выполняет только dry-run и логирует выбранные параметры.
+# Логика отката добавляется отдельным runbook'ом и кодом.
+#
+# Имя самого workflow (`Rollback Skeleton`) — английский
+# идентификатор в GitHub UI, не переводится. Поля `description:`
+# инпутов оставлены на английском (см. комментарий в `deploy.yml`).
+
+name: Rollback Skeleton
 
 on:
   workflow_dispatch:
@@ -15,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Dry-run only
+      - name: Только dry-run (реальный откат ещё не подключён)
         run: |
           echo "Rollback is not enabled yet."
           echo "instance=${{ inputs.instance }}"

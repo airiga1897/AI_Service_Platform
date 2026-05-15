@@ -1,27 +1,64 @@
 ---
-# Общие переменные для всех серверов
+# Общие переменные для всех серверов.
+#
+# Имена приложения, директории, контейнеры и образы здесь —
+# placeholder'ы. Реальные значения задаются в `host_vars/<host>.yml`
+# или через `--extra-vars` (см. `infra/ansible/README.md` и пример
+# `host_vars/aromaflow-work.yml.example`).
+#
+# Роли `backup_client` / `backup_server` параметризованы этими
+# переменными — никаких legacy-имён в шаблонах больше нет.
 
-# SSH
+# --- SSH ---
 ssh_port: 22
 ssh_allowed_users:
   - root
 
-# ufw — открытые порты
+# --- ufw — открытые порты ---
 ufw_allowed_ports:
   - "22"
   - "80"
   - "443"
 
-# fail2ban
+# --- fail2ban ---
 fail2ban_bantime: 3600       # 1 час
 fail2ban_findtime: 600       # 10 минут
 fail2ban_maxretry: 5
 
-# Docker
+# --- Docker ---
 docker_compose_version: "2.27.0"
 
-# Временная зона
+# --- Временная зона ---
 timezone: "UTC"
 
-# PostgreSQL backup retention
+# --- PostgreSQL backup retention ---
 pg_backup_retention_days: 7
+
+# --- Параметризация приложения (placeholder'ы) ---
+# Имя приложения используется как префикс для имён контейнеров,
+# volume'ов, cron-job'ов и каталогов на хосте.
+app_name: "REPLACE_ME"
+
+# Корень для каталога приложения и сам каталог.
+app_dir_root: /opt
+app_dir: "{{ app_dir_root }}/{{ app_name }}"
+
+# Имя docker-образа для деплоя стэндбая (тэг подставляется при запуске).
+app_image: "ghcr.io/REPLACE_ME/REPLACE_ME"
+
+# WSGI-модуль приложения (используется в gunicorn-команде standby-стека).
+app_wsgi_module: "REPLACE_ME.wsgi:application"
+
+# Список production-доменов приложения (используется в инструкциях
+# скрипта failover для переключения DNS).
+app_domains: []
+
+# --- Производные имена контейнеров и volume'ов БД ---
+# Совместимы с дефолтным шаблоном именования docker compose:
+#   <project>-<service>-<replica> → <app_name>-db-1.
+db_container_name: "{{ app_name }}-db-1"
+db_standby_container_name: "{{ app_name }}-db-standby-1"
+db_standby_volume: "{{ app_name }}_postgres_standby"
+
+# --- Префикс имён cron-job'ов backup-клиента ---
+backup_cron_prefix: "{{ app_name }}"

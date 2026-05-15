@@ -24,7 +24,7 @@ notify() {
 mkdir -p "$BACKUP_DIR"
 
 log "Начинаю дамп PostgreSQL..."
-if docker exec mypet01-db-1 pg_dumpall -U {{ vault_db_user }} | gzip > "$DUMP_FILE"; then
+if docker exec {{ db_container_name }} pg_dumpall -U {{ vault_db_user }} | gzip > "$DUMP_FILE"; then
     SIZE=$(du -sh "$DUMP_FILE" | cut -f1)
     log "Дамп создан: $DUMP_FILE ($SIZE)"
 else

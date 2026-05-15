@@ -1,15 +1,204 @@
-# Эксплуатационные runbook-и
+# Эксплуатационные runbook'и
 
-Runbook-и будут добавлены до включения реального деплоя.
+Этот файл собирает короткие, проверенные процедуры для повседневной
+работы с платформенным репозиторием. Раздел «Уже работающие процедуры»
+покрывает то, что прямо сейчас исполняется в этом репозитории.
+Раздел «Запланированные runbook'и» — список процедур, которые будут
+добавлены, когда соответствующий код/деплой появятся.
 
-Необходимый набор runbook-ов:
+Архитектурный контекст и обоснования — в [`adr/README.md`](adr/README.md).
+Источник истины для контракта — [`../services.yml`](../services.yml).
 
-- деплой выбранного стека;
-- rollback выбранного стека;
-- ротация секретов окружения;
-- восстановление бэкапа базы данных;
-- восстановление конфигурации и сертификатов SoftEther VPN;
-- failover с VPS1 на VPS2;
-- продление и валидация TLS-сертификатов;
-- инспекция маршрутизации HAProxy/Nginx;
-- инспекция маршрутизации SoftEther VPN, management-доступа и логов.
+---
+
+## Уже работающие процедуры
+
+### 1. Локальная проверка перед коммитом
+
+**Когда применять:** перед каждым `git commit`/`git push`, после любой
+правки `services.yml`, шаблонов рендера, валидатора или тестов.
+
+**Предусловия:**
+- установлен Python 3.11;
+- установлены зависимости: `python3 -m pip install pyyaml jinja2`.
+
+**Шаги:**
+```bash
+make check
+```
+
+Цель `make check` запускает по очереди:
+1. `make validate` — `validate_services_yml.py --strict` (предупреждения
+   валидатора трактуются как ошибки).
+2. `make render-check` — `render_compose.py --stack all --check`
+   (фейлится, если сгенерированные `infra/stacks/*/docker-compose.*.yml`
+   разошлись с текущим `services.yml`).
+3. `make test` — smoke-тесты `validate-services-yml`, `render-compose`,
+   `healthcheck`.
+
+**Признак успеха:** последняя строка вывода — `OK` от unittest и нулевой
+exit-код. Те же проверки выполняет `.github/workflows/validate.yml` на
+каждом PR/push.
+
+**Что делать при ошибке:**
+- ошибка валидатора → читать сообщение, править `services.yml`;
+- расхождение `render-check` → перерендерить затронутый стек (см. п. 2);
+- падение smoke-тестов → читать traceback, искать в
+  `tools/<инструмент>/tests/`.
+
+Подробности — в [`CI_CD.md`](CI_CD.md).
+
+---
+
+### 2. Перерендер стека после правки `services.yml`
+
+**Когда применять:** после любой правки `services.yml`, которая
+затрагивает `runtime_instances.<имя>` (порты, env-префиксы, тома,
+healthcheck, контейнеры, образы).
+
+**Предусловия:** `make check` не показывает ошибок валидатора;
+`render-check` показывает дрейф.
+
+**Шаги:**
+```bash
+# перерендер одного стека
+python3 tools/render-compose/render_compose.py --stack <имя>
+
+# или сразу всех
+python3 tools/render-compose/render_compose.py --stack all
+```
+
+После рендера обязательно:
+```bash
+make check
+```
+
+**Признак успеха:** в `infra/stacks/<имя>/docker-compose.<имя>.yml`
+видны ожидаемые изменения; `make render-check` не сообщает о дрейфе;
+`make check` зелёный.
+
+**Что делать при ошибке:**
+- `RenderError: missing required field 'X'` → в `services.yml` для
+  выбранного инстанса не хватает поля; добавить и повторить;
+- `unknown project type 'Y'` → выбран `type:`, для которого нет
+  шаблона в `tools/render-compose/templates/`. Добавить шаблон или
+  поправить `type:`.
+
+---
+
+### 3. Прогон healthcheck в `local` / `preprod` / `prod`
+
+**Когда применять:** для быстрой проверки «жив/не жив» сайтов в
+выбранном окружении. В CI сетевые healthcheck'и не выполняются — их
+запускают вручную с машины, у которой есть сетевой доступ к таргетам.
+
+**Предусловия:**
+- для `local` — сайты подняты и слушают на портах из
+  `runtime_instances.*.local.backend_port`;
+- для `preprod`/`prod` — DNS резолвится, маршрутизация edge на месте.
+
+**Шаги:**
+```bash
+# все инстансы окружения
+python3 tools/healthcheck/healthcheck.py --env preprod
+
+# конкретный инстанс, JSON-отчёт
+python3 tools/healthcheck/healthcheck.py --env prod \
+    --instance aromaflow-work --json
+```
+
+CLI читает `services.yml`, формирует URL по `healthcheck.path`,
+делает `GET` и сравнивает фактический статус с
+`healthcheck.expected_status`.
+
+**Признак успеха:** exit-код `0`. Все цели либо `ok`, либо `skipped`
+(домен-плейсхолдер для нереализованных окружений).
+
+**Exit-коды:**
+- `0` — все цели `ok`/`skipped`;
+- `1` — хотя бы одна цель `fail` (HTTP-статус не совпал, таймаут,
+  отказ соединения, DNS-ошибка);
+- `2` — ошибка конфигурации (нет такого инстанса/окружения, плохой
+  таймаут, кривой `services.yml`).
+
+**Что делать при `fail`:**
+- HTTP не тот, что ожидается → проверить, на какой `expected_status`
+  заявлен инстанс в `services.yml`;
+- timeout/connection refused → проверить, что соответствующий
+  стек/контейнер реально запущен и слушает на ожидаемом порту/домене.
+
+Подробности — в [`../tools/healthcheck/README.md`](../tools/healthcheck/README.md).
+
+---
+
+### 4. Добавление нового рантайм-инстанса (site / telegram-bot)
+
+**Когда применять:** когда в каталог рантаймов добавляется новый
+сайт или Telegram-бот.
+
+**Предусловия:**
+- решено имя инстанса (`<project>-<role>`), env-префикс
+  (`<PROJECT>_<ROLE>`), VPS-таргеты для `preprod`/`prod`;
+- для типа `site` — выделены непересекающиеся `local.backend_port` /
+  `local.frontend_port`, имя БД, набор томов;
+- для типа `telegram-bot` — выделены домены вебхука для
+  `preprod`/`prod`, токен (как ENV-переменная — не коммитить).
+
+**Шаги:**
+1. Открыть `services.yml`, секция `runtime_instances`. Добавить
+   новый ключ по образцу существующего инстанса того же типа. Все
+   обязательные поля диктуются `future_service_template.<тип>` в этом
+   же файле.
+2. Прогнать валидатор:
+   ```bash
+   make validate
+   ```
+   Поправить ошибки до зелёного.
+3. Если тип — `site`: перерендерить стек:
+   ```bash
+   python3 tools/render-compose/render_compose.py --stack <новое-имя>
+   ```
+4. Прогнать `make check` — должен быть зелёный.
+5. Добавить `host_vars`/`group_vars` для Ansible, если задеваются
+   роли `backup_client`/`backup_server` (см.
+   [`../infra/ansible/README.md`](../infra/ansible/README.md)).
+6. Закоммитить `services.yml` и сгенерированный compose-файл одним
+   PR. CI повторит `make check`.
+
+**Признак успеха:** PR проходит CI; `make validate --strict` не
+сообщает ни об ошибках, ни о варнингах для нового инстанса.
+
+**Что важно не забыть:**
+- `domains.local` для `site` начинается с `http://localhost:<port>`;
+- `domains.preprod`/`prod` — голые хосты (без схемы/порта);
+- `env.prefix` должен быть `<UPPER_INSTANCE_NAME_WITH_UNDERSCORES>`
+  (валидатор это проверяет);
+- `data.database` — уникальное имя в `snake_case`;
+- порты `local.*_port` не должны пересекаться с другими инстансами и
+  не должны попадать в Replit-reserved (5000).
+
+Архитектурное обоснование расширяемости каталога — в
+[ADR-0004](adr/0004-extensible-service-catalog.md).
+
+---
+
+## Запланированные runbook'и
+
+Эти процедуры будут добавлены, когда появится соответствующий код или
+автоматизация. До этого момента реальная эксплуатация выполняется
+вручную с привлечением инженера.
+
+- Деплой выбранного стека (после реализации `deploy.yml`).
+- Откат выбранного стека (после реализации `rollback.yml`).
+- Ротация ENV-секретов и обновление `*_TOKEN`/`*_PASSWORD` на VPS.
+- Восстановление БД из бэкапа (после стабилизации `backup_*` ролей).
+- Восстановление SoftEther VPN из тома `softether_data` и резервных
+  TLS-сертификатов (см. [`SOFTETHER_VPN.md`](SOFTETHER_VPN.md)).
+- Failover VPS1 → VPS2 с использованием `failover.sh` /
+  `failback.sh` из роли `backup_server`.
+- Продление и валидация TLS-сертификатов (Nginx + Certbot, копия для
+  SoftEther).
+- Инспекция HAProxy/Nginx маршрутизации (после внедрения
+  `tools/render-edge`).
+- Инспекция SoftEther: маршрутизация, management-доступ,
+  логи (`5555/tcp` allowlist, `softether_logs`).

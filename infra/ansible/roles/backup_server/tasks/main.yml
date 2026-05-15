@@ -4,6 +4,23 @@
 # PostgreSQL streaming replication + контейнеры в режиме ожидания
 # ============================================================
 
+- name: Preflight — проверить, что обязательные переменные заданы
+  assert:
+    that:
+      - app_name is defined
+      - app_name | length > 0
+      - app_name != 'REPLACE_ME'
+      - app_image is defined
+      - app_image != 'ghcr.io/REPLACE_ME/REPLACE_ME'
+      - app_wsgi_module is defined
+      - app_wsgi_module != 'REPLACE_ME.wsgi:application'
+    fail_msg: >-
+      Не заданы обязательные переменные `app_name` / `app_image` /
+      `app_wsgi_module` (или они равны placeholder'ам). Задайте их в
+      host_vars/<host>.yml или через --extra-vars (см.
+      infra/ansible/host_vars/aromaflow-work.yml.example).
+    quiet: true
+
 - name: Установить пакеты
   apt:
     name:
@@ -58,7 +75,7 @@
 # --- PostgreSQL Primary: создать пользователя репликации (выполняется на VPS1) ---
 - name: Создать пользователя репликации на Primary (VPS1)
   community.docker.docker_container_exec:
-    container: mypet01-db-1
+    container: "{{ db_container_name }}"
     command: >
       psql -U {{ vault_db_user }} -c
       "DO $$BEGIN
@@ -87,7 +104,7 @@
 
 - name: Перезапустить PostgreSQL на VPS1 для применения конфига репликации
   community.docker.docker_container:
-    name: mypet01-db-1
+    name: "{{ db_container_name }}"
     state: started
     restart: true
   delegate_to: "{{ groups['prod'][0] }}"
@@ -95,7 +112,7 @@
 # --- PostgreSQL Standby: инициализация через pg_basebackup ---
 - name: Создать Docker volume для standby PostgreSQL
   community.docker.docker_volume:
-    name: mypet01_postgres_standby
+    name: "{{ db_standby_volume }}"
     state: present
 
 - name: Инициализировать standby через pg_basebackup
@@ -106,7 +123,7 @@
     detach: false
     cleanup: true
     volumes:
-      - mypet01_postgres_standby:/var/lib/postgresql/data
+      - "{{ db_standby_volume }}:/var/lib/postgresql/data"
     env:
       PGPASSWORD: "{{ vault_pg_replication_password }}"
     command: >

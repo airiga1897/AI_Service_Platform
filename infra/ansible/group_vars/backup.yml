@@ -1,12 +1,14 @@
 ---
-# Переменные VPS2 — Горячий резерв (hot standby) + Бэкапы
+# Переменные группы backup (VPS2 — горячий резерв + бэкапы).
+#
+# Базовая параметризация приложения (`app_name`, `app_dir`, …)
+# объявлена в `all.yml` и переопределяется через `host_vars/<host>.yml`.
 
 # --- Тип резерва ---
 standby_mode: hot           # hot = PostgreSQL streaming replication работает постоянно
 
-# --- Директории ---
+# --- Локальные директории бэкапов ---
 backup_dir: /opt/backups
-app_dir: /opt/mypet01
 
 # --- Хранение бэкапов ---
 backup_retention_days: 7    # хранить 7 дней локально
@@ -23,7 +25,9 @@ pg_replication_slot: vps2_replica
 
 # --- Rsync медиафайлов (каждые 10 минут) ---
 media_rsync_interval_minutes: 10
-media_src: "{{ hostvars[groups['prod'][0]]['app_dir'] | default('/opt/mypet01') }}/media/"
+# `app_dir` на стороне VPS1 берётся из его host_vars (унаследованный
+# через `all.yml`). Если не задан — fallback на `app_dir` текущей ноды.
+media_src: "{{ hostvars[groups['prod'][0]]['app_dir'] | default(app_dir) }}/media/"
 media_dst: "{{ app_dir }}/media/"
 
 # --- rsync: разрешённые источники ---

@@ -56,8 +56,12 @@ make check
 - `make render-check` — `tools/render-compose/render_compose.py --stack all --check`
   (фейлится, если сгенерированные `infra/stacks/<stack>/docker-compose.<stack>.yml`
   разошлись с текущим `services.yml`);
+- `make render-edge-check` — `tools/render-edge/render_edge.py --check`
+  (фейлится, если `infra/edge/haproxy/haproxy.cfg` или
+  `infra/edge/nginx/sites/*.conf` разошлись с текущим `services.yml`);
 - `make test` — smoke-тесты `tools/validate-services-yml/tests`,
-  `tools/render-compose/tests`, `tools/healthcheck/tests`.
+  `tools/render-compose/tests`, `tools/render-edge/tests`,
+  `tools/healthcheck/tests`.
 
 Алиас `make validate-strict` сохранён для обратной совместимости и
 делает то же самое. Цель `make validate-lax` гонит валидатор без
@@ -79,8 +83,9 @@ pre-commit install --hook-type pre-push   # для smoke-тестов
   из `pre-commit/pre-commit-hooks`;
 - `validate-services-yml` — локально запускает валидатор реестра;
 - `render-compose-check` — локально запускает `render_compose.py --stack all --check`;
-- `python-tests` — на стадии `pre-push` гоняет smoke-тесты всех трёх
-  инструментов.
+- `render-edge-check` — локально запускает `render_edge.py --check`;
+- `python-tests` — на стадии `pre-push` гоняет smoke-тесты всех
+  инструментов (validator / render-compose / render-edge / healthcheck).
 
 ### CI на PR/push
 
@@ -91,7 +96,8 @@ push в `main` (а также вручную через `workflow_dispatch`):
 2. Ставит `pyyaml` и `jinja2`.
 3. Проверяет минимальный layout репозитория (наличие `services.yml`,
    `infra/stacks/*`, `infra/edge/softether`).
-4. Запускает `make validate`, `make render-check`, `make test`.
+4. Запускает `make validate`, `make render-check`,
+   `make render-edge-check`, `make test`.
 
 Реальные сетевые healthcheck-и в CI не выполняются — модуль
 `tools/healthcheck/` проверяется только моками в smoke-тестах.

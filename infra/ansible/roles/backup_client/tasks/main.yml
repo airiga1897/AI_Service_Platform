@@ -1,4 +1,16 @@
 ---
+- name: Preflight — проверить, что обязательные переменные заданы
+  assert:
+    that:
+      - app_name is defined
+      - app_name | length > 0
+      - app_name != 'REPLACE_ME'
+    fail_msg: >-
+      Переменная `app_name` не задана или равна placeholder 'REPLACE_ME'.
+      Задайте её в host_vars/<host>.yml или через --extra-vars
+      (см. infra/ansible/host_vars/aromaflow-work.yml.example).
+    quiet: true
+
 - name: Установить зависимости бэкап-клиента
   apt:
     name:
@@ -36,10 +48,10 @@
 
 - name: Настроить cron для ежедневных бэкапов
   cron:
-    name: "Ежедневный бэкап MyPet01"
-    cron_file: mypet01-backup
+    name: "Ежедневный бэкап {{ app_name }}"
+    cron_file: "{{ backup_cron_prefix }}-backup"
     user: root
-    job: "python3 /opt/scripts/backup.py >> /var/log/mypet01-backup.log 2>&1"
+    job: "python3 /opt/scripts/backup.py >> /var/log/{{ backup_cron_prefix }}-backup.log 2>&1"
     hour: "2"
     minute: "0"
 
@@ -52,7 +64,7 @@
 - name: Настроить cron для pg_dump
   cron:
     name: "Ежедневный pg_dump PostgreSQL"
-    cron_file: mypet01-pgbackup
+    cron_file: "{{ backup_cron_prefix }}-pgbackup"
     user: root
     job: "bash /opt/scripts/pg_backup.sh >> /var/log/pg-backup.log 2>&1"
     hour: "3"

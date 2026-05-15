@@ -1,5 +1,5 @@
-# AUTO-GENERATED FIXTURE for validator tests. DO NOT hand-edit.
-# Source: services.yml mutated to exercise a single failure mode.
+# Фикстура для тестов валидатора — committed-файл (генератора нет).
+# Источник: services.yml, мутирован под один конкретный сценарий ошибки.
 version: 2
 platform:
   name: AI Service Platform

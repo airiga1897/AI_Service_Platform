@@ -1,4 +1,17 @@
-﻿name: Deploy Skeleton
+# Workflow CI «Deploy Skeleton».
+#
+# Каркас пайплайна деплоя. Реальный деплой пока не подключён —
+# job выполняет только dry-run и логирует выбранные параметры.
+# Логика деплоя добавляется отдельным runbook'ом и кодом.
+#
+# Имена шагов (`name:`) — на русском. Поля `description:` для
+# инпутов `workflow_dispatch` оставлены на английском, потому что
+# их значения (`options:`) — английские идентификаторы инстансов и
+# VPS, и UI GitHub показывает их рядом с описанием.
+# Имя самого workflow (`Deploy Skeleton`) — английский идентификатор
+# в GitHub UI, не переводится.
+
+name: Deploy Skeleton
 
 on:
   workflow_dispatch:
@@ -29,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Dry-run only
+      - name: Только dry-run (реальный деплой ещё не подключён)
         run: |
           echo "Deploy is not enabled yet."
           echo "instance=${{ inputs.instance }}"
