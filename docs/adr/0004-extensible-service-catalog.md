@@ -1,46 +1,46 @@
-# 0004. `services.yml` is an extensible service catalog
+# 0004. `services.yml` — расширяемый каталог сервисов
 
-- **Status:** Accepted
-- **Date:** 2026-05-15
+- **Статус:** Accepted
+- **Дата:** 2026-05-15
 
-## Context
+## Контекст
 
-Beyond the four launch runtimes ([ADR-0003](0003-four-runtime-instances.md)), the platform must accept new public sites and Telegram bots without schema changes. The registry already reserves a `future_service_template` block in [`services.yml`](../../services.yml) for this purpose, with two service kinds:
+Помимо четырёх стартовых рантаймов ([ADR-0003](0003-four-runtime-instances.md)), платформа должна принимать новые публичные сайты и Telegram-боты без изменения схемы. Реестр уже резервирует блок `future_service_template` в [`services.yml`](../../services.yml) для этой цели, с двумя видами сервисов:
 
-- `site` — public web service (Django, Django+React, etc.).
-- `telegram-bot` — aiogram3 bot (polling in dev, webhook in preprod/prod, per `defaults.bots`).
+- `site` — публичный web-сервис (Django, Django+React и т.д.).
+- `telegram-bot` — aiogram3-бот (polling в dev, webhook в preprod/prod, согласно `defaults.bots`).
 
-A `bots/` directory is also reserved under `defaults.platform_structure`, separate from `services/`.
+Каталог `bots/` также зарезервирован под `defaults.platform_structure`, отдельно от `services/`.
 
-## Decision
+## Решение
 
-`services.yml` is the **single, extensible catalog** for all platform runtimes. Adding a new app or bot is a registry change plus a generator template — never a manual edit of edge configs or per-stack Compose.
+`services.yml` — **единственный, расширяемый каталог** для всех платформенных рантаймов. Добавление нового приложения или бота — это правка реестра плюс шаблон генератора, а никогда не ручная правка edge-конфигов или per-stack Compose.
 
-Contract for new entries:
+Контракт для новых записей:
 
-- A new `runtime_instances.<name>` entry must satisfy the `required` fields of the matching `future_service_template` kind:
-  - `site` requires `profile`, `env.prefix`, `domains`, `healthcheck`, `containers`, `data.database`, `data.cache`.
-  - `telegram-bot` requires `profile`, `env.prefix`, `webhook.preprod`, `webhook.prod`, `containers`, `healthcheck`.
-- An explicit `type:` field (`site` | `telegram-bot`) is recommended for new entries so the validator can apply the right contract conditionally.
-- New entries must declare `deploy.environments` only against VPS nodes that exist in `platform.vps_layout`.
-- New entries must not declare `edge_vpn` — VPN is owned by the platform, not by runtimes ([ADR-0005](0005-edge-haproxy-nginx-softether.md)).
+- Новая запись `runtime_instances.<name>` должна удовлетворять `required`-полям соответствующего вида в `future_service_template`:
+  - `site` требует `profile`, `env.prefix`, `domains`, `healthcheck`, `containers`, `data.database`, `data.cache`.
+  - `telegram-bot` требует `profile`, `env.prefix`, `webhook.preprod`, `webhook.prod`, `containers`, `healthcheck`.
+- Явное поле `type:` (`site` | `telegram-bot`) рекомендовано для новых записей, чтобы валидатор мог условно применять нужный контракт.
+- Новые записи должны объявлять `deploy.environments` только против VPS-узлов, существующих в `platform.vps_layout`.
+- Новые записи не должны объявлять `edge_vpn` — VPN принадлежит платформе, не рантаймам ([ADR-0005](0005-edge-haproxy-nginx-softether.md)).
 
-Generator and validator changes that depend on this contract are tracked in separate tasks (`tools/render-compose`, validator extensions).
+Изменения генератора и валидатора, опирающиеся на этот контракт, отслеживаются в отдельных задачах (`tools/render-compose`, расширения валидатора).
 
-## Consequences
+## Последствия
 
-- Positive: adding a fifth runtime — site or bot — is a small, mechanical change.
-- Positive: the validator and renderer can grow with the catalog instead of branching per-stack.
-- Trade-off: the `future_service_template` block is a soft contract today; full enforcement lands with the validator extension.
-- Follow-up: when the first real bot is added, revisit `defaults.bots` (framework, modes) to confirm it still matches reality.
+- Плюс: добавление пятого рантайма — сайта или бота — мелкое механическое изменение.
+- Плюс: валидатор и рендерер растут вместе с каталогом, а не ветвятся per-stack.
+- Компромисс: блок `future_service_template` сегодня — soft-контракт; полное обеспечение приходит с расширением валидатора.
+- Дальнейшее: когда появится первый реальный бот, пересмотреть `defaults.bots` (фреймворк, режимы), чтобы убедиться, что они всё ещё соответствуют реальности.
 
-## Alternatives considered
+## Рассмотренные альтернативы
 
-- **Per-app config files.** Rejected — duplicates fields, encourages drift, and makes cross-app invariants (port uniqueness, env prefix shape) impossible to validate.
-- **Hardcoding service list in tools.** Rejected — would invert the source of truth and force code changes for every new runtime.
+- **Per-app конфиг-файлы.** Отвергнуто — дублируют поля, поощряют дрейф и делают cross-app инварианты (уникальность портов, форма env-префикса) невалидируемыми.
+- **Хардкод списка сервисов в инструментах.** Отвергнуто — инвертировало бы источник истины и заставляло бы менять код для каждого нового рантайма.
 
-## References
+## Ссылки
 
-- `future_service_template` and `defaults.bots` in [`services.yml`](../../services.yml)
+- `future_service_template` и `defaults.bots` в [`services.yml`](../../services.yml)
 - [ADR-0003](0003-four-runtime-instances.md)
 - [ADR-0006](0006-deploy-from-immutable-image-refs.md)

@@ -1,20 +1,20 @@
-﻿# Deployment
+# Деплой
 
-Deployment is platform-driven after product repositories publish container images.
+Деплой управляется платформой после того, как продуктовые репозитории опубликовали контейнерные образы.
 
-## Flow
+## Поток
 
-1. Product repository runs lint, tests, and build.
-2. Product repository publishes image to GHCR with commit SHA and release tags.
-3. Product repository may trigger this repository through `repository_dispatch`.
-4. Platform workflow validates `services.yml`.
-5. Platform workflow deploys the selected image ref to the selected VPS stack.
-6. Platform workflow runs healthcheck and records rollback metadata.
+1. Продуктовый репозиторий гоняет линт, тесты и сборку.
+2. Продуктовый репозиторий публикует образ в GHCR с тегами по коммит-SHA и релиз-тегам.
+3. Продуктовый репозиторий может триггернуть этот репозиторий через `repository_dispatch`.
+4. Платформенный workflow валидирует `services.yml`.
+5. Платформенный workflow деплоит выбранный image ref в выбранный стек на VPS.
+6. Платформенный workflow прогоняет healthcheck и сохраняет метаданные для rollback.
 
-## Source References
+## Источники (refs)
 
-`services.yml` may contain temporary `bootstrap_ref` values while product `main` and `develop` branches are not ready. These refs identify the current source branch for building images, but deployment should still use immutable image refs produced by product CI.
+`services.yml` может содержать временные значения `bootstrap_ref`, пока ветки `main` и `develop` продукта не готовы. Эти refs идентифицируют текущую source-ветку для сборки образов, но деплой всё равно должен использовать неизменяемые image refs, произведённые продуктовым CI.
 
-When a product repository is ready, merge the bootstrap branch into `develop`, create the production `main` or release tag as appropriate, and mark the bootstrap ref as historical or remove it from the active policy.
+Когда продуктовый репозиторий готов, влейте bootstrap-ветку в `develop`, создайте продакшен-`main` или релиз-тег по необходимости, и пометьте bootstrap ref как исторический или удалите его из активной политики.
 
-Real deployment is intentionally not enabled in the initial skeleton.
+В начальном скелете реальный деплой намеренно не включён.

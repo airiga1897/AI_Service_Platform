@@ -1,39 +1,39 @@
-# 0006. Deploy from immutable Docker image refs
+# 0006. Деплой из неизменяемых Docker image refs
 
-- **Status:** Accepted
-- **Date:** 2026-05-15
+- **Статус:** Accepted
+- **Дата:** 2026-05-15
 
-## Context
+## Контекст
 
-Branch names ("deploy `main`", "deploy `develop`") are convenient but ambiguous: the same name resolves to different code over time, and rollbacks become impossible without external bookkeeping. Product repositories already build container images; the only sensible deploy unit across two product repos and three VPS nodes is the image ref.
+Имена веток («задеплой `main`», «задеплой `develop`») удобны, но неоднозначны: одно и то же имя со временем разрешается в разный код, и rollback становится невозможен без внешнего учёта. Продуктовые репозитории уже собирают контейнерные образы; единственный осмысленный юнит деплоя между двумя продуктовыми репозиториями и тремя VPS-узлами — это image ref.
 
-This is already encoded in `platform.source_policy.preferred_deploy_artifact: immutable_docker_image_ref` in [`services.yml`](../../services.yml).
+Это уже зашито как `platform.source_policy.preferred_deploy_artifact: immutable_docker_image_ref` в [`services.yml`](../../services.yml).
 
-## Decision
+## Решение
 
-Deployment artifacts are **immutable Docker image refs** (digest or commit-SHA tag). Branch names exist only as build/source policy.
+Артефакты деплоя — **неизменяемые Docker image refs** (digest или коммит-SHA-тег). Имена веток существуют только как политика сборки/источников.
 
-- `platform.source_policy.preferred_deploy_artifact` is `immutable_docker_image_ref`.
-- `platform.source_policy.deploy_from_archives` is `false`.
-- `platform.source_policy.branch_names_are_build_policy_only` is `true`.
-- Per-project `source.deploy_refs.preferred` is `image_ref`.
-- `bootstrap_ref` values in `projects.*.source.bootstrap_ref` are **temporary** until product `develop` / `main` / release tags exist; they are always listed in `allowed_source_refs` and removed once promoted (see [`docs/DEPLOYMENT.md`](../DEPLOYMENT.md)).
-- Rollback uses a previously deployed image ref; it does not re-checkout a branch.
+- `platform.source_policy.preferred_deploy_artifact` равно `immutable_docker_image_ref`.
+- `platform.source_policy.deploy_from_archives` равно `false`.
+- `platform.source_policy.branch_names_are_build_policy_only` равно `true`.
+- Per-project `source.deploy_refs.preferred` равно `image_ref`.
+- Значения `bootstrap_ref` в `projects.*.source.bootstrap_ref` — **временные** до появления продуктовых `develop` / `main` / релиз-тегов; они всегда перечислены в `allowed_source_refs` и удаляются после promotion (см. [`docs/DEPLOYMENT.md`](../DEPLOYMENT.md)).
+- Rollback использует ранее задеплоенный image ref; он не делает re-checkout ветки.
 
-## Consequences
+## Последствия
 
-- Positive: every deploy is reproducible and rollback is mechanical.
-- Positive: product CI owns building and tagging; platform CI never compiles product code.
-- Trade-off: requires a working image registry and stable image-tagging discipline in product repos.
-- Follow-up: `bootstrap_ref` entries are tech debt and must be removed as product branches stabilise.
+- Плюс: каждый деплой воспроизводим, rollback механический.
+- Плюс: продуктовый CI владеет сборкой и тегированием; платформенный CI никогда не компилирует продуктовый код.
+- Компромисс: требует работающего image registry и стабильной дисциплины тегирования образов в продуктовых репо.
+- Дальнейшее: записи `bootstrap_ref` — техдолг и должны удаляться по мере стабилизации продуктовых веток.
 
-## Alternatives considered
+## Рассмотренные альтернативы
 
-- **Deploy from git refs.** Rejected — non-reproducible (mutable branches), couples deploy to source checkout.
-- **Deploy from archives.** Explicitly rejected by `source_policy.deploy_from_archives: false` — same reproducibility problem plus opaque provenance.
+- **Деплой из git-refs.** Отвергнуто — не воспроизводимо (изменяемые ветки), связывает деплой с source checkout.
+- **Деплой из архивов.** Явно отвергнуто через `source_policy.deploy_from_archives: false` — та же проблема воспроизводимости плюс непрозрачное происхождение.
 
-## References
+## Ссылки
 
-- `platform.source_policy`, `projects.*.source.deploy_refs` in [`services.yml`](../../services.yml)
+- `platform.source_policy`, `projects.*.source.deploy_refs` в [`services.yml`](../../services.yml)
 - [`docs/DEPLOYMENT.md`](../DEPLOYMENT.md)
 - [`docs/CI_CD.md`](../CI_CD.md)

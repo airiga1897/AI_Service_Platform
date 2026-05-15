@@ -1,107 +1,108 @@
 # SoftEther VPN
 
-SoftEther VPN is a first-class platform edge component. It must not be removed
-or treated as incidental legacy state during migration from MyPet01/AromaFlowAI
-runtime names.
+SoftEther VPN — первоклассный edge-компонент платформы. Его нельзя удалять или
+трактовать как случайное legacy-состояние при миграции с runtime-имён
+MyPet01/AromaFlowAI.
 
-SoftEther belongs to the infrastructure layer. Product runtimes such as
-`aromaflow-work`, `aromaflow-demo`, `ai-retail-mvp`, and `ai-retail-dev` may be
-routed through the shared edge, but they do not own the VPN service.
+SoftEther относится к слою инфраструктуры. Продуктовые рантаймы вроде
+`aromaflow-work`, `aromaflow-demo`, `ai-retail-mvp` и `ai-retail-dev` могут
+маршрутизироваться через общий edge, но не владеют VPN-сервисом.
 
-Target state: SoftEther runs on every VPS node:
+Целевое состояние: SoftEther работает на каждом VPS-узле:
 
-- VPS1 in Latvia;
-- VPS2 in Kazakhstan;
-- VPS3 in Russia.
+- VPS1 в Латвии;
+- VPS2 в Казахстане;
+- VPS3 в России.
 
-The existing preserved setup is TCP-only. UDP VPN protocols are future optional
-features, not current required listeners.
+Существующая сохранённая установка — только TCP. UDP-протоколы VPN — будущая
+опция, а не обязательные текущие listener-ы.
 
-Additional countries can be added later as VPN-only edge nodes. Such nodes run
-HAProxy TCP entrypoints, SoftEther, monitoring, and backup for VPN config, but
-do not host product runtimes, product databases, or product deploy workflows.
+В дальнейшем можно добавлять новые страны как VPN-only edge-узлы. На таких
+узлах работают HAProxy TCP entrypoints, SoftEther, мониторинг и бэкап
+VPN-конфигурации, но они не хостят продуктовые рантаймы, продуктовые БД или
+продуктовые workflow-ы деплоя.
 
-Standard website CDN is not the default transport for SoftEther because VPN is
-not normal HTTP site traffic. Future acceleration may still be tested through
-GeoDNS, Anycast, or an L4 TCP proxy provider for `443/tcp`, `992/tcp`, and
-`1194/tcp`. Management on `5555/tcp` must remain direct and allowlisted.
+Обычный сайтовый CDN — не транспорт SoftEther по умолчанию, потому что VPN —
+не обычный HTTP-трафик сайтов. Будущее ускорение можно отдельно тестировать
+через GeoDNS, Anycast или L4 TCP proxy для `443/tcp`, `992/tcp` и
+`1194/tcp`. Управление на `5555/tcp` должно оставаться напрямую и в allowlist.
 
-## Platform Role
+## Роль платформы
 
-- HAProxy owns public TCP entrypoints and sends VPN traffic to the SoftEther
-  container inside the Docker network.
-- On `443/tcp`, HAProxy can separate site and VPN traffic by domain name because
-  it can see TLS SNI.
-- On UDP, domain-name routing is not available in this design; UDP packets are
-  routed by IP and port if UDP protocols are enabled later.
-- Nginx/Certbot own certificate renewal; SoftEther consumes copied certificate
-  files from the shared TLS directory.
-- VPN configuration and logs are persistent platform data and are included in
-  backup, restore, monitoring, and firewall rules.
+- HAProxy владеет публичными TCP entrypoints и направляет VPN-трафик в
+  контейнер SoftEther внутри Docker-сети.
+- На `443/tcp` HAProxy умеет разделять трафик сайтов и VPN по доменному
+  имени, потому что видит TLS SNI.
+- По UDP маршрутизация по доменному имени в этой схеме не доступна; UDP-пакеты
+  маршрутизируются по IP и порту, если UDP-протоколы будут включены позже.
+- Nginx/Certbot владеют обновлением сертификатов; SoftEther потребляет
+  скопированные файлы сертификатов из общего TLS-каталога.
+- Конфигурация и логи VPN — это persistent-данные платформы, и они входят в
+  бэкап, восстановление, мониторинг и правила firewall.
 
-## Current TCP Ports
+## Текущие TCP-порты
 
-| Port | Protocol | Purpose |
+| Порт | Протокол | Назначение |
 |---|---|---|
-| `443` | TCP | SSTP/SSL VPN through HAProxy SNI routing |
-| `992` | TCP | SoftEther alternative SSL endpoint |
-| `1194` | TCP | OpenVPN-compatible TCP endpoint |
-| `5555` | TCP | SoftEther Server Manager, IP-filtered |
+| `443` | TCP | SSTP/SSL VPN через HAProxy SNI routing |
+| `992` | TCP | Альтернативный SSL endpoint SoftEther |
+| `1194` | TCP | OpenVPN-совместимый TCP endpoint |
+| `5555` | TCP | SoftEther Server Manager, IP-фильтрация |
 
-## Future Optional UDP Ports
+## Будущие опциональные UDP-порты
 
-These ports are not active in the current preserved setup. Add them only after
-the matching SoftEther protocols are enabled and tested:
+Эти порты не активны в текущей сохранённой установке. Добавлять их только после
+того, как соответствующие протоколы SoftEther включены и проверены:
 
-| Port | Protocol | Purpose |
+| Порт | Протокол | Назначение |
 |---|---|---|
 | `500` | UDP | IPsec/IKE |
 | `4500` | UDP | IPsec NAT-T |
 | `1701` | UDP | L2TP |
-| `1194` | UDP | OpenVPN-compatible UDP endpoint |
+| `1194` | UDP | OpenVPN-совместимый UDP endpoint |
 
-## Required Volumes
+## Обязательные тома
 
-- `softether_data`: SoftEther server configuration, including
+- `softether_data`: конфигурация сервера SoftEther, включая
   `vpn_server.config`.
-- `softether_logs`: SoftEther server logs.
-- `certbot_conf`: certificate source of truth owned by Certbot.
-- Nginx/Certbot TLS copy directory mounted read-only into SoftEther as
+- `softether_logs`: логи сервера SoftEther.
+- `certbot_conf`: источник истины по сертификатам, владелец — Certbot.
+- Каталог TLS-копий Nginx/Certbot, монтируемый read-only в SoftEther как
   `/etc/ssl/vpn`.
 
-## Backup And Restore
+## Бэкап и восстановление
 
-Backup scope must include:
+В скоуп бэкапа должны входить:
 
 - `softether_data`;
-- `softether_logs` when useful for incident review;
-- copied VPN certificate files;
-- HAProxy VPN routing config and management allowlist.
+- `softether_logs`, когда полезны для разбора инцидентов;
+- скопированные файлы VPN-сертификатов;
+- VPN-конфиг маршрутизации HAProxy и management allowlist.
 
-Restore is incomplete until:
+Восстановление считается неполным, пока:
 
-- SoftEther container starts with the restored `softether_data` volume;
-- VPN certificate files are present and valid;
-- HAProxy routes VPN SNI to SoftEther;
-- ports `443/tcp`, `992/tcp`, `1194/tcp`, and `5555/tcp` are intentionally
-  routed through HAProxy;
-- future UDP ports are intentionally open or blocked according to the enabled
-  protocol set;
-- management port `5555` is reachable only from approved IPs.
+- контейнер SoftEther не стартанул с восстановленным томом `softether_data`;
+- файлы VPN-сертификатов не присутствуют и не валидны;
+- HAProxy не маршрутизирует VPN SNI на SoftEther;
+- порты `443/tcp`, `992/tcp`, `1194/tcp` и `5555/tcp` не маршрутизированы
+  через HAProxy осознанно;
+- будущие UDP-порты не открыты или не закрыты осознанно согласно набору
+  включённых протоколов;
+- management-порт `5555` не доступен только с разрешённых IP.
 
-## Product HA Boundary
+## Граница продуктовой HA
 
-Do not build AromaFlowAI or AI_E_Retail high availability on top of SoftEther.
-Product availability belongs to DNS, HAProxy/Nginx, private node overlay,
-backup/restore, replication, and deploy rollback. SoftEther is for VPN access,
-management access, and controlled egress routing.
+Не строить high availability AromaFlowAI или AI_E_Retail поверх SoftEther.
+Доступность продуктов обеспечивается DNS, HAProxy/Nginx, частной overlay-сетью
+узлов, бэкапом/восстановлением, репликацией и rollback деплоя. SoftEther — для
+VPN-доступа, management-доступа и контролируемой маршрутизации egress.
 
-## Monitoring And Security
+## Мониторинг и безопасность
 
-- Monitor SoftEther TCP endpoints and container health.
-- Prefer TCP health checks over ICMP-only checks.
-- Keep Server Manager access IP-filtered.
-- Include SoftEther logs in fail2ban or alerting only after confirming the log
-  format and real client IP behavior.
-- Do not commit `vpn_server.config` if it contains passwords, users, keys, or
-  other secrets.
+- Мониторить TCP endpoints SoftEther и здоровье контейнера.
+- Предпочитать TCP healthcheck-и проверкам только по ICMP.
+- Доступ к Server Manager держать под IP-фильтром.
+- Включать логи SoftEther в fail2ban или алертинг только после подтверждения
+  формата логов и реального поведения client IP.
+- Не коммитить `vpn_server.config`, если он содержит пароли, пользователей,
+  ключи или другие секреты.

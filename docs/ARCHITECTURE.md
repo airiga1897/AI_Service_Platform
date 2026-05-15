@@ -1,56 +1,45 @@
-﻿# Architecture
+# Архитектура
 
-AI Service Platform is an infra/orchestration repository. It coordinates multiple product repositories without merging their source code.
+AI Service Platform — это репозиторий инфраструктуры/оркестрации. Он координирует несколько продуктовых репозиториев, не сливая их исходный код.
 
-## Repository Boundaries
+## Границы репозиториев
 
-- `AromaFlowAI` owns application code for `aromaflow-work` and `aromaflow-demo` images.
-- `AI_E_Retail` owns application code for `ai-retail-mvp` and `ai-retail-dev` images.
-- `AI_Service_Platform` owns platform registry, VPS layout, edge routing, stack templates, deploy playbooks, and runbooks.
+- `AromaFlowAI` владеет прикладным кодом для образов `aromaflow-work` и `aromaflow-demo`.
+- `AI_E_Retail` владеет прикладным кодом для образов `ai-retail-mvp` и `ai-retail-dev`.
+- `AI_Service_Platform` владеет реестром платформы, разметкой VPS, edge-маршрутизацией, шаблонами стеков, плейбуками деплоя и runbook-ами.
 
-Migration source rules are documented in [MIGRATION_SOURCES.md](MIGRATION_SOURCES.md). SoftEther VPN is a required platform edge/infrastructure capability, not a product-runtime-owned service, and is documented in [SOFTETHER_VPN.md](SOFTETHER_VPN.md). Target VPN placement is one SoftEther instance per VPS; product HA stays separate from the VPN layer.
+Правила миграции источников описаны в [MIGRATION_SOURCES.md](MIGRATION_SOURCES.md). SoftEther VPN — обязательный edge/инфра-компонент платформы, а не сервис, принадлежащий продуктовому рантайму, и описан в [SOFTETHER_VPN.md](SOFTETHER_VPN.md). Целевое размещение VPN — один SoftEther на каждый VPS; высокая доступность продуктов остаётся отдельной от слоя VPN.
 
-CDN, GeoIP, GeoDNS, shared GeoPolicy, and VPN acceleration research are
-documented in [CDN_GEO_POLICY.md](CDN_GEO_POLICY.md).
+CDN, GeoIP, GeoDNS, общий GeoPolicy и исследования по ускорению VPN описаны в [CDN_GEO_POLICY.md](CDN_GEO_POLICY.md).
 
-Public websites may later use a CDN in front of the HAProxy/Nginx web edge for
-static caching, TLS edge, WAF/bot filtering, and origin shielding. CDN is a site
-delivery layer, not a VPN layer: SoftEther, VPN management, database traffic,
-and private node overlay traffic stay outside CDN.
+Публичные сайты в будущем могут использовать CDN перед HAProxy/Nginx web edge для кеширования статики, TLS на edge, WAF/фильтрации ботов и origin shielding. CDN — это слой доставки сайтов, а не VPN: SoftEther, управление VPN, трафик баз данных и трафик частной overlay-сети узлов остаются вне CDN.
 
-This does not forbid VPN acceleration. It only means a standard website CDN is
-not the default VPN transport. SoftEther can be evaluated separately with
-GeoDNS, Anycast, or an L4 TCP proxy provider. Management traffic on `5555/tcp`
-must stay direct and allowlisted.
+Это не запрещает ускорение VPN. Это значит лишь, что обычный сайтовый CDN — не транспорт VPN по умолчанию. SoftEther можно отдельно оценивать с GeoDNS, Anycast или провайдером L4 TCP-прокси. Управляющий трафик на `5555/tcp` должен идти напрямую и быть в allowlist.
 
-A shared GeoPolicy service can be used as the single source for country/IP
-decisions. It may generate HAProxy country lists, VPN GeoDNS target choices,
-egress country rules, and CDN policy inputs. Enforcement remains separate per
-traffic type so a web protection rule cannot accidentally break VPN access or
-product failover.
+Общий сервис GeoPolicy может выступать единым источником решений по странам/IP. Из него могут генерироваться списки стран HAProxy, цели VPN GeoDNS, правила страны выхода и входы политик CDN. Применение остаётся раздельным по типу трафика, чтобы правило защиты сайтов не сломало случайно VPN-доступ или продуктовое переключение.
 
-## Roadmap / Runtime instances
+## Roadmap / Рантайм-инстансы
 
-The platform launches with **four runtime instances**, all defined in `runtime_instances` in [`../services.yml`](../services.yml). They are deliberately independent so ports, databases, env prefixes, and volumes never collide:
+Платформа стартует с **четырёх рантайм-инстансов**, все определены в `runtime_instances` в [`../services.yml`](../services.yml). Они намеренно независимы — порты, базы, env-префиксы и тома никогда не пересекаются:
 
-| Instance         | Project       | Role                       | Notes |
-|------------------|---------------|----------------------------|-------|
-| `aromaflow-work` | AromaFlowAI   | Working public site        | Production on VPS1, preprod on VPS2. |
-| `aromaflow-demo` | AromaFlowAI   | Demo-data site             | Seeded via `setup_demo_content`. Preprod only. |
-| `ai-retail-mvp`  | AI_E_Retail   | Frozen MVP                 | Frozen at a release tag (`ai-retail-mvp-v*`). |
-| `ai-retail-dev`  | AI_E_Retail   | Future development copy    | Mirrors MVP at launch, then diverges on `develop`. |
+| Инстанс          | Проект        | Роль                       | Примечания |
+|------------------|---------------|----------------------------|------------|
+| `aromaflow-work` | AromaFlowAI   | Рабочий публичный сайт     | Прод на VPS1, препрод на VPS2. |
+| `aromaflow-demo` | AromaFlowAI   | Сайт с демо-данными        | Засевается через `setup_demo_content`. Только препрод. |
+| `ai-retail-mvp`  | AI_E_Retail   | Замороженный MVP           | Заморожен на релиз-теге (`ai-retail-mvp-v*`). |
+| `ai-retail-dev`  | AI_E_Retail   | Будущая копия для разработки | На старте — зеркало MVP, далее расходится по `develop`. |
 
-See [ADR-0003](adr/0003-four-runtime-instances.md) for the rationale.
+Обоснование — в [ADR-0003](adr/0003-four-runtime-instances.md).
 
-The catalog is **extensible**. New public sites and Telegram bots can be added to `runtime_instances.*` by following the `future_service_template` contract in [`../services.yml`](../services.yml) (kinds: `site`, `telegram-bot`). A `bots/` directory is already reserved alongside `services/` under `defaults.platform_structure`. See [ADR-0004](adr/0004-extensible-service-catalog.md).
+Каталог **расширяемый**. Новые публичные сайты и Telegram-боты добавляются в `runtime_instances.*` по контракту `future_service_template` из [`../services.yml`](../services.yml) (kinds: `site`, `telegram-bot`). Каталог `bots/` уже зарезервирован рядом с `services/` в `defaults.platform_structure`. См. [ADR-0004](adr/0004-extensible-service-catalog.md).
 
-`services.yml` remains the single source of truth: validator (`tools/validate-services-yml/`), renderer (`tools/render-compose/`), and healthcheck (`tools/healthcheck/`) all derive their behaviour from it.
+`services.yml` остаётся единственным источником истины: валидатор (`tools/validate-services-yml/`), рендерер (`tools/render-compose/`) и healthcheck (`tools/healthcheck/`) выводят своё поведение из него.
 
-For the full set of platform decisions, see [`adr/README.md`](adr/README.md).
+Полный набор платформенных решений — в [`adr/README.md`](adr/README.md).
 
-## Non-Goals
+## Чего здесь нет
 
-- No product source code in this repository.
-- No git submodules in the first stage.
-- No real secrets in this repository.
-- No deploy from archives.
+- Никакого продуктового исходного кода в этом репозитории.
+- Никаких git submodules на первом этапе.
+- Никаких реальных секретов в этом репозитории.
+- Никакого деплоя из архивов.

@@ -1,34 +1,34 @@
-﻿# CI/CD
+# CI/CD (непрерывная интеграция и доставка)
 
-## Model
+## Модель
 
-Products build, platform deploys.
+Продукты собирают, платформа деплоит.
 
-## Product repositories
+## Продуктовые репозитории
 
-Product repositories are responsible for:
+Продуктовые репозитории отвечают за:
 
-- lint and tests;
-- Docker image build;
-- publishing images to GHCR;
-- optional `repository_dispatch` to platform repo.
+- линт и тесты;
+- сборку Docker-образов;
+- публикацию образов в GHCR;
+- опциональный `repository_dispatch` в платформенный репозиторий.
 
-Branch names describe source/build policy only. Temporary feature branches are recorded in `services.yml` as `bootstrap_ref` until product `develop`, `main`, or release tags are ready.
+Имена веток описывают только политику источников/сборки. Временные feature-ветки фиксируются в `services.yml` как `bootstrap_ref` до тех пор, пока не появятся продуктовые `develop`, `main` или релиз-теги.
 
-## Platform repository
+## Платформенный репозиторий
 
-This repository is responsible for:
+Этот репозиторий отвечает за:
 
-- validating service registry and stack metadata;
-- rendering deploy configuration;
-- deploying selected immutable image refs to selected VPS stacks;
-- healthchecks and rollback metadata.
+- валидацию реестра сервисов и метаданных стеков;
+- рендер конфигурации деплоя;
+- деплой выбранных неизменяемых image refs в выбранные стеки на VPS;
+- healthcheck-и и метаданные для rollback.
 
-Deploy inputs should prefer Docker image refs tagged with commit SHA or release tag. A branch name must not be the only production deployment identifier.
+В качестве входов деплоя предпочтительны Docker image refs, помеченные коммит-SHA или релиз-тегом. Имя ветки не должно быть единственным идентификатором продакшен-деплоя.
 
-## GitHub Environments
+## GitHub Environments (окружения)
 
-Recommended environments:
+Рекомендуемые окружения:
 
 - `aromaflow-work`
 - `aromaflow-demo`
@@ -93,5 +93,5 @@ push в `main` (а также вручную через `workflow_dispatch`):
    `infra/stacks/*`, `infra/edge/softether`).
 4. Запускает `make validate`, `make render-check`, `make test`.
 
-Реальные сетевые healthcheck'и в CI не выполняются — модуль
+Реальные сетевые healthcheck-и в CI не выполняются — модуль
 `tools/healthcheck/` проверяется только моками в smoke-тестах.

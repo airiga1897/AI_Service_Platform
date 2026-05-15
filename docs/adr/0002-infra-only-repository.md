@@ -1,45 +1,45 @@
-# 0002. This repository is infra/orchestration only
+# 0002. Этот репозиторий — только инфра/оркестрация
 
-- **Status:** Accepted
-- **Date:** 2026-05-15
+- **Статус:** Accepted
+- **Дата:** 2026-05-15
 
-## Context
+## Контекст
 
-Two product codebases exist in separate GitHub repositories:
+Существует две продуктовые кодовые базы в отдельных GitHub-репозиториях:
 
 - [`airiga1897/AromaFlowAI`](https://github.com/airiga1897/AromaFlowAI)
 - [`airiga1897/AI_E_Retail`](https://github.com/airiga1897/AI_E_Retail)
 
-There is recurring pressure to "just put the source here too" so that local development and deployment touch one repository. That would couple platform orchestration to product release cadence, force the platform repo to grow with product code, and conflict with the migration policy already documented in [`docs/MIGRATION_SOURCES.md`](../MIGRATION_SOURCES.md).
+Регулярно возникает соблазн «положить исходники сюда же», чтобы локальная разработка и деплой касались одного репозитория. Это связало бы оркестрацию платформы с продуктовым релиз-циклом, заставило бы платформенный репозиторий расти вместе с продуктовым кодом и противоречило бы политике миграции, уже описанной в [`docs/MIGRATION_SOURCES.md`](../MIGRATION_SOURCES.md).
 
-## Decision
+## Решение
 
-This repository owns **only** platform-level orchestration:
+Этот репозиторий владеет **только** оркестрацией уровня платформы:
 
-- `services.yml` (the platform registry, source of truth);
-- `infra/` (Ansible, edge configs, per-stack Compose);
-- `tools/` (validators and generators);
+- `services.yml` (реестр платформы, источник истины);
+- `infra/` (Ansible, edge-конфиги, per-stack Compose);
+- `tools/` (валидаторы и генераторы);
 - `.github/workflows/` (validate / deploy / rollback);
-- `docs/` (architecture, ADRs, runbooks).
+- `docs/` (архитектура, ADR, runbooks).
 
-Product source code is **not** vendored, **not** mirrored, and **not** referenced as a git submodule in the first stage. Products build and publish container images from their own repositories; this repository deploys those image refs.
+Продуктовый исходный код **не** вендорится, **не** зеркалируется и **не** подключается как git submodule на первом этапе. Продукты собирают и публикуют контейнерные образы из своих репозиториев; этот репозиторий деплоит эти image refs.
 
-This is also encoded as `platform.repository_note` and `platform.source_policy` in [`services.yml`](../../services.yml).
+Это также зашито как `platform.repository_note` и `platform.source_policy` в [`services.yml`](../../services.yml).
 
-## Consequences
+## Последствия
 
-- Positive: clear ownership boundary; product cadence does not destabilise platform orchestration.
-- Positive: platform CI is fast — no product dependencies to install.
-- Negative: contributors must clone two or three repositories to reproduce a full deploy locally.
-- Follow-up: deploy artifacts must be addressable across repos (covered by [ADR-0006](0006-deploy-from-immutable-image-refs.md)).
+- Плюс: чёткая граница владения; продуктовый цикл не дестабилизирует оркестрацию платформы.
+- Плюс: платформенный CI быстрый — нет продуктовых зависимостей для установки.
+- Минус: контрибьюторам нужно склонировать два-три репозитория, чтобы воспроизвести полный деплой локально.
+- Дальнейшее: артефакты деплоя должны быть адресуемы между репозиториями (закрыто в [ADR-0006](0006-deploy-from-immutable-image-refs.md)).
 
-## Alternatives considered
+## Рассмотренные альтернативы
 
-- **Monorepo containing all products and platform.** Rejected — couples release cadence and inflates CI; product teams would lose autonomy.
-- **Git submodules.** Rejected for the first stage — operationally noisy (detached HEADs, accidental version drift) and not needed because products publish images.
+- **Монорепо со всеми продуктами и платформой.** Отвергнуто — связывает релиз-циклы и раздувает CI; продуктовые команды теряют автономию.
+- **Git submodules.** Отвергнуто на первом этапе — операционно шумно (detached HEADs, случайный version drift) и не нужно, потому что продукты публикуют образы.
 
-## References
+## Ссылки
 
 - [`docs/MIGRATION_SOURCES.md`](../MIGRATION_SOURCES.md)
 - [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md)
-- `platform.source_policy` in [`services.yml`](../../services.yml)
+- `platform.source_policy` в [`services.yml`](../../services.yml)

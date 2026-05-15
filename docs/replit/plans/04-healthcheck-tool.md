@@ -1,9 +1,9 @@
 # Реализация tools/healthcheck
 
-## What & Why
+## Зачем и почему
 `tools/healthcheck/` сейчас пустой. Нужен простой CLI, который читает `services.yml` и опрашивает healthcheck-эндпойнты выбранных рантайм-инстансов в выбранном окружении (`local`/`preprod`/`prod`). Это даёт быстрый способ проверить «жив/не жив» все 4 текущих сайта и любые будущие сайты/боты, а также служит основой для будущих rollback-решений в CI.
 
-## Done looks like
+## Критерии готовности
 - Есть CLI: `python3 tools/healthcheck/healthcheck.py --env <local|preprod|prod> [--instance <name> ...] [--timeout <sec>] [--json]`.
   - Без `--instance` опрашивает все инстансы, у которых в выбранном окружении есть домены.
   - `--json` печатает структурированный отчёт (для CI/agents); по умолчанию — человекочитаемая таблица.
@@ -18,19 +18,19 @@
   - правильный exit-code при микс-результатах (часть ок, часть фейл, часть skipped);
   - корректный JSON-вывод.
 
-## Out of scope
+## Вне скоупа
 - Принятие решений о rollback — только отчёт. Логика rollback'а живёт в `.github/workflows/rollback.yml`/будущем оркестраторе.
 - Опрос внутренних метрик/Redis/Postgres — только HTTP healthcheck-пути.
 - Хождение в SoftEther/management-порты.
 
-## Steps
+## Шаги
 1. **Загрузка реестра** — использовать общий загрузчик `tools/_lib/registry.py` (если он уже создан задачей render-compose) или временный локальный, с последующим объединением.
 2. **Сборка целей** — для каждого выбранного инстанса и окружения собрать список `(instance, env, domain, url, expected_status, timeout)` с понятной обработкой placeholder-доменов.
 3. **Опрос** — последовательный (или с небольшим thread-pool'ом) HTTP-GET через `urllib.request` с таймаутом; собрать `status_code`, `latency_ms`, `error`.
 4. **Отчёт** — человекочитаемая таблица + `--json` режим; финальный exit-code по агрегату.
 5. **Тесты + README** — smoke-тесты с моками + `tools/healthcheck/README.md`.
 
-## Relevant files
+## Затрагиваемые файлы
 - `tools/healthcheck/README.md`
 - `services.yml`
 - `tools/validate-services-yml/validate_services_yml.py`

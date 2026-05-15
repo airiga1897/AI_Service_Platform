@@ -1,34 +1,34 @@
-# 0001. Record architecture decisions
+# 0001. Ведение записей об архитектурных решениях
 
-- **Status:** Accepted
-- **Date:** 2026-05-15
+- **Статус:** Accepted
+- **Дата:** 2026-05-15
 
-## Context
+## Контекст
 
-The AI Service Platform repository orchestrates multiple product runtimes, edge components, VPS roles, and CI/CD policies. Several non-trivial architectural decisions are already encoded in `services.yml` and scattered across `docs/` (e.g. infra-only repo, SoftEther on every VPS, immutable image refs, shared GeoPolicy). Without a single place to record *why* these decisions were taken, future contributors must re-derive them from configuration and risk overturning them by accident.
+Репозиторий AI Service Platform оркестрирует несколько продуктовых рантаймов, edge-компонентов, ролей VPS и политик CI/CD. Несколько нетривиальных архитектурных решений уже зашиты в `services.yml` и разбросаны по `docs/` (например, infra-only-репозиторий, SoftEther на каждом VPS, неизменяемые image refs, общий GeoPolicy). Без единого места, где зафиксировано *почему* эти решения были приняты, будущим контрибьюторам пришлось бы выводить их из конфигурации заново и был бы риск случайно их пересмотреть.
 
-## Decision
+## Решение
 
-Record significant architectural decisions as Architecture Decision Records (ADRs) in `docs/adr/`, using the [MADR](https://adr.github.io/madr/) format defined in [`template.md`](template.md).
+Записывать значимые архитектурные решения как ADR (Architecture Decision Records) в `docs/adr/`, используя формат [MADR](https://adr.github.io/madr/), определённый в [`template.md`](template.md).
 
-- One decision per file, sequentially numbered (`NNNN-short-title.md`).
-- Status values: `Proposed`, `Accepted`, `Superseded by ADR-NNNN`.
-- An ADR is never deleted; superseded ADRs stay for history.
-- The index in [`README.md`](README.md) is updated whenever an ADR is added or its status changes.
-- ADRs describe architecture and policy. They are **not** the Replit-session work plan (that lives in `docs/replit/plans/`) and **not** runbooks (those live in `docs/RUNBOOKS.md`).
+- Одно решение на файл, последовательная нумерация (`NNNN-short-title.md`).
+- Допустимые статусы: `Proposed`, `Accepted`, `Superseded by ADR-NNNN`.
+- ADR никогда не удаляется; superseded ADRs остаются для истории.
+- Индекс в [`README.md`](README.md) обновляется при каждом добавлении ADR или смене статуса.
+- ADR описывают архитектуру и политику. Это **не** план работ Replit-сессии (тот лежит в `docs/replit/plans/`) и **не** runbooks (те живут в `docs/RUNBOOKS.md`).
 
-## Consequences
+## Последствия
 
-- Positive: every significant decision has a discoverable, dated rationale.
-- Positive: changes to architecture become a deliberate act (write a new ADR or supersede an old one) rather than an accidental config edit.
-- Trade-off: small overhead per decision. We accept that overhead for decisions with cross-cutting consequences; trivial choices stay out of `docs/adr/`.
+- Плюс: у каждого значимого решения есть находимое и датированное обоснование.
+- Плюс: изменение архитектуры становится осознанным актом (написать новый ADR или superseded старый), а не случайной правкой конфига.
+- Компромисс: небольшой накладной расход на каждое решение. Мы принимаем его для решений с кросс-эффектами; тривиальные выборы остаются вне `docs/adr/`.
 
-## Alternatives considered
+## Рассмотренные альтернативы
 
-- **Long-form architecture document only.** Already partially exists as `docs/ARCHITECTURE.md`. Rejected as the sole record because it does not capture decision context, status, or supersession history.
-- **Issues / commit messages only.** Rejected because they are not discoverable as a coherent body of architecture knowledge.
+- **Только длинный архитектурный документ.** Уже частично существует как `docs/ARCHITECTURE.md`. Отвергнуто как единственный источник, потому что он не фиксирует контекст, статус и историю supersession решений.
+- **Только issues/коммит-сообщения.** Отвергнуто, потому что они не находимы как связное тело знаний об архитектуре.
 
-## References
+## Ссылки
 
 - [MADR](https://adr.github.io/madr/)
 - [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md)

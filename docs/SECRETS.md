@@ -1,15 +1,15 @@
-﻿# Secrets
+# Секреты
 
-No real secrets are committed to this repository.
+Реальные секреты в этом репозитории не коммитятся.
 
-Use GitHub Environments, Ansible Vault, or SOPS for secrets. Env examples may document variable names, but values must remain empty or placeholder-only.
+Для секретов используются GitHub Environments, Ansible Vault или SOPS. Примеры env-файлов могут документировать имена переменных, но значения должны оставаться пустыми или содержать только placeholder-ы.
 
-Secret categories:
+Категории секретов:
 
-- VPS SSH credentials;
-- registry tokens if needed;
-- database passwords;
-- application secret keys;
-- Sentry and provider API keys;
-- TLS/account credentials;
-- SoftEther VPN users, server config, management passwords, and private keys.
+- учётные данные SSH для VPS;
+- registry-токены при необходимости;
+- пароли баз данных;
+- секретные ключи приложений;
+- API-ключи Sentry и провайдеров;
+- TLS/учётные данные account;
+- пользователи SoftEther VPN, server config, management-пароли и приватные ключи.

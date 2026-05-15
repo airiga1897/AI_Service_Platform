@@ -1,28 +1,28 @@
-# NNNN. Short title in imperative mood
+# NNNN. Краткий заголовок в повелительном наклонении
 
-- **Status:** Proposed | Accepted | Superseded by ADR-NNNN
-- **Date:** YYYY-MM-DD
-- **Deciders:** (names or roles)
+- **Статус:** Proposed | Accepted | Superseded by ADR-NNNN
+- **Дата:** YYYY-MM-DD
+- **Принимающие решение:** (имена или роли)
 
-## Context
+## Контекст
 
-What is the situation, the constraint, the forces in play? Reference concrete artefacts in this repository (`services.yml` keys, doc files, infra paths) when relevant.
+Какова ситуация, ограничение, действующие силы? Ссылайтесь на конкретные артефакты в этом репозитории (ключи `services.yml`, doc-файлы, инфра-пути), когда это уместно.
 
-## Decision
+## Решение
 
-What did we decide? State it in one or two sentences, in the imperative mood. Add detail underneath.
+Что мы решили? Сформулируйте в одном-двух предложениях, в повелительном наклонении. Детали — ниже.
 
-## Consequences
+## Последствия
 
-- Positive: …
-- Negative / trade-offs: …
-- Follow-ups required: …
+- Плюс: …
+- Минус / компромиссы: …
+- Необходимые follow-up-ы: …
 
-## Alternatives considered
+## Рассмотренные альтернативы
 
-- Option A — why rejected.
-- Option B — why rejected.
+- Вариант A — почему отвергнут.
+- Вариант B — почему отвергнут.
 
-## References
+## Ссылки
 
-- Links to related ADRs, doc files, code locations, external articles.
+- Ссылки на связанные ADR, doc-файлы, места в коде, внешние статьи.

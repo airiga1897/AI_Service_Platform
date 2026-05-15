@@ -1,58 +1,62 @@
-# Migration Sources
+# Источники миграции
 
-This document records which historical infrastructure assets may be reused in
-AI Service Platform and which assets must stay out of this repository.
+Этот документ фиксирует, какие исторические инфраструктурные артефакты можно
+переиспользовать в AI Service Platform, а какие должны оставаться вне этого
+репозитория.
 
-## Source Priority
+## Приоритет источников
 
-1. `airiga1897/AromaFlowAI`, branch `codex/feature/new_infra02`
-   - Primary source for cleaned platform-level drafts.
-   - Use for Ansible roles, operations notes, deployment boundaries, and VPS
-     layout.
-2. `riga1897/SiteProject01`, branch `feature/siteproject01_newtask01`
-   - Historical reference for mature MyPet01 infrastructure work.
-   - Use as design input for HAProxy, Nginx, SoftEther, backup, CI/CD, and
-     healthcheck behavior.
-3. Local roadmap: `D:/Users/RGHome/OneDrive/Desktop/roadmap.md`
-   - Architecture decision record for the three-VPS platform direction.
-   - Use for priority and rollout order, not as executable source.
+1. `airiga1897/AromaFlowAI`, ветка `codex/feature/new_infra02`
+   - Основной источник вычищенных черновиков уровня платформы.
+   - Используется для Ansible-ролей, операционных заметок, границ деплоя и
+     разметки VPS.
+2. `riga1897/SiteProject01`, ветка `feature/siteproject01_newtask01`
+   - Историческая ссылка на зрелые инфра-наработки MyPet01.
+   - Используется как input при проектировании HAProxy, Nginx, SoftEther,
+     бэкапа, CI/CD и поведения healthcheck.
+3. Локальный roadmap: `D:/Users/RGHome/OneDrive/Desktop/roadmap.md`
+   - Запись архитектурного решения о направлении на трёхузловую VPS-платформу.
+   - Используется для приоритетов и порядка выкатки, не как исполняемый
+     источник.
 
-## Allowed To Migrate
+## Что разрешено мигрировать
 
-- Platform Ansible roles: Docker, security, monitoring, backup client, backup
-  server, management, and Semaphore.
-- Edge routing patterns: HAProxy SNI routing, ACME bypass, rate limiting,
-  blacklist handling, GeoIP lists, and stats endpoint.
-- Site delivery ideas: future CDN in front of public websites for cache,
-  filtering, and origin shielding. Do not use CDN as the default VPN transport.
-- Shared GeoPolicy idea: one platform source for country/IP data that feeds
-  HAProxy protection lists, VPN GeoDNS, egress policy, and CDN policy inputs.
-  The active plan is documented in `CDN_GEO_POLICY.md`.
-- Per-site Nginx proxy/static/media patterns.
-- SoftEther VPN configuration contract, ports, volumes, TLS sharing, backup,
-  restore, monitoring, and firewall requirements.
-- Backup strategy: PostgreSQL dump, media/static volumes, `certbot_conf`,
-  `softether_data`, local standby copy, S3-compatible offsite copy, and
-  retention policy.
-- CI/CD ideas: immutable GHCR image refs, Trivy scan, healthcheck, rollback
-  metadata, manual deploy dispatch, and Telegram notifications.
+- Платформенные Ansible-роли: Docker, security, monitoring, backup client,
+  backup server, management и Semaphore.
+- Шаблоны edge-маршрутизации: HAProxy SNI routing, ACME bypass, rate limiting,
+  работа с blacklist, GeoIP-списки и stats endpoint.
+- Идеи доставки сайтов: будущий CDN перед публичными сайтами для кеша,
+  фильтрации и origin shielding. Не использовать CDN как транспорт VPN по
+  умолчанию.
+- Идею общего GeoPolicy: один платформенный источник данных по странам/IP,
+  питающий списки защиты HAProxy, VPN GeoDNS, egress policy и входы политики
+  CDN. Активный план описан в `CDN_GEO_POLICY.md`.
+- Per-site Nginx-шаблоны для proxy/static/media.
+- Контракт конфигурации SoftEther VPN, порты, тома, разделение TLS, бэкап,
+  восстановление, мониторинг и требования к firewall.
+- Стратегию бэкапа: дамп PostgreSQL, тома media/static, `certbot_conf`,
+  `softether_data`, локальная резервная копия, offsite-копия в S3-совместимом
+  хранилище и политика хранения.
+- Идеи CI/CD: неизменяемые GHCR image refs, Trivy scan, healthcheck, метаданные
+  для rollback, ручной dispatch деплоя и Telegram-уведомления.
 
-## Not Allowed To Migrate
+## Что мигрировать запрещено
 
-- Product source code from `SiteProject01`, `AromaFlowAI`, or `AI_E_Retail`.
-- Django apps, migrations, templates, fixtures, demo media, generated
-  `staticfiles`, logs, local `.env` files, or product test suites.
-- Real IP addresses, private keys, tokens, passwords, real inventories, or
-  unencrypted vault files.
-- Hardcoded MyPet01 names as active platform names. Legacy names may appear only
-  in migration notes for the current `aromaflow-work` runtime state.
+- Продуктовый исходный код из `SiteProject01`, `AromaFlowAI` или `AI_E_Retail`.
+- Django-приложения, миграции, шаблоны, фикстуры, демо-медиа, сгенерированные
+  `staticfiles`, логи, локальные `.env`-файлы или продуктовые тест-сьюты.
+- Реальные IP-адреса, приватные ключи, токены, пароли, реальные inventory или
+  незашифрованные vault-файлы.
+- Хардкод имён MyPet01 как актуальных платформенных имён. Старые имена могут
+  встречаться только в заметках о миграции для текущего состояния рантайма
+  `aromaflow-work`.
 
-## Execution Order
+## Порядок исполнения
 
-1. Preserve this source policy and the SoftEther VPN contract in docs.
-2. Move reusable Ansible roles into `infra/ansible`.
-3. Add generic edge templates for HAProxy, Nginx, and SoftEther.
-4. Validate `services.yml` before any render or deploy work.
-5. Render stack compose files from registry data.
-6. Keep real deployment disabled until validation, render, healthcheck, and
-   rollback dry-runs are reliable.
+1. Сохранить эту политику источников и контракт SoftEther VPN в документации.
+2. Перенести переиспользуемые Ansible-роли в `infra/ansible`.
+3. Добавить общие edge-шаблоны для HAProxy, Nginx и SoftEther.
+4. Валидировать `services.yml` до любых работ по рендеру или деплою.
+5. Рендерить compose-файлы стеков из данных реестра.
+6. Не включать реальный деплой, пока валидация, рендер, healthcheck и dry-run
+   rollback не станут надёжными.

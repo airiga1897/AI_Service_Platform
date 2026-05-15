@@ -1,38 +1,38 @@
-# 0007. Single shared GeoPolicy data source
+# 0007. Единый общий источник данных GeoPolicy
 
-- **Status:** Accepted
-- **Date:** 2026-05-15
+- **Статус:** Accepted
+- **Дата:** 2026-05-15
 
-## Context
+## Контекст
 
-Geographic decisions are needed in several unrelated places: HAProxy country lists for site protection, GeoDNS for picking the nearest VPN ingress, egress country selection for VPN traffic, and country inputs for any future site CDN. If each layer maintains its own country/IP data, lists drift, decisions diverge, and a "fix" in one place silently regresses another.
+Гео-решения нужны в нескольких несвязанных местах: HAProxy country lists для защиты сайтов, GeoDNS для выбора ближайшего входа VPN, выбор страны egress для VPN-трафика и country-входы для будущего сайтового CDN. Если каждый слой держит свои country/IP-данные, списки расходятся, решения разъезжаются, и «фикс» в одном месте молча регрессирует другой.
 
-This is already documented in `platform.geo_policy` in [`services.yml`](../../services.yml) and in [`docs/CDN_GEO_POLICY.md`](../CDN_GEO_POLICY.md).
+Это уже описано в `platform.geo_policy` в [`services.yml`](../../services.yml) и в [`docs/CDN_GEO_POLICY.md`](../CDN_GEO_POLICY.md).
 
-## Decision
+## Решение
 
-There is **one** shared GeoPolicy source for country/IP data. **Enforcement stays per traffic type.**
+Существует **один** общий источник GeoPolicy для country/IP-данных. **Применение остаётся раздельным по типу трафика.**
 
-- `platform.geo_policy.status` is `planned-shared-platform-service`.
-- `platform.geo_policy.data_outputs` enumerates the consumers: `haproxy_country_lists`, `vpn_geodns_targets`, `egress_country_rules`, `cdn_country_policy_inputs`.
-- `enforcement_boundaries` records that web protection is owned by HAProxy (or future CDN), VPN nearest ingress by GeoDNS, VPN egress selection by the routing-policy controller, and product HA is **not** handled by GeoPolicy.
-- Safety: dry-run first, audit log required, manual override required (`platform.geo_policy.safety`).
-- A web-protection rule must never be able to silently break VPN access or product failover.
+- `platform.geo_policy.status` равен `planned-shared-platform-service`.
+- `platform.geo_policy.data_outputs` перечисляет потребителей: `haproxy_country_lists`, `vpn_geodns_targets`, `egress_country_rules`, `cdn_country_policy_inputs`.
+- `enforcement_boundaries` фиксирует, что защитой сайтов владеет HAProxy (или будущий CDN), ближайшим VPN-входом — GeoDNS, выбором egress VPN — routing-policy controller, а продуктовая HA **не** обрабатывается GeoPolicy.
+- Безопасность: сначала dry-run, обязательный audit log, обязательный ручной override (`platform.geo_policy.safety`).
+- Правило защиты сайтов никогда не должно молча сломать VPN-доступ или продуктовый failover.
 
-## Consequences
+## Последствия
 
-- Positive: one place to update country data, four consistent applications.
-- Positive: edge protection, VPN routing, and CDN policy stay decoupled at the enforcement layer.
-- Trade-off: the GeoPolicy service itself does not exist yet (`planned-…`); until it ships, individual layers maintain their own lists with the contract that they will migrate.
-- Follow-up: when GeoPolicy is implemented, supersede this ADR with a new ADR describing the actual interface and rollout.
+- Плюс: одно место для обновления country-данных, четыре согласованных применения.
+- Плюс: edge-защита, маршрутизация VPN и политика CDN остаются развязанными на уровне применения.
+- Компромисс: сам сервис GeoPolicy ещё не существует (`planned-…`); пока он не выйдет, отдельные слои держат свои списки с обязательством мигрировать.
+- Дальнейшее: когда GeoPolicy будет реализован, заменить этот ADR новым, описывающим реальный интерфейс и rollout.
 
-## Alternatives considered
+## Рассмотренные альтернативы
 
-- **Per-layer country lists.** Today's de facto state. Rejected as the long-term plan because it caused drift between HAProxy lists and VPN/CDN expectations historically.
-- **Single enforcement engine for all geo decisions.** Rejected — couples web protection, VPN, and CDN; one rule could break unrelated traffic types.
+- **Per-layer country-списки.** Сегодняшнее де-факто состояние. Отвергнуто как долгосрочный план, потому что исторически вызывало дрейф между списками HAProxy и ожиданиями VPN/CDN.
+- **Единый движок применения для всех гео-решений.** Отвергнуто — связывает защиту сайтов, VPN и CDN; одно правило могло бы сломать несвязанные типы трафика.
 
-## References
+## Ссылки
 
-- `platform.geo_policy`, `platform.edge_protection`, `platform.vpn_acceleration` in [`services.yml`](../../services.yml)
+- `platform.geo_policy`, `platform.edge_protection`, `platform.vpn_acceleration` в [`services.yml`](../../services.yml)
 - [`docs/CDN_GEO_POLICY.md`](../CDN_GEO_POLICY.md)
 - [ADR-0005](0005-edge-haproxy-nginx-softether.md)

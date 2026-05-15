@@ -1,42 +1,42 @@
-# 0003. Four runtime instances on launch
+# 0003. Четыре рантайм-инстанса на старте
 
-- **Status:** Accepted
-- **Date:** 2026-05-15
+- **Статус:** Accepted
+- **Дата:** 2026-05-15
 
-## Context
+## Контекст
 
-Each product needs more than a single runtime: AromaFlowAI requires a working public site **and** a demo site with seeded content; AI_E_Retail requires a frozen MVP **and** a mirrored development copy that can diverge. Modelling these as four independent runtime instances (rather than environments of two services) keeps env prefixes, ports, databases, volumes, and deploy targets explicitly separated and prevents accidental data crossover.
+Каждому продукту нужен не один рантайм: AromaFlowAI требует рабочий публичный сайт **и** demo-сайт с засеянным контентом; AI_E_Retail требует замороженный MVP **и** зеркальную копию для разработки, которая может расходиться. Моделирование этого как четырёх независимых рантайм-инстансов (а не как окружений двух сервисов) явно разделяет env-префиксы, порты, базы данных, тома и таргеты деплоя и предотвращает случайные пересечения данных.
 
-## Decision
+## Решение
 
-The platform launches with **four runtime instances**, each with its own env prefix, port pair, database name, volume set, and deploy targets, as defined in `runtime_instances` in [`services.yml`](../../services.yml):
+Платформа стартует с **четырёх рантайм-инстансов**, у каждого свой env-префикс, пара портов, имя БД, набор томов и таргеты деплоя, как определено в `runtime_instances` в [`services.yml`](../../services.yml):
 
-| Instance         | Project         | Role                              | Notes |
-|------------------|-----------------|-----------------------------------|-------|
-| `aromaflow-work` | AromaFlowAI     | Working public site               | Production on VPS1, preprod on VPS2. |
-| `aromaflow-demo` | AromaFlowAI     | Demo-data site                    | `python manage.py setup_demo_content`. Preprod only. |
-| `ai-retail-mvp`  | AI_E_Retail     | Frozen MVP                        | Frozen at a release tag (`ai-retail-mvp-v*`). Mirrors `ai-retail-dev` at launch. |
-| `ai-retail-dev`  | AI_E_Retail     | Future development copy           | Starts as a mirror of `ai-retail-mvp`, then diverges on `develop`. |
+| Инстанс          | Проект          | Роль                              | Примечания |
+|------------------|-----------------|-----------------------------------|------------|
+| `aromaflow-work` | AromaFlowAI     | Рабочий публичный сайт            | Прод на VPS1, препрод на VPS2. |
+| `aromaflow-demo` | AromaFlowAI     | Сайт с демо-данными               | `python manage.py setup_demo_content`. Только препрод. |
+| `ai-retail-mvp`  | AI_E_Retail     | Замороженный MVP                  | Заморожен на релиз-теге (`ai-retail-mvp-v*`). На старте зеркало `ai-retail-dev`. |
+| `ai-retail-dev`  | AI_E_Retail     | Будущая копия для разработки      | Стартует как зеркало `ai-retail-mvp`, далее расходится по `develop`. |
 
-Two implications:
+Два следствия:
 
-- `ai-retail-mvp` is **frozen by policy**, not by accident. Changes to the MVP runtime require a new MVP release tag, not branch promotion.
-- `ai-retail-dev` and `ai-retail-mvp` may share schema today but must not share databases, volumes, or env prefixes (see `data.database`, `data.volumes`, `env.prefix` per instance in `services.yml`).
+- `ai-retail-mvp` **заморожен по политике**, а не случайно. Изменения в MVP-рантайме требуют нового MVP-релиз-тега, а не promotion ветки.
+- `ai-retail-dev` и `ai-retail-mvp` могут сегодня делить схему, но не должны делить базы данных, тома или env-префиксы (см. `data.database`, `data.volumes`, `env.prefix` по каждому инстансу в `services.yml`).
 
-## Consequences
+## Последствия
 
-- Positive: ports, databases, and volumes never collide; demo seeding cannot leak into production.
-- Positive: the registry stays the source of truth for what runs where.
-- Trade-off: four sets of env files / secrets to manage (mitigated by the env prefix convention enforced by the validator).
-- Follow-up: the validator must enforce uniqueness of ports, databases, and env prefixes across instances (tracked in the validator extension task).
+- Плюс: порты, базы и тома никогда не пересекаются; demo seeding не утечёт в production.
+- Плюс: реестр остаётся источником истины о том, что и где работает.
+- Компромисс: четыре набора env-файлов/секретов для управления (смягчается соглашением об env-префиксах, проверяемом валидатором).
+- Дальнейшее: валидатор должен обеспечивать уникальность портов, баз и env-префиксов между инстансами (отслеживается в задаче расширения валидатора).
 
-## Alternatives considered
+## Рассмотренные альтернативы
 
-- **Two instances with environment switches.** Rejected — env switches inside a single runtime were the source of past data leaks and made backups ambiguous.
-- **Single MVP instance, no separate dev copy.** Rejected — would force destabilising changes onto the frozen MVP.
+- **Два инстанса с переключателями окружений.** Отвергнуто — внутренние env-переключатели в едином рантайме исторически были источником утечек данных и делали бэкапы неоднозначными.
+- **Один MVP-инстанс без отдельной dev-копии.** Отвергнуто — заставляло бы вносить дестабилизирующие изменения в замороженный MVP.
 
-## References
+## Ссылки
 
-- `runtime_instances` in [`services.yml`](../../services.yml)
-- [ADR-0004](0004-extensible-service-catalog.md) — extensibility for future apps and bots
+- `runtime_instances` в [`services.yml`](../../services.yml)
+- [ADR-0004](0004-extensible-service-catalog.md) — расширяемость для будущих приложений и ботов
 - [`docs/VPS_ROLES.md`](../VPS_ROLES.md)

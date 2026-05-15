@@ -1,38 +1,38 @@
-# Architecture Decision Records
+# Архитектурные решения (ADR)
 
-This directory contains Architecture Decision Records (ADRs) for the AI Service Platform.
+В этом каталоге хранятся записи об архитектурных решениях (ADR — Architecture Decision Records) для AI Service Platform.
 
-ADRs capture significant architectural decisions: their context, the decision itself, status, and consequences. They are not project tasks and not roadmap items — they record decisions that have already been made (or are explicitly proposed) so that anyone reading the repository later can understand *why* the platform looks the way it does.
+ADR фиксируют значимые архитектурные решения: их контекст, само решение, статус и последствия. Это не задачи проекта и не roadmap-пункты — они записывают решения, которые уже приняты (или явно предложены), чтобы любой, кто будет читать репозиторий позже, мог понять, *почему* платформа выглядит именно так.
 
-- Format: [MADR](https://adr.github.io/madr/) — see [`template.md`](template.md).
-- Filename: `NNNN-short-kebab-title.md`, four-digit zero-padded sequence.
-- Status values: `Proposed` → `Accepted` → `Superseded` (record the superseder in both ADRs).
+- Формат: [MADR](https://adr.github.io/madr/) — см. [`template.md`](template.md).
+- Имя файла: `NNNN-short-kebab-title.md`, четырёхзначная zero-padded последовательность.
+- Допустимые статусы: `Proposed` → `Accepted` → `Superseded` (записывайте superseder в обоих ADR).
 
-This is **not** the same as `docs/replit/`. `docs/replit/` is a snapshot of the current Replit-session work plan; ADRs live longer and describe architecture, not workflow.
+Это **не** то же самое, что `docs/replit/`. `docs/replit/` — снапшот текущего плана работ Replit-сессии; ADR живут дольше и описывают архитектуру, а не workflow.
 
-## Index
+## Индекс
 
-| ADR | Title | Status |
-|-----|-------|--------|
-| [0001](0001-record-architecture-decisions.md) | Record architecture decisions | Accepted |
-| [0002](0002-infra-only-repository.md) | This repository is infra/orchestration only | Accepted |
-| [0003](0003-four-runtime-instances.md) | Four runtime instances on launch | Accepted |
-| [0004](0004-extensible-service-catalog.md) | `services.yml` is an extensible service catalog | Accepted |
-| [0005](0005-edge-haproxy-nginx-softether.md) | Edge: HAProxy + per-site Nginx + SoftEther | Accepted |
-| [0006](0006-deploy-from-immutable-image-refs.md) | Deploy from immutable Docker image refs | Accepted |
-| [0007](0007-shared-geo-policy-service.md) | Single shared GeoPolicy data source | Accepted |
+| ADR | Заголовок | Статус |
+|-----|-----------|--------|
+| [0001](0001-record-architecture-decisions.md) | Ведение записей об архитектурных решениях | Accepted |
+| [0002](0002-infra-only-repository.md) | Этот репозиторий — только инфра/оркестрация | Accepted |
+| [0003](0003-four-runtime-instances.md) | Четыре рантайм-инстанса на старте | Accepted |
+| [0004](0004-extensible-service-catalog.md) | `services.yml` — расширяемый каталог сервисов | Accepted |
+| [0005](0005-edge-haproxy-nginx-softether.md) | Платформенный edge: HAProxy + per-site Nginx + SoftEther | Accepted |
+| [0006](0006-deploy-from-immutable-image-refs.md) | Деплой из неизменяемых Docker image refs | Accepted |
+| [0007](0007-shared-geo-policy-service.md) | Единый общий источник данных GeoPolicy | Accepted |
 
-## How to add a new ADR
+## Как добавить новый ADR
 
-1. Copy [`template.md`](template.md) to `NNNN-your-decision.md` using the next free number.
-2. Fill in Context, Decision, Status, Consequences, and Date.
-3. Add a row to the index above.
-4. Open a PR. The decision becomes `Accepted` once merged unless explicitly marked `Proposed`.
+1. Скопировать [`template.md`](template.md) в `NNNN-your-decision.md`, используя следующий свободный номер.
+2. Заполнить разделы «Контекст», «Решение», «Статус», «Последствия» и «Дата».
+3. Добавить строку в индекс выше.
+4. Открыть PR. Решение становится `Accepted` после merge, если явно не помечено как `Proposed`.
 
-## Superseding
+## Замена ADR (supersession)
 
-When a new ADR replaces an old one:
+Когда новый ADR заменяет старый:
 
-- Set the old ADR's status to `Superseded by ADR-NNNN`.
-- Set the new ADR's status to `Accepted (supersedes ADR-MMMM)`.
-- Do not delete the old ADR — history matters.
+- Поставить старому ADR статус `Superseded by ADR-NNNN`.
+- Поставить новому ADR статус `Accepted (supersedes ADR-MMMM)`.
+- Не удалять старый ADR — история важна.

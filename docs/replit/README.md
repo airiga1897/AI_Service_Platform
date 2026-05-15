@@ -1,28 +1,28 @@
-# Replit session plans
+# Планы Replit-сессии
 
-This directory is a **snapshot of the current Replit-session work plan**. Each file in [`plans/`](plans) corresponds 1:1 to a project task created in this Replit session and mirrors the plan that lives under `.local/tasks/` in the working environment (which is not committed to git).
+Этот каталог — **снапшот текущего плана работ Replit-сессии**. Каждый файл в [`plans/`](plans) соответствует 1:1 проектной задаче, созданной в этой Replit-сессии, и зеркалирует план, который лежит в `.local/tasks/` рабочего окружения (он не коммитится в git).
 
-It is **not** an architecture record. Architecture decisions live in [`../adr/`](../adr/README.md).
+Это **не** запись об архитектуре. Архитектурные решения живут в [`../adr/`](../adr/README.md).
 
-It is **not** a runbook. Operational procedures live in [`../RUNBOOKS.md`](../RUNBOOKS.md).
+Это **не** runbook. Операционные процедуры живут в [`../RUNBOOKS.md`](../RUNBOOKS.md).
 
-## Purpose
+## Назначение
 
-- Make the Replit work plan reviewable in PRs and visible to anyone reading the repository on GitHub.
-- Preserve the original scope ("What & Why", "Done looks like", "Out of scope", "Steps") for each task even after the task is completed and the working files in `.local/tasks/` are gone.
+- Сделать план работ Replit-сессии доступным для ревью в PR-ах и видимым любому, кто читает репозиторий на GitHub.
+- Сохранить исходный скоуп («What & Why», «Done looks like», «Out of scope», «Steps») для каждой задачи даже после её завершения и удаления рабочих файлов в `.local/tasks/`.
 
-## Plans in this snapshot
+## Планы в этом снапшоте
 
-| Plan | Title |
-|------|-------|
+| План | Заголовок |
+|------|-----------|
 | [`plans/01-adr-and-platform-vision-docs.md`](plans/01-adr-and-platform-vision-docs.md) | ADR и видение платформы в docs |
 | [`plans/02-extend-services-yml-validator.md`](plans/02-extend-services-yml-validator.md) | Расширение валидатора `services.yml` |
 | [`plans/03-render-compose-tool.md`](plans/03-render-compose-tool.md) | Реализация `tools/render-compose` |
 | [`plans/04-healthcheck-tool.md`](plans/04-healthcheck-tool.md) | Реализация `tools/healthcheck` |
 | [`plans/05-ci-and-precommit-integration.md`](plans/05-ci-and-precommit-integration.md) | CI и pre-commit интеграция |
 
-## Conventions
+## Соглашения
 
-- Filenames mirror the plan files in `.local/tasks/`.
-- Plans are written in Russian (working language for this session); ADRs and the rest of `docs/` are in English.
-- Plans are append-only snapshots: when scope changes, prefer a new plan file and a short note in the old one rather than rewriting history.
+- Имена файлов зеркалируют файлы планов в `.local/tasks/`.
+- Планы написаны на русском (рабочий язык этой сессии); вся остальная документация в `docs/` и ADR также на русском.
+- Планы — снапшоты только на добавление: при изменении скоупа предпочтительнее завести новый файл плана и оставить короткую заметку в старом, а не переписывать историю.

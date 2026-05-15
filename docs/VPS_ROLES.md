@@ -1,52 +1,53 @@
-# VPS Roles
+# Роли VPS
 
-The target platform uses three VPS nodes. This layout comes from the historical
-infrastructure roadmap and is part of the platform contract, not an incidental
-deployment detail.
+Целевая платформа использует три VPS-узла. Эта разметка пришла из
+исторического roadmap инфраструктуры и является частью контракта платформы, а
+не случайной деталью деплоя.
 
 ## VPS1
 
-Production runtime in Latvia.
+Production-рантайм в Латвии.
 
-- Initial production stack: `aromaflow-work`.
-- Primary application data starts here.
-- Expected resource shape: 4 CPU / 4 GB RAM / 40 GB SSD.
-- Additional production stacks are added only after explicit approval.
-- Production changes must preserve backup, restore, TLS, edge routing, and
-  rollback procedures.
+- Начальный production-стек: `aromaflow-work`.
+- Здесь стартуют первичные данные приложений.
+- Ожидаемая конфигурация: 4 CPU / 4 GB RAM / 40 GB SSD.
+- Дополнительные production-стеки добавляются только после явного согласования.
+- Изменения в production должны сохранять процедуры бэкапа, восстановления,
+  TLS, edge-маршрутизации и rollback.
 
 ## VPS2
 
-Pre-production, hot-standby, and backup target in Kazakhstan.
+Препродакшн, горячий резерв (hot-standby) и таргет резервных копий в Казахстане.
 
-- Hosts demo, MVP, and dev validation stacks when needed.
-- Acts as hot standby/failover target for VPS1.
-- Stores local backup copies before offsite S3 upload.
-- Expected resource shape: 4 CPU / 4 GB RAM / 80 GB SSD.
-- Must not silently mix preprod experiments with standby/backup responsibilities.
+- Хостит demo, MVP и dev-валидационные стеки по необходимости.
+- Выступает горячим резервом (hot standby) и failover-таргетом для VPS1.
+- Хранит локальные копии бэкапов до offsite-выгрузки в S3.
+- Ожидаемая конфигурация: 4 CPU / 4 GB RAM / 80 GB SSD.
+- Не должен молча смешивать preprod-эксперименты с обязанностями
+  standby/backup.
 
 ## VPS3
 
-Management, monitoring, and orchestration node in Russia.
+Узел management, мониторинга и оркестрации в России.
 
-- Runs Ansible control workflows, monitoring, and backup orchestration.
-- Can host Prometheus, Grafana, Loki/Promtail, Alertmanager, and Semaphore.
-- Expected resource shape: 2 CPU / 2 GB RAM / 40 GB SSD.
-- It is not an application runtime.
-- If unavailable, VPS2 may temporarily take over recovery orchestration according
-  to the failover runbook.
+- Гоняет управляющие Ansible-workflow, мониторинг и оркестрацию бэкапов.
+- Может хостить Prometheus, Grafana, Loki/Promtail, Alertmanager и Semaphore.
+- Ожидаемая конфигурация: 2 CPU / 2 GB RAM / 40 GB SSD.
+- Не является рантаймом приложений.
+- При недоступности VPS2 может временно взять на себя оркестрацию
+  восстановления согласно failover-runbook.
 
-## External Storage
+## Внешнее хранилище
 
-S3-compatible object storage is used for offsite backups in the 3-2-1 backup
-model. Media storage migration to S3 is optional and separate from backup S3.
+S3-совместимое объектное хранилище используется для offsite-бэкапов в модели
+3-2-1. Миграция медиа-хранилища в S3 — опциональна и отделена от backup S3.
 
-## VPN Presence
+## Присутствие VPN
 
-SoftEther is a platform VPN service on all three VPS nodes. The first preserved
-setup is VPS1, but the target state is one SoftEther instance per VPS for local
-client ingress and controlled country-specific egress.
+SoftEther — платформенный VPN-сервис на всех трёх VPS-узлах. Первая сохранённая
+установка — VPS1, но целевое состояние — один экземпляр SoftEther на VPS для
+локального ingress клиентов и контролируемого egress по странам.
 
-Future countries may be added as VPN-only edge nodes. They should not run
-product stacks; they only need the VPN edge, monitoring, firewall rules, and
-backup for SoftEther configuration.
+В будущем могут добавляться новые страны как VPN-only edge-узлы. На них не
+должны работать продуктовые стеки; им нужен только VPN edge, мониторинг,
+правила firewall и бэкап конфигурации SoftEther.

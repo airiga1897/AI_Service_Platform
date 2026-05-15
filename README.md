@@ -1,47 +1,47 @@
-﻿# AI Service Platform
+# AI Service Platform
 
-Infra-only orchestration repository for services deployed across the AI Service Platform.
+Репозиторий-оркестратор инфраструктуры для сервисов, разворачиваемых на AI Service Platform. Здесь нет прикладного кода — только метаданные платформы, инфра-конфиги, шаблоны и правила CI/CD.
 
-Product source code lives in separate repositories:
+Исходный код продуктов живёт в отдельных репозиториях:
 
 - `airiga1897/AromaFlowAI`
 - `airiga1897/AI_E_Retail`
 
-This repository owns platform-level runtime metadata, VPS layout, edge routing templates, stack templates, deployment playbooks, and CI/CD orchestration rules. It must not vendor product source code and does not use git submodules in the first stage.
+Этот репозиторий владеет метаданными рантаймов уровня платформы, разметкой VPS, шаблонами edge-маршрутизации, шаблонами стеков, плейбуками деплоя и правилами оркестрации CI/CD. Он не должен содержать продуктовый исходный код и на первом этапе не использует git submodules.
 
-Migration source policy is documented in `docs/MIGRATION_SOURCES.md`. SoftEther VPN is a required platform edge/infrastructure component, independent of product ownership, and is documented in `docs/SOFTETHER_VPN.md`. CDN, GeoIP, GeoDNS, and VPN acceleration research are documented in `docs/CDN_GEO_POLICY.md`. The target VPN topology has SoftEther on VPS1, VPS2, and VPS3; HAProxy publishes the current TCP entrypoints.
+Политика источников миграции описана в `docs/MIGRATION_SOURCES.md`. SoftEther VPN — обязательный edge/инфра-компонент платформы, не привязанный к продуктам, описан в `docs/SOFTETHER_VPN.md`. Исследования по CDN, GeoIP, GeoDNS и ускорению VPN собраны в `docs/CDN_GEO_POLICY.md`. Целевая VPN-топология: SoftEther на VPS1, VPS2 и VPS3; HAProxy публикует текущие TCP-входы.
 
-## Runtime Instances
+## Рантайм-инстансы
 
-- `aromaflow-work` - working AromaFlowAI site.
-- `aromaflow-demo` - AromaFlowAI demo-data site.
-- `ai-retail-mvp` - frozen AI_E_Retail MVP.
-- `ai-retail-dev` - AI_E_Retail development copy.
+- `aromaflow-work` — рабочий сайт AromaFlowAI.
+- `aromaflow-demo` — сайт AromaFlowAI с демо-данными.
+- `ai-retail-mvp` — замороженная MVP-версия AI_E_Retail.
+- `ai-retail-dev` — копия AI_E_Retail для разработки.
 
-## CI/CD Model
+## Модель CI/CD
 
-Products build and publish images. This platform repository validates `services.yml` and deploys selected image refs to selected VPS stacks.
+Продукты собирают и публикуют образы. Платформенный репозиторий валидирует `services.yml` и деплоит выбранные image refs в выбранные стеки на VPS.
 
-Product repository branches are tracked as build/source policy, not as deployment artifacts. While product `main` and `develop` branches are still being prepared, `services.yml` records temporary `bootstrap_ref` values for the current working product branches. Real deployment should use immutable Docker image refs tagged by commit SHA or release tag.
+Ветки продуктовых репозиториев трактуются как политика сборки/исходников, а не как артефакты деплоя. Пока ветки `main` и `develop` продуктов ещё готовятся, `services.yml` хранит временные значения `bootstrap_ref` для текущих рабочих веток продуктов. Реальный деплой должен использовать неизменяемые Docker image refs, помеченные коммит-SHA или релиз-тегом.
 
-Initial workflows are validate-only or manual skeletons. Real deploy is enabled only after product image builds are stable.
+Начальные workflow-ы — только валидация или ручные скелеты. Реальный деплой включается только после того, как сборка продуктовых образов станет стабильной.
 
-## Architecture Decision Records
+## Архитектурные решения (ADR)
 
-Significant architectural decisions for this platform are recorded as ADRs under [`docs/adr/`](docs/adr/README.md). Start with the [index](docs/adr/README.md) for the full list.
+Значимые архитектурные решения для платформы записываются как ADR в [`docs/adr/`](docs/adr/README.md). Полный список — в [индексе](docs/adr/README.md).
 
-Key decisions in force today:
+Действующие ключевые решения:
 
-- [ADR-0002](docs/adr/0002-infra-only-repository.md) — this repository is infra/orchestration only; product code stays in product repositories.
-- [ADR-0003](docs/adr/0003-four-runtime-instances.md) — four runtime instances on launch (`aromaflow-work`, `aromaflow-demo`, `ai-retail-mvp`, `ai-retail-dev`).
-- [ADR-0004](docs/adr/0004-extensible-service-catalog.md) — `services.yml` is an extensible catalog for future sites and Telegram bots.
-- [ADR-0005](docs/adr/0005-edge-haproxy-nginx-softether.md) — edge is HAProxy + per-site Nginx + SoftEther, owned by infrastructure.
-- [ADR-0006](docs/adr/0006-deploy-from-immutable-image-refs.md) — deploy from immutable Docker image refs, not branches.
-- [ADR-0007](docs/adr/0007-shared-geo-policy-service.md) — single shared GeoPolicy data source, per-traffic enforcement.
+- [ADR-0002](docs/adr/0002-infra-only-repository.md) — этот репозиторий хранит только инфраструктуру/оркестрацию; продуктовый код — в продуктовых репозиториях.
+- [ADR-0003](docs/adr/0003-four-runtime-instances.md) — четыре рантайм-инстанса на старте (`aromaflow-work`, `aromaflow-demo`, `ai-retail-mvp`, `ai-retail-dev`).
+- [ADR-0004](docs/adr/0004-extensible-service-catalog.md) — `services.yml` — расширяемый каталог для будущих сайтов и Telegram-ботов.
+- [ADR-0005](docs/adr/0005-edge-haproxy-nginx-softether.md) — edge: HAProxy + per-site Nginx + SoftEther, владелец — инфраструктура.
+- [ADR-0006](docs/adr/0006-deploy-from-immutable-image-refs.md) — деплой из неизменяемых Docker image refs, не из веток.
+- [ADR-0007](docs/adr/0007-shared-geo-policy-service.md) — единый общий источник GeoPolicy, применение раздельно по типу трафика.
 
-The current Replit-session work plan is snapshotted under [`docs/replit/`](docs/replit/README.md).
+Текущий план работ Replit-сессии лежит в [`docs/replit/`](docs/replit/README.md).
 
-## How to develop locally
+## Локальная разработка
 
 Установить общие Python-зависимости:
 

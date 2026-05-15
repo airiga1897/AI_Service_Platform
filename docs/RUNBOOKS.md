@@ -1,15 +1,15 @@
-﻿# Runbooks
+# Эксплуатационные runbook-и
 
-Runbooks will be added before real deployment is enabled.
+Runbook-и будут добавлены до включения реального деплоя.
 
-Required runbooks:
+Необходимый набор runbook-ов:
 
-- deploy selected stack;
-- rollback selected stack;
-- rotate env secrets;
-- restore database backup;
-- restore SoftEther VPN config and certificates;
-- fail over from VPS1 to VPS2;
-- renew and validate TLS certificates;
-- inspect HAProxy/Nginx routing;
-- inspect SoftEther VPN routing, management access, and logs.
+- деплой выбранного стека;
+- rollback выбранного стека;
+- ротация секретов окружения;
+- восстановление бэкапа базы данных;
+- восстановление конфигурации и сертификатов SoftEther VPN;
+- failover с VPS1 на VPS2;
+- продление и валидация TLS-сертификатов;
+- инспекция маршрутизации HAProxy/Nginx;
+- инспекция маршрутизации SoftEther VPN, management-доступа и логов.

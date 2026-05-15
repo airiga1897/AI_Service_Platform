@@ -1,4 +1,4 @@
-# CDN, GeoIP, GeoDNS Plan
+# План по CDN, GeoIP и GeoDNS
 
 Этот документ фиксирует общий план для CDN, GeoIP/GeoPolicy и GeoDNS в AI
 Service Platform.
@@ -13,55 +13,55 @@ Service Platform.
 - исходящий VPN-трафик: выбор страны выхода;
 - защита edge: списки стран, allowlist, blacklist, rate limit.
 
-## Site CDN
+## CDN для сайтов
 
 CDN для сайтов рассматривается как будущий слой перед публичным web edge.
 
 Применяется к:
 
-- `AromaFlowAI` public web traffic;
-- `AI_E_Retail` public web traffic;
-- static assets;
-- media assets после отдельного решения по storage policy.
+- публичному web-трафику `AromaFlowAI`;
+- публичному web-трафику `AI_E_Retail`;
+- статическим ассетам;
+- медиа-ассетам после отдельного решения по storage policy.
 
 Не применяется к:
 
-- SoftEther management `5555/tcp`;
-- database traffic;
-- private node overlay traffic;
+- управляющему порту SoftEther `5555/tcp`;
+- трафику баз данных;
+- частному overlay-трафику между узлами;
 - VPN как к обычному HTTP-сайту.
 
 Ожидаемые функции:
 
-- cache static assets;
+- кеш статических ассетов;
 - TLS на edge;
 - WAF или базовая фильтрация ботов;
 - rate limiting;
 - origin shielding, если провайдер поддерживает.
 
-## Shared GeoPolicy
+## Общий GeoPolicy
 
 GeoPolicy должен быть одним общим источником данных и решений. Это не значит,
 что одно правило применяется ко всему трафику. Один сервис готовит данные, а
-исполнение остается раздельным.
+исполнение остаётся раздельным.
 
-GeoPolicy outputs:
+Выходы GeoPolicy:
 
 - HAProxy country lists для защиты сайтов и edge endpoints;
 - VPN GeoDNS targets для выбора ближайшего VPS;
 - egress country rules для выбора страны выхода VPN-трафика;
 - CDN country policy inputs для CDN/WAF правил.
 
-Safety rules:
+Правила безопасности:
 
 - сначала dry-run;
 - обязательный audit log;
 - ручной override;
 - изменения маршрутов и списков должны быть откатываемыми.
 
-## GeoDNS For VPN
+## GeoDNS для VPN
 
-Для VPN входа базовая идея такая:
+Для VPN-входа базовая идея такая:
 
 ```text
 vpn.example.com
@@ -71,11 +71,11 @@ vpn.example.com
 ```
 
 GeoDNS выбирает ближайший или наиболее подходящий VPS до подключения клиента.
-После DNS выбора клиент подключается уже к конкретному IP.
+После DNS-выбора клиент подключается уже к конкретному IP.
 
-GeoDNS не заменяет firewall, HAProxy allowlist, healthcheck или monitoring.
+GeoDNS не заменяет firewall, HAProxy allowlist, healthcheck или мониторинг.
 
-## SSTP Acceleration Research
+## Исследование ускорения SSTP
 
 SSTP использует `TCP/443`, поэтому его можно отдельно исследовать через сервисы
 уровня TCP:
@@ -89,7 +89,7 @@ SSTP использует `TCP/443`, поэтому его можно отдел
 или HTTPS сайт и может мешать VPN-протоколу. Для SSTP нужен режим, который
 проксирует TCP-трафик без превращения его в web request.
 
-Research constraints:
+Ограничения исследования:
 
 - тестировать только `443/tcp`, `992/tcp`, `1194/tcp`;
 - не проксировать `5555/tcp` management;
@@ -97,11 +97,11 @@ Research constraints:
 - обязательный rollback на direct GeoDNS-to-VPS;
 - сравнить latency, stability, reconnect behavior и client IP behavior.
 
-## Current Decision
+## Текущее решение
 
-- Site CDN: future optional для public websites.
-- GeoPolicy: planned shared platform service.
-- VPN nearest entry: GeoDNS first.
-- VPN acceleration: future research через Anycast/L4 TCP proxy, не через
+- CDN для сайтов: будущая опция для публичных сайтов.
+- GeoPolicy: запланированный общий платформенный сервис.
+- Ближайший вход VPN: сначала через GeoDNS.
+- Ускорение VPN: будущее исследование через Anycast/L4 TCP proxy, не через
   обычный web-CDN.
-- SoftEther остается platform VPN service на VPS1, VPS2 и VPS3.
+- SoftEther остаётся платформенным VPN-сервисом на VPS1, VPS2 и VPS3.
