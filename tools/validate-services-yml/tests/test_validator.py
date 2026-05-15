@@ -18,6 +18,7 @@ or:
 from __future__ import annotations
 
 import copy
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -28,6 +29,8 @@ THIS_DIR = Path(__file__).resolve().parent
 TOOL_DIR = THIS_DIR.parent
 ROOT = TOOL_DIR.parent.parent
 SERVICES_YML = ROOT / "services.yml"
+FIXTURES_DIR = THIS_DIR / "fixtures"
+VALIDATOR = TOOL_DIR / "validate_services_yml.py"
 
 sys.path.insert(0, str(TOOL_DIR))
 from validate_services_yml import (  # noqa: E402  (sys.path tweak above)
@@ -191,6 +194,52 @@ class ValidatorBrokenFixtureTests(unittest.TestCase):
             any("5000" in w and "Replit" in w for w in warnings),
             f"missing Replit reserved-port warning in: {warnings}",
         )
+
+
+class ValidatorCliFixtureTests(unittest.TestCase):
+    """End-to-end CLI tests against committed YAML fixture files.
+
+    Complements the in-memory mutation tests above with real subprocess
+    invocations, asserting both exit codes and key error messages.
+    """
+
+    def _run(self, fixture_name: str, *extra: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(VALIDATOR), str(FIXTURES_DIR / fixture_name), *extra],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_cli_passes_on_real_services_yml(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(VALIDATOR), str(SERVICES_YML)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("services.yml validation passed", result.stdout)
+
+    def test_cli_fails_on_duplicate_port_fixture(self) -> None:
+        result = self._run("broken_duplicate_port.yml")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("duplicates port 5170", result.stderr)
+
+    def test_cli_fails_on_bad_env_prefix_fixture(self) -> None:
+        result = self._run("broken_bad_env_prefix.yml")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("env.prefix must be 'AROMAFLOW_WORK'", result.stderr)
+
+    def test_cli_fails_on_unknown_vps_fixture(self) -> None:
+        result = self._run("broken_unknown_vps.yml")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("VPS9", result.stderr)
+
+    def test_cli_fails_on_missing_healthcheck_fixture(self) -> None:
+        result = self._run("broken_missing_healthcheck.yml")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("healthcheck.path is required", result.stderr)
 
 
 if __name__ == "__main__":  # pragma: no cover

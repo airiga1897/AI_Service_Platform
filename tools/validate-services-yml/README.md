@@ -92,9 +92,19 @@ services.yml validation failed:
 
 ## Tests
 
-Smoke tests live in `tools/validate-services-yml/tests/`. They load the real
-`services.yml`, mutate the parsed dict in-memory to produce intentionally
-broken fixtures, and assert that each check fires with a sensible message.
+Smoke tests live in `tools/validate-services-yml/tests/`. There are two
+layers:
+
+- **In-memory mutation tests** load the real `services.yml`, mutate the
+  parsed dict to produce intentionally broken inputs, and assert that
+  each check fires with a sensible message. This is fast and stays
+  automatically in sync with the real registry.
+- **CLI fixture tests** run the validator as a subprocess against the
+  committed YAML files in `tests/fixtures/` (`broken_duplicate_port.yml`,
+  `broken_bad_env_prefix.yml`, `broken_unknown_vps.yml`,
+  `broken_missing_healthcheck.yml`) and assert both exit code and
+  stderr message. Regenerate them from the current `services.yml` only
+  when the contract changes.
 
 Run with the standard library only:
 
