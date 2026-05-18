@@ -42,7 +42,7 @@ flowchart LR
 |------|--------|------------|
 | Старт | Ri Ga | `Begin`, `Prepare`, `Prepare CDN` — задел под CDN/GeoPolicy |
 | Основной объём | Replit Agent (`airiga1897`) | Валидатор, render-compose, healthcheck, ADR, Ansible, edge, CI, перевод docs |
-| Cursor | Ri Ga | Коммит `Step #6`: промт в [`../../codex/plans/01-cursor-deploy-rollback-next-step.md`](../../codex/plans/01-cursor-deploy-rollback-next-step.md) |
+| Cursor | Ri Ga | Коммит `Step #6`: промт в [`../../codex/plans/cursor-deploy-rollback-next-step.md`](../../codex/plans/cursor-deploy-rollback-next-step.md) |
 
 Replit-сессия шла по планам в [`../../replit/plans/`](../../replit/plans/) (задачи #1–#5 выполнены, #6 — только документ).
 
@@ -86,7 +86,7 @@ Replit-сессия шла по планам в [`../../replit/plans/`](../../re
 | Расширенный deploy-контракт в `services.yml` | Не добавлен (только `branches` + `environments`) |
 | Реальный SSH rollout | Вне репо (секреты, inventory) — намеренно |
 
-Первый безопасный сценарий: **`ai-retail-dev` → `preprod` → VPS2**. Детали — в [`01-codex-deploy-rollback-proposal.md`](01-codex-deploy-rollback-proposal.md) и [`../../codex/plans/01-cursor-deploy-rollback-next-step.md`](../../codex/plans/01-cursor-deploy-rollback-next-step.md).
+Первый безопасный сценарий: **`ai-retail-dev` → `preprod` → VPS2**. Детали — в [`01-codex-deploy-rollback-proposal.md`](01-codex-deploy-rollback-proposal.md) и [`../../codex/plans/cursor-deploy-rollback-next-step.md`](../../codex/plans/cursor-deploy-rollback-next-step.md).
 
 ## Оценка
 

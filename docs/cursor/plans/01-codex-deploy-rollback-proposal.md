@@ -1,6 +1,6 @@
 # Предложение Codex: deploy/rollback pipeline
 
-Краткий разбор [`../../codex/plans/01-cursor-deploy-rollback-next-step.md`](../../codex/plans/01-cursor-deploy-rollback-next-step.md) и сопоставление с Replit-планом [`../../replit/plans/06-deploy-and-rollback-pipeline.md`](../../replit/plans/06-deploy-and-rollback-pipeline.md).
+Краткий разбор [`../../codex/plans/cursor-deploy-rollback-next-step.md`](../../codex/plans/cursor-deploy-rollback-next-step.md) и сопоставление с Replit-планом [`../../replit/plans/06-deploy-and-rollback-pipeline.md`](../../replit/plans/06-deploy-and-rollback-pipeline.md).
 
 ## Источник
 
@@ -82,4 +82,4 @@ Codex предлагает:
 3. Обновить workflows (4–5) и docs (6).
 4. Прогнать `make check` и закоммитить.
 
-Полный текст промта: [`../../codex/plans/01-cursor-deploy-rollback-next-step.md`](../../codex/plans/01-cursor-deploy-rollback-next-step.md).
+Полный текст промта: [`../../codex/plans/cursor-deploy-rollback-next-step.md`](../../codex/plans/cursor-deploy-rollback-next-step.md).

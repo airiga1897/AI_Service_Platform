@@ -9,7 +9,7 @@
 
 Текущий workflow пока не запускает `docker compose pull/up`. Он подключается по SSH, копирует compose-bundle на VPS2 и выполняет `docker compose config`.
 
-Важно: это **временный deploy-access для GitHub Actions**, а не основной способ управления инфраструктурой. Нормальная platform-последовательность начинается с `VPS3` как Ansible control node; см. [`03-vps3-management-bootstrap.md`](03-vps3-management-bootstrap.md).
+Важно: это **временный deploy-access для GitHub Actions**, а не основной способ управления инфраструктурой. Нормальная platform-последовательность начинается с `VPS3` как Ansible control node; см. [`01-vps3-management-bootstrap.md`](01-vps3-management-bootstrap.md).
 
 Главная идея: значения для GitHub Environment не придумываются вручную. Сначала на VPS2 запускается bootstrap-скрипт в target `ai-retail-dev-preprod`, он создаёт пользователей, SSH-ключи, каталог деплоя и выводит готовые значения `SSH_HOST`, `SSH_USER`, `SSH_PORT`, `SSH_KEY`.
 
