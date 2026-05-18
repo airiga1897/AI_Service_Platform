@@ -9,14 +9,86 @@
 
 Текущий workflow пока не запускает `docker compose pull/up`. Он подключается по SSH, копирует compose-bundle на VPS2 и выполняет `docker compose config`.
 
-## 1. Открыть настройки репозитория
+Важно: это **временный deploy-access для GitHub Actions**, а не основной способ управления инфраструктурой. Нормальная platform-последовательность начинается с `VPS3` как Ansible control node; см. [`03-vps3-management-bootstrap.md`](03-vps3-management-bootstrap.md).
+
+Главная идея: значения для GitHub Environment не придумываются вручную. Сначала на VPS2 запускается bootstrap-скрипт в target `ai-retail-dev-preprod`, он создаёт пользователей, SSH-ключи, каталог деплоя и выводит готовые значения `SSH_HOST`, `SSH_USER`, `SSH_PORT`, `SSH_KEY`.
+
+## 1. Проверить, что VPS3 уже bootstrap/control-ready
+
+Перед временным deploy-access на VPS2 желательно сначала подготовить VPS3:
+
+```bash
+sudo bash setup_vps.sh vps3-management
+```
+
+VPS3 должен стать Ansible control node. После этого VPS2 можно bootstrap-ить как managed node или как временный deploy target.
+
+## 2. Запустить временный deploy-access bootstrap на VPS2
+
+Подключись к новой VPS2 как `root` или пользователь с `sudo`, положи туда скрипт из репозитория:
+
+```text
+tools/bootstrap/setup_vps.sh
+```
+
+Запусти:
+
+```bash
+sudo bash setup_vps.sh ai-retail-dev-preprod
+```
+
+По умолчанию скрипт создаёт:
+
+| Параметр | Значение |
+| --- | --- |
+| GitHub Environment | `ai-retail-dev-preprod` |
+| deploy user | `depuser` |
+| admin user | `useradmin` |
+| deploy dir | `/opt/stacks/ai-retail-dev-preprod` |
+| runtime env file | `/opt/stacks/ai-retail-dev-preprod/.env.ai-retail.dev` |
+
+Если нужны другие имена пользователей или SSH-порт, их можно задать перед запуском:
+
+```bash
+sudo DEPLOY_USER=depuser ADMIN_USER=useradmin SSH_PORT=22 bash setup_vps.sh ai-retail-dev-preprod
+```
+
+Target `ai-retail-dev-preprod` является alias для первого GitHub Actions predeploy-check. Для общей подготовки VPS2 как платформенной ноды используй:
+
+```bash
+sudo bash setup_vps.sh vps2-preprod
+```
+
+## 3. Скопировать значения, которые вывел bootstrap
+
+В конце bootstrap выведет блок:
+
+```text
+GitHub Environment: ai-retail-dev-preprod
+SSH_HOST=<detected_public_ip>
+SSH_USER=depuser
+SSH_PORT=22
+SSH_KEY=(copy private deploy key below)
+```
+
+Ниже будет напечатан приватный deploy key между маркерами:
+
+```text
+--- BEGIN SSH_KEY ---
+...
+--- END SSH_KEY ---
+```
+
+Скопируй эти значения для следующего шага. Приватный ключ показывается только для переноса в GitHub Environment. Не сохраняй его в repo files, `.env`, docs, issues или chat logs.
+
+## 4. Открыть настройки репозитория
 
 1. Открой GitHub repo `airiga1897/AI_Service_Platform`.
 2. Перейди в **Settings**.
 3. В левом меню открой **Environments**.
 4. Нажми **New environment**.
 
-## 2. Создать Environment
+## 5. Создать Environment
 
 1. В поле имени введи строго:
 
@@ -33,16 +105,16 @@ environment:
   name: ai-retail-dev-preprod
 ```
 
-## 3. Добавить Environment secrets
+## 6. Добавить Environment secrets
 
-Внутри Environment открой раздел **Environment secrets** и добавь:
+Внутри Environment открой раздел **Environment secrets** и добавь значения, которые вывел bootstrap:
 
-| Secret | Что хранит |
+| Secret | Откуда взять |
 | --- | --- |
-| `SSH_HOST` | IP или DNS VPS2 |
-| `SSH_USER` | Linux-пользователь для деплоя |
-| `SSH_KEY` | private SSH key для подключения |
-| `SSH_PORT` | опционально, если SSH не на `22` |
+| `SSH_HOST` | строка `SSH_HOST=<detected_public_ip>` |
+| `SSH_USER` | строка `SSH_USER=depuser` |
+| `SSH_KEY` | приватный ключ из блока `BEGIN SSH_KEY` / `END SSH_KEY` |
+| `SSH_PORT` | строка `SSH_PORT=22`, если SSH не на стандартном порту или хочешь зафиксировать порт явно |
 
 `SSH_KEY` вставлять полностью, включая строки:
 
@@ -52,9 +124,9 @@ environment:
 -----END OPENSSH PRIVATE KEY-----
 ```
 
-Не добавляй эти значения в repo files, `.env`, docs или issue comments.
+Важно: добавляй эти значения именно в **Environment secrets** окружения `ai-retail-dev-preprod`, а не в repository-level secrets.
 
-## 4. Рекомендуемые protection rules
+## 7. Рекомендуемые protection rules
 
 Для первого запуска желательно включить ручное подтверждение:
 
@@ -65,34 +137,36 @@ environment:
 
 Если required reviewers недоступны, можно оставить без protection rules, но первый запуск нужно делать вручную и внимательно смотреть logs.
 
-## 5. Подготовить VPS2
+## 8. Дозаполнить runtime env-файл на VPS2
 
-На VPS2 должны быть:
+Bootstrap создаёт placeholder:
 
-1. Docker установлен.
-2. Docker Compose plugin доступен командой:
+```bash
+/opt/stacks/ai-retail-dev-preprod/.env.ai-retail.dev
+```
 
-   ```bash
-   docker compose version
-   ```
+В этот файл нужно вручную вписать реальные переменные приложения на VPS2. Значения нельзя хранить в репозитории.
 
-3. Пользователь `SSH_USER` должен иметь право запускать Docker.
-4. Должен существовать runtime env-файл:
+Минимально проверь:
 
-   ```bash
-   /opt/stacks/ai-retail-dev-preprod/.env.ai-retail.dev
-   ```
+```bash
+sudo ls -la /opt/stacks/ai-retail-dev-preprod
+sudo nano /opt/stacks/ai-retail-dev-preprod/.env.ai-retail.dev
+```
 
-5. Каталог можно создать заранее:
+## 9. Проверить готовность Docker
 
-   ```bash
-   sudo mkdir -p /opt/stacks/ai-retail-dev-preprod
-   sudo chown -R <SSH_USER>:<SSH_USER> /opt/stacks/ai-retail-dev-preprod
-   ```
+Текущий deploy-access bootstrap готовит пользователей, ключи и каталог, но полноценный provisioning ОС остаётся за Ansible с VPS3.
 
-В `.env.ai-retail.dev` должны быть реальные переменные приложения. Их нельзя хранить в репозитории.
+Перед predeploy-check на VPS2 должен работать Docker Compose plugin:
 
-## 6. Проверить image ref локально
+```bash
+docker compose version
+```
+
+Если команды нет, сначала установи Docker через Ansible `docker` role или отдельный provisioning-шаг.
+
+## 10. Проверить image ref локально
 
 Перед запуском workflow проверь image ref:
 
@@ -105,7 +179,7 @@ python tools/deploy/preflight.py \
 
 Ожидаемый результат: JSON с `vps: VPS2`, `deploy_dir: /opt/stacks/ai-retail-dev-preprod` и `env_file: .env.ai-retail.dev`.
 
-## 7. Запустить GitHub Actions Deploy
+## 11. Запустить GitHub Actions Deploy
 
 1. Открой **Actions**.
 2. Выбери workflow **Deploy**.
@@ -121,7 +195,7 @@ python tools/deploy/preflight.py \
 5. Запусти workflow.
 6. Если включены required reviewers, подтверди deployment.
 
-## 8. Проверить успешный результат
+## 12. Проверить успешный результат
 
 В логах job `deploy` должно быть:
 
@@ -143,7 +217,7 @@ cd /opt/stacks/ai-retail-dev-preprod
 docker compose --env-file .env.deploy -f docker-compose.yml config
 ```
 
-## 9. Что делать при ошибках
+## 13. Что делать при ошибках
 
 Если workflow пишет, что secrets пустые:
 
@@ -164,11 +238,11 @@ docker compose --env-file .env.deploy -f docker-compose.yml config
 - проверь наличие `/opt/stacks/ai-retail-dev-preprod/.env.ai-retail.dev`;
 - проверь права пользователя на каталог `/opt/stacks/ai-retail-dev-preprod`.
 
-## 10. Важное ограничение
+## 14. Важное ограничение
 
 Этот шаг не запускает контейнеры и не делает реальный rollout. Он только проверяет:
 
-- GitHub Environment secrets;
+- bootstrap-generated GitHub Environment secrets;
 - SSH-доступ;
 - наличие runtime env-файла;
 - валидность compose-конфига на VPS2.
