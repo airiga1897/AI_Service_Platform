@@ -62,24 +62,107 @@ sudo bash setup_vps.sh vps2-preprod
 
 ## 3. Добавить Ansible control public key
 
-После bootstrap VPS3 возьми public key из блока:
+Цель этого шага: разрешить VPS3 подключаться к VPS1 и VPS2 по SSH от имени пользователя `ansible`, чтобы все дальнейшие настройки выполнялись Ansible-плейбуками с management-ноды.
+
+После bootstrap VPS3 в выводе скрипта будет блок:
 
 ```text
 === Ansible control public key for VPS1/VPS2 authorized_keys ===
 ```
 
-Добавление этого public key на VPS1 и VPS2 должно быть частью bootstrap/Ansible-подготовки managed nodes. Ручное редактирование `authorized_keys` допустимо только как временный аварийный fallback, если автоматический шаг ещё не готов.
+Сразу под этим заголовком будет одна строка public key. Она обычно начинается с `ssh-ed25519` или `ssh-rsa` и заканчивается комментарием вроде `ansible-control@vps3-management`.
 
-Fallback-вариант:
+Скопируй **всю строку целиком**. Это public key, его можно передавать на VPS1/VPS2. Private key из блока `BEGIN ANSIBLE CONTROL KEY` на VPS1/VPS2 не копируется.
+
+На VPS1 и VPS2 после `sudo bash setup_vps.sh vps1-prod` / `sudo bash setup_vps.sh vps2-preprod` уже должен существовать пользователь `ansible` и файл:
+
+```text
+/home/ansible/.ssh/authorized_keys
+```
+
+Добавь public key VPS3 в этот файл на **каждой** managed node.
+
+Команда на VPS1:
 
 ```bash
-sudo -u ansible mkdir -p /home/ansible/.ssh
-printf '%s\n' '<ANSIBLE_CONTROL_PUBLIC_KEY>' | sudo tee -a /home/ansible/.ssh/authorized_keys >/dev/null
-sudo chmod 700 /home/ansible/.ssh
+ANSIBLE_CONTROL_PUBLIC_KEY='<PASTE_FULL_PUBLIC_KEY_FROM_VPS3_OUTPUT>'
+
+sudo install -d -m 700 -o ansible -g ansible /home/ansible/.ssh
+printf '%s\n' "$ANSIBLE_CONTROL_PUBLIC_KEY" | sudo tee -a /home/ansible/.ssh/authorized_keys >/dev/null
+sudo chown ansible:ansible /home/ansible/.ssh/authorized_keys
 sudo chmod 600 /home/ansible/.ssh/authorized_keys
 ```
 
+Та же команда на VPS2:
+
+```bash
+ANSIBLE_CONTROL_PUBLIC_KEY='<PASTE_FULL_PUBLIC_KEY_FROM_VPS3_OUTPUT>'
+
+sudo install -d -m 700 -o ansible -g ansible /home/ansible/.ssh
+printf '%s\n' "$ANSIBLE_CONTROL_PUBLIC_KEY" | sudo tee -a /home/ansible/.ssh/authorized_keys >/dev/null
+sudo chown ansible:ansible /home/ansible/.ssh/authorized_keys
+sudo chmod 600 /home/ansible/.ssh/authorized_keys
+```
+
+После этого вернись на VPS3 и проверь подключение к VPS1/VPS2. Команды выполняются именно с VPS3:
+
+```bash
+sudo -u ansible ssh -i /home/ansible/.ssh/ansible_control ansible@VPS1_PUBLIC_IP 'hostname && whoami'
+sudo -u ansible ssh -i /home/ansible/.ssh/ansible_control ansible@VPS2_PUBLIC_IP 'hostname && whoami'
+```
+
+Ожидаемый результат:
+
+```text
+<hostname-vps1>
+ansible
+<hostname-vps2>
+ansible
+```
+
+Если SSH спрашивает `Are you sure you want to continue connecting`, ответь `yes`. Это добавит host key в `known_hosts` пользователя `ansible` на VPS3.
+
+Если подключение не работает:
+
+- проверь, что public key скопирован одной строкой без переносов внутри ключа;
+- проверь, что ключ добавлен именно в `/home/ansible/.ssh/authorized_keys`;
+- проверь права:
+
+```bash
+sudo ls -ld /home/ansible /home/ansible/.ssh
+sudo ls -l /home/ansible/.ssh/authorized_keys
+sudo tail -n 5 /home/ansible/.ssh/authorized_keys
+```
+
+- проверь, что пользователь `ansible` существует:
+
+```bash
+id ansible
+```
+
+- проверь firewall/security group: VPS3 должен иметь доступ к SSH-порту VPS1/VPS2.
+
 Если на managed node нет пользователя `ansible`, не создавай его руками как основной путь: повторно запусти bootstrap с нужным `ANSIBLE_USER`.
+
+Целевое состояние на будущее: этот шаг должен стать полностью скриптовым. Например, bootstrap managed node сможет принимать public key через переменную окружения:
+
+```bash
+sudo ANSIBLE_AUTHORIZED_KEY='<PASTE_FULL_PUBLIC_KEY_FROM_VPS3_OUTPUT>' bash setup_vps.sh vps1-prod
+sudo ANSIBLE_AUTHORIZED_KEY='<PASTE_FULL_PUBLIC_KEY_FROM_VPS3_OUTPUT>' bash setup_vps.sh vps2-preprod
+```
+
+Пока такой режим не реализован, добавление public key — единственный временный ручной мост между bootstrap VPS3 и запуском Ansible.
+
+Когда доступ проверен, можно быстро проверить Ansible-связность с VPS3:
+
+```bash
+cd /opt/ai-service-platform
+ansible all -i inventory.ini -m ping
+```
+
+Ожидаемый смысл результата: VPS1 и VPS2 отвечают `pong`.
+
+Если `ansible all -m ping` ещё не готов, потому что реальный `inventory.ini` не создан, переходи к следующему шагу и сначала подготовь inventory.
 
 ## 4. Подготовить inventory/vault вне репозитория
 
