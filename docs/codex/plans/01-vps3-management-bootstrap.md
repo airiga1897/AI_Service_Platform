@@ -9,13 +9,15 @@
 
 ## 1. Bootstrap VPS3
 
-Подключись к VPS3 как `root` или пользователь с `sudo`, положи туда скрипт:
+Подключись к VPS3 как `root` или пользователь с `sudo` и запусти bootstrap-скрипт. Это не ручная настройка ОС: оператор только доставляет и запускает entrypoint, а пользователи, ключи, каталоги и базовые ограничения создаются скриптом.
+
+Скрипт из репозитория:
 
 ```text
 tools/bootstrap/setup_vps.sh
 ```
 
-Запусти:
+Команда запуска на VPS3:
 
 ```bash
 sudo bash setup_vps.sh vps3-management
@@ -66,24 +68,24 @@ sudo bash setup_vps.sh vps2-preprod
 === Ansible control public key for VPS1/VPS2 authorized_keys ===
 ```
 
-Добавь этот public key на VPS1 и VPS2 в `authorized_keys` пользователя, через которого VPS3 будет управлять нодами.
+Добавление этого public key на VPS1 и VPS2 должно быть частью bootstrap/Ansible-подготовки managed nodes. Ручное редактирование `authorized_keys` допустимо только как временный аварийный fallback, если автоматический шаг ещё не готов.
 
-Рекомендуемый минимальный вариант:
+Fallback-вариант:
 
 ```bash
 sudo -u ansible mkdir -p /home/ansible/.ssh
-sudo -u ansible nano /home/ansible/.ssh/authorized_keys
+printf '%s\n' '<ANSIBLE_CONTROL_PUBLIC_KEY>' | sudo tee -a /home/ansible/.ssh/authorized_keys >/dev/null
 sudo chmod 700 /home/ansible/.ssh
 sudo chmod 600 /home/ansible/.ssh/authorized_keys
 ```
 
-Если на managed node нет пользователя `ansible`, создай его или повторно запусти bootstrap с нужным `ANSIBLE_USER`.
+Если на managed node нет пользователя `ansible`, не создавай его руками как основной путь: повторно запусти bootstrap с нужным `ANSIBLE_USER`.
 
 ## 4. Подготовить inventory/vault вне репозитория
 
 Реальный `inventory.ini` с IP и ключами не коммитится.
 
-Используй пример:
+Основной путь: сгенерировать реальный inventory из безопасного шаблона/секретного хранилища вне repo. Пример структуры хранится здесь:
 
 ```text
 infra/ansible/inventory.example.ini
@@ -102,7 +104,7 @@ VPS2_PUBLIC_IP ansible_user=ansible ansible_ssh_private_key_file=/home/ansible/.
 VPS3_PUBLIC_IP ansible_user=ansible ansible_ssh_private_key_file=/home/ansible/.ssh/ansible_control
 ```
 
-Secrets для Ansible хранятся в Ansible Vault, SOPS или другом encrypted source, но не в repo.
+Secrets для Ansible хранятся в Ansible Vault, SOPS или другом encrypted source, но не в repo. Если на раннем этапе inventory собирается вручную, это временный операторский артефакт вне репозитория, а не часть platform source of truth.
 
 ## 5. Запустить Ansible с VPS3
 

@@ -11,7 +11,7 @@
 
 Важно: это **временный deploy-access для GitHub Actions**, а не основной способ управления инфраструктурой. Нормальная platform-последовательность начинается с `VPS3` как Ansible control node; см. [`01-vps3-management-bootstrap.md`](01-vps3-management-bootstrap.md).
 
-Главная идея: значения для GitHub Environment не придумываются вручную. Сначала на VPS2 запускается bootstrap-скрипт в target `ai-retail-dev-preprod`, он создаёт пользователей, SSH-ключи, каталог деплоя и выводит готовые значения `SSH_HOST`, `SSH_USER`, `SSH_PORT`, `SSH_KEY`.
+Главная идея: VPS и доступы не настраиваются руками. Сначала на VPS2 запускается bootstrap-скрипт в target `ai-retail-dev-preprod`, он создаёт пользователей, SSH-ключи, каталог деплоя и выводит готовые значения `SSH_HOST`, `SSH_USER`, `SSH_PORT`, `SSH_KEY`. Ручным остаётся только безопасный перенос этих секретов в GitHub Environment или эквивалентная команда через GitHub CLI.
 
 ## 1. Проверить, что VPS3 уже bootstrap/control-ready
 
@@ -25,7 +25,7 @@ VPS3 должен стать Ansible control node. После этого VPS2 м
 
 ## 2. Запустить временный deploy-access bootstrap на VPS2
 
-Подключись к новой VPS2 как `root` или пользователь с `sudo`, положи туда скрипт из репозитория:
+Подключись к новой VPS2 как `root` или пользователь с `sudo` и запусти bootstrap-скрипт из репозитория. Это единственный обязательный операторский вход на пустую VPS; дальше состояние создаётся скриптом.
 
 ```text
 tools/bootstrap/setup_vps.sh
@@ -59,7 +59,7 @@ Target `ai-retail-dev-preprod` является alias для первого GitH
 sudo bash setup_vps.sh vps2-preprod
 ```
 
-## 3. Скопировать значения, которые вывел bootstrap
+## 3. Сохранить значения, которые вывел bootstrap
 
 В конце bootstrap выведет блок:
 
@@ -79,24 +79,52 @@ SSH_KEY=(copy private deploy key below)
 --- END SSH_KEY ---
 ```
 
-Скопируй эти значения для следующего шага. Приватный ключ показывается только для переноса в GitHub Environment. Не сохраняй его в repo files, `.env`, docs, issues или chat logs.
+Сохрани эти значения только на время переноса в GitHub Environment. Приватный ключ показывается только для этого шага. Не сохраняй его в repo files, `.env`, docs, issues или chat logs.
 
-## 4. Открыть настройки репозитория
+## 4. Создать Environment через GitHub CLI
+
+Основной путь — создать Environment и secrets командой, а не кликами в UI. На машине, где установлен и авторизован `gh`, выполни:
+
+```bash
+gh api \
+  --method PUT \
+  repos/airiga1897/AI_Service_Platform/environments/ai-retail-dev-preprod
+```
+
+Затем добавь secrets из вывода bootstrap:
+
+```bash
+gh secret set SSH_HOST --env ai-retail-dev-preprod --repo airiga1897/AI_Service_Platform
+gh secret set SSH_USER --env ai-retail-dev-preprod --repo airiga1897/AI_Service_Platform
+gh secret set SSH_PORT --env ai-retail-dev-preprod --repo airiga1897/AI_Service_Platform
+gh secret set SSH_KEY --env ai-retail-dev-preprod --repo airiga1897/AI_Service_Platform
+```
+
+`gh` запросит значения интерактивно. Для `SSH_KEY` вставь приватный deploy key полностью, включая строки:
+
+```text
+-----BEGIN OPENSSH PRIVATE KEY-----
+...
+-----END OPENSSH PRIVATE KEY-----
+```
+
+Важно: добавляй эти значения именно в **Environment secrets** окружения `ai-retail-dev-preprod`, а не в repository-level secrets.
+
+## 5. UI fallback для Environment
+
+Если GitHub CLI недоступен, можно сделать то же самое через UI:
 
 1. Открой GitHub repo `airiga1897/AI_Service_Platform`.
 2. Перейди в **Settings**.
 3. В левом меню открой **Environments**.
 4. Нажми **New environment**.
-
-## 5. Создать Environment
-
-1. В поле имени введи строго:
+5. В поле имени введи строго:
 
    ```text
    ai-retail-dev-preprod
    ```
 
-2. Нажми **Configure environment**.
+6. Нажми **Configure environment**.
 
 Важно: имя должно совпадать с workflow:
 
@@ -105,7 +133,7 @@ environment:
   name: ai-retail-dev-preprod
 ```
 
-## 6. Добавить Environment secrets
+## 6. UI fallback для Environment secrets
 
 Внутри Environment открой раздел **Environment secrets** и добавь значения, которые вывел bootstrap:
 
@@ -124,7 +152,7 @@ environment:
 -----END OPENSSH PRIVATE KEY-----
 ```
 
-Важно: добавляй эти значения именно в **Environment secrets** окружения `ai-retail-dev-preprod`, а не в repository-level secrets.
+Это fallback к CLI-командам из шага 4. В обоих вариантах секреты не должны попадать в repository-level secrets, repo files, `.env`, docs или issue comments.
 
 ## 7. Рекомендуемые protection rules
 
@@ -145,13 +173,13 @@ Bootstrap создаёт placeholder:
 /opt/stacks/ai-retail-dev-preprod/.env.ai-retail.dev
 ```
 
-В этот файл нужно вручную вписать реальные переменные приложения на VPS2. Значения нельзя хранить в репозитории.
+В этот файл нужно внести реальные переменные приложения на VPS2. На первом этапе это может сделать оператор, но правильное целевое состояние — заполнять файл из Ansible Vault/SOPS или другого секретного хранилища вне repo. Значения нельзя хранить в репозитории.
 
-Минимально проверь:
+Минимальная контрольная проверка:
 
 ```bash
 sudo ls -la /opt/stacks/ai-retail-dev-preprod
-sudo nano /opt/stacks/ai-retail-dev-preprod/.env.ai-retail.dev
+sudo test -f /opt/stacks/ai-retail-dev-preprod/.env.ai-retail.dev
 ```
 
 ## 9. Проверить готовность Docker
@@ -210,7 +238,7 @@ Remote predeploy passed: compose bundle uploaded and docker compose config succe
 /opt/stacks/ai-retail-dev-preprod/.env.deploy
 ```
 
-Проверить вручную на VPS2:
+Контрольная команда на VPS2:
 
 ```bash
 cd /opt/stacks/ai-retail-dev-preprod
