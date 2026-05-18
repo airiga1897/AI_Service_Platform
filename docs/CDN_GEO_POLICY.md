@@ -67,7 +67,7 @@ GeoPolicy должен быть одним общим источником да�
 vpn.example.com
   Russia users     -> VPS3 Russia
   Kazakhstan users -> VPS2 Kazakhstan
-  Europe users     -> VPS1 Latvia
+  Europe users     -> VPS1 Netherlands
 ```
 
 GeoDNS выбирает ближайший или наиболее подходящий VPS до подключения клиента.

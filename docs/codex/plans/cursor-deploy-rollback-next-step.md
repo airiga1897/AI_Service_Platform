@@ -30,7 +30,7 @@
   - `ai-retail-mvp`
   - `ai-retail-dev`
 - VPS layout:
-  - `VPS1`: Latvia, production runtime
+  - `VPS1`: Netherlands, production runtime
   - `VPS2`: Kazakhstan, preprod/hot-standby/backup
   - `VPS3`: Russia, management/monitoring/orchestration
 - SoftEther is a platform VPN service on VPS1/VPS2/VPS3, not a product app.

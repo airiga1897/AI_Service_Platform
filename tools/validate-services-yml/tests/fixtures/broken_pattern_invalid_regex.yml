@@ -13,7 +13,7 @@ platform:
   vps_layout:
     VPS1:
       role: production-runtime
-      country: Latvia
+      country: Netherlands
       initial_runtime: aromaflow-work
       resources_hint: 4cpu-4gb-40gb
       notes: первичный продакшн-трафик и основные данные живут здесь
