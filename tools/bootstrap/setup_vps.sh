@@ -39,6 +39,8 @@ Environment overrides:
   DEPLOY_USER=depuser
   ADMIN_USER=useradmin
   ANSIBLE_USER=ansible
+  ANSIBLE_AUTHORIZED_KEY='ssh-ed25519 ... ansible-control@vps3-management'
+  ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub
   SSH_PORT=22
 
 Supported targets:
@@ -90,6 +92,8 @@ esac
 DEPLOY_USER="${DEPLOY_USER:-depuser}"
 ADMIN_USER="${ADMIN_USER:-useradmin}"
 ANSIBLE_USER="${ANSIBLE_USER:-ansible}"
+ANSIBLE_AUTHORIZED_KEY="${ANSIBLE_AUTHORIZED_KEY:-}"
+ANSIBLE_AUTHORIZED_KEY_FILE="${ANSIBLE_AUTHORIZED_KEY_FILE:-}"
 SSH_PORT="${SSH_PORT:-22}"
 DEPLOY_KEY_NAME="github_deploy"
 ADMIN_KEY_NAME="admin_key"
@@ -169,6 +173,51 @@ setup_ssh_key() {
     print_success "SSH key generated for $user_name"
 }
 
+lock_user_password() {
+    local user_name="$1"
+    passwd -l "$user_name" >/dev/null 2>&1 || true
+    print_success "Password login locked for $user_name"
+}
+
+install_authorized_key() {
+    local user_name="$1"
+    local public_key="$2"
+    local home_dir
+    local ssh_dir
+    local authorized_keys
+
+    home_dir="$(getent passwd "$user_name" | cut -d: -f6)"
+    ssh_dir="$home_dir/.ssh"
+    authorized_keys="$ssh_dir/authorized_keys"
+
+    mkdir -p "$ssh_dir"
+    touch "$authorized_keys"
+    if ! grep -Fxq "$public_key" "$authorized_keys"; then
+        printf '%s\n' "$public_key" >> "$authorized_keys"
+    fi
+    chown -R "$user_name:$user_name" "$ssh_dir"
+    chmod 700 "$ssh_dir"
+    chmod 600 "$authorized_keys"
+}
+
+resolve_ansible_authorized_key() {
+    if [ -n "$ANSIBLE_AUTHORIZED_KEY_FILE" ]; then
+        if [ ! -f "$ANSIBLE_AUTHORIZED_KEY_FILE" ]; then
+            print_error "ANSIBLE_AUTHORIZED_KEY_FILE not found: $ANSIBLE_AUTHORIZED_KEY_FILE"
+            exit 1
+        fi
+        ANSIBLE_AUTHORIZED_KEY="$(tr -d '\r\n' < "$ANSIBLE_AUTHORIZED_KEY_FILE")"
+    fi
+
+    if [ -n "$ANSIBLE_AUTHORIZED_KEY" ] &&
+        ! printf '%s\n' "$ANSIBLE_AUTHORIZED_KEY" | grep -Eq '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp[0-9]+) '; then
+        print_error "ANSIBLE_AUTHORIZED_KEY does not look like an SSH public key."
+        exit 1
+    fi
+}
+
+resolve_ansible_authorized_key
+
 print_header "1/7 - Base packages"
 ensure_command sudo sudo
 ensure_command ssh-keygen openssh-client
@@ -217,6 +266,7 @@ if [ "$NODE_ROLE" = "management" ]; then
     chmod 440 "$ANSIBLE_SUDOERS_FILE"
     visudo -cf "$ANSIBLE_SUDOERS_FILE" >/dev/null
     setup_ssh_key "$ANSIBLE_USER" "$ANSIBLE_KEY_NAME" "ansible-control@$TARGET"
+    lock_user_password "$ANSIBLE_USER"
     print_success "Ansible control user is ready"
 else
     print_header "3b/7 - Ansible managed user"
@@ -227,12 +277,19 @@ else
     chmod 440 "$ANSIBLE_SUDOERS_FILE"
     visudo -cf "$ANSIBLE_SUDOERS_FILE" >/dev/null
     ANSIBLE_HOME="$(getent passwd "$ANSIBLE_USER" | cut -d: -f6)"
-    mkdir -p "$ANSIBLE_HOME/.ssh"
-    touch "$ANSIBLE_HOME/.ssh/authorized_keys"
-    chown -R "$ANSIBLE_USER:$ANSIBLE_USER" "$ANSIBLE_HOME/.ssh"
-    chmod 700 "$ANSIBLE_HOME/.ssh"
-    chmod 600 "$ANSIBLE_HOME/.ssh/authorized_keys"
-    print_warning "Add the VPS3 Ansible control public key to this node after VPS3 bootstrap."
+    if [ -n "$ANSIBLE_AUTHORIZED_KEY" ]; then
+        install_authorized_key "$ANSIBLE_USER" "$ANSIBLE_AUTHORIZED_KEY"
+        print_success "VPS3 Ansible control public key installed for $ANSIBLE_USER"
+    else
+        mkdir -p "$ANSIBLE_HOME/.ssh"
+        touch "$ANSIBLE_HOME/.ssh/authorized_keys"
+        chown -R "$ANSIBLE_USER:$ANSIBLE_USER" "$ANSIBLE_HOME/.ssh"
+        chmod 700 "$ANSIBLE_HOME/.ssh"
+        chmod 600 "$ANSIBLE_HOME/.ssh/authorized_keys"
+        print_warning "Add the VPS3 Ansible control public key to this node after VPS3 bootstrap."
+        print_warning "Or rerun bootstrap with ANSIBLE_AUTHORIZED_KEY='ssh-ed25519 ...'."
+    fi
+    lock_user_password "$ANSIBLE_USER"
     print_warning "Ansible provisioning should run from VPS3, not directly from GitHub Actions."
 fi
 
@@ -322,6 +379,9 @@ echo -e "${GREEN}--- END SSH_KEY ---${NC}"
 echo ""
 
 if [ "$NODE_ROLE" = "management" ]; then
+    cp "$ANSIBLE_KEY_PATH.pub" "$ANSIBLE_HOME/.ssh/${ANSIBLE_KEY_NAME}.managed_nodes.pub"
+    chown "$ANSIBLE_USER:$ANSIBLE_USER" "$ANSIBLE_HOME/.ssh/${ANSIBLE_KEY_NAME}.managed_nodes.pub"
+    chmod 644 "$ANSIBLE_HOME/.ssh/${ANSIBLE_KEY_NAME}.managed_nodes.pub"
     echo -e "${BLUE}=== Ansible control key ($ANSIBLE_USER) ===${NC}"
     echo -e "${GREEN}--- BEGIN ANSIBLE CONTROL KEY ---${NC}"
     cat "$ANSIBLE_KEY_PATH"
@@ -329,6 +389,9 @@ if [ "$NODE_ROLE" = "management" ]; then
     echo ""
     echo -e "${BLUE}=== Ansible control public key for VPS1/VPS2 authorized_keys ===${NC}"
     cat "$ANSIBLE_KEY_PATH.pub"
+    echo ""
+    echo "Saved public key file for managed nodes:"
+    echo "$ANSIBLE_HOME/.ssh/${ANSIBLE_KEY_NAME}.managed_nodes.pub"
     echo ""
 fi
 

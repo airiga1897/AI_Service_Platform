@@ -42,6 +42,8 @@ sudo bash setup_vps.sh vps3-management
 - Ansible control private key;
 - Ansible control public key, который нужно добавить на VPS1/VPS2.
 
+Для пользователя `ansible` пароль не используется. Bootstrap явно блокирует password-login для `ansible`; доступ должен идти только по SSH key с VPS3.
+
 Private keys нельзя сохранять в репозиторий, docs, issues или chat logs.
 
 ## 2. Bootstrap VPS1 и VPS2 как managed nodes
@@ -64,7 +66,15 @@ sudo bash setup_vps.sh vps2-preprod
 
 Цель этого шага: разрешить VPS3 подключаться к VPS1 и VPS2 по SSH от имени пользователя `ansible`, чтобы все дальнейшие настройки выполнялись Ansible-плейбуками с management-ноды.
 
-После bootstrap VPS3 в выводе скрипта будет блок:
+После bootstrap VPS3 public key будет доступен двумя способами.
+
+Первый способ — файл на VPS3:
+
+```bash
+sudo -u ansible cat /home/ansible/.ssh/ansible_control.managed_nodes.pub
+```
+
+Второй способ — блок в выводе bootstrap:
 
 ```text
 === Ansible control public key for VPS1/VPS2 authorized_keys ===
@@ -72,36 +82,86 @@ sudo bash setup_vps.sh vps2-preprod
 
 Сразу под этим заголовком будет одна строка public key. Она обычно начинается с `ssh-ed25519` или `ssh-rsa` и заканчивается комментарием вроде `ansible-control@vps3-management`.
 
-Скопируй **всю строку целиком**. Это public key, его можно передавать на VPS1/VPS2. Private key из блока `BEGIN ANSIBLE CONTROL KEY` на VPS1/VPS2 не копируется.
+Скопируй **всю строку целиком** или используй содержимое файла `/home/ansible/.ssh/ansible_control.managed_nodes.pub`. Это public key, его можно передавать на VPS1/VPS2. Private key из блока `BEGIN ANSIBLE CONTROL KEY` на VPS1/VPS2 не копируется.
 
-На VPS1 и VPS2 после `sudo bash setup_vps.sh vps1-prod` / `sudo bash setup_vps.sh vps2-preprod` уже должен существовать пользователь `ansible` и файл:
+Основной script-first путь: передать public key файлом сразу при bootstrap VPS1/VPS2.
+
+С VPS3 скопируй на VPS1/VPS2 два файла:
 
 ```text
-/home/ansible/.ssh/authorized_keys
+setup_vps.sh
+ansible_control.managed_nodes.pub
 ```
 
-Добавь public key VPS3 в этот файл на **каждой** managed node.
+`ansible_control.managed_nodes.pub` — это файл public key с VPS3:
 
-Команда на VPS1:
-
-```bash
-ANSIBLE_CONTROL_PUBLIC_KEY='<PASTE_FULL_PUBLIC_KEY_FROM_VPS3_OUTPUT>'
-
-sudo install -d -m 700 -o ansible -g ansible /home/ansible/.ssh
-printf '%s\n' "$ANSIBLE_CONTROL_PUBLIC_KEY" | sudo tee -a /home/ansible/.ssh/authorized_keys >/dev/null
-sudo chown ansible:ansible /home/ansible/.ssh/authorized_keys
-sudo chmod 600 /home/ansible/.ssh/authorized_keys
+```text
+/home/ansible/.ssh/ansible_control.managed_nodes.pub
 ```
 
-Та же команда на VPS2:
+Его можно временно положить на managed VPS, например сюда:
+
+```text
+/tmp/ansible_control.managed_nodes.pub
+```
+
+На VPS1:
 
 ```bash
-ANSIBLE_CONTROL_PUBLIC_KEY='<PASTE_FULL_PUBLIC_KEY_FROM_VPS3_OUTPUT>'
+sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash setup_vps.sh vps1-prod
+```
 
-sudo install -d -m 700 -o ansible -g ansible /home/ansible/.ssh
-printf '%s\n' "$ANSIBLE_CONTROL_PUBLIC_KEY" | sudo tee -a /home/ansible/.ssh/authorized_keys >/dev/null
-sudo chown ansible:ansible /home/ansible/.ssh/authorized_keys
-sudo chmod 600 /home/ansible/.ssh/authorized_keys
+На VPS2:
+
+```bash
+sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash setup_vps.sh vps2-preprod
+```
+
+В этом режиме bootstrap сам:
+
+- создаёт пользователя `ansible`;
+- блокирует password-login для `ansible`;
+- создаёт `/home/ansible/.ssh/authorized_keys`;
+- добавляет public key VPS3;
+- выставляет корректные права на `.ssh` и `authorized_keys`.
+
+После успешного bootstrap временный public key файл можно удалить с managed VPS:
+
+```bash
+rm -f /tmp/ansible_control.managed_nodes.pub
+```
+
+Если удобнее передать ключ строкой, bootstrap также поддерживает переменную `ANSIBLE_AUTHORIZED_KEY`:
+
+```bash
+sudo ANSIBLE_AUTHORIZED_KEY='<PASTE_FULL_PUBLIC_KEY_FROM_VPS3_FILE_OR_OUTPUT>' bash setup_vps.sh vps1-prod
+sudo ANSIBLE_AUTHORIZED_KEY='<PASTE_FULL_PUBLIC_KEY_FROM_VPS3_FILE_OR_OUTPUT>' bash setup_vps.sh vps2-preprod
+```
+
+Если VPS1/VPS2 уже были bootstrap-нуты без `ANSIBLE_AUTHORIZED_KEY_FILE`, используй отдельный helper-скрипт донастройки.
+
+Команда донастройки на VPS1:
+
+```bash
+sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash install_ansible_authorized_key.sh
+```
+
+Та же донастройка на VPS2:
+
+```bash
+sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash install_ansible_authorized_key.sh
+```
+
+`install_ansible_authorized_key.sh` лежит в repo:
+
+```text
+tools/bootstrap/install_ansible_authorized_key.sh
+```
+
+Helper также поддерживает строковый режим:
+
+```bash
+sudo ANSIBLE_AUTHORIZED_KEY='<PASTE_FULL_PUBLIC_KEY_FROM_VPS3_FILE_OR_OUTPUT>' bash install_ansible_authorized_key.sh
 ```
 
 После этого вернись на VPS3 и проверь подключение к VPS1/VPS2. Команды выполняются именно с VPS3:
@@ -144,14 +204,14 @@ id ansible
 
 Если на managed node нет пользователя `ansible`, не создавай его руками как основной путь: повторно запусти bootstrap с нужным `ANSIBLE_USER`.
 
-Целевое состояние на будущее: этот шаг должен стать полностью скриптовым. Например, bootstrap managed node сможет принимать public key через переменную окружения:
+Коротко про пароли: у `ansible` на VPS1/VPS2/VPS3 не должно быть рабочего пароля для SSH. Это локальные Linux-пользователи с одинаковым именем, но управление идёт через SSH key от VPS3. Для privilege escalation используется sudo rule `NOPASSWD`, а не пароль пользователя.
+
+Целевое состояние на будущее: отдельный orchestration-шаг может брать public key с VPS3 и донастраивать managed nodes без ручной вставки. Сейчас минимальный script-first контракт уже есть через `ANSIBLE_AUTHORIZED_KEY_FILE`, `ANSIBLE_AUTHORIZED_KEY` и `install_ansible_authorized_key.sh`:
 
 ```bash
-sudo ANSIBLE_AUTHORIZED_KEY='<PASTE_FULL_PUBLIC_KEY_FROM_VPS3_OUTPUT>' bash setup_vps.sh vps1-prod
-sudo ANSIBLE_AUTHORIZED_KEY='<PASTE_FULL_PUBLIC_KEY_FROM_VPS3_OUTPUT>' bash setup_vps.sh vps2-preprod
+sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash setup_vps.sh vps1-prod
+sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash setup_vps.sh vps2-preprod
 ```
-
-Пока такой режим не реализован, добавление public key — единственный временный ручной мост между bootstrap VPS3 и запуском Ansible.
 
 Когда доступ проверен, можно быстро проверить Ansible-связность с VPS3:
 
