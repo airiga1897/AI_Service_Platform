@@ -236,6 +236,7 @@ echo "$ADMIN_USER ALL=(ALL) NOPASSWD: ALL" > "$ADMIN_SUDOERS_FILE"
 chmod 440 "$ADMIN_SUDOERS_FILE"
 visudo -cf "$ADMIN_SUDOERS_FILE" >/dev/null
 setup_ssh_key "$ADMIN_USER" "$ADMIN_KEY_NAME" "$ADMIN_USER@$(hostname)"
+lock_user_password "$ADMIN_USER"
 print_success "Admin user is ready"
 
 print_header "3/7 - Deploy user"
@@ -255,6 +256,7 @@ echo "$DEPLOY_USER ALL=(ALL) NOPASSWD: PLATFORM_DIRS, PLATFORM_DOCKER, PLATFORM_
 chmod 440 "$DEPLOY_SUDOERS_FILE"
 visudo -cf "$DEPLOY_SUDOERS_FILE" >/dev/null
 setup_ssh_key "$DEPLOY_USER" "$DEPLOY_KEY_NAME" "github-actions-deploy@$TARGET"
+lock_user_password "$DEPLOY_USER"
 print_success "Deploy user is ready"
 
 if [ "$NODE_ROLE" = "management" ]; then

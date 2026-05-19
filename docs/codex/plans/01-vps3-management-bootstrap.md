@@ -42,7 +42,7 @@ sudo bash setup_vps.sh vps3-management
 - Ansible control private key;
 - Ansible control public key, который нужно добавить на VPS1/VPS2.
 
-Для пользователя `ansible` пароль не используется. Bootstrap явно блокирует password-login для `ansible`; доступ должен идти только по SSH key с VPS3.
+Для пользователей `useradmin`, `depuser` и `ansible` пароль не используется. Bootstrap явно блокирует password-login для всех трёх; доступ должен идти только по SSH key.
 
 Private keys нельзя сохранять в репозиторий, docs, issues или chat logs.
 
