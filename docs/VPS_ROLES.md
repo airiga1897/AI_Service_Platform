@@ -79,6 +79,60 @@ Ansible group: `vpn_edges`.
 - Нужны HAProxy TCP entrypoints, SoftEther, monitoring agent, firewall rules и
   backup конфигурации SoftEther.
 
+## Operator CSV and inventory generation
+
+`current_alias` — короткий операторский ключ строки CSV: `vps1`, `vps2`,
+`vps3`. Он не является platform role. `roles` задаёт обязанности узла, а
+`ansible_group` задаёт группу для playbook.
+
+| Role(s) in CSV | Ansible group |
+| --- | --- |
+| `production-runtime` | `prod` |
+| `preprod+hot-standby+backup` | `backup` |
+| `management+monitoring+orchestration` | `management` |
+| `vpn-edge` | `vpn_edges` |
+| `vpn-cascade` | future/experimental |
+
+Real endpoints хранятся только в operator CSV на VPS3, например:
+
+```text
+/opt/ai-service-platform/operator/nodes.csv
+```
+
+Безопасный шаблон хранится в `infra/ansible/nodes.example.csv`:
+
+```csv
+current_alias,endpoint,connection,ansible_group,roles,root_password
+vps1,vps01.example.com,ssh,prod,production-runtime+vpn-edge,
+vps2,vps02.example.com,ssh,backup,preprod+hot-standby+backup+vpn-edge,
+vps3,local,local,management,management+monitoring+orchestration+vpn-edge,
+```
+
+Inventory генерируется из CSV:
+
+```bash
+sudo bash tools/bootstrap/create_inventory.sh \
+  --nodes-file /opt/ai-service-platform/operator/nodes.csv \
+  --include vps1,vps2,vps3
+```
+
+Тот же CSV можно использовать для bootstrap по alias:
+
+```bash
+sudo bash tools/bootstrap/setup_vps.sh --nodes-file /tmp/nodes.csv --alias vps2
+```
+
+`root_password` используется только bootstrap runner-ами для первого входа на
+голую VPS. Он не попадает в generated `inventory.ini`, не нужен `setup_vps.sh`
+как постоянный секрет и не копируется на VPS в real form: runner передаёт
+sanitized CSV с пустой последней колонкой.
+
+Реальные endpoint-ы и root passwords остаются только в operator `nodes.csv`.
+Generated `inventory.ini` на VPS3 тоже не коммитится.
+
+`deploy-access` не является ролью VPS. Это временная настройка workflow или
+GitHub Environment для конкретного деплой-сценария.
+
 ## Migration model
 
 Для одиночных ролей состояние хранится в `platform_roles`:

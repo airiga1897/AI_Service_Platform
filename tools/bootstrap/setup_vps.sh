@@ -7,6 +7,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
+EXPECTED_CSV_HEADER="current_alias,endpoint,connection,ansible_group,roles,root_password"
 
 print_header() {
     echo ""
@@ -31,6 +32,10 @@ print_error() {
 usage() {
     cat <<'USAGE'
 Usage:
+  sudo bash tools/bootstrap/setup_vps.sh --nodes-file /tmp/nodes.csv --alias vps3
+  sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash tools/bootstrap/setup_vps.sh --nodes-file /tmp/nodes.csv --alias vps2
+
+Fallback target mode:
   sudo bash tools/bootstrap/setup_vps.sh vps3-management
   sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash tools/bootstrap/setup_vps.sh vps2-preprod
   sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash tools/bootstrap/setup_vps.sh vps1-prod
@@ -48,46 +53,206 @@ Supported targets:
   vps2-preprod          Managed preprod / hot-standby / backup node.
   vps1-prod             Managed production node.
   ai-retail-dev-preprod Temporary alias for GitHub Actions deploy access to VPS2.
+
+CSV columns:
+  current_alias,endpoint,connection,ansible_group,roles,root_password
 USAGE
 }
 
-TARGET="${1:-}"
+NODES_FILE=""
+NODE_ALIAS=""
+TARGET=""
+CSV_ROLES=""
+
+has_role() {
+    local wanted="$1"
+    case "+$CSV_ROLES+" in
+        *"+$wanted+"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+validate_roles() {
+    local roles="$1"
+    local line_number="$2"
+    local role
+    local old_ifs="$IFS"
+    IFS=+
+    for role in $roles; do
+        IFS="$old_ifs"
+        case "$role" in
+            production-runtime|preprod|hot-standby|backup|management|monitoring|orchestration|vpn-edge|vpn-cascade) ;;
+            *)
+                print_error "nodes.csv line $line_number has unsupported role: $role"
+                exit 1
+                ;;
+        esac
+        IFS=+
+    done
+    IFS="$old_ifs"
+}
+
+resolve_behavior_from_roles() {
+    if has_role management || has_role orchestration; then
+        NODE_ROLE="management"
+        DEPLOY_DIR="/opt/ai-service-platform"
+        RUNTIME_ENV_FILE=""
+        GITHUB_ENVIRONMENT="$NODE_ALIAS"
+        TARGET="$NODE_ALIAS"
+        return
+    fi
+
+    if has_role production-runtime || has_role preprod || has_role hot-standby || has_role backup || has_role vpn-edge || has_role vpn-cascade; then
+        NODE_ROLE="managed"
+        DEPLOY_DIR="/opt/stacks"
+        RUNTIME_ENV_FILE=""
+        GITHUB_ENVIRONMENT="$NODE_ALIAS"
+        TARGET="$NODE_ALIAS"
+        return
+    fi
+
+    print_error "Alias $NODE_ALIAS has no bootstrap-supported role in nodes.csv: $CSV_ROLES"
+    exit 1
+}
+
+resolve_target_from_nodes_file() {
+    if [ ! -f "$NODES_FILE" ]; then
+        print_error "nodes file not found: $NODES_FILE"
+        exit 1
+    fi
+
+    local line_number=0
+    local header_seen="false"
+    local current_alias endpoint connection ansible_group roles root_password extra
+
+    while IFS=, read -r current_alias endpoint connection ansible_group roles root_password extra || [ -n "${current_alias:-}" ]; do
+        line_number=$((line_number + 1))
+        current_alias="${current_alias//$'\r'/}"
+        endpoint="${endpoint//$'\r'/}"
+        connection="${connection//$'\r'/}"
+        ansible_group="${ansible_group//$'\r'/}"
+        roles="${roles//$'\r'/}"
+        root_password="${root_password//$'\r'/}"
+        extra="${extra//$'\r'/}"
+
+        if [ "$line_number" -eq 1 ]; then
+            local header
+            header="$current_alias,$endpoint,$connection,$ansible_group,$roles,$root_password"
+            if [ "$header" != "$EXPECTED_CSV_HEADER" ] || [ -n "$extra" ]; then
+                print_error "nodes.csv header must be exactly:"
+                echo "$EXPECTED_CSV_HEADER"
+                exit 1
+            fi
+            header_seen="true"
+            continue
+        fi
+
+        if [ "$current_alias" = "$NODE_ALIAS" ]; then
+            if [ -z "$roles" ]; then
+                print_error "nodes.csv line $line_number has empty roles for alias $NODE_ALIAS"
+                exit 1
+            fi
+            validate_roles "$roles" "$line_number"
+            CSV_ROLES="$roles"
+            resolve_behavior_from_roles
+            return
+        fi
+    done < "$NODES_FILE"
+
+    if [ "$header_seen" != "true" ]; then
+        print_error "nodes.csv is empty: $NODES_FILE"
+        exit 1
+    fi
+
+    print_error "Alias not found in nodes file: $NODE_ALIAS"
+    exit 1
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --nodes-file)
+            NODES_FILE="${2:-}"
+            shift 2
+            ;;
+        --alias)
+            NODE_ALIAS="${2:-}"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        --*)
+            print_error "Unknown option: $1"
+            usage
+            exit 1
+            ;;
+        *)
+            if [ -n "$TARGET" ]; then
+                print_error "Only one fallback target can be provided."
+                usage
+                exit 1
+            fi
+            TARGET="$1"
+            shift
+            ;;
+    esac
+done
+
+CSV_MODE="false"
+if [ -n "$NODES_FILE" ] || [ -n "$NODE_ALIAS" ]; then
+    if [ -z "$NODES_FILE" ] || [ -z "$NODE_ALIAS" ]; then
+        print_error "--nodes-file and --alias must be used together."
+        usage
+        exit 1
+    fi
+    if [ -n "$TARGET" ]; then
+        print_error "Use either --nodes-file/--alias or fallback target mode, not both."
+        usage
+        exit 1
+    fi
+    CSV_MODE="true"
+    resolve_target_from_nodes_file
+fi
+
 if [ -z "$TARGET" ]; then
     usage
     exit 1
 fi
 
-case "$TARGET" in
-    vps3-management)
-        NODE_ROLE="management"
-        DEPLOY_DIR="/opt/ai-service-platform"
-        RUNTIME_ENV_FILE=""
-        GITHUB_ENVIRONMENT="vps3-management"
-        ;;
-    vps2-preprod)
-        NODE_ROLE="managed"
-        DEPLOY_DIR="/opt/stacks"
-        RUNTIME_ENV_FILE=""
-        GITHUB_ENVIRONMENT="vps2-preprod"
-        ;;
-    vps1-prod)
-        NODE_ROLE="managed"
-        DEPLOY_DIR="/opt/stacks"
-        RUNTIME_ENV_FILE=""
-        GITHUB_ENVIRONMENT="vps1-prod"
-        ;;
-    ai-retail-dev-preprod)
-        NODE_ROLE="deploy-access"
-        DEPLOY_DIR="/opt/stacks/ai-retail-dev-preprod"
-        RUNTIME_ENV_FILE="${DEPLOY_DIR}/.env.ai-retail.dev"
-        GITHUB_ENVIRONMENT="ai-retail-dev-preprod"
-        ;;
-    *)
-        print_error "Unsupported bootstrap target: $TARGET"
-        usage
-        exit 1
-        ;;
-esac
+if [ "$CSV_MODE" != "true" ]; then
+    case "$TARGET" in
+        vps3-management)
+            NODE_ROLE="management"
+            DEPLOY_DIR="/opt/ai-service-platform"
+            RUNTIME_ENV_FILE=""
+            GITHUB_ENVIRONMENT="vps3-management"
+            ;;
+        vps2-preprod)
+            NODE_ROLE="managed"
+            DEPLOY_DIR="/opt/stacks"
+            RUNTIME_ENV_FILE=""
+            GITHUB_ENVIRONMENT="vps2-preprod"
+            ;;
+        vps1-prod)
+            NODE_ROLE="managed"
+            DEPLOY_DIR="/opt/stacks"
+            RUNTIME_ENV_FILE=""
+            GITHUB_ENVIRONMENT="vps1-prod"
+            ;;
+        ai-retail-dev-preprod)
+            NODE_ROLE="deploy-access"
+            DEPLOY_DIR="/opt/stacks/ai-retail-dev-preprod"
+            RUNTIME_ENV_FILE="${DEPLOY_DIR}/.env.ai-retail.dev"
+            GITHUB_ENVIRONMENT="ai-retail-dev-preprod"
+            ;;
+        *)
+            print_error "Unsupported bootstrap target: $TARGET"
+            usage
+            exit 1
+            ;;
+    esac
+fi
 
 DEPLOY_USER="${DEPLOY_USER:-depuser}"
 ADMIN_USER="${ADMIN_USER:-useradmin}"
@@ -225,10 +390,18 @@ if [ "$NODE_ROLE" = "managed" ] && [ -z "$ANSIBLE_AUTHORIZED_KEY" ]; then
     echo "  /home/ansible/.ssh/ansible_control.managed_nodes.pub -> /tmp/ansible_control.managed_nodes.pub"
     echo ""
     echo "Then run:"
-    echo "  sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash setup_vps.sh $TARGET"
+    if [ "$CSV_MODE" = "true" ]; then
+        echo "  sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash setup_vps.sh --nodes-file $NODES_FILE --alias $NODE_ALIAS"
+    else
+        echo "  sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash setup_vps.sh $TARGET"
+    fi
     echo ""
     echo "String fallback:"
-    echo "  sudo ANSIBLE_AUTHORIZED_KEY='ssh-ed25519 ... ansible-control@vps3-management' bash setup_vps.sh $TARGET"
+    if [ "$CSV_MODE" = "true" ]; then
+        echo "  sudo ANSIBLE_AUTHORIZED_KEY='ssh-ed25519 ... ansible-control@vps3-management' bash setup_vps.sh --nodes-file $NODES_FILE --alias $NODE_ALIAS"
+    else
+        echo "  sudo ANSIBLE_AUTHORIZED_KEY='ssh-ed25519 ... ansible-control@vps3-management' bash setup_vps.sh $TARGET"
+    fi
     exit 1
 fi
 
