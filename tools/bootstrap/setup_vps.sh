@@ -32,8 +32,8 @@ usage() {
     cat <<'USAGE'
 Usage:
   sudo bash tools/bootstrap/setup_vps.sh vps3-management
-  sudo bash tools/bootstrap/setup_vps.sh vps2-preprod
-  sudo bash tools/bootstrap/setup_vps.sh vps1-prod
+  sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash tools/bootstrap/setup_vps.sh vps2-preprod
+  sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash tools/bootstrap/setup_vps.sh vps1-prod
 
 Environment overrides:
   DEPLOY_USER=depuser
@@ -217,6 +217,20 @@ resolve_ansible_authorized_key() {
 }
 
 resolve_ansible_authorized_key
+
+if [ "$NODE_ROLE" = "managed" ] && [ -z "$ANSIBLE_AUTHORIZED_KEY" ]; then
+    print_error "Managed target $TARGET requires the VPS3 Ansible control public key."
+    echo ""
+    echo "Copy this public key file from VPS3 to the managed VPS:"
+    echo "  /home/ansible/.ssh/ansible_control.managed_nodes.pub -> /tmp/ansible_control.managed_nodes.pub"
+    echo ""
+    echo "Then run:"
+    echo "  sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash setup_vps.sh $TARGET"
+    echo ""
+    echo "String fallback:"
+    echo "  sudo ANSIBLE_AUTHORIZED_KEY='ssh-ed25519 ... ansible-control@vps3-management' bash setup_vps.sh $TARGET"
+    exit 1
+fi
 
 print_header "1/7 - Base packages"
 ensure_command sudo sudo
