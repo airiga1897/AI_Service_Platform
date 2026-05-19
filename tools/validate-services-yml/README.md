@@ -6,7 +6,8 @@ Validates the `services.yml` registry contract for the AI Service Platform.
 
 **Platform invariants**
 
-- Three-node VPS layout (`VPS1`/`VPS2`/`VPS3`) with required fields.
+- Physical node metadata (`country`/`city`/`datacenter`) and platform role bindings.
+- Compatibility VPS aliases (`VPS1`/`VPS2`/`VPS3`) with required current-layout fields.
 - Source policy: source from Git only, deploy preferred via immutable Docker image refs.
 - SoftEther as a required platform-owned edge/VPN component (not owned by any runtime instance).
 - SoftEther TCP listener set, future-optional UDP set, HAProxy publish model.

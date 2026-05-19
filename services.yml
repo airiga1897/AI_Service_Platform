@@ -25,6 +25,47 @@ platform:
     deploy_from_git_only: false
     preferred_deploy_artifact: immutable_docker_image_ref
     branch_names_are_build_policy_only: true
+  physical_nodes:
+    vps-nl-qupra-01:
+      current_alias: VPS1
+      country: Netherlands
+      city: Amsterdam
+      datacenter: Qupra DC2
+    vps-kz-ahost-01:
+      current_alias: VPS2
+      country: Kazakhstan
+      city: Almaty
+      datacenter: Ahost
+    vps-ru-ixcellerate-01:
+      current_alias: VPS3
+      country: Russia
+      city: Moscow
+      datacenter: IXcellerate
+  platform_roles:
+    production-runtime:
+      current_alias: VPS1
+      ansible_group: prod
+      active_node: vps-nl-qupra-01
+      candidate_node: null
+      old_node: null
+    preprod-hot-standby-backup:
+      current_alias: VPS2
+      ansible_group: backup
+      active_node: vps-kz-ahost-01
+      candidate_node: null
+      old_node: null
+    management-monitoring-orchestration:
+      current_alias: VPS3
+      ansible_group: management
+      active_node: vps-ru-ixcellerate-01
+      candidate_node: null
+      old_node: null
+    vpn-only-edge:
+      current_alias: null
+      ansible_group: vpn_edges
+      active_nodes: []
+      candidate_nodes: []
+      old_nodes: []
   vps_layout:
     VPS1:
       role: production-runtime

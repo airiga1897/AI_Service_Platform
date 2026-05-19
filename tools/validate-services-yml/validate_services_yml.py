@@ -83,6 +83,116 @@ def validate_platform(errors: list[str], data: dict[str, Any]) -> None:
     if source_policy.get("branch_names_are_build_policy_only") is not True:
         fail(errors, "platform.source_policy.branch_names_are_build_policy_only must be true")
 
+    physical_nodes = require_mapping(
+        errors, platform.get("physical_nodes"), "platform.physical_nodes"
+    )
+    forbidden_physical_node_fields = {
+        "ip",
+        "public_ip",
+        "public_ip_hint",
+        "hostname",
+        "public_endpoint",
+        "provider",
+        "provider_id",
+        "tariff",
+        "plan",
+        "os_template",
+        "lifecycle_state",
+    }
+    expected_physical_nodes = {
+        "vps-nl-qupra-01": {
+            "current_alias": "VPS1",
+            "country": "Netherlands",
+            "city": "Amsterdam",
+            "datacenter": "Qupra DC2",
+        },
+        "vps-kz-ahost-01": {
+            "current_alias": "VPS2",
+            "country": "Kazakhstan",
+            "city": "Almaty",
+            "datacenter": "Ahost",
+        },
+        "vps-ru-ixcellerate-01": {
+            "current_alias": "VPS3",
+            "country": "Russia",
+            "city": "Moscow",
+            "datacenter": "IXcellerate",
+        },
+    }
+    for node_name, expected in expected_physical_nodes.items():
+        node_data = require_mapping(
+            errors,
+            physical_nodes.get(node_name),
+            f"platform.physical_nodes.{node_name}",
+        )
+        for field, expected_value in expected.items():
+            if node_data.get(field) != expected_value:
+                fail(
+                    errors,
+                    f"platform.physical_nodes.{node_name}.{field} must be {expected_value!r}",
+                )
+        for field in forbidden_physical_node_fields:
+            if field in node_data:
+                fail(
+                    errors,
+                    f"platform.physical_nodes.{node_name}.{field} must not be stored in services.yml",
+                )
+
+    platform_roles = require_mapping(
+        errors, platform.get("platform_roles"), "platform.platform_roles"
+    )
+    expected_roles = {
+        "production-runtime": {
+            "current_alias": "VPS1",
+            "ansible_group": "prod",
+            "active_node": "vps-nl-qupra-01",
+        },
+        "preprod-hot-standby-backup": {
+            "current_alias": "VPS2",
+            "ansible_group": "backup",
+            "active_node": "vps-kz-ahost-01",
+        },
+        "management-monitoring-orchestration": {
+            "current_alias": "VPS3",
+            "ansible_group": "management",
+            "active_node": "vps-ru-ixcellerate-01",
+        },
+    }
+    for role_name, expected in expected_roles.items():
+        role_data = require_mapping(
+            errors, platform_roles.get(role_name), f"platform.platform_roles.{role_name}"
+        )
+        for field, expected_value in expected.items():
+            if role_data.get(field) != expected_value:
+                fail(
+                    errors,
+                    f"platform.platform_roles.{role_name}.{field} must be {expected_value!r}",
+                )
+        for field in ("candidate_node", "old_node"):
+            node_ref = role_data.get(field)
+            if node_ref is not None and node_ref not in physical_nodes:
+                fail(
+                    errors,
+                    f"platform.platform_roles.{role_name}.{field} references unknown physical node {node_ref!r}",
+                )
+
+    vpn_edge_role = require_mapping(
+        errors, platform_roles.get("vpn-only-edge"), "platform.platform_roles.vpn-only-edge"
+    )
+    if vpn_edge_role.get("current_alias") is not None:
+        fail(errors, "platform.platform_roles.vpn-only-edge.current_alias must be null")
+    if vpn_edge_role.get("ansible_group") != "vpn_edges":
+        fail(errors, "platform.platform_roles.vpn-only-edge.ansible_group must be 'vpn_edges'")
+    for field in ("active_nodes", "candidate_nodes", "old_nodes"):
+        for node_ref in require_list(
+            errors, vpn_edge_role.get(field), f"platform.platform_roles.vpn-only-edge.{field}"
+        ):
+            if node_ref not in physical_nodes:
+                fail(
+                    errors,
+                    f"platform.platform_roles.vpn-only-edge.{field} references unknown physical node {node_ref!r}",
+                )
+
     vps_layout = require_mapping(errors, platform.get("vps_layout"), "platform.vps_layout")
     for node in ("VPS1", "VPS2", "VPS3"):
         node_data = require_mapping(errors, vps_layout.get(node), f"platform.vps_layout.{node}")

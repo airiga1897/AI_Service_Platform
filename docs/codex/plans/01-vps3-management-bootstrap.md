@@ -7,6 +7,8 @@
 3. После этого Ansible с VPS3 доводит ОС до платформенного состояния.
 4. GitHub Actions deploy-access к `ai-retail-dev/preprod` остаётся временным удобным мостом, а не главным способом управления инфраструктурой.
 
+Важно: `VPS1`, `VPS2` и `VPS3` в этом документе — current aliases текущей схемы. Настоящие platform roles описаны в `services.yml` и `docs/VPS_ROLES.md`: `production-runtime`, `preprod-hot-standby-backup`, `management-monitoring-orchestration`. Bootstrap targets `vps1-prod`, `vps2-preprod`, `vps3-management` пока соответствуют этим aliases; позже их можно обобщить до role-based/node-based targets.
+
 ## 1. Bootstrap VPS3
 
 Подключись к VPS3 как `root` или пользователь с `sudo` и запусти bootstrap-скрипт. Это не ручная настройка ОС: оператор только доставляет и запускает entrypoint, а пользователи, ключи, каталоги и базовые ограничения создаются скриптом.

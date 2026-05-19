@@ -96,6 +96,27 @@ class ValidatorBrokenFixtureTests(unittest.TestCase):
             f"missing unknown-VPS error in: {errors}",
         )
 
+    # ---------- platform roles / physical nodes ----------------------
+    def test_physical_nodes_must_not_store_lifecycle_state(self) -> None:
+        self.data["platform"]["physical_nodes"]["vps-nl-qupra-01"][
+            "lifecycle_state"
+        ] = "active"
+        errors, _ = validate_data(self.data)
+        self.assertTrue(
+            any("lifecycle_state must not be stored" in e for e in errors),
+            f"missing lifecycle_state error in: {errors}",
+        )
+
+    def test_role_candidate_must_reference_known_physical_node(self) -> None:
+        self.data["platform"]["platform_roles"]["production-runtime"][
+            "candidate_node"
+        ] = "missing-node"
+        errors, _ = validate_data(self.data)
+        self.assertTrue(
+            any("candidate_node references unknown physical node" in e for e in errors),
+            f"missing unknown candidate_node error in: {errors}",
+        )
+
     # ---------- deploy contract --------------------------------------
     def test_missing_allowed_image_ref_pattern_is_an_error(self) -> None:
         del self.data["runtime_instances"]["aromaflow-work"]["deploy"][
