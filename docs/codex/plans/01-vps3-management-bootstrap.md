@@ -141,9 +141,11 @@ sudo ANSIBLE_AUTHORIZED_KEY='<PASTE_FULL_PUBLIC_KEY_FROM_VPS3_FILE_OR_OUTPUT>' b
 После bootstrap или recovery вернись на VPS3 и проверь подключение к VPS1/VPS2. Команды выполняются именно с VPS3:
 
 ```bash
-sudo -u ansible ssh -i /home/ansible/.ssh/ansible_control ansible@VPS1_PUBLIC_IP 'hostname && whoami'
-sudo -u ansible ssh -i /home/ansible/.ssh/ansible_control ansible@VPS2_PUBLIC_IP 'hostname && whoami'
+sudo -u ansible ssh -i /home/ansible/.ssh/ansible_control ansible@<VPS1_PUBLIC_IP_OR_DNS> 'hostname && whoami'
+sudo -u ansible ssh -i /home/ansible/.ssh/ansible_control ansible@<VPS2_PUBLIC_IP_OR_DNS> 'hostname && whoami'
 ```
+
+`<VPS1_PUBLIC_IP_OR_DNS>` и `<VPS2_PUBLIC_IP_OR_DNS>` — placeholder-ы. Замени их на реальный публичный IP или DNS, например `vps02.example.com`.
 
 Ожидаемый результат:
 
@@ -205,13 +207,13 @@ infra/ansible/inventory.example.ini
 
 ```ini
 [prod]
-VPS1_PUBLIC_IP ansible_user=ansible ansible_ssh_private_key_file=/home/ansible/.ssh/ansible_control
+<VPS1_PUBLIC_IP_OR_DNS> ansible_user=ansible ansible_ssh_private_key_file=/home/ansible/.ssh/ansible_control
 
 [backup]
-VPS2_PUBLIC_IP ansible_user=ansible ansible_ssh_private_key_file=/home/ansible/.ssh/ansible_control
+<VPS2_PUBLIC_IP_OR_DNS> ansible_user=ansible ansible_ssh_private_key_file=/home/ansible/.ssh/ansible_control
 
 [management]
-VPS3_PUBLIC_IP ansible_user=ansible ansible_ssh_private_key_file=/home/ansible/.ssh/ansible_control
+<VPS3_PUBLIC_IP_OR_DNS> ansible_user=ansible ansible_ssh_private_key_file=/home/ansible/.ssh/ansible_control
 ```
 
 Secrets для Ansible хранятся в Ansible Vault, SOPS или другом encrypted source, но не в repo. Если на раннем этапе inventory собирается вручную, это временный операторский артефакт вне репозитория, а не часть platform source of truth.
