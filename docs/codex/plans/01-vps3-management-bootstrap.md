@@ -2,26 +2,78 @@
 
 Эта инструкция фиксирует правильный порядок первичной инициализации платформы:
 
-1. Сначала поднимается `VPS3` как management/control node.
-2. Затем `VPS1` и `VPS2` готовятся как managed nodes.
-3. После этого Ansible с VPS3 доводит ОС до платформенного состояния.
-4. GitHub Actions deploy-access к `ai-retail-dev/preprod` остаётся временным удобным мостом, а не главным способом управления инфраструктурой.
+1. Сначала с операторской машины bootstrap-ится `vps3` как management/control node.
+2. Runner автоматически сохраняет Ansible control public key в `./operator/ansible_control.managed_nodes.pub`.
+3. Затем `vps1` и `vps2` bootstrap-ятся как managed nodes с этим public key.
+4. Только после bootstrap всех VPS запускается отдельный Ansible-этап с VPS3.
 
-Важно: `VPS1`, `VPS2` и `VPS3` в этом документе — current aliases текущей схемы. В operator CSV они пишутся как `vps1`, `vps2`, `vps3`. Настоящие обязанности узла задаются в колонке `roles`: например `production-runtime+vpn-edge`, `preprod+hot-standby+backup+vpn-edge`, `management+monitoring+orchestration+vpn-edge`.
+Важно: `vps1`, `vps2`, `vps3` здесь — короткие operator aliases текущей схемы, а не настоящие platform roles. Обязанности узла задаются в CSV-колонке `roles`.
 
-## 1. Bootstrap VPS3
+Bootstrap и Ansible не смешиваются:
 
-Подключись к VPS3 как `root` или пользователь с `sudo` и запусти bootstrap-скрипт. Это не ручная настройка ОС: оператор только доставляет и запускает entrypoint, а пользователи, ключи, каталоги и базовые ограничения создаются скриптом.
+| Этап | Что делает |
+| --- | --- |
+| Bootstrap | Пользователи, SSH keys, базовые sudo-права, каталоги, запрет root SSH |
+| Ansible | Docker, firewall, fail2ban, SoftEther, edge, monitoring, backup, platform tooling |
 
-Скрипт из репозитория:
+Bootstrap runners не запускают `ansible-playbook`.
 
-```text
-tools/bootstrap/setup_vps.sh
+## 1. Подготовить operator CSV
+
+На операторской машине создай локальную ignored-папку:
+
+```powershell
+mkdir operator
 ```
 
-Основной путь: запускать bootstrap runner с операторской машины. Он читает real `nodes.csv`, подключается к VPS по временному `root_password`, копирует `setup_vps.sh`, копирует sanitized CSV без root password и запускает bootstrap по alias.
+Создай real CSV:
 
-Windows:
+```text
+./operator/nodes.csv
+```
+
+Header должен быть строго таким:
+
+```csv
+current_alias,endpoint,connection,ansible_group,roles,root_password
+```
+
+Пример структуры:
+
+```csv
+current_alias,endpoint,connection,ansible_group,roles,root_password
+vps1,vps01.example.com,ssh,prod,production-runtime+vpn-edge,<TEMP_ROOT_PASSWORD_VPS1>
+vps2,vps02.example.com,ssh,backup,preprod+hot-standby+backup+vpn-edge,<TEMP_ROOT_PASSWORD_VPS2>
+vps3,vps03.example.com,ssh,management,management+monitoring+orchestration+vpn-edge,<TEMP_ROOT_PASSWORD_VPS3>
+```
+
+`root_password` используется только runner-ом для первого входа на голую VPS. На VPS копируется sanitized CSV без root password. Постоянный вход по паролю не включается.
+
+Безопасный template без реальных адресов и паролей хранится здесь:
+
+```text
+infra/ansible/nodes.example.csv
+```
+
+Real `./operator/nodes.csv` не коммитится.
+
+## 2. Bootstrap VPS3
+
+VPS3 — текущий management/control node. На нем bootstrap создаёт пользователя `ansible`, private key:
+
+```text
+/home/ansible/.ssh/ansible_control
+```
+
+и public key для managed nodes:
+
+```text
+/home/ansible/.ssh/ansible_control.managed_nodes.pub
+```
+
+Private key остается только на VPS3. Public key runner автоматически скачивает на операторскую машину.
+
+### Windows
 
 ```powershell
 .\tools\bootstrap\bootstrap_from_windows.ps1 `
@@ -29,7 +81,31 @@ Windows:
   -Alias vps3
 ```
 
-WSL/Linux/macOS:
+После успешного выполнения появится файл:
+
+```text
+.\operator\ansible_control.managed_nodes.pub
+```
+
+Если файл уже существует, runner остановится и попросит использовать `-Force`, чтобы не перезаписать ключ случайно:
+
+```powershell
+.\tools\bootstrap\bootstrap_from_windows.ps1 `
+  -NodesFile .\operator\nodes.csv `
+  -Alias vps3 `
+  -Force
+```
+
+Если нужен другой путь для public key:
+
+```powershell
+.\tools\bootstrap\bootstrap_from_windows.ps1 `
+  -NodesFile .\operator\nodes.csv `
+  -Alias vps3 `
+  -OutputAnsibleAuthorizedKeyFile .\operator\ansible_control.managed_nodes.pub
+```
+
+### WSL/Linux/macOS
 
 ```bash
 bash tools/bootstrap/bootstrap_from_unix.sh \
@@ -37,65 +113,37 @@ bash tools/bootstrap/bootstrap_from_unix.sh \
   --alias vps3
 ```
 
-Если на VPS уже скопирован sanitized operator CSV, bootstrap можно запускать по alias:
+После успешного выполнения появится файл:
+
+```text
+./operator/ansible_control.managed_nodes.pub
+```
+
+Если файл уже существует, runner остановится. Для осознанной перезаписи:
 
 ```bash
-sudo bash setup_vps.sh --nodes-file /tmp/nodes.csv --alias vps3
+bash tools/bootstrap/bootstrap_from_unix.sh \
+  --nodes-file ./operator/nodes.csv \
+  --alias vps3 \
+  --force
 ```
 
-Fallback-команда запуска на VPS3 без CSV:
+Если нужен другой путь для public key:
 
 ```bash
-sudo bash setup_vps.sh vps3-management
+bash tools/bootstrap/bootstrap_from_unix.sh \
+  --nodes-file ./operator/nodes.csv \
+  --alias vps3 \
+  --output-ansible-authorized-key-file ./operator/ansible_control.managed_nodes.pub
 ```
 
-По умолчанию скрипт создаёт:
+## 3. Bootstrap VPS1/VPS2 как managed nodes
 
-| Параметр | Значение |
-| --- | --- |
-| target | `vps3-management` |
-| deploy user | `depuser` |
-| admin user | `useradmin` |
-| Ansible control user | `ansible` |
-| platform dir | `/opt/ai-service-platform` |
+Managed VPS должны получить public key от VPS3 сразу во время bootstrap. Если ключ не передан, `setup_vps.sh` остановится до установки пакетов, создания пользователей и каталогов.
 
-Для alias с ролями `management` или `orchestration` bootstrap также ставит минимальные пакеты `git` и `ansible`, чтобы VPS3 могла стать control-нодой без ручной установки Ansible.
+### Windows
 
-В конце скрипт выведет:
-
-- admin private key для доступа оператора к VPS3;
-- deploy private key для возможных будущих GitHub/Semaphore задач;
-- Ansible control private key;
-- Ansible control public key, который нужно добавить на VPS1/VPS2.
-
-Для пользователей `useradmin`, `depuser` и `ansible` пароль не используется. Bootstrap явно блокирует password-login для всех трёх; доступ должен идти только по SSH key.
-
-Private keys нельзя сохранять в репозиторий, docs, issues или chat logs.
-
-## 2. Bootstrap VPS1 и VPS2 как managed nodes
-
-Для `vps1-prod` и `vps2-preprod` public key VPS3 обязателен сразу при запуске bootstrap. Если не передать `ANSIBLE_AUTHORIZED_KEY_FILE` или `ANSIBLE_AUTHORIZED_KEY`, скрипт остановится до установки пакетов, создания пользователей и каталогов.
-
-С VPS3 скопируй на VPS1/VPS2 два файла:
-
-```text
-setup_vps.sh
-ansible_control.managed_nodes.pub
-```
-
-`ansible_control.managed_nodes.pub` — это файл public key с VPS3:
-
-```text
-/home/ansible/.ssh/ansible_control.managed_nodes.pub
-```
-
-На managed VPS его удобно положить сюда:
-
-```text
-/tmp/ansible_control.managed_nodes.pub
-```
-
-С операторской машины для VPS1:
+Для VPS1:
 
 ```powershell
 .\tools\bootstrap\bootstrap_from_windows.ps1 `
@@ -104,7 +152,18 @@ ansible_control.managed_nodes.pub
   -AnsibleAuthorizedKeyFile .\operator\ansible_control.managed_nodes.pub
 ```
 
-или из WSL/Linux/macOS:
+Для VPS2:
+
+```powershell
+.\tools\bootstrap\bootstrap_from_windows.ps1 `
+  -NodesFile .\operator\nodes.csv `
+  -Alias vps2 `
+  -AnsibleAuthorizedKeyFile .\operator\ansible_control.managed_nodes.pub
+```
+
+### WSL/Linux/macOS
+
+Для VPS1:
 
 ```bash
 bash tools/bootstrap/bootstrap_from_unix.sh \
@@ -113,152 +172,75 @@ bash tools/bootstrap/bootstrap_from_unix.sh \
   --ansible-authorized-key-file ./operator/ansible_control.managed_nodes.pub
 ```
 
-Для VPS2 команды такие же, но `Alias/--alias` равен `vps2`.
-
-Runner копирует на VPS sanitized `/tmp/nodes.csv` без root password. `setup_vps.sh` берёт роли из строки alias и сам выбирает поведение: management node или managed node. Managed nodes требуют public key VPS3 сразу при bootstrap.
-
-Fallback-команды без CSV остаются допустимы:
+Для VPS2:
 
 ```bash
-sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash setup_vps.sh vps1-prod
-sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash setup_vps.sh vps2-preprod
+bash tools/bootstrap/bootstrap_from_unix.sh \
+  --nodes-file ./operator/nodes.csv \
+  --alias vps2 \
+  --ansible-authorized-key-file ./operator/ansible_control.managed_nodes.pub
 ```
 
-После успешного bootstrap временный public key файл можно удалить с VPS1/VPS2:
-
-```bash
-rm -f /tmp/ansible_control.managed_nodes.pub
-```
-
-Если удобнее передать ключ строкой, bootstrap также поддерживает переменную `ANSIBLE_AUTHORIZED_KEY`:
-
-```bash
-sudo ANSIBLE_AUTHORIZED_KEY='<PASTE_FULL_PUBLIC_KEY_FROM_VPS3_FILE_OR_OUTPUT>' bash setup_vps.sh vps1-prod
-sudo ANSIBLE_AUTHORIZED_KEY='<PASTE_FULL_PUBLIC_KEY_FROM_VPS3_FILE_OR_OUTPUT>' bash setup_vps.sh vps2-preprod
-```
-
-## 3. Проверить Ansible SSH-доступ с VPS3
-
-Цель этого шага: убедиться, что VPS3 подключается к VPS1 и VPS2 по SSH от имени пользователя `ansible`, чтобы все дальнейшие настройки выполнялись Ansible-плейбуками с management-ноды.
-
-Public key VPS3 можно посмотреть на VPS3:
-
-```bash
-sudo -u ansible cat /home/ansible/.ssh/ansible_control.managed_nodes.pub
-```
-
-Тот же key был напечатан bootstrap-скриптом в блоке:
+Runner копирует на VPS временные файлы:
 
 ```text
-=== Ansible control public key for VPS1/VPS2 authorized_keys ===
+/tmp/setup_vps.sh
+/tmp/nodes.csv
+/tmp/ansible_control.managed_nodes.pub
 ```
 
-Если VPS1/VPS2 были bootstrap-нуты старой версией скрипта без `ANSIBLE_AUTHORIZED_KEY_FILE`, используй отдельный helper-скрипт как recovery.
+После успешного bootstrap runner удаляет эти временные файлы.
 
-Команда донастройки на VPS1:
+## 4. Проверить SSH-доступ Ansible с VPS3
 
-```bash
-sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash install_ansible_authorized_key.sh
-```
-
-Та же донастройка на VPS2:
-
-```bash
-sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash install_ansible_authorized_key.sh
-```
-
-`install_ansible_authorized_key.sh` лежит в repo:
-
-```text
-tools/bootstrap/install_ansible_authorized_key.sh
-```
-
-Helper также поддерживает строковый режим:
-
-```bash
-sudo ANSIBLE_AUTHORIZED_KEY='<PASTE_FULL_PUBLIC_KEY_FROM_VPS3_FILE_OR_OUTPUT>' bash install_ansible_authorized_key.sh
-```
-
-После bootstrap или recovery вернись на VPS3 и проверь подключение к VPS1/VPS2. Команды выполняются именно с VPS3:
+Команды выполняются именно на VPS3.
 
 ```bash
 sudo -u ansible ssh -i /home/ansible/.ssh/ansible_control ansible@<VPS1_PUBLIC_IP_OR_DNS> 'hostname && whoami'
 sudo -u ansible ssh -i /home/ansible/.ssh/ansible_control ansible@<VPS2_PUBLIC_IP_OR_DNS> 'hostname && whoami'
 ```
 
-`<VPS1_PUBLIC_IP_OR_DNS>` и `<VPS2_PUBLIC_IP_OR_DNS>` — placeholder-ы. Замени их на реальный публичный IP или DNS, например `vps02.example.com`.
+`<VPS1_PUBLIC_IP_OR_DNS>` и `<VPS2_PUBLIC_IP_OR_DNS>` — placeholders. Замени их на реальные DNS или IP, например:
+
+```bash
+sudo -u ansible ssh -i /home/ansible/.ssh/ansible_control ansible@vps01.example.com 'hostname && whoami'
+```
 
 Ожидаемый результат:
 
 ```text
-<hostname-vps1>
-ansible
-<hostname-vps2>
+<hostname>
 ansible
 ```
 
 Если SSH спрашивает `Are you sure you want to continue connecting`, ответь `yes`. Это добавит host key в `known_hosts` пользователя `ansible` на VPS3.
 
-Если подключение не работает:
+Если подключение не работает, проверь:
 
-- проверь, что public key скопирован одной строкой без переносов внутри ключа;
-- проверь, что ключ добавлен именно в `/home/ansible/.ssh/authorized_keys`;
-- проверь права:
+- public key есть в `/home/ansible/.ssh/authorized_keys` на managed VPS;
+- пользователь `ansible` существует на managed VPS;
+- права на `/home/ansible/.ssh` и `authorized_keys` корректные;
+- VPS3 имеет сетевой доступ к SSH-порту VPS1/VPS2.
 
-```bash
-sudo ls -ld /home/ansible /home/ansible/.ssh
-sudo ls -l /home/ansible/.ssh/authorized_keys
-sudo tail -n 5 /home/ansible/.ssh/authorized_keys
-```
-
-- проверь, что пользователь `ansible` существует:
+Recovery helper для уже подготовленной VPS:
 
 ```bash
-id ansible
+sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash install_ansible_authorized_key.sh
 ```
 
-- проверь firewall/security group: VPS3 должен иметь доступ к SSH-порту VPS1/VPS2.
+`install_ansible_authorized_key.sh` — аварийный способ доустановить ключ, а не основной bootstrap-путь.
 
-Если на managed node нет пользователя `ansible`, не создавай его руками как основной путь: повторно запусти bootstrap с нужным `ANSIBLE_USER`.
+## 5. Подготовить inventory на VPS3
 
-Коротко про пароли: у `ansible` на VPS1/VPS2/VPS3 не должно быть рабочего пароля для SSH. Это локальные Linux-пользователи с одинаковым именем, но управление идёт через SSH key от VPS3. Для privilege escalation используется sudo rule `NOPASSWD`, а не пароль пользователя.
-
-Когда доступ проверен, можно быстро проверить Ansible-связность с VPS3:
-
-```bash
-cd /opt/ai-service-platform
-ansible all -i inventory.ini -m ping
-```
-
-Ожидаемый смысл результата: VPS1 и VPS2 отвечают `pong`.
-
-Если `ansible all -m ping` ещё не готов, потому что реальный `inventory.ini` не создан, переходи к следующему шагу и сначала подготовь inventory.
-
-## 4. Подготовить inventory/vault вне репозитория
-
-Реальный `inventory.ini` с IP и ключами не коммитится.
-
-Основной путь: сгенерировать реальный inventory на VPS3 из operator CSV. Это не ручное редактирование inventory: оператор один раз поддерживает `nodes.csv`, а скрипт берёт из него alias, endpoint, connection, Ansible group и roles.
-
-```text
-tools/bootstrap/create_inventory.sh
-```
-
-Real CSV хранится вне git:
+Real CSV для дальнейшего управления хранится на VPS3 вне git:
 
 ```text
 /opt/ai-service-platform/operator/nodes.csv
 ```
 
-Для первого bootstrap real CSV на операторской машине может временно содержать `root_password` в последней колонке. Runner использует его только для подключения к голой VPS. На VPS копируется sanitized CSV с пустой последней колонкой, а постоянный вход по паролю не включается.
+Он может быть скопирован из operator-local `./operator/nodes.csv`, но без временных root passwords. Последняя колонка `root_password` должна быть пустой.
 
-Безопасный пример структуры лежит в repo:
-
-```text
-infra/ansible/nodes.example.csv
-```
-
-Основной пример для текущих VPS1/VPS2/VPS3:
+Сгенерировать inventory:
 
 ```bash
 cd /opt/ai-service-platform
@@ -268,19 +250,7 @@ sudo bash tools/bootstrap/create_inventory.sh \
   --check
 ```
 
-Если `--include` не указан, скрипт возьмёт все строки CSV.
-
-По умолчанию скрипт пишет:
-
-```text
-/opt/ai-service-platform/inventory.ini
-```
-
-VPS3 добавляется в inventory как local connection, потому что Ansible запускается прямо с VPS3. Если позже понадобится управлять VPS3 по SSH с другой control-ноды, в CSV меняется `endpoint` и `connection`.
-
-Ручной fallback без CSV остаётся только для аварийных сценариев и описан в `tools/bootstrap/create_inventory.sh --help`. Основной путь — operator CSV.
-
-Без проверки связности:
+Если проверка прошла, создать inventory:
 
 ```bash
 sudo bash tools/bootstrap/create_inventory.sh \
@@ -288,49 +258,42 @@ sudo bash tools/bootstrap/create_inventory.sh \
   --include vps1,vps2,vps3
 ```
 
-Пример безопасной структуры хранится здесь:
+По умолчанию будет создан:
 
 ```text
-infra/ansible/inventory.example.ini
+/opt/ai-service-platform/inventory.ini
 ```
 
-Secrets для Ansible хранятся в Ansible Vault, SOPS или другом encrypted source, но не в repo. Если real inventory нужно пересоздать, повторно запусти `create_inventory.sh`; не редактируй committed example под реальные адреса.
+Real `inventory.ini` не коммитится.
 
-## 5. Запустить Ansible с VPS3
+## 6. Запустить Ansible как отдельный этап
 
-На VPS3 сначала положи или склонируй platform repo в `/opt/ai-service-platform`. Реальные credentials для доступа к GitHub не коммитятся.
-
-После этого:
+После bootstrap и проверки SSH можно запускать Ansible с VPS3:
 
 ```bash
 cd /opt/ai-service-platform
+ansible all -i inventory.ini -m ping
+```
+
+Ожидаемый смысл результата: managed VPS отвечают `pong`.
+
+Затем, когда playbooks готовы:
+
+```bash
 ansible-playbook -i inventory.ini infra/ansible/site.yml --check
 ansible-playbook -i inventory.ini infra/ansible/site.yml
 ```
 
-Первый запуск с `--check` нужен, чтобы увидеть потенциальные изменения без применения.
+Первый запуск с `--check` нужен, чтобы увидеть план изменений без применения.
 
-## 6. Связь с GitHub Environment `ai-retail-dev-preprod`
+## 7. Что не делает bootstrap
 
-GitHub Environment `ai-retail-dev-preprod` нужен для первого predeploy-check на VPS2:
+Bootstrap не настраивает всю ОС и не деплоит приложения. Он не должен:
 
-```text
-ai-retail-dev -> preprod -> VPS2
-```
+- запускать `ansible-playbook`;
+- ставить и конфигурировать Docker как финальное состояние;
+- настраивать SoftEther/HAProxy/Nginx;
+- раскатывать `AromaFlowAI` или `AI_E_Retail`;
+- включать постоянный password-login.
 
-Он не заменяет Ansible management. В дальнейшем GitHub Actions может:
-
-- напрямую выполнять ограниченный predeploy-check на VPS2;
-- или триггерить VPS3/Semaphore, чтобы вся инфраструктурная логика оставалась на management node.
-
-## 7. Важное ограничение
-
-Bootstrap не является полной настройкой ОС. Он только создаёт безопасную точку входа:
-
-- пользователи;
-- SSH keys;
-- базовые sudo-права;
-- первичные каталоги;
-- запрет root SSH.
-
-Полная настройка ОС: Docker, firewall, fail2ban, monitoring, backup, management tooling и будущий SoftEther edge — задача Ansible.
+Все это остается задачей Ansible и следующих operational steps.

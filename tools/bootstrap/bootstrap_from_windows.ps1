@@ -7,11 +7,17 @@ param(
 
     [string]$SetupScript = "tools/bootstrap/setup_vps.sh",
 
-    [string]$AnsibleAuthorizedKeyFile
+    [string]$AnsibleAuthorizedKeyFile,
+
+    [string]$OutputAnsibleAuthorizedKeyFile = ".\operator\ansible_control.managed_nodes.pub",
+
+    [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
 $ExpectedHeader = "current_alias,endpoint,connection,ansible_group,roles,root_password"
+$PublicKeyBeginMarker = "__ANSIBLE_CONTROL_PUBLIC_KEY_BEGIN__"
+$PublicKeyEndMarker = "__ANSIBLE_CONTROL_PUBLIC_KEY_END__"
 
 function Fail($Message) {
     Write-Error $Message
@@ -26,6 +32,10 @@ function Require-File($Path, $Label) {
 
 function Has-Role($Roles, $Role) {
     return ("+$Roles+").Contains("+$Role+")
+}
+
+function Is-ManagementNode($Roles) {
+    return (Has-Role $Roles "management") -or (Has-Role $Roles "orchestration")
 }
 
 Require-File $NodesFile "NodesFile"
@@ -61,6 +71,11 @@ if (-not (Has-Role $row.roles "management") -and -not (Has-Role $row.roles "orch
     Fail "Managed node $Alias requires -AnsibleAuthorizedKeyFile"
 }
 
+$isManagementNode = Is-ManagementNode $row.roles
+if ($isManagementNode -and (Test-Path -LiteralPath $OutputAnsibleAuthorizedKeyFile -PathType Leaf) -and -not $Force) {
+    Fail "Output Ansible public key file already exists: $OutputAnsibleAuthorizedKeyFile. Use -Force to overwrite it."
+}
+
 $sanitized = New-TemporaryFile
 try {
     Set-Content -LiteralPath $sanitized -Value $ExpectedHeader -Encoding ascii
@@ -83,16 +98,54 @@ try {
     }
 
     if ($AnsibleAuthorizedKeyFile) {
-        $remoteCommand = "ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash /tmp/setup_vps.sh --nodes-file /tmp/nodes.csv --alias '$Alias'"
+        $setupCommand = "ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash /tmp/setup_vps.sh --nodes-file /tmp/nodes.csv --alias '$Alias'"
     } else {
-        $remoteCommand = "bash /tmp/setup_vps.sh --nodes-file /tmp/nodes.csv --alias '$Alias'"
+        $setupCommand = "bash /tmp/setup_vps.sh --nodes-file /tmp/nodes.csv --alias '$Alias'"
     }
 
-    & plink -pw $row.root_password $remote $remoteCommand
-    if ($LASTEXITCODE -ne 0) { Fail "remote setup_vps.sh failed" }
+    if ($isManagementNode) {
+        $emitKeyCommand = "if [ `$rc -eq 0 ]; then echo $PublicKeyBeginMarker; cat /home/ansible/.ssh/ansible_control.managed_nodes.pub; echo $PublicKeyEndMarker; fi"
+    } else {
+        $emitKeyCommand = ":"
+    }
+    $remoteCommand = "set +e; $setupCommand; rc=`$?; $emitKeyCommand; rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/ansible_control.managed_nodes.pub; exit `$rc"
 
-    & plink -pw $row.root_password $remote "rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/ansible_control.managed_nodes.pub"
-    if ($LASTEXITCODE -ne 0) { Fail "remote cleanup failed" }
+    $remoteOutput = & plink -pw $row.root_password $remote $remoteCommand 2>&1
+    $remoteExitCode = $LASTEXITCODE
+    $remoteOutput | ForEach-Object { Write-Host $_ }
+    if ($remoteExitCode -ne 0) { Fail "remote setup_vps.sh failed" }
+
+    if ($isManagementNode) {
+        $outputDir = Split-Path -Parent $OutputAnsibleAuthorizedKeyFile
+        if ($outputDir) {
+            New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+        }
+        if ((Test-Path -LiteralPath $OutputAnsibleAuthorizedKeyFile -PathType Leaf) -and $Force) {
+            Remove-Item -LiteralPath $OutputAnsibleAuthorizedKeyFile -Force
+        }
+
+        $publicKeyLines = New-Object System.Collections.Generic.List[string]
+        $insidePublicKey = $false
+        foreach ($line in $remoteOutput) {
+            $lineText = [string]$line
+            if ($lineText -eq $PublicKeyBeginMarker) {
+                $insidePublicKey = $true
+                continue
+            }
+            if ($lineText -eq $PublicKeyEndMarker) {
+                $insidePublicKey = $false
+                continue
+            }
+            if ($insidePublicKey) {
+                $publicKeyLines.Add($lineText)
+            }
+        }
+        if ($publicKeyLines.Count -ne 1) {
+            Fail "Could not capture exactly one Ansible control public key from remote bootstrap output."
+        }
+        Set-Content -LiteralPath $OutputAnsibleAuthorizedKeyFile -Value $publicKeyLines[0] -Encoding ascii
+        Write-Host "Saved Ansible control public key: $OutputAnsibleAuthorizedKeyFile"
+    }
 
     Write-Host "Bootstrap completed for $Alias"
 } finally {

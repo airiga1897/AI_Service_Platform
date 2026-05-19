@@ -8,6 +8,8 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 EXPECTED_CSV_HEADER="current_alias,endpoint,connection,ansible_group,roles,root_password"
+PUBLIC_KEY_BEGIN_MARKER="__ANSIBLE_CONTROL_PUBLIC_KEY_BEGIN__"
+PUBLIC_KEY_END_MARKER="__ANSIBLE_CONTROL_PUBLIC_KEY_END__"
 
 print_header() {
     echo ""
@@ -42,6 +44,10 @@ Options:
   --alias VALUE                      current_alias to bootstrap.
   --setup-script PATH                setup_vps.sh path. Default: tools/bootstrap/setup_vps.sh
   --ansible-authorized-key-file PATH VPS3 public key for managed nodes.
+  --output-ansible-authorized-key-file PATH
+                                     Where to save the VPS3 public key after management bootstrap.
+                                     Default: ./operator/ansible_control.managed_nodes.pub
+  --force                            Overwrite output public key file when it already exists.
   -h, --help                         Show this help.
 
 Requires sshpass when root_password is present.
@@ -52,6 +58,8 @@ NODES_FILE=""
 NODE_ALIAS=""
 SETUP_SCRIPT="tools/bootstrap/setup_vps.sh"
 ANSIBLE_AUTHORIZED_KEY_FILE=""
+OUTPUT_ANSIBLE_AUTHORIZED_KEY_FILE="./operator/ansible_control.managed_nodes.pub"
+FORCE_OVERWRITE="false"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -70,6 +78,14 @@ while [ "$#" -gt 0 ]; do
         --ansible-authorized-key-file)
             ANSIBLE_AUTHORIZED_KEY_FILE="${2:-}"
             shift 2
+            ;;
+        --output-ansible-authorized-key-file)
+            OUTPUT_ANSIBLE_AUTHORIZED_KEY_FILE="${2:-}"
+            shift 2
+            ;;
+        --force)
+            FORCE_OVERWRITE="true"
+            shift
             ;;
         -h|--help)
             usage
@@ -175,8 +191,21 @@ if ! has_role "$roles" management && ! has_role "$roles" orchestration && [ -z "
     exit 1
 fi
 
+is_management_node="false"
+if has_role "$roles" management || has_role "$roles" orchestration; then
+    is_management_node="true"
+fi
+if [ "$is_management_node" = "true" ] &&
+    [ -f "$OUTPUT_ANSIBLE_AUTHORIZED_KEY_FILE" ] &&
+    [ "$FORCE_OVERWRITE" != "true" ]; then
+    print_error "Output Ansible public key file already exists: $OUTPUT_ANSIBLE_AUTHORIZED_KEY_FILE"
+    print_error "Use --force to overwrite it."
+    exit 1
+fi
+
 sanitized_nodes="$(mktemp)"
-trap 'rm -f "$sanitized_nodes"' EXIT
+remote_log="$(mktemp)"
+trap 'rm -f "$sanitized_nodes" "$remote_log"' EXIT
 {
     echo "$EXPECTED_CSV_HEADER"
     tail -n +2 "$NODES_FILE" | while IFS=, read -r csv_alias csv_endpoint csv_connection csv_group csv_roles _csv_root_password extra || [ -n "${csv_alias:-}" ]; do
@@ -203,10 +232,39 @@ if [ -n "$ANSIBLE_AUTHORIZED_KEY_FILE" ]; then
 fi
 
 if [ -n "$ANSIBLE_AUTHORIZED_KEY_FILE" ]; then
-    "${ssh_base[@]}" "ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash /tmp/setup_vps.sh --nodes-file /tmp/nodes.csv --alias '$NODE_ALIAS'"
+    setup_command="ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash /tmp/setup_vps.sh --nodes-file /tmp/nodes.csv --alias '$NODE_ALIAS'"
 else
-    "${ssh_base[@]}" "bash /tmp/setup_vps.sh --nodes-file /tmp/nodes.csv --alias '$NODE_ALIAS'"
+    setup_command="bash /tmp/setup_vps.sh --nodes-file /tmp/nodes.csv --alias '$NODE_ALIAS'"
 fi
 
-"${ssh_base[@]}" "rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/ansible_control.managed_nodes.pub"
+if [ "$is_management_node" = "true" ]; then
+    emit_key_command="if [ \$rc -eq 0 ]; then echo $PUBLIC_KEY_BEGIN_MARKER; cat /home/ansible/.ssh/ansible_control.managed_nodes.pub; echo $PUBLIC_KEY_END_MARKER; fi"
+else
+    emit_key_command=":"
+fi
+remote_command="set +e; $setup_command; rc=\$?; $emit_key_command; rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/ansible_control.managed_nodes.pub; exit \$rc"
+
+"${ssh_base[@]}" "$remote_command" 2>&1 | tee "$remote_log"
+
+if [ "$is_management_node" = "true" ]; then
+    output_dir="$(dirname "$OUTPUT_ANSIBLE_AUTHORIZED_KEY_FILE")"
+    mkdir -p "$output_dir"
+    if [ -f "$OUTPUT_ANSIBLE_AUTHORIZED_KEY_FILE" ] && [ "$FORCE_OVERWRITE" = "true" ]; then
+        rm -f "$OUTPUT_ANSIBLE_AUTHORIZED_KEY_FILE"
+    fi
+
+    public_key="$(
+        awk -v begin="$PUBLIC_KEY_BEGIN_MARKER" -v end="$PUBLIC_KEY_END_MARKER" '
+            $0 == begin { capture=1; next }
+            $0 == end { capture=0; next }
+            capture { print }
+        ' "$remote_log"
+    )"
+    if [ "$(printf '%s\n' "$public_key" | sed '/^$/d' | wc -l | tr -d ' ')" -ne 1 ]; then
+        print_error "Could not capture exactly one Ansible control public key from remote bootstrap output."
+        exit 1
+    fi
+    printf '%s\n' "$public_key" > "$OUTPUT_ANSIBLE_AUTHORIZED_KEY_FILE"
+    print_success "Saved Ansible control public key: $OUTPUT_ANSIBLE_AUTHORIZED_KEY_FILE"
+fi
 print_success "Bootstrap completed for $NODE_ALIAS"
