@@ -18,6 +18,41 @@ Bootstrap и Ansible не смешиваются:
 
 Bootstrap runners не запускают `ansible-playbook`.
 
+Bootstrap можно запускать повторно. Обычный повторный запуск не пересоздает уже
+созданные SSH private keys и не очищает `authorized_keys`. Это важно: повторный
+запуск должен чинить/дозаполнять базовую подготовку, а не ломать существующий
+доступ.
+
+Опасный emergency-режим для пересоздания ключей включается только явно:
+
+```powershell
+.\tools\bootstrap\bootstrap_from_windows.ps1 `
+  -NodesFile .\operator\nodes.csv `
+  -Alias vps3 `
+  -Force `
+  -RegenerateRemoteKeys
+```
+
+или:
+
+```bash
+bash tools/bootstrap/bootstrap_from_unix.sh \
+  --nodes-file ./operator/nodes.csv \
+  --alias vps3 \
+  --force \
+  --regenerate-remote-keys
+```
+
+Разница флагов:
+
+- `-Force` / `--force` разрешает перезаписать локальный public key файл в `./operator`.
+- `-RegenerateRemoteKeys` / `--regenerate-remote-keys` передаёт на VPS `FORCE_REGENERATE_KEYS=1`.
+
+Для management node пересоздание remote keys требует `-Force` / `--force`,
+чтобы локальный public key был обновлён явно и не остался старым.
+Используй этот режим только если действительно нужно заменить bootstrap-generated keys.
+Даже в этом режиме `authorized_keys` не очищается автоматически.
+
 ## 1. Подготовить operator CSV
 
 На операторской машине создай локальную ignored-папку:
@@ -49,6 +84,8 @@ vps3,vps03.example.com,ssh,management,management+monitoring+orchestration+vpn-ed
 
 `root_password` используется только runner-ом для первого входа на голую VPS. На VPS копируется sanitized CSV без root password. Постоянный вход по паролю не включается.
 
+Для первого bootstrap с Windows/WSL/Linux/macOS у `vps3` должен быть реальный DNS или IP и `connection=ssh`. Строка `vps3,local,local,...` для этого шага не подходит: `local` используется только позже, если Ansible inventory готовится и запускается прямо на VPS3.
+
 Безопасный template без реальных адресов и паролей хранится здесь:
 
 ```text
@@ -56,6 +93,30 @@ infra/ansible/nodes.example.csv
 ```
 
 Real `./operator/nodes.csv` не коммитится.
+
+Рекомендуемая структура operator-файлов после bootstrap:
+
+```text
+operator/
+  nodes.csv
+  ansible_control.managed_nodes.pub
+  vps1/
+    deploy_key
+    admin_key
+  vps2/
+    deploy_key
+    admin_key
+  vps3/
+    deploy_key
+    admin_key
+    ansible_control_key
+    ansible_control.managed_nodes.pub
+```
+
+`operator/ansible_control.managed_nodes.pub` — совместимый короткий путь для bootstrap `vps1`/`vps2`.
+`operator/vps3/ansible_control.managed_nodes.pub` — тот же public key, но разложенный по alias.
+
+Важно: текущие bootstrap runners автоматически сохраняют только Ansible control public key. Private keys (`deploy_key`, `admin_key`, `ansible_control_key`) пока нужно сохранить в соответствующие alias-папки вручную из блоков, которые печатает `setup_vps.sh`. Следующий логичный шаг автоматизации — научить runner-ы извлекать эти блоки и сохранять их по этой структуре.
 
 ## 2. Bootstrap VPS3
 
@@ -86,6 +147,26 @@ Private key остается только на VPS3. Public key runner авто�
 ```text
 .\operator\ansible_control.managed_nodes.pub
 ```
+
+После bootstrap `vps3` вручную сохрани напечатанные private keys в operator-local файлы:
+
+```text
+.\operator\vps3\deploy_key
+.\operator\vps3\admin_key
+.\operator\vps3\ansible_control_key
+.\operator\vps3\ansible_control.managed_nodes.pub
+```
+
+`.\operator\vps3\ansible_control.managed_nodes.pub` должен совпадать с `.\operator\ansible_control.managed_nodes.pub`.
+
+Во время шага `run remote bootstrap` runner должен показать строку:
+
+```text
+AI Service Platform VPS bootstrap
+```
+
+Если после копирования файлов долго нет вывода, проверь PuTTY/plink host key
+cache, SSH banner/session prompts и правильность временного root password.
 
 Если файл уже существует, runner остановится и попросит использовать `-Force`, чтобы не перезаписать ключ случайно:
 
@@ -191,6 +272,21 @@ Runner копирует на VPS временные файлы:
 
 После успешного bootstrap runner удаляет эти временные файлы.
 
+После bootstrap `vps1` и `vps2` вручную сохрани напечатанные private keys в operator-local alias-папки:
+
+```text
+.\operator\vps1\deploy_key
+.\operator\vps1\admin_key
+.\operator\vps2\deploy_key
+.\operator\vps2\admin_key
+```
+
+Для GitHub Environment `ai-retail-dev-preprod` нужен deploy key именно от `vps2`:
+
+```text
+.\operator\vps2\deploy_key
+```
+
 ## 4. Проверить SSH-доступ Ansible с VPS3
 
 Команды выполняются именно на VPS3.
@@ -239,6 +335,14 @@ Real CSV для дальнейшего управления хранится н�
 ```
 
 Он может быть скопирован из operator-local `./operator/nodes.csv`, но без временных root passwords. Последняя колонка `root_password` должна быть пустой.
+
+Если Ansible запускается прямо на VPS3, строку `vps3` в этом VPS3-local CSV можно заменить на local connection:
+
+```csv
+vps3,local,local,management,management+monitoring+orchestration+vpn-edge,
+```
+
+Для operator-local bootstrap CSV на Windows/WSL так делать нельзя: там нужен реальный endpoint VPS3.
 
 Сгенерировать inventory:
 

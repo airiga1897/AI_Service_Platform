@@ -11,7 +11,7 @@
 
 Важно: это **временный deploy-access для GitHub Actions**, а не основной способ управления инфраструктурой. Нормальная platform-последовательность начинается с `VPS3` как Ansible control node; см. [`01-vps3-management-bootstrap.md`](01-vps3-management-bootstrap.md).
 
-Главная идея: VPS и доступы не настраиваются руками. Сначала на VPS2 запускается bootstrap-скрипт в target `ai-retail-dev-preprod`, он создаёт пользователей, SSH-ключи, каталог деплоя и выводит готовые значения `SSH_HOST`, `SSH_USER`, `SSH_PORT`, `SSH_KEY`. Ручным остаётся только безопасный перенос этих секретов в GitHub Environment или эквивалентная команда через GitHub CLI.
+Главная идея: VPS и доступы не настраиваются руками. Сначала на VPS2 запускается bootstrap-скрипт в target `ai-retail-dev-preprod`, он создаёт пользователей, SSH-ключи, каталог деплоя и выводит готовые значения `SSH_HOST`, `SSH_USER`, `SSH_PORT`, `SSH_KEY`. Затем operator-local скрипт проверяет GitHub Environment, создаёт его при отсутствии и идемпотентно задаёт Environment secrets.
 
 ## 1. Проверить, что VPS3 уже bootstrap/control-ready
 
@@ -81,9 +81,64 @@ SSH_KEY=(copy private deploy key below)
 
 Сохрани эти значения только на время переноса в GitHub Environment. Приватный ключ показывается только для этого шага. Не сохраняй его в repo files, `.env`, docs, issues или chat logs.
 
-## 4. Создать Environment через GitHub CLI
+## 4. Создать Environment и secrets через скрипт
 
-Основной путь — создать Environment и secrets командой, а не кликами в UI. На машине, где установлен и авторизован `gh`, выполни:
+Основной путь — через GitHub CLI и script-first helper. Скрипт:
+
+- проверяет наличие GitHub Environment;
+- создаёт Environment, если его ещё нет;
+- задаёт Environment secrets через `gh secret set`;
+- не читает и не коммитит реальные значения в repo.
+
+Сначала убедись, что GitHub CLI установлен и авторизован:
+
+```powershell
+gh auth status
+```
+
+Сохрани private deploy key из блока `BEGIN SSH_KEY` / `END SSH_KEY` в operator-local alias-файл VPS2:
+
+```text
+.\operator\vps2\deploy_key
+```
+
+Этот файл не коммитится, потому что `operator/` находится в `.gitignore`.
+
+Windows:
+
+```powershell
+.\tools\github\ensure_environment_secrets.ps1 `
+  -Repo airiga1897/AI_Service_Platform `
+  -Environment ai-retail-dev-preprod `
+  -NodesFile .\operator\nodes.csv `
+  -Alias vps2 `
+  -SshUser depuser `
+  -SshPort 22 `
+  -SshKeyFile .\operator\vps2\deploy_key
+```
+
+WSL/Linux/macOS:
+
+```bash
+bash tools/github/ensure_environment_secrets.sh \
+  --repo airiga1897/AI_Service_Platform \
+  --env ai-retail-dev-preprod \
+  --nodes-file ./operator/nodes.csv \
+  --alias vps2 \
+  --ssh-user depuser \
+  --ssh-port 22 \
+  --ssh-key-file ./operator/vps2/deploy_key
+```
+
+Скрипт возьмёт `SSH_HOST` из `endpoint` строки `vps2` в operator CSV. Если нужно переопределить host вручную, можно вместо `-NodesFile/-Alias` передать `-SshHost <VPS2_PUBLIC_IP_OR_DNS>` или `--ssh-host <VPS2_PUBLIC_IP_OR_DNS>`.
+
+Почему используется `operator/vps2/deploy_key`: GitHub Actions подключается именно к VPS2 для временного `ai-retail-dev/preprod` predeploy-check. Ключи от `vps1` или `vps3` сюда не подходят.
+
+Скрипты можно запускать повторно: Environment уже будет найден, а secrets будут обновлены теми же значениями.
+
+## 5. CLI fallback вручную
+
+Если helper-скрипт недоступен, можно создать Environment и secrets командами `gh` вручную. На машине, где установлен и авторизован `gh`, выполни:
 
 ```bash
 gh api \
@@ -110,7 +165,7 @@ gh secret set SSH_KEY --env ai-retail-dev-preprod --repo airiga1897/AI_Service_P
 
 Важно: добавляй эти значения именно в **Environment secrets** окружения `ai-retail-dev-preprod`, а не в repository-level secrets.
 
-## 5. UI fallback для Environment
+## 6. UI fallback для Environment
 
 Если GitHub CLI недоступен, можно сделать то же самое через UI:
 
@@ -133,7 +188,7 @@ environment:
   name: ai-retail-dev-preprod
 ```
 
-## 6. UI fallback для Environment secrets
+## 7. UI fallback для Environment secrets
 
 Внутри Environment открой раздел **Environment secrets** и добавь значения, которые вывел bootstrap:
 
@@ -152,9 +207,9 @@ environment:
 -----END OPENSSH PRIVATE KEY-----
 ```
 
-Это fallback к CLI-командам из шага 4. В обоих вариантах секреты не должны попадать в repository-level secrets, repo files, `.env`, docs или issue comments.
+Это fallback к helper-скрипту из шага 4. В обоих вариантах секреты не должны попадать в repository-level secrets, repo files, `.env`, docs или issue comments.
 
-## 7. Рекомендуемые protection rules
+## 8. Рекомендуемые protection rules
 
 Для первого запуска желательно включить ручное подтверждение:
 
@@ -165,7 +220,7 @@ environment:
 
 Если required reviewers недоступны, можно оставить без protection rules, но первый запуск нужно делать вручную и внимательно смотреть logs.
 
-## 8. Дозаполнить runtime env-файл на VPS2
+## 9. Дозаполнить runtime env-файл на VPS2
 
 Bootstrap создаёт placeholder:
 
@@ -182,7 +237,7 @@ sudo ls -la /opt/stacks/ai-retail-dev-preprod
 sudo test -f /opt/stacks/ai-retail-dev-preprod/.env.ai-retail.dev
 ```
 
-## 9. Проверить готовность Docker
+## 10. Проверить готовность Docker
 
 Текущий deploy-access bootstrap готовит пользователей, ключи и каталог, но полноценный provisioning ОС остаётся за Ansible с VPS3.
 
@@ -194,7 +249,7 @@ docker compose version
 
 Если команды нет, сначала установи Docker через Ansible `docker` role или отдельный provisioning-шаг.
 
-## 10. Проверить image ref локально
+## 11. Проверить image ref локально
 
 Перед запуском workflow проверь image ref:
 
@@ -207,7 +262,7 @@ python tools/deploy/preflight.py \
 
 Ожидаемый результат: JSON с `vps: VPS2`, `deploy_dir: /opt/stacks/ai-retail-dev-preprod` и `env_file: .env.ai-retail.dev`.
 
-## 11. Запустить GitHub Actions Deploy
+## 12. Запустить GitHub Actions Deploy
 
 1. Открой **Actions**.
 2. Выбери workflow **Deploy**.
@@ -223,7 +278,7 @@ python tools/deploy/preflight.py \
 5. Запусти workflow.
 6. Если включены required reviewers, подтверди deployment.
 
-## 12. Проверить успешный результат
+## 13. Проверить успешный результат
 
 В логах job `deploy` должно быть:
 
@@ -245,7 +300,7 @@ cd /opt/stacks/ai-retail-dev-preprod
 docker compose --env-file .env.deploy -f docker-compose.yml config
 ```
 
-## 13. Что делать при ошибках
+## 14. Что делать при ошибках
 
 Если workflow пишет, что secrets пустые:
 
@@ -266,7 +321,7 @@ docker compose --env-file .env.deploy -f docker-compose.yml config
 - проверь наличие `/opt/stacks/ai-retail-dev-preprod/.env.ai-retail.dev`;
 - проверь права пользователя на каталог `/opt/stacks/ai-retail-dev-preprod`.
 
-## 14. Важное ограничение
+## 15. Важное ограничение
 
 Этот шаг не запускает контейнеры и не делает реальный rollout. Он только проверяет:
 

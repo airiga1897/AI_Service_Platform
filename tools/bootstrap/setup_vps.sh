@@ -46,6 +46,7 @@ Environment overrides:
   ANSIBLE_USER=ansible
   ANSIBLE_AUTHORIZED_KEY='ssh-ed25519 ... ansible-control@vps3-management'
   ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub
+  FORCE_REGENERATE_KEYS=0
   SSH_PORT=22
 
 Supported targets:
@@ -260,6 +261,7 @@ ANSIBLE_USER="${ANSIBLE_USER:-ansible}"
 ANSIBLE_AUTHORIZED_KEY="${ANSIBLE_AUTHORIZED_KEY:-}"
 ANSIBLE_AUTHORIZED_KEY_FILE="${ANSIBLE_AUTHORIZED_KEY_FILE:-}"
 SSH_PORT="${SSH_PORT:-22}"
+FORCE_REGENERATE_KEYS="${FORCE_REGENERATE_KEYS:-0}"
 DEPLOY_KEY_NAME="github_deploy"
 ADMIN_KEY_NAME="admin_key"
 ANSIBLE_KEY_NAME="ansible_control"
@@ -280,6 +282,7 @@ echo "  Deploy user:        $DEPLOY_USER"
 echo "  Admin user:         $ADMIN_USER"
 echo "  Ansible user:       $ANSIBLE_USER"
 echo "  SSH port:           $SSH_PORT"
+echo "  Regenerate keys:    $FORCE_REGENERATE_KEYS"
 echo ""
 
 ensure_command() {
@@ -311,6 +314,7 @@ setup_ssh_key() {
     local home_dir
     local ssh_dir
     local key_path
+    local authorized_keys
 
     home_dir="$(getent passwd "$user_name" | cut -d: -f6)"
     if [ -z "$home_dir" ]; then
@@ -320,22 +324,39 @@ setup_ssh_key() {
 
     ssh_dir="$home_dir/.ssh"
     key_path="$ssh_dir/$key_name"
+    authorized_keys="$ssh_dir/authorized_keys"
 
     mkdir -p "$ssh_dir"
-    if [ -f "$key_path" ]; then
-        print_warning "Existing key for $user_name will be regenerated: $key_path"
-    fi
-    rm -f "$key_path" "$key_path.pub" "$ssh_dir/authorized_keys"
+    touch "$authorized_keys"
 
-    ssh-keygen -t ed25519 -C "$key_comment" -f "$key_path" -N ""
-    cat "$key_path.pub" > "$ssh_dir/authorized_keys"
+    if [ "$FORCE_REGENERATE_KEYS" = "1" ]; then
+        print_warning "FORCE_REGENERATE_KEYS=1; regenerating key for $user_name: $key_path"
+        rm -f "$key_path" "$key_path.pub"
+    fi
+
+    if [ -f "$key_path" ] && [ ! -f "$key_path.pub" ]; then
+        print_warning "Public key is missing for $user_name; deriving it from existing private key"
+        ssh-keygen -y -f "$key_path" > "$key_path.pub"
+    fi
+
+    if [ ! -f "$key_path" ]; then
+        ssh-keygen -t ed25519 -C "$key_comment" -f "$key_path" -N ""
+        print_success "SSH key generated for $user_name"
+    else
+        print_success "SSH key already exists for $user_name; keeping it unchanged"
+    fi
+
+    if ! grep -Fxq "$(cat "$key_path.pub")" "$authorized_keys"; then
+        cat "$key_path.pub" >> "$authorized_keys"
+        print_success "Public key added to authorized_keys for $user_name"
+    else
+        print_success "Public key already present in authorized_keys for $user_name"
+    fi
 
     chown -R "$user_name:$user_name" "$ssh_dir"
     chmod 700 "$ssh_dir"
-    chmod 600 "$ssh_dir/authorized_keys" "$key_path"
+    chmod 600 "$authorized_keys" "$key_path"
     chmod 644 "$key_path.pub"
-
-    print_success "SSH key generated for $user_name"
 }
 
 lock_user_password() {
@@ -549,7 +570,7 @@ echo -e "${YELLOW}Do not save them in repository files, docs, issues, or chat lo
 echo ""
 
 echo "GitHub Environment: $GITHUB_ENVIRONMENT"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "-------------------------------------"
 echo "SSH_HOST=$SERVER_IP"
 echo "SSH_USER=$DEPLOY_USER"
 echo "SSH_PORT=$SSH_PORT"

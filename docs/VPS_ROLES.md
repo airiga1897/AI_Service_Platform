@@ -105,8 +105,12 @@ Real endpoints хранятся только в operator CSV на VPS3, напр
 current_alias,endpoint,connection,ansible_group,roles,root_password
 vps1,vps01.example.com,ssh,prod,production-runtime+vpn-edge,
 vps2,vps02.example.com,ssh,backup,preprod+hot-standby+backup+vpn-edge,
-vps3,local,local,management,management+monitoring+orchestration+vpn-edge,
+vps3,vps03.example.com,ssh,management,management+monitoring+orchestration+vpn-edge,
 ```
+
+Для первого bootstrap с операторской машины у `vps3` должен быть реальный
+DNS/IP и `connection=ssh`. Значение `local,local` допустимо только позже в
+operator CSV на самой VPS3, если Ansible запускается с этой же management-ноды.
 
 Inventory генерируется из CSV:
 

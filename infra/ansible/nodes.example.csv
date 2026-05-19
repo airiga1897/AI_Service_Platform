@@ -1,4 +1,4 @@
 current_alias,endpoint,connection,ansible_group,roles,root_password
 vps1,vps01.example.com,ssh,prod,production-runtime+vpn-edge,
 vps2,vps02.example.com,ssh,backup,preprod+hot-standby+backup+vpn-edge,
-vps3,local,local,management,management+monitoring+orchestration+vpn-edge,
+vps3,vps03.example.com,ssh,management,management+monitoring+orchestration+vpn-edge,

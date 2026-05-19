@@ -48,6 +48,8 @@ Options:
                                      Where to save the VPS3 public key after management bootstrap.
                                      Default: ./operator/ansible_control.managed_nodes.pub
   --force                            Overwrite output public key file when it already exists.
+  --regenerate-remote-keys           Set FORCE_REGENERATE_KEYS=1 for remote setup_vps.sh.
+                                     For management nodes this also requires --force.
   -h, --help                         Show this help.
 
 Requires sshpass when root_password is present.
@@ -60,6 +62,7 @@ SETUP_SCRIPT="tools/bootstrap/setup_vps.sh"
 ANSIBLE_AUTHORIZED_KEY_FILE=""
 OUTPUT_ANSIBLE_AUTHORIZED_KEY_FILE="./operator/ansible_control.managed_nodes.pub"
 FORCE_OVERWRITE="false"
+REGENERATE_REMOTE_KEYS="false"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -85,6 +88,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --force)
             FORCE_OVERWRITE="true"
+            shift
+            ;;
+        --regenerate-remote-keys)
+            REGENERATE_REMOTE_KEYS="true"
             shift
             ;;
         -h|--help)
@@ -175,6 +182,8 @@ if [ "$found" != "true" ]; then
 fi
 if [ "$connection" = "local" ] || [ "$endpoint" = "local" ]; then
     print_error "Cannot bootstrap remote VPS with endpoint=local: $NODE_ALIAS"
+    print_error "For first bootstrap from this runner, set endpoint to the VPS public DNS/IP and connection=ssh."
+    print_error "Use local only later in the VPS3 inventory CSV if needed."
     exit 1
 fi
 if [ -z "$root_password" ]; then
@@ -194,6 +203,12 @@ fi
 is_management_node="false"
 if has_role "$roles" management || has_role "$roles" orchestration; then
     is_management_node="true"
+fi
+if [ "$REGENERATE_REMOTE_KEYS" = "true" ] &&
+    [ "$is_management_node" = "true" ] &&
+    [ "$FORCE_OVERWRITE" != "true" ]; then
+    print_error "--regenerate-remote-keys for a management node requires --force so the local Ansible public key file is refreshed explicitly."
+    exit 1
 fi
 if [ "$is_management_node" = "true" ] &&
     [ -f "$OUTPUT_ANSIBLE_AUTHORIZED_KEY_FILE" ] &&
@@ -225,9 +240,12 @@ ssh_base=(sshpass -p "$root_password" ssh -o StrictHostKeyChecking=accept-new "$
 scp_base=(sshpass -p "$root_password" scp -o StrictHostKeyChecking=accept-new)
 
 print_header "Bootstrap $NODE_ALIAS from Unix runner"
+echo "Step 1/4: copy setup_vps.sh"
 "${scp_base[@]}" "$SETUP_SCRIPT" "$remote:/tmp/setup_vps.sh"
+echo "Step 2/4: copy sanitized nodes.csv"
 "${scp_base[@]}" "$sanitized_nodes" "$remote:/tmp/nodes.csv"
 if [ -n "$ANSIBLE_AUTHORIZED_KEY_FILE" ]; then
+    echo "Step 2b/4: copy Ansible control public key"
     "${scp_base[@]}" "$ANSIBLE_AUTHORIZED_KEY_FILE" "$remote:/tmp/ansible_control.managed_nodes.pub"
 fi
 
@@ -235,6 +253,9 @@ if [ -n "$ANSIBLE_AUTHORIZED_KEY_FILE" ]; then
     setup_command="ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash /tmp/setup_vps.sh --nodes-file /tmp/nodes.csv --alias '$NODE_ALIAS'"
 else
     setup_command="bash /tmp/setup_vps.sh --nodes-file /tmp/nodes.csv --alias '$NODE_ALIAS'"
+fi
+if [ "$REGENERATE_REMOTE_KEYS" = "true" ]; then
+    setup_command="FORCE_REGENERATE_KEYS=1 $setup_command"
 fi
 
 if [ "$is_management_node" = "true" ]; then
@@ -244,9 +265,13 @@ else
 fi
 remote_command="set +e; $setup_command; rc=\$?; $emit_key_command; rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/ansible_control.managed_nodes.pub; exit \$rc"
 
+echo "Step 3/4: run remote bootstrap"
+echo "Expected next output: AI Service Platform VPS bootstrap"
+echo "If this step stays silent for a long time, check SSH host key prompts, SSH banner prompts, and root password auth."
 "${ssh_base[@]}" "$remote_command" 2>&1 | tee "$remote_log"
 
 if [ "$is_management_node" = "true" ]; then
+    echo "Step 4/4: save Ansible control public key"
     output_dir="$(dirname "$OUTPUT_ANSIBLE_AUTHORIZED_KEY_FILE")"
     mkdir -p "$output_dir"
     if [ -f "$OUTPUT_ANSIBLE_AUTHORIZED_KEY_FILE" ] && [ "$FORCE_OVERWRITE" = "true" ]; then
@@ -266,5 +291,7 @@ if [ "$is_management_node" = "true" ]; then
     fi
     printf '%s\n' "$public_key" > "$OUTPUT_ANSIBLE_AUTHORIZED_KEY_FILE"
     print_success "Saved Ansible control public key: $OUTPUT_ANSIBLE_AUTHORIZED_KEY_FILE"
+else
+    echo "Step 4/4: no Ansible public key download needed for managed node"
 fi
 print_success "Bootstrap completed for $NODE_ALIAS"
