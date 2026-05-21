@@ -85,6 +85,10 @@ Ansible group: `vpn_edges`.
 `vps3`. Он не является platform role. `roles` задаёт обязанности узла, а
 `ansible_group` задаёт группу для playbook.
 
+`ansible_group` задаёт primary-группу узла. Capability-роли из `roles` могут добавлять
+узел в дополнительные группы. Например, `vpn-edge` добавляет узел в `[vpn_edges]`,
+поэтому один и тот же `vps1` может быть и в `[prod]`, и в `[vpn_edges]`.
+
 | Role(s) in CSV | Ansible group |
 | --- | --- |
 | `production-runtime` | `prod` |

@@ -163,6 +163,15 @@ include_alias() {
     esac
 }
 
+roles_have() {
+    local roles="$1"
+    local wanted="$2"
+    case "+$roles+" in
+        *"+$wanted+"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 role_to_group() {
     case "$1" in
         production-runtime) echo "prod" ;;
@@ -294,6 +303,9 @@ read_nodes_file() {
             matched_count=$((matched_count + 1))
             matched_aliases="${matched_aliases}${current_alias},"
             PARSED_BINDINGS+=("active|$roles|$ansible_group|$current_alias|$current_alias|$endpoint|$connection")
+            if roles_have "$roles" "vpn-edge" && [ "$ansible_group" != "vpn_edges" ]; then
+                PARSED_BINDINGS+=("active|$roles|vpn_edges|$current_alias|$current_alias|$endpoint|$connection")
+            fi
         fi
     done < "$NODES_FILE"
 

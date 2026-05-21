@@ -9,21 +9,21 @@
 
 Текущий workflow пока не запускает `docker compose pull/up`. Он подключается по SSH, копирует compose-bundle на VPS2 и выполняет `docker compose config`.
 
-Важно: это **временный deploy-access для GitHub Actions**, а не основной способ управления инфраструктурой. Нормальная platform-последовательность начинается с `VPS3` как Ansible control node; см. [`01-vps3-management-bootstrap.md`](01-vps3-management-bootstrap.md).
+Важно: это **infrastructure/deploy-access слой для GitHub Actions**, а не product service и не полноценный rollout приложения. Нормальная platform-последовательность начинается с `VPS3` как Ansible control node; см. [`01-vps3-management-bootstrap.md`](01-vps3-management-bootstrap.md). После этого шага первым настоящим platform service будет SoftEther/VPN; см. [`03-vpn-first-service-rollout.md`](03-vpn-first-service-rollout.md).
 
 Главная идея: VPS и доступы не настраиваются руками. Сначала на VPS2 запускается bootstrap-скрипт в target `ai-retail-dev-preprod`, он создаёт пользователей, SSH-ключи, каталог деплоя и выводит готовые значения `SSH_HOST`, `SSH_USER`, `SSH_PORT`, `SSH_KEY`. Затем operator-local скрипт проверяет GitHub Environment, создаёт его при отсутствии и идемпотентно задаёт Environment secrets.
 
 ## 1. Проверить, что VPS3 уже bootstrap/control-ready
 
-Перед временным deploy-access на VPS2 желательно сначала подготовить VPS3:
+Перед deploy-access на VPS2 сначала подготовь VPS3:
 
 ```bash
 sudo bash setup_vps.sh vps3-management
 ```
 
-VPS3 должен стать Ansible control node. После этого VPS2 можно bootstrap-ить как managed node или как временный deploy target.
+VPS3 должен стать Ansible control node. После этого VPS2 можно bootstrap-ить как managed node и deploy target для predeploy-check.
 
-## 2. Запустить временный deploy-access bootstrap на VPS2
+## 2. Запустить deploy-access bootstrap на VPS2
 
 Подключись к новой VPS2 как `root` или пользователь с `sudo` и запусти bootstrap-скрипт из репозитория. Это единственный обязательный операторский вход на пустую VPS; дальше состояние создаётся скриптом.
 
@@ -132,7 +132,7 @@ bash tools/github/ensure_environment_secrets.sh \
 
 Скрипт возьмёт `SSH_HOST` из `endpoint` строки `vps2` в operator CSV. Если нужно переопределить host вручную, можно вместо `-NodesFile/-Alias` передать `-SshHost <VPS2_PUBLIC_IP_OR_DNS>` или `--ssh-host <VPS2_PUBLIC_IP_OR_DNS>`.
 
-Почему используется `operator/vps2/deploy_key`: GitHub Actions подключается именно к VPS2 для временного `ai-retail-dev/preprod` predeploy-check. Ключи от `vps1` или `vps3` сюда не подходят.
+Почему используется `operator/vps2/deploy_key`: GitHub Actions подключается именно к VPS2 для `ai-retail-dev/preprod` predeploy-check. Ключи от `vps1` или `vps3` сюда не подходят.
 
 Скрипты можно запускать повторно: Environment уже будет найден, а secrets будут обновлены теми же значениями.
 

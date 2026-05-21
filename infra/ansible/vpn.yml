@@ -1,0 +1,30 @@
+---
+# SoftEther/VPN service rollout entrypoint.
+#
+# This playbook is intentionally scoped to vpn_edges so the first service
+# rollout does not trigger product, backup, or monitoring stacks from site.yml.
+# The concrete SoftEther role is added in the VPN implementation step.
+
+- name: SoftEther/VPN service rollout
+  hosts: vpn_edges
+  become: true
+  gather_facts: false
+  vars:
+    vpn_state: present
+    vpn_purge_data: false
+  tasks:
+    - name: Validate requested VPN state
+      ansible.builtin.assert:
+        that:
+          - vpn_state in ['present', 'absent']
+          - vpn_purge_data in [true, false]
+        fail_msg: "vpn_state must be present|absent and vpn_purge_data must be boolean."
+
+    - name: Show planned VPN action
+      ansible.builtin.debug:
+        msg:
+          - "VPN rollout scaffold for {{ inventory_hostname }}"
+          - "vpn_state={{ vpn_state }}"
+          - "vpn_purge_data={{ vpn_purge_data }}"
+          - "SoftEther implementation role is intentionally added in the next step."
+      changed_when: false

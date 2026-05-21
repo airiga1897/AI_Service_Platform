@@ -40,6 +40,23 @@ require_command() {
     command -v "$1" >/dev/null 2>&1 || fail "$1 not found in PATH"
 }
 
+require_gh_auth() {
+    if ! gh auth status >/tmp/ai_service_platform_gh_auth_status.log 2>&1; then
+        cat /tmp/ai_service_platform_gh_auth_status.log >&2 || true
+        rm -f /tmp/ai_service_platform_gh_auth_status.log
+        cat >&2 <<EOF
+[ERROR] GitHub CLI is not authenticated.
+
+Run:
+  gh auth login
+
+Use an account with repo access to $REPO, then re-run this script.
+EOF
+        exit 1
+    fi
+    rm -f /tmp/ai_service_platform_gh_auth_status.log
+}
+
 write_secret_from_string() {
     local name="$1"
     local value="$2"
@@ -98,6 +115,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 require_command gh
+require_gh_auth
 
 [ -n "$REPO" ] || fail "--repo is required"
 [ -n "$ENVIRONMENT" ] || fail "--env is required"

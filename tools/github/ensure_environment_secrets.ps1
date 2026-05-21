@@ -36,6 +36,29 @@ function Require-File($Path, $Label) {
     }
 }
 
+function Require-GhAuth {
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $script:ErrorActionPreference = "Continue"
+        $output = & gh auth status 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $script:ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    if ($exitCode -ne 0) {
+        $output | ForEach-Object { Write-Host $_ }
+        Fail @"
+GitHub CLI is not authenticated.
+
+Run:
+  gh auth login
+
+Use an account with repo access to $Repo, then re-run this script.
+"@
+    }
+}
+
 function Invoke-GhApi($Arguments) {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
@@ -67,6 +90,7 @@ function Write-SecretFromString($Name, $Value) {
 }
 
 Require-Command gh
+Require-GhAuth
 Require-File $SshKeyFile "SshKeyFile"
 
 if ($NodesFile -or $Alias) {

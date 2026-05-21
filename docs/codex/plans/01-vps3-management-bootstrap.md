@@ -18,6 +18,23 @@ Bootstrap и Ansible не смешиваются:
 
 Bootstrap runners не запускают `ansible-playbook`.
 
+## Fresh bootstrap после переустановки ОС
+
+Если VPS были переустановлены, этот документ снова становится первым operational step. Старые ключи из
+`operator/` нужно считать устаревшими, пока они не пересохранены из нового bootstrap output.
+
+Текущий порядок после reinstall OS:
+
+1. Обновить `./operator/nodes.csv`: у `vps1`, `vps2`, `vps3` должны быть реальные `endpoint`, `connection=ssh`
+   и свежие временные `root_password`.
+2. Bootstrap `vps3` первым с `-Force`, чтобы локальный `./operator/ansible_control.managed_nodes.pub`
+   точно был обновлен от новой ОС.
+3. Bootstrap `vps1` и `vps2` только с новым `./operator/ansible_control.managed_nodes.pub`.
+4. Проверить SSH-доступ пользователя `ansible` с `vps3` на `vps1`/`vps2`.
+5. Создать real inventory на `vps3` и выполнить `ansible all -i inventory.ini -m ping`.
+
+GitHub deploy-access, VPN и product deploy не запускаются, пока этот fresh bootstrap проход не завершен успешно.
+
 Bootstrap можно запускать повторно. Обычный повторный запуск не пересоздает уже
 созданные SSH private keys и не очищает `authorized_keys`. Это важно: повторный
 запуск должен чинить/дозаполнять базовую подготовку, а не ломать существующий
@@ -139,10 +156,11 @@ Private key остается только на VPS3. Public key runner авто�
 ```powershell
 .\tools\bootstrap\bootstrap_from_windows.ps1 `
   -NodesFile .\operator\nodes.csv `
-  -Alias vps3
+  -Alias vps3 `
+  -Force
 ```
 
-После успешного выполнения появится файл:
+После успешного fresh bootstrap появится или обновится файл:
 
 ```text
 .\operator\ansible_control.managed_nodes.pub
@@ -191,10 +209,11 @@ cache, SSH banner/session prompts и правильность временног
 ```bash
 bash tools/bootstrap/bootstrap_from_unix.sh \
   --nodes-file ./operator/nodes.csv \
-  --alias vps3
+  --alias vps3 \
+  --force
 ```
 
-После успешного выполнения появится файл:
+После успешного fresh bootstrap появится или обновится файл:
 
 ```text
 ./operator/ansible_control.managed_nodes.pub
@@ -401,3 +420,7 @@ Bootstrap не настраивает всю ОС и не деплоит при�
 - включать постоянный password-login.
 
 Все это остается задачей Ansible и следующих operational steps.
+
+После этого шага продолжается infrastructure preparation: сначала настраивается GitHub deploy-access/predeploy-check
+для `ai-retail-dev-preprod`, затем первым настоящим platform service устанавливается SoftEther/VPN.
+Product `pull/up` и полноценный rollback остаются отдельными следующими этапами.
