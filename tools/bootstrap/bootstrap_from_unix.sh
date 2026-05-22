@@ -213,7 +213,11 @@ extract_marked_block() {
 
     output="$(
         awk -v begin="$begin_marker" -v end="$end_marker" '
-            $0 == begin {
+            {
+                line=$0
+                gsub(/\033\[[0-9;]*m/, "", line)
+            }
+            line == begin {
                 if (capture || seen) {
                     duplicate=1
                 }
@@ -221,14 +225,14 @@ extract_marked_block() {
                 seen=1
                 next
             }
-            $0 == end {
+            line == end {
                 if (!capture) {
                     stray_end=1
                 }
                 capture=0
                 next
             }
-            capture { print }
+            capture { print line }
             END {
                 if (!seen || capture || duplicate || stray_end) {
                     exit 2

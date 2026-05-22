@@ -91,9 +91,10 @@ function Get-MarkedBlock($Lines, $BeginMarker, $EndMarker, $Label) {
     $blockLines = New-Object System.Collections.Generic.List[string]
     $insideBlock = $false
     $seenBlock = $false
+    $escapeChar = [char]27
 
     foreach ($line in $Lines) {
-        $lineText = [string]$line
+        $lineText = [regex]::Replace([string]$line, "$escapeChar\[[0-9;]*m", "").Trim()
         if ($lineText -eq $BeginMarker) {
             if ($insideBlock -or $seenBlock) {
                 Fail "Found duplicate or nested begin marker for $Label"
