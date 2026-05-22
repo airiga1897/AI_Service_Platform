@@ -1,12 +1,12 @@
 # Codex Plans
 
-Эта папка разделяет основной порядок платформенных шагов и временные/вспомогательные материалы.
+Эта папка разделяет основной порядок платформенных шагов и будущие/вспомогательные материалы.
 
 ## Основной порядок
 
-1. [VPS3 management bootstrap](01-vps3-management-bootstrap.md) — после fresh reinstall OS сначала обновляется `operator/nodes.csv`, затем bootstrap `vps3` как Ansible control node, bootstrap managed nodes, автоочистка временных root passwords, sync sanitized CSV на VPS3, inventory и проверка Ansible connectivity.
+1. [Control/orchestration node bootstrap](01-vps3-management-bootstrap.md) — после fresh reinstall OS обновляются `operator/nodes.csv` и `operator/state.csv`; Windows wrapper выбирает control node по `role,orchestration` из `state.csv`, bootstrap-ит control/managed nodes, сохраняет ключи, очищает временные root passwords, sync-ит sanitized CSV, готовит inventory и проверку Ansible connectivity.
 2. [GitHub Actions deploy access](02-github-actions-deploy-access-ai-retail-dev-preprod.md) — GitHub Environment/secrets/predeploy-check для `ai-retail-dev-preprod` как infrastructure/deploy-access слой, без product `pull/up`.
-3. [VPN first service rollout](03-vpn-first-service-rollout.md) — SoftEther/VPN как первый настоящий platform service после infrastructure preparation.
+3. [VPN first service rollout](03-vpn-first-service-rollout.md) — SoftEther/VPN как первый настоящий platform service после infrastructure preparation, управляется строкой `service,vpn,...` в `state.csv`.
 
 ## Термины порядка
 
@@ -15,7 +15,7 @@
 - Первый service rollout: **SoftEther/VPN**.
 - Product deploy и полноценный rollback включаются позже, после predeploy-check и VPN milestone.
 
-## Временные и вспомогательные материалы
+## Временные и будущие материалы
 
 - [Cursor deploy/rollback prompt](cursor-deploy-rollback-next-step.md) — prompt/archive для Cursor, не часть operational order.
 - [Future VPS transport](future-vps-transport-softether-s2s-and-ssh-tunnel.md) — будущий план проверки SoftEther site-to-site/cascade и SSH tunnel fallback для controlled VPN egress.

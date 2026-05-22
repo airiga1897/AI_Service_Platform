@@ -14,3 +14,4 @@ operator/
 inventory.ini
 infra/ansible/inventory.ini
 infra/ansible/nodes.csv
+infra/ansible/state.csv

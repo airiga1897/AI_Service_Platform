@@ -1,186 +1,191 @@
-# Platform roles and current VPS aliases
+# Platform Nodes, Roles And Service State
 
-Платформа разделяет две сущности:
+Платформа разделяет две вещи:
 
-- `platform_role` — что узел делает в архитектуре.
-- `physical_node` — где физически находится VPS.
+- `nodes.csv` — какие VPS существуют и как к ним подключаться.
+- `state.csv` — какие роли и сервисы должны быть активны на этих VPS.
 
-`VPS1`, `VPS2` и `VPS3` — это current aliases текущей схемы. Их можно
-использовать в bootstrap-командах, старых runbook и UI-обсуждениях, но они не
-являются настоящими ролями. При миграции меняется `active_node` у
-`platform_role`, а не смысл alias `VPS1`.
+`vps1`, `vps2`, `vps3` — короткие operator aliases текущей схемы. Это не platform roles.
 
-## Physical nodes
+## Operator Files
 
-`services.yml` хранит только минимальные сведения о физическом размещении VPS:
-страну, город и датацентр. IP, DNS, тариф, provider id, OS template, private
-keys, `.env` и реальный `inventory.ini` не коммитятся.
+Real operator files хранятся вне git:
 
-Текущие physical nodes:
+```text
+operator/nodes.csv
+operator/state.csv
+```
 
-| Physical node | Current alias | Country | City | Datacenter |
-| --- | --- | --- | --- | --- |
-| `vps-nl-qupra-01` | `VPS1` | Netherlands | Amsterdam | Qupra DC2 |
-| `vps-kz-ahost-01` | `VPS2` | Kazakhstan | Almaty | Ahost |
-| `vps-ru-ixcellerate-01` | `VPS3` | Russia | Moscow | IXcellerate |
-
-## Platform roles
-
-### `production-runtime`
-
-Текущий alias: `VPS1`.
-
-Active physical node: `vps-nl-qupra-01`.
-
-Ansible group: `prod`.
-
-- Начальный production-стек: `aromaflow-work`.
-- Здесь стартуют primary runtime и primary application data.
-- Дополнительные production-стеки добавляются только после явного согласования.
-- Изменения в production должны сохранять backup, restore, TLS, edge routing и
-  rollback.
-
-### `preprod-hot-standby-backup`
-
-Текущий alias: `VPS2`.
-
-Active physical node: `vps-kz-ahost-01`.
-
-Ansible group: `backup`.
-
-- Хостит demo, MVP и dev-валидационные стеки по необходимости.
-- Выступает hot standby и failover-target для production-runtime.
-- Хранит локальные копии бэкапов до offsite-выгрузки в S3.
-- Не должен молча смешивать preprod-эксперименты с обязанностями
-  standby/backup.
-
-### `management-monitoring-orchestration`
-
-Текущий alias: `VPS3`.
-
-Active physical node: `vps-ru-ixcellerate-01`.
-
-Ansible group: `management`.
-
-- Запускает Ansible workflow, мониторинг и оркестрацию бэкапов.
-- Может хостить Prometheus, Grafana, Loki/Promtail, Alertmanager и Semaphore.
-- Не является рантаймом продуктовых приложений.
-- При миграции этой роли отдельно переносится control state: Ansible key,
-  inventory/vault вне repo, monitoring state и Semaphore state.
-
-### `vpn-only-edge`
-
-Текущий alias: отсутствует.
-
-Ansible group: `vpn_edges`.
-
-- Будущая multi-node роль для стран/регионов, где нужен только VPN edge.
-- На таких узлах не должны работать product runtime stacks.
-- Нужны HAProxy TCP entrypoints, SoftEther, monitoring agent, firewall rules и
-  backup конфигурации SoftEther.
-
-## Operator CSV and inventory generation
-
-`current_alias` — короткий операторский ключ строки CSV: `vps1`, `vps2`,
-`vps3`. Он не является platform role. `roles` задаёт обязанности узла, а
-`ansible_group` задаёт группу для playbook.
-
-`ansible_group` задаёт primary-группу узла. Capability-роли из `roles` могут добавлять
-узел в дополнительные группы. Например, `vpn-edge` добавляет узел в `[vpn_edges]`,
-поэтому один и тот же `vps1` может быть и в `[prod]`, и в `[vpn_edges]`.
-
-| Role(s) in CSV | Ansible group |
-| --- | --- |
-| `production-runtime` | `prod` |
-| `preprod+hot-standby+backup` | `backup` |
-| `management+monitoring+orchestration` | `management` |
-| `vpn-edge` | `vpn_edges` |
-| `vpn-cascade` | future/experimental |
-
-Real endpoints хранятся только в operator CSV на VPS3, например:
+На control/orchestration node они синхронизируются как:
 
 ```text
 /opt/ai-service-platform/operator/nodes.csv
+/opt/ai-service-platform/operator/state.csv
 ```
 
-Безопасный шаблон хранится в `infra/ansible/nodes.example.csv`:
+Безопасные шаблоны:
+
+```text
+infra/ansible/nodes.example.csv
+infra/ansible/state.example.csv
+```
+
+## nodes.csv
+
+Header:
 
 ```csv
 current_alias,endpoint,connection,ansible_group,roles,root_password
-vps1,vps01.example.com,ssh,prod,production-runtime+vpn-edge,
-vps2,vps02.example.com,ssh,backup,preprod+hot-standby+backup+vpn-edge,
-vps3,vps03.example.com,ssh,management,management+monitoring+orchestration+vpn-edge,
 ```
 
-Для первого bootstrap с операторской машины у `vps3` должен быть реальный
-DNS/IP и `connection=ssh`. Значение `local,local` допустимо только позже в
-operator CSV на самой VPS3, если Ansible запускается с этой же management-ноды.
+Смысл:
 
-Inventory генерируется из CSV:
+- `current_alias` — короткий ключ узла, например `vps1`.
+- `endpoint` — DNS/IP для operator bootstrap; real value не коммитится.
+- `connection` — `ssh` для bootstrap с операторской машины, `local` только на control node.
+- `ansible_group` — базовая группа узла для старых/fallback сценариев.
+- `roles` — базовые capabilities узла, например `production+vpn-edge`.
+- `root_password` — временный пароль только для первого bootstrap; runner очищает его после успеха.
+
+`root_password` не копируется на control node: sync всегда отправляет sanitized CSV.
+
+## state.csv
+
+Header:
+
+```csv
+kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state
+```
+
+Пример:
+
+```csv
+kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state
+role,production,prod,vps1,,,present
+role,preprod,backup,vps2,,,present
+role,backup,backup,vps2,,,present
+role,orchestration,management,vps3,,,present
+service,vpn,vpn_edges,vps1+vps2+vps3,,,present
+```
+
+Смысл:
+
+- `kind=role` — назначение узла, например `orchestration`.
+- `kind=service` — устанавливаемый platform service, например `vpn`.
+- `active_aliases` — где роль/сервис сейчас должны быть активны.
+- `candidate_aliases` — узлы-кандидаты для миграции или подготовки.
+- `old_aliases` — прежние узлы на rollback window.
+- `state` — желаемое состояние: `present`, `absent`, `purged`.
+
+Внутри alias-полей несколько значений разделяются через `+`.
+
+## state Values
+
+`present` означает: роль или сервис должны существовать.
+
+Для VPN:
+
+```csv
+service,vpn,vpn_edges,vps1+vps2+vps3,,,present
+```
+
+означает: VPN должен быть развернут на `vps1`, `vps2`, `vps3`.
+
+`absent` означает: сервис не должен быть активен, но данные не удаляются. Реальное отключение выполняется только явной командой `service vpn absent`.
+
+`purged` означает: данные можно удалить, но только явной командой `service vpn purge --confirm-purge`.
+
+Изменение CSV само по себе не запускает разрушительные действия.
+
+## Control Node
+
+Control node выбирается по `state.csv`:
+
+```csv
+role,orchestration,management,vps3,,,present
+```
+
+Правила:
+
+- должен быть ровно один active alias для `role,orchestration`;
+- резервный orchestration node указывается в `candidate_aliases`;
+- перенос control role делается изменением `state.csv`, а не hardcode alias `vps3`.
+
+Пример подготовки резерва:
+
+```csv
+role,orchestration,management,vps3,vps4,,present
+```
+
+Здесь `vps3` остается active, а `vps4` является candidate.
+
+## Inventory Generation
+
+`create_inventory.sh` берет:
+
+- endpoint/connection из `nodes.csv`;
+- группы active/candidate/old из `state.csv`.
+
+Пример:
 
 ```bash
 sudo bash tools/bootstrap/create_inventory.sh \
   --nodes-file /opt/ai-service-platform/operator/nodes.csv \
+  --state-file /opt/ai-service-platform/operator/state.csv \
   --include vps1,vps2,vps3
 ```
 
-Тот же CSV можно использовать для bootstrap по alias:
+Результат:
+
+- active `production` попадает в `[prod]`;
+- active `vpn` попадает в `[vpn_edges]`;
+- candidate aliases попадают в `[candidate_*]`;
+- old aliases попадают в `[old_*]`.
+
+## VPN Service
+
+VPN — первый platform service после infrastructure preparation.
+
+Он управляется строкой:
+
+```csv
+service,vpn,vpn_edges,vps1+vps2+vps3,,,present
+```
+
+Проверить план:
 
 ```bash
-sudo bash tools/bootstrap/setup_vps.sh --nodes-file /tmp/nodes.csv --alias vps2
+bash tools/services/service.sh vpn plan \
+  --nodes-file /opt/ai-service-platform/operator/nodes.csv \
+  --state-file /opt/ai-service-platform/operator/state.csv
 ```
 
-`root_password` используется только bootstrap runner-ами для первого входа на
-голую VPS. Он не попадает в generated `inventory.ini`, не нужен `setup_vps.sh`
-как постоянный секрет и не копируется на VPS в real form: runner передаёт
-sanitized CSV с пустой последней колонкой.
+Применить осторожно на одном узле:
 
-Реальные endpoint-ы и root passwords остаются только в operator `nodes.csv`.
-Generated `inventory.ini` на VPS3 тоже не коммитится.
-
-`deploy-access` не является ролью VPS. Это временная настройка workflow или
-GitHub Environment для конкретного деплой-сценария.
-
-## Migration model
-
-Для одиночных ролей состояние хранится в `platform_roles`:
-
-```yaml
-production-runtime:
-  active_node: vps-nl-qupra-01
-  candidate_node: null
-  old_node: null
+```bash
+bash tools/services/service.sh vpn apply \
+  --nodes-file /opt/ai-service-platform/operator/nodes.csv \
+  --state-file /opt/ai-service-platform/operator/state.csv \
+  --inventory /opt/ai-service-platform/inventory.ini \
+  --limit vps1 \
+  --check
 ```
 
-Для multi-node роли `vpn-only-edge` используются списки:
+Удаление сервиса не автоматическое:
 
-```yaml
-vpn-only-edge:
-  active_nodes: []
-  candidate_nodes: []
-  old_nodes: []
+```bash
+bash tools/services/service.sh vpn absent --limit vps1
+bash tools/services/service.sh vpn purge --limit vps1 --confirm-purge
 ```
 
-Миграция любой роли проходит одинаково:
+## Current Physical Placement
 
-1. Создать новый `physical_node`.
-2. Назначить его `candidate_node` или добавить в `candidate_nodes`.
-3. Bootstrap/provision/healthcheck выполнить без замены active node.
-4. После проверки переключить `active_node` на candidate.
-5. Предыдущий active node временно сохранить как `old_node` на rollback window.
+Минимальная физическая информация остается в `services.yml`: страна, город и датацентр. Real endpoints остаются в operator-local CSV.
 
-`lifecycle_state` не хранится в `physical_nodes`, чтобы не было двух источников
-истины. Состояние узла определяется только тем, как на него ссылается
-`platform_role`.
+Текущая схема:
 
-## External storage
-
-S3-совместимое объектное хранилище используется для offsite-бэкапов в модели
-3-2-1. Миграция медиа-хранилища в S3 — опциональна и отделена от backup S3.
-
-## VPN presence
-
-SoftEther — платформенный VPN-сервис на всех текущих platform nodes. Первая
-сохранённая установка была на current alias `VPS1`, но целевое состояние — один
-экземпляр SoftEther на каждом нужном physical node для локального ingress
-клиентов и контролируемого egress по странам.
+| Alias | Country | City | Datacenter |
+| --- | --- | --- | --- |
+| `vps1` | Netherlands | Amsterdam | Qupra DC2 |
+| `vps2` | Kazakhstan | Almaty | Ahost |
+| `vps3` | Russia | Moscow | IXcellerate |

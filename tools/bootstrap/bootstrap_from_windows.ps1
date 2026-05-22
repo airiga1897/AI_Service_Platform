@@ -2,6 +2,8 @@ param(
     [Parameter(Mandatory=$true)]
     [string]$NodesFile,
 
+    [string]$StateFile = "",
+
     [Parameter(Mandatory=$true)]
     [string]$Alias,
 
@@ -12,6 +14,8 @@ param(
     [string]$PrepareInventoryScript = "tools/bootstrap/prepare_vps3_inventory.sh",
 
     [string]$AnsibleAuthorizedKeyFile,
+
+    [string]$OperatorDir = ".\operator",
 
     [string]$OutputAnsibleAuthorizedKeyFile = ".\operator\ansible_control.managed_nodes.pub",
 
@@ -83,6 +87,96 @@ function Clear-RootPasswordForAlias($Path, $AliasToClear) {
     Write-Host "Cleared root_password in local nodes.csv for $AliasToClear"
 }
 
+function Get-MarkedBlock($Lines, $BeginMarker, $EndMarker, $Label) {
+    $blockLines = New-Object System.Collections.Generic.List[string]
+    $insideBlock = $false
+    $seenBlock = $false
+
+    foreach ($line in $Lines) {
+        $lineText = [string]$line
+        if ($lineText -eq $BeginMarker) {
+            if ($insideBlock -or $seenBlock) {
+                Fail "Found duplicate or nested begin marker for $Label"
+            }
+            $insideBlock = $true
+            $seenBlock = $true
+            continue
+        }
+        if ($lineText -eq $EndMarker) {
+            if (-not $insideBlock) {
+                Fail "Found end marker without begin marker for $Label"
+            }
+            $insideBlock = $false
+            continue
+        }
+        if ($insideBlock) {
+            $blockLines.Add($lineText)
+        }
+    }
+
+    if (-not $seenBlock -or $insideBlock -or $blockLines.Count -eq 0) {
+        Fail "Could not capture $Label from remote bootstrap output."
+    }
+
+    return $blockLines
+}
+
+function Save-TextFile($Path, $Lines, $AllowOverwrite) {
+    if ((Test-Path -LiteralPath $Path -PathType Leaf) -and -not $AllowOverwrite) {
+        Fail "Output key file already exists: $Path. Use -Force to overwrite it."
+    }
+
+    $outputDir = Split-Path -Parent $Path
+    if ($outputDir) {
+        New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+    }
+    Set-Content -LiteralPath $Path -Value $Lines -Encoding ascii
+}
+
+function Assert-OutputKeyPathAvailable($Path, $AllowOverwrite) {
+    if ((Test-Path -LiteralPath $Path -PathType Leaf) -and -not $AllowOverwrite) {
+        Fail "Output key file already exists: $Path. Use -Force to overwrite it."
+    }
+}
+
+function Assert-BootstrapKeyPathsAvailable($AliasToSave, $IsManagement, $BaseOperatorDir, $PublicKeyPath, $AllowOverwrite) {
+    $aliasDir = Join-Path $BaseOperatorDir $AliasToSave
+
+    Assert-OutputKeyPathAvailable (Join-Path $aliasDir "deploy_key") $AllowOverwrite
+    Assert-OutputKeyPathAvailable (Join-Path $aliasDir "admin_key") $AllowOverwrite
+
+    if ($IsManagement) {
+        Assert-OutputKeyPathAvailable (Join-Path $aliasDir "ansible_control_key") $AllowOverwrite
+        Assert-OutputKeyPathAvailable (Join-Path $aliasDir "ansible_control.managed_nodes.pub") $AllowOverwrite
+        Assert-OutputKeyPathAvailable $PublicKeyPath $AllowOverwrite
+    }
+}
+
+function Save-BootstrapKeys($Lines, $AliasToSave, $IsManagement, $BaseOperatorDir, $PublicKeyPath, $AllowOverwrite) {
+    $aliasDir = Join-Path $BaseOperatorDir $AliasToSave
+    New-Item -ItemType Directory -Force -Path $aliasDir | Out-Null
+
+    $deployKey = Get-MarkedBlock $Lines "--- BEGIN SSH_KEY ---" "--- END SSH_KEY ---" "deploy private key"
+    $adminKey = Get-MarkedBlock $Lines "--- BEGIN ADMIN KEY ---" "--- END ADMIN KEY ---" "admin private key"
+
+    Save-TextFile (Join-Path $aliasDir "deploy_key") $deployKey $AllowOverwrite
+    Save-TextFile (Join-Path $aliasDir "admin_key") $adminKey $AllowOverwrite
+    Write-Host "Saved bootstrap keys: $aliasDir"
+
+    if ($IsManagement) {
+        $ansibleKey = Get-MarkedBlock $Lines "--- BEGIN ANSIBLE CONTROL KEY ---" "--- END ANSIBLE CONTROL KEY ---" "Ansible control private key"
+        $publicKey = Get-MarkedBlock $Lines $PublicKeyBeginMarker $PublicKeyEndMarker "Ansible control public key"
+        if ($publicKey.Count -ne 1) {
+            Fail "Could not capture exactly one Ansible control public key from remote bootstrap output."
+        }
+
+        Save-TextFile (Join-Path $aliasDir "ansible_control_key") $ansibleKey $AllowOverwrite
+        Save-TextFile (Join-Path $aliasDir "ansible_control.managed_nodes.pub") $publicKey $AllowOverwrite
+        Save-TextFile $PublicKeyPath $publicKey $AllowOverwrite
+        Write-Host "Saved Ansible control public key: $PublicKeyPath"
+    }
+}
+
 function Invoke-PlinkCommand($Remote, $Password, $Command, $LogPath) {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
@@ -103,6 +197,9 @@ function Invoke-PlinkCommand($Remote, $Password, $Command, $LogPath) {
 }
 
 Require-File $NodesFile "NodesFile"
+if ($StateFile) {
+    Require-File $StateFile "StateFile"
+}
 Require-File $SetupScript "SetupScript"
 if ($AnsibleAuthorizedKeyFile) {
     Require-File $AnsibleAuthorizedKeyFile "AnsibleAuthorizedKeyFile"
@@ -143,9 +240,7 @@ if ($isManagementNode) {
 if ($RegenerateRemoteKeys -and $isManagementNode -and -not $Force) {
     Fail "RegenerateRemoteKeys for a management node requires -Force so the local Ansible public key file is refreshed explicitly."
 }
-if ($isManagementNode -and (Test-Path -LiteralPath $OutputAnsibleAuthorizedKeyFile -PathType Leaf) -and -not $Force) {
-    Fail "Output Ansible public key file already exists: $OutputAnsibleAuthorizedKeyFile. Use -Force to overwrite it."
-}
+Assert-BootstrapKeyPathsAvailable $Alias $isManagementNode $OperatorDir $OutputAnsibleAuthorizedKeyFile $Force
 
 $sanitized = New-TemporaryFile
 $remoteLog = New-TemporaryFile
@@ -166,8 +261,14 @@ try {
     & pscp -pw $row.root_password $sanitized "${remote}:/tmp/nodes.csv"
     if ($LASTEXITCODE -ne 0) { Fail "pscp sanitized nodes.csv failed" }
 
+    if ($StateFile) {
+        Write-Host "Step 2a/4: copy state.csv"
+        & pscp -pw $row.root_password $StateFile "${remote}:/tmp/state.csv"
+        if ($LASTEXITCODE -ne 0) { Fail "pscp state.csv failed" }
+    }
+
     if ($isManagementNode) {
-        Write-Host "Step 2b/4: copy VPS3 inventory helpers"
+        Write-Host "Step 2b/4: copy control inventory helpers"
         & pscp -pw $row.root_password $CreateInventoryScript "${remote}:/tmp/create_inventory.sh"
         if ($LASTEXITCODE -ne 0) { Fail "pscp create_inventory.sh failed" }
         & pscp -pw $row.root_password $PrepareInventoryScript "${remote}:/tmp/prepare_vps3_inventory.sh"
@@ -190,13 +291,18 @@ try {
     }
 
     if ($isManagementNode) {
-        $prepareInventoryCommand = "if [ `$rc -eq 0 ]; then mkdir -p /opt/ai-service-platform/tools/bootstrap; install -m 700 /tmp/create_inventory.sh /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; install -m 700 /tmp/prepare_vps3_inventory.sh /opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh; bash /opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh --source-nodes-file /tmp/nodes.csv --skip-check; fi"
+        if ($StateFile) {
+            $stateArg = "--source-state-file /tmp/state.csv"
+        } else {
+            $stateArg = ""
+        }
+        $prepareInventoryCommand = "if [ `$rc -eq 0 ]; then mkdir -p /opt/ai-service-platform/tools/bootstrap; install -m 700 /tmp/create_inventory.sh /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; install -m 700 /tmp/prepare_vps3_inventory.sh /opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh; bash /opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh --source-nodes-file /tmp/nodes.csv $stateArg --skip-check; fi"
         $emitKeyCommand = "if [ `$rc -eq 0 ]; then echo $PublicKeyBeginMarker; cat /home/ansible/.ssh/ansible_control.managed_nodes.pub; echo $PublicKeyEndMarker; fi"
     } else {
         $prepareInventoryCommand = ":"
         $emitKeyCommand = ":"
     }
-    $remoteCommand = "set +e; $setupCommand; rc=`$?; $prepareInventoryCommand; $emitKeyCommand; rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/ansible_control.managed_nodes.pub /tmp/create_inventory.sh /tmp/prepare_vps3_inventory.sh; exit `$rc"
+    $remoteCommand = "set +e; $setupCommand; rc=`$?; $prepareInventoryCommand; $emitKeyCommand; rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/state.csv /tmp/ansible_control.managed_nodes.pub /tmp/create_inventory.sh /tmp/prepare_vps3_inventory.sh; exit `$rc"
 
     Write-Host "Step 3/4: run remote bootstrap"
     Write-Host "Expected next output: AI Service Platform VPS bootstrap"
@@ -206,41 +312,8 @@ try {
     $remoteExitCode = $plinkResult.ExitCode
     if ($remoteExitCode -ne 0) { Fail "remote setup_vps.sh failed" }
 
-    if ($isManagementNode) {
-        Write-Host "Step 4/4: save Ansible control public key"
-        $outputDir = Split-Path -Parent $OutputAnsibleAuthorizedKeyFile
-        if ($outputDir) {
-            New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
-        }
-        if ((Test-Path -LiteralPath $OutputAnsibleAuthorizedKeyFile -PathType Leaf) -and $Force) {
-            Remove-Item -LiteralPath $OutputAnsibleAuthorizedKeyFile -Force
-        }
-
-        $publicKeyLines = New-Object System.Collections.Generic.List[string]
-        $insidePublicKey = $false
-        foreach ($line in $remoteOutput) {
-            $lineText = [string]$line
-            if ($lineText -eq $PublicKeyBeginMarker) {
-                $insidePublicKey = $true
-                continue
-            }
-            if ($lineText -eq $PublicKeyEndMarker) {
-                $insidePublicKey = $false
-                continue
-            }
-            if ($insidePublicKey) {
-                $publicKeyLines.Add($lineText)
-            }
-        }
-        if ($publicKeyLines.Count -ne 1) {
-            Fail "Could not capture exactly one Ansible control public key from remote bootstrap output."
-        }
-        Set-Content -LiteralPath $OutputAnsibleAuthorizedKeyFile -Value $publicKeyLines[0] -Encoding ascii
-        Write-Host "Saved Ansible control public key: $OutputAnsibleAuthorizedKeyFile"
-    }
-    if (-not $isManagementNode) {
-        Write-Host "Step 4/4: no Ansible public key download needed for managed node"
-    }
+    Write-Host "Step 4/4: save bootstrap keys"
+    Save-BootstrapKeys $remoteOutput $Alias $isManagementNode $OperatorDir $OutputAnsibleAuthorizedKeyFile $Force
 
     Clear-RootPasswordForAlias $NodesFile $Alias
     Write-Host "Bootstrap completed for $Alias"

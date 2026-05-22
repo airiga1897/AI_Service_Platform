@@ -3,11 +3,14 @@
 set -euo pipefail
 
 EXPECTED_CSV_HEADER="current_alias,endpoint,connection,ansible_group,roles,root_password"
+EXPECTED_STATE_CSV_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 NODES_FILE="./operator/nodes.csv"
+STATE_FILE="./operator/state.csv"
 VPS3_ALIAS="vps3"
 SSH_USER="useradmin"
 SSH_KEY_FILE="./operator/vps3/admin_key"
 REMOTE_NODES_FILE="/tmp/ai-service-platform.nodes.csv"
+REMOTE_STATE_FILE="/tmp/ai-service-platform.state.csv"
 REMOTE_PREPARE_SCRIPT="/opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh"
 INCLUDE_ALIASES=""
 
@@ -20,6 +23,7 @@ Usage:
 
 Options:
   --nodes-file PATH          Operator nodes.csv. Default: ./operator/nodes.csv
+  --state-file PATH          Operator state.csv. Default: ./operator/state.csv
   --vps3-alias VALUE         Alias for management VPS. Default: vps3
   --ssh-user VALUE           SSH user for VPS3 sync. Default: useradmin
   --ssh-key-file PATH        SSH private key for SSH user. Default: ./operator/vps3/admin_key
@@ -46,6 +50,10 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --nodes-file)
             NODES_FILE="${2:-}"
+            shift 2
+            ;;
+        --state-file)
+            STATE_FILE="${2:-}"
             shift 2
             ;;
         --vps3-alias)
@@ -84,9 +92,16 @@ done
 
 require_file "$NODES_FILE" "--nodes-file"
 require_file "$SSH_KEY_FILE" "--ssh-key-file"
+if [ -n "$STATE_FILE" ]; then
+    require_file "$STATE_FILE" "--state-file"
+fi
 
 first_line="$(head -n 1 "$NODES_FILE" | tr -d '\r')"
 [ "$first_line" = "$EXPECTED_CSV_HEADER" ] || fail "nodes.csv header must be exactly: $EXPECTED_CSV_HEADER"
+if [ -n "$STATE_FILE" ]; then
+    state_first_line="$(head -n 1 "$STATE_FILE" | tr -d '\r')"
+    [ "$state_first_line" = "$EXPECTED_STATE_CSV_HEADER" ] || fail "state.csv header must be exactly: $EXPECTED_STATE_CSV_HEADER"
+fi
 
 vps3_endpoint=""
 vps3_connection=""
@@ -133,12 +148,19 @@ trap 'rm -f "$sanitized_nodes"' EXIT
 remote="$SSH_USER@$vps3_endpoint"
 echo "Syncing sanitized nodes.csv to $remote"
 scp -i "$SSH_KEY_FILE" "$sanitized_nodes" "$remote:$REMOTE_NODES_FILE"
+if [ -n "$STATE_FILE" ]; then
+    echo "Syncing state.csv to $remote"
+    scp -i "$SSH_KEY_FILE" "$STATE_FILE" "$remote:$REMOTE_STATE_FILE"
+fi
 
 prepare_command="sudo bash '$REMOTE_PREPARE_SCRIPT' --source-nodes-file '$REMOTE_NODES_FILE'"
+if [ -n "$STATE_FILE" ]; then
+    prepare_command="$prepare_command --source-state-file '$REMOTE_STATE_FILE'"
+fi
 if [ -n "$INCLUDE_ALIASES" ]; then
     prepare_command="$prepare_command --include '$INCLUDE_ALIASES'"
 fi
-remote_command="set -e; $prepare_command; rm -f '$REMOTE_NODES_FILE'"
+remote_command="set -e; $prepare_command; rm -f '$REMOTE_NODES_FILE' '$REMOTE_STATE_FILE'"
 
 echo "Running VPS3 inventory preparation"
 ssh -i "$SSH_KEY_FILE" "$remote" "$remote_command"

@@ -82,7 +82,7 @@ validate_roles() {
     for role in $roles; do
         IFS="$old_ifs"
         case "$role" in
-            production-runtime|preprod|hot-standby|backup|management|monitoring|orchestration|vpn-edge|vpn-cascade) ;;
+            production|production-runtime|preprod|hot-standby|backup|management|monitoring|orchestration|vpn-edge|vpn-cascade) ;;
             *)
                 print_error "nodes.csv line $line_number has unsupported role: $role"
                 exit 1
@@ -103,7 +103,7 @@ resolve_behavior_from_roles() {
         return
     fi
 
-    if has_role production-runtime || has_role preprod || has_role hot-standby || has_role backup || has_role vpn-edge || has_role vpn-cascade; then
+    if has_role production || has_role production-runtime || has_role preprod || has_role hot-standby || has_role backup || has_role vpn-edge || has_role vpn-cascade; then
         NODE_ROLE="managed"
         DEPLOY_DIR="/opt/stacks"
         RUNTIME_ENV_FILE=""
