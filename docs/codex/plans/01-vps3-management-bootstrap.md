@@ -99,7 +99,7 @@ current_alias,endpoint,connection,ansible_group,roles,root_password
 
 ```csv
 current_alias,endpoint,connection,ansible_group,roles,root_password
-vps1,vps01.example.com,ssh,prod,production-runtime+vpn-edge,<TEMP_ROOT_PASSWORD_VPS1>
+vps1,vps01.example.com,ssh,prod,production+vpn-edge,<TEMP_ROOT_PASSWORD_VPS1>
 vps2,vps02.example.com,ssh,backup,preprod+hot-standby+backup+vpn-edge,<TEMP_ROOT_PASSWORD_VPS2>
 vps3,vps03.example.com,ssh,management,management+monitoring+orchestration+vpn-edge,<TEMP_ROOT_PASSWORD_VPS3>
 ```
@@ -161,7 +161,7 @@ Bootstrap runners автоматически сохраняют key-блоки �
 2. Находит единственный active alias в строке `role,orchestration` из `state.csv`.
 3. Bootstrap-ит control node первым.
 4. Берёт `.\operator\ansible_control.managed_nodes.pub`.
-5. Bootstrap-ит managed nodes. Если `-ManagedAliases` не указан, выбирает их по ролям `production-runtime`, `preprod`, `hot-standby`, `backup`, `vpn-edge`, `vpn-cascade`.
+5. Bootstrap-ит managed nodes. Если `-ManagedAliases` не указан, выбирает их по ролям `production`, `preprod`, `hot-standby`, `backup`, `vpn-edge`, `vpn-cascade`.
 6. Синхронизирует sanitized `nodes.csv` и `state.csv` на control node.
 7. Печатает следующий ручной шаг: `ansible all -i inventory.ini -m ping` на control node.
 
