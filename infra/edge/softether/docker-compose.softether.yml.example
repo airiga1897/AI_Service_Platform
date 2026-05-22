@@ -1,6 +1,7 @@
 services:
-  softether:
+  softether-edge:
     image: softethervpn/vpnserver:stable
+    container_name: softether-edge
     cap_add:
       - NET_ADMIN
     expose:
@@ -15,11 +16,11 @@ services:
       - /etc/localtime:/etc/localtime:ro
     restart: always
     networks:
-      vpn_net:
+      vpn_edge_net:
         ipv4_address: 172.20.0.2
 
 networks:
-  vpn_net:
+  vpn_edge_net:
     driver: bridge
     ipam:
       config:

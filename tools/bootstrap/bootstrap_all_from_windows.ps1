@@ -22,6 +22,8 @@ param(
 
     [switch]$ForceOverwriteKeys,
 
+    [switch]$AutoAcceptHostKey,
+
     [switch]$RegenerateRemoteKeys,
 
     [switch]$SkipSync,
@@ -210,6 +212,9 @@ if ($ForceManagementKeyRefresh -or $ForceOverwriteKeys) {
 if ($RegenerateRemoteKeys) {
     $controlArgs += "-RegenerateRemoteKeys"
 }
+if ($AutoAcceptHostKey) {
+    $controlArgs += "-AutoAcceptHostKey"
+}
 
 Write-Host "Step 1/4: bootstrap control node $($controlNode.current_alias)"
 Invoke-ChildScript $BootstrapRunner $controlArgs
@@ -244,6 +249,9 @@ if (-not $SkipManaged) {
         if ($RegenerateRemoteKeys) {
             $managedArgs += "-RegenerateRemoteKeys"
         }
+        if ($AutoAcceptHostKey) {
+            $managedArgs += "-AutoAcceptHostKey"
+        }
 
         Write-Host "Step 2/4: bootstrap managed node $managedAlias"
         Invoke-ChildScript $BootstrapRunner $managedArgs
@@ -259,6 +267,9 @@ if (-not $SkipSync) {
     )
     if ($useStateFile) {
         $syncArgs += @("-StateFile", $StateFile)
+    }
+    if ($AutoAcceptHostKey) {
+        $syncArgs += "-AutoAcceptHostKey"
     }
 
     Write-Host "Step 3/4: sync sanitized nodes.csv to control node"

@@ -1,0 +1,17 @@
+---
+vpn_edge_root_dir: /opt/ai-service-platform/vpn_edge
+vpn_edge_data_dir: "{{ vpn_edge_root_dir }}/softether_data"
+vpn_edge_logs_dir: "{{ vpn_edge_root_dir }}/softether_logs"
+vpn_edge_backup_dir: "{{ vpn_edge_root_dir }}/backups"
+vpn_edge_overrides_dir: "{{ vpn_edge_root_dir }}/overrides"
+vpn_edge_tls_dir: "{{ vpn_edge_root_dir }}/nginx/ssl"
+vpn_edge_compose_file: "{{ vpn_edge_root_dir }}/docker-compose.yml"
+
+vpn_edge_seed_config: "{{ playbook_dir }}/../../operator/softether/edge/vpn_server.config"
+vpn_edge_local_override_dir: "{{ playbook_dir }}/../../operator/softether/edge/overrides/{{ inventory_hostname }}"
+
+vpn_edge_image: softethervpn/vpnserver:stable
+vpn_edge_container_name: softether-edge
+vpn_edge_network_name: vpn_edge_net
+vpn_edge_network_subnet: 172.20.0.0/24
+vpn_edge_container_ipv4: 172.20.0.2

@@ -49,6 +49,25 @@ Meaning:
 
 `root_password` is never copied to the control node in real form. Sync always sends sanitized `nodes.csv`.
 
+## Reinstall Model
+
+Reinstalling a VPS changes the physical node access keys, not the platform role by itself.
+
+For one managed VPS reinstall:
+
+- update only that alias row in operator-local `nodes.csv` with the fresh temporary `root_password`;
+- run bootstrap for that alias with the existing control-node public key;
+- let the runner refresh only `operator/<alias>/deploy_key` and `operator/<alias>/admin_key`;
+- sync sanitized `nodes.csv` and `state.csv` back to the active orchestration node.
+
+For an orchestration-node reinstall:
+
+- bootstrap the active `orchestration` alias first;
+- treat the old `operator/ansible_control.managed_nodes.pub` as obsolete;
+- distribute the new Ansible control public key to managed nodes before relying on Ansible again.
+
+`state.csv` should change only when the desired role/service placement changes. It is not edited just because an OS was reinstalled on the same alias.
+
 ## state.csv
 
 Header:
@@ -152,6 +171,7 @@ Expected result:
 ## VPN Edge Service
 
 The current user-facing VPN service is `vpn_edge`, not generic `vpn`.
+It is the SoftEther user ingress service behind HAProxy.
 
 It is controlled by:
 
@@ -185,4 +205,15 @@ bash tools/services/service.sh vpn_edge absent --limit vps1
 bash tools/services/service.sh vpn_edge purge --limit vps1 --confirm-purge
 ```
 
+`vpn_edge` uses the operator-only opaque seed config:
+
+```text
+operator/softether/edge/vpn_server.config
+```
+
+The seed can contain multiple VirtualHUBs, users, groups, SecureNAT/DHCP, and
+credentials. It is copied as state, not generated from Ansible variables.
+
 `vpn_cascade` is documented in `state.csv` but rollout is not implemented yet.
+It is reserved for future site-to-site/cascade transport and must use a separate
+config/container/volume design.

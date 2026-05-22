@@ -11,6 +11,8 @@ SSH_USER="useradmin"
 SSH_KEY_FILE="./operator/vps3/admin_key"
 REMOTE_NODES_FILE="/tmp/ai-service-platform.nodes.csv"
 REMOTE_STATE_FILE="/tmp/ai-service-platform.state.csv"
+SOFTETHER_DIR="./operator/softether"
+REMOTE_SOFTETHER_DIR="/tmp/ai-service-platform.softether"
 REMOTE_PREPARE_SCRIPT="/opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh"
 INCLUDE_ALIASES=""
 
@@ -28,6 +30,8 @@ Options:
   --ssh-user VALUE           SSH user for VPS3 sync. Default: useradmin
   --ssh-key-file PATH        SSH private key for SSH user. Default: ./operator/vps3/admin_key
   --remote-nodes-file PATH   Remote temporary CSV path. Default: /tmp/ai-service-platform.nodes.csv
+  --softether-dir PATH       Optional operator SoftEther secret directory.
+                             Default: ./operator/softether
   --remote-prepare-script PATH
                              Remote prepare script path.
   --include LIST             Optional aliases to include when generating inventory.
@@ -70,6 +74,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --remote-nodes-file)
             REMOTE_NODES_FILE="${2:-}"
+            shift 2
+            ;;
+        --softether-dir)
+            SOFTETHER_DIR="${2:-}"
             shift 2
             ;;
         --remote-prepare-script)
@@ -152,6 +160,11 @@ if [ -n "$STATE_FILE" ]; then
     echo "Syncing state.csv to $remote"
     scp -i "$SSH_KEY_FILE" "$STATE_FILE" "$remote:$REMOTE_STATE_FILE"
 fi
+if [ -d "$SOFTETHER_DIR" ]; then
+    echo "Syncing SoftEther operator secret directory to $remote"
+    ssh -i "$SSH_KEY_FILE" "$remote" "rm -rf '$REMOTE_SOFTETHER_DIR'"
+    scp -r -i "$SSH_KEY_FILE" "$SOFTETHER_DIR" "$remote:$REMOTE_SOFTETHER_DIR"
+fi
 
 prepare_command="sudo bash '$REMOTE_PREPARE_SCRIPT' --source-nodes-file '$REMOTE_NODES_FILE'"
 if [ -n "$STATE_FILE" ]; then
@@ -161,6 +174,10 @@ if [ -n "$INCLUDE_ALIASES" ]; then
     prepare_command="$prepare_command --include '$INCLUDE_ALIASES'"
 fi
 remote_command="set -e; $prepare_command; rm -f '$REMOTE_NODES_FILE' '$REMOTE_STATE_FILE'"
+if [ -d "$SOFTETHER_DIR" ]; then
+    softether_command="sudo mkdir -p /opt/ai-service-platform/operator; if [ -d '$REMOTE_SOFTETHER_DIR/softether' ]; then sudo rm -rf /opt/ai-service-platform/operator/softether && sudo cp -a '$REMOTE_SOFTETHER_DIR/softether' /opt/ai-service-platform/operator/softether; else sudo rm -rf /opt/ai-service-platform/operator/softether && sudo cp -a '$REMOTE_SOFTETHER_DIR' /opt/ai-service-platform/operator/softether; fi;"
+    remote_command="set -e; $softether_command $prepare_command; rm -rf '$REMOTE_SOFTETHER_DIR'; rm -f '$REMOTE_NODES_FILE' '$REMOTE_STATE_FILE'"
+fi
 
 echo "Running VPS3 inventory preparation"
 ssh -i "$SSH_KEY_FILE" "$remote" "$remote_command"

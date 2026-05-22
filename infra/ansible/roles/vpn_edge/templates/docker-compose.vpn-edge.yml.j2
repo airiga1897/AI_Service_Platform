@@ -1,0 +1,27 @@
+services:
+  softether-edge:
+    image: {{ vpn_edge_image }}
+    container_name: {{ vpn_edge_container_name }}
+    cap_add:
+      - NET_ADMIN
+    expose:
+      - "443/tcp"
+      - "992/tcp"
+      - "1194/tcp"
+      - "5555/tcp"
+    volumes:
+      - ./softether_data:/mnt
+      - ./softether_logs:/usr/local/bin/server_log
+      - ./nginx/ssl:/etc/ssl/vpn:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: always
+    networks:
+      {{ vpn_edge_network_name }}:
+        ipv4_address: {{ vpn_edge_container_ipv4 }}
+
+networks:
+  {{ vpn_edge_network_name }}:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: {{ vpn_edge_network_subnet }}

@@ -31,9 +31,11 @@ service,vpn_edge,vpn_edges,vps1+vps2+vps3,,,present
 service,vpn_cascade,vpn_cascades,,,,absent
 ```
 
-`vpn_edge` is the user VPN ingress service.
+`vpn_edge` is the user VPN ingress service. Its seed config is the opaque
+operator secret `operator/softether/edge/vpn_server.config`.
 
 `vpn_cascade` is reserved for future site-to-site/cascade transport and is not rolled out now.
+It must get a separate config/container/volume design before implementation.
 
 ## 2. Prepare Inventory
 
@@ -133,6 +135,11 @@ bash tools/services/service.sh vpn_edge purge \
 ## 6. SoftEther Contract
 
 SoftEther/VPN is a platform service, not part of `AromaFlowAI` or `AI_E_Retail`.
+This rollout covers `vpn_edge` only; `vpn_cascade` remains reserved.
+
+`vpn_server.config` is copied as an opaque edge seed. Ansible v1 must not parse
+VirtualHUBs, users, groups, passwords, SecureNAT/DHCP, or certificates from it
+and must not patch it with string replacements.
 
 Current TCP-only contract:
 
@@ -157,5 +164,6 @@ HAProxy publishes TCP ports externally. SoftEther stays inside Docker network an
 - `service vpn` is rejected.
 - `service vpn_cascade` is rejected as reserved/not implemented.
 - SoftEther container starts on the target node.
+- Both existing VirtualHUBs from the opaque edge seed are still present.
 - TCP ports `443`, `992`, `1194`, `5555` follow the edge contract.
 - `vpn_server.config`, private keys, real IPs, passwords, and generated inventory are not committed.

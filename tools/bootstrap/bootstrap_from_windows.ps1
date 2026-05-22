@@ -21,6 +21,8 @@ param(
 
     [switch]$Force,
 
+    [switch]$AutoAcceptHostKey,
+
     [switch]$RegenerateRemoteKeys
 )
 
@@ -178,11 +180,38 @@ function Save-BootstrapKeys($Lines, $AliasToSave, $IsManagement, $BaseOperatorDi
     }
 }
 
-function Invoke-PlinkCommand($Remote, $Password, $Command, $LogPath) {
+function Get-PuttyHostKeyFingerprint($Remote, $Password) {
+    if (-not $AutoAcceptHostKey) {
+        return ""
+    }
+
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $script:ErrorActionPreference = "Continue"
-        & plink -batch -pw $Password $Remote $Command 2>&1 | ForEach-Object {
+        $output = & plink -batch -no-antispoof -pw $Password $Remote exit 2>&1
+    } finally {
+        $script:ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    $outputText = ($output | ForEach-Object { [string]$_ }) -join "`n"
+    $match = [regex]::Match($outputText, "SHA256:[A-Za-z0-9+/=]+")
+    if (-not $match.Success) {
+        Fail "Could not detect SSH host key fingerprint for $Remote. PuTTY output:`n$outputText"
+    }
+
+    Write-Host "Detected SSH host key fingerprint for $Remote`: $($match.Value)"
+    return $match.Value
+}
+
+function Invoke-PlinkCommand($Remote, $Password, $Command, $LogPath, $HostKeyFingerprint) {
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $script:ErrorActionPreference = "Continue"
+        $plinkArgs = @("-batch", "-no-antispoof", "-pw", $Password, $Remote, $Command)
+        if ($HostKeyFingerprint) {
+            $plinkArgs = @("-hostkey", $HostKeyFingerprint) + $plinkArgs
+        }
+        & plink @plinkArgs 2>&1 | ForEach-Object {
             $line = [string]$_
             Add-Content -LiteralPath $LogPath -Value $line -Encoding utf8
             Write-Host $line
@@ -194,6 +223,36 @@ function Invoke-PlinkCommand($Remote, $Password, $Command, $LogPath) {
 
     return [PSCustomObject]@{
         ExitCode = $exitCode
+    }
+}
+
+function Invoke-PscpPassword($Password, $Source, $Target, $Label, $HostKeyFingerprint) {
+    $pscpArgs = @("-pw", $Password, $Source, $Target)
+    if ($HostKeyFingerprint) {
+        $pscpArgs = @("-hostkey", $HostKeyFingerprint) + $pscpArgs
+    }
+    & pscp @pscpArgs
+    if ($LASTEXITCODE -ne 0) {
+        Fail "$Label failed"
+    }
+}
+
+function Clear-PuttyHostKeyCache($Endpoint) {
+    if (-not $AutoAcceptHostKey) {
+        return
+    }
+
+    $registryPath = "HKCU:\Software\SimonTatham\PuTTY\SshHostKeys"
+    if (-not (Test-Path -LiteralPath $registryPath)) {
+        return
+    }
+
+    $keyItem = Get-Item -LiteralPath $registryPath
+    foreach ($property in $keyItem.GetValueNames()) {
+        if ($property -like "*@*:$Endpoint") {
+            Remove-ItemProperty -LiteralPath $registryPath -Name $property -ErrorAction SilentlyContinue
+            Write-Host "Removed PuTTY cached host key: $property"
+        }
     }
 }
 
@@ -253,33 +312,29 @@ try {
 
     $remote = "root@$($row.endpoint)"
     Write-Host "Bootstrapping $Alias at $($row.endpoint)"
+    Clear-PuttyHostKeyCache $row.endpoint
+    $hostKeyFingerprint = Get-PuttyHostKeyFingerprint $remote $row.root_password
 
     Write-Host "Step 1/4: copy setup_vps.sh"
-    & pscp -pw $row.root_password $SetupScript "${remote}:/tmp/setup_vps.sh"
-    if ($LASTEXITCODE -ne 0) { Fail "pscp setup_vps.sh failed" }
+    Invoke-PscpPassword $row.root_password $SetupScript "${remote}:/tmp/setup_vps.sh" "pscp setup_vps.sh" $hostKeyFingerprint
 
     Write-Host "Step 2/4: copy sanitized nodes.csv"
-    & pscp -pw $row.root_password $sanitized "${remote}:/tmp/nodes.csv"
-    if ($LASTEXITCODE -ne 0) { Fail "pscp sanitized nodes.csv failed" }
+    Invoke-PscpPassword $row.root_password $sanitized "${remote}:/tmp/nodes.csv" "pscp sanitized nodes.csv" $hostKeyFingerprint
 
     if ($StateFile) {
         Write-Host "Step 2a/4: copy state.csv"
-        & pscp -pw $row.root_password $StateFile "${remote}:/tmp/state.csv"
-        if ($LASTEXITCODE -ne 0) { Fail "pscp state.csv failed" }
+        Invoke-PscpPassword $row.root_password $StateFile "${remote}:/tmp/state.csv" "pscp state.csv" $hostKeyFingerprint
     }
 
     if ($isManagementNode) {
         Write-Host "Step 2b/4: copy control inventory helpers"
-        & pscp -pw $row.root_password $CreateInventoryScript "${remote}:/tmp/create_inventory.sh"
-        if ($LASTEXITCODE -ne 0) { Fail "pscp create_inventory.sh failed" }
-        & pscp -pw $row.root_password $PrepareInventoryScript "${remote}:/tmp/prepare_vps3_inventory.sh"
-        if ($LASTEXITCODE -ne 0) { Fail "pscp prepare_vps3_inventory.sh failed" }
+        Invoke-PscpPassword $row.root_password $CreateInventoryScript "${remote}:/tmp/create_inventory.sh" "pscp create_inventory.sh" $hostKeyFingerprint
+        Invoke-PscpPassword $row.root_password $PrepareInventoryScript "${remote}:/tmp/prepare_vps3_inventory.sh" "pscp prepare_vps3_inventory.sh" $hostKeyFingerprint
     }
 
     if ($AnsibleAuthorizedKeyFile) {
         Write-Host "Step 2c/4: copy Ansible control public key"
-        & pscp -pw $row.root_password $AnsibleAuthorizedKeyFile "${remote}:/tmp/ansible_control.managed_nodes.pub"
-        if ($LASTEXITCODE -ne 0) { Fail "pscp Ansible public key failed" }
+        Invoke-PscpPassword $row.root_password $AnsibleAuthorizedKeyFile "${remote}:/tmp/ansible_control.managed_nodes.pub" "pscp Ansible public key" $hostKeyFingerprint
     }
 
     if ($AnsibleAuthorizedKeyFile) {
@@ -308,7 +363,7 @@ try {
     Write-Host "Step 3/4: run remote bootstrap"
     Write-Host "Expected next output: AI Service Platform VPS bootstrap"
     Write-Host "If this step stays silent for a long time, check PuTTY/plink host key cache, SSH banner prompts, and root password auth."
-    $plinkResult = Invoke-PlinkCommand $remote $row.root_password $remoteCommand $remoteLog
+    $plinkResult = Invoke-PlinkCommand $remote $row.root_password $remoteCommand $remoteLog $hostKeyFingerprint
     $remoteOutput = Get-Content -LiteralPath $remoteLog -ErrorAction SilentlyContinue
     $remoteExitCode = $plinkResult.ExitCode
     if ($remoteExitCode -ne 0) { Fail "remote setup_vps.sh failed" }

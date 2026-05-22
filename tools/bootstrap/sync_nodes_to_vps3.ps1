@@ -17,9 +17,15 @@ param(
 
     [string]$RemoteNodesFile = "/tmp/ai-service-platform.nodes.csv",
 
+    [string]$SoftetherDir = ".\operator\softether",
+
+    [string]$RemoteSoftetherDir = "/tmp/ai-service-platform.softether",
+
     [string]$RemotePrepareScript = "/opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh",
 
-    [string]$Include = ""
+    [string]$Include = "",
+
+    [switch]$AutoAcceptHostKey
 )
 
 $ErrorActionPreference = "Stop"
@@ -148,6 +154,9 @@ if (-not (Get-Command plink -ErrorAction SilentlyContinue)) {
 if (-not (Get-Command pscp -ErrorAction SilentlyContinue)) {
     Fail "pscp not found in PATH"
 }
+if (-not (Get-Command puttygen -ErrorAction SilentlyContinue)) {
+    Fail "puttygen not found in PATH. It is required to convert OpenSSH private keys to PuTTY .ppk for plink/pscp."
+}
 
 $firstLine = Get-Content -LiteralPath $NodesFile -TotalCount 1
 if ($firstLine -ne $ExpectedHeader) {
@@ -182,16 +191,115 @@ if (-not $Include) {
 $sanitized = New-SanitizedNodesFile $NodesFile
 $remote = "$SshUser@$($controlNode.endpoint)"
 
+function Convert-ToPuttyPrivateKey($OpenSshKeyFile) {
+    $tempPpk = [System.IO.Path]::ChangeExtension((New-TemporaryFile).FullName, ".ppk")
+    Remove-Item -LiteralPath $tempPpk -Force -ErrorAction SilentlyContinue
+
+    & puttygen $OpenSshKeyFile -O private -o $tempPpk
+    if ($LASTEXITCODE -ne 0) {
+        Fail "puttygen failed to convert OpenSSH key to PuTTY .ppk: $OpenSshKeyFile"
+    }
+    if (-not (Test-Path -LiteralPath $tempPpk -PathType Leaf)) {
+        Fail "puttygen did not create .ppk file: $tempPpk"
+    }
+
+    return $tempPpk
+}
+
+function Get-PuttyHostKeyFingerprint($Remote, $KeyFile) {
+    if (-not $AutoAcceptHostKey) {
+        return ""
+    }
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $script:ErrorActionPreference = "Continue"
+        $output = & plink -batch -no-antispoof -i $KeyFile $Remote exit 2>&1
+    } finally {
+        $script:ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    $outputText = ($output | ForEach-Object { [string]$_ }) -join "`n"
+    $match = [regex]::Match($outputText, "SHA256:[A-Za-z0-9+/=]+")
+    if (-not $match.Success) {
+        Fail "Could not detect SSH host key fingerprint for $Remote. PuTTY output:`n$outputText"
+    }
+
+    Write-Host "Detected SSH host key fingerprint for $Remote`: $($match.Value)"
+    return $match.Value
+}
+
+function Invoke-PscpKey($KeyFile, $Source, $Target, $Label, $HostKeyFingerprint) {
+    $pscpArgs = @("-i", $KeyFile, $Source, $Target)
+    if ($HostKeyFingerprint) {
+        $pscpArgs = @("-hostkey", $HostKeyFingerprint) + $pscpArgs
+    }
+    & pscp @pscpArgs
+    if ($LASTEXITCODE -ne 0) {
+        Fail "$Label failed"
+    }
+}
+
+function Invoke-PscpKeyRecursive($KeyFile, $Source, $Target, $Label, $HostKeyFingerprint) {
+    $pscpArgs = @("-r", "-i", $KeyFile, $Source, $Target)
+    if ($HostKeyFingerprint) {
+        $pscpArgs = @("-hostkey", $HostKeyFingerprint) + $pscpArgs
+    }
+    & pscp @pscpArgs
+    if ($LASTEXITCODE -ne 0) {
+        Fail "$Label failed"
+    }
+}
+
+function Invoke-PlinkKey($KeyFile, $Remote, $Command, $Label, $HostKeyFingerprint) {
+    $plinkArgs = @("-batch", "-no-antispoof", "-i", $KeyFile, $Remote, $Command)
+    if ($HostKeyFingerprint) {
+        $plinkArgs = @("-hostkey", $HostKeyFingerprint) + $plinkArgs
+    }
+    & plink @plinkArgs
+    if ($LASTEXITCODE -ne 0) {
+        Fail "$Label failed"
+    }
+}
+
+function Clear-PuttyHostKeyCache($Endpoint) {
+    if (-not $AutoAcceptHostKey) {
+        return
+    }
+
+    $registryPath = "HKCU:\Software\SimonTatham\PuTTY\SshHostKeys"
+    if (-not (Test-Path -LiteralPath $registryPath)) {
+        return
+    }
+
+    $keyItem = Get-Item -LiteralPath $registryPath
+    foreach ($property in $keyItem.GetValueNames()) {
+        if ($property -like "*@*:$Endpoint") {
+            Remove-ItemProperty -LiteralPath $registryPath -Name $property -ErrorAction SilentlyContinue
+            Write-Host "Removed PuTTY cached host key: $property"
+        }
+    }
+}
+
+Clear-PuttyHostKeyCache $controlNode.endpoint
+$puttyKeyFile = Convert-ToPuttyPrivateKey $SshKeyFile
+$hostKeyFingerprint = Get-PuttyHostKeyFingerprint $remote $puttyKeyFile
+
 try {
     Write-Host "Syncing sanitized nodes.csv to control node $($controlNode.current_alias) at $remote"
-    & pscp -i $SshKeyFile $sanitized "${remote}:$RemoteNodesFile"
-    if ($LASTEXITCODE -ne 0) { Fail "pscp sanitized nodes.csv failed" }
+    Invoke-PscpKey $puttyKeyFile $sanitized "${remote}:$RemoteNodesFile" "pscp sanitized nodes.csv" $hostKeyFingerprint
 
     $remoteStateFile = "/tmp/ai-service-platform.state.csv"
     if ($useStateFile) {
         Write-Host "Syncing state.csv to control node $($controlNode.current_alias)"
-        & pscp -i $SshKeyFile $StateFile "${remote}:$remoteStateFile"
-        if ($LASTEXITCODE -ne 0) { Fail "pscp state.csv failed" }
+        Invoke-PscpKey $puttyKeyFile $StateFile "${remote}:$remoteStateFile" "pscp state.csv" $hostKeyFingerprint
+    }
+
+    $syncSoftether = Test-Path -LiteralPath $SoftetherDir -PathType Container
+    if ($syncSoftether) {
+        Write-Host "Syncing SoftEther operator secret directory to control node $($controlNode.current_alias)"
+        Invoke-PlinkKey $puttyKeyFile $remote "rm -rf '$RemoteSoftetherDir'" "remote cleanup SoftEther temp dir" $hostKeyFingerprint
+        Invoke-PscpKeyRecursive $puttyKeyFile $SoftetherDir "${remote}:$RemoteSoftetherDir" "pscp SoftEther operator directory" $hostKeyFingerprint
     }
 
     $prepareCommand = "sudo bash '$RemotePrepareScript' --source-nodes-file '$RemoteNodesFile'"
@@ -201,13 +309,17 @@ try {
     if ($Include) {
         $prepareCommand = "$prepareCommand --include '$Include'"
     }
-    $remoteCommand = "set -e; $prepareCommand; rm -f '$RemoteNodesFile' '$remoteStateFile'"
+    $softetherCommand = ""
+    if ($syncSoftether) {
+        $softetherCommand = "sudo mkdir -p /opt/ai-service-platform/operator; if [ -d '$RemoteSoftetherDir/softether' ]; then sudo rm -rf /opt/ai-service-platform/operator/softether && sudo cp -a '$RemoteSoftetherDir/softether' /opt/ai-service-platform/operator/softether; else sudo rm -rf /opt/ai-service-platform/operator/softether && sudo cp -a '$RemoteSoftetherDir' /opt/ai-service-platform/operator/softether; fi;"
+    }
+    $remoteCommand = "set -e; $softetherCommand $prepareCommand; rm -rf '$RemoteSoftetherDir'; rm -f '$RemoteNodesFile' '$remoteStateFile'"
 
     Write-Host "Running control node inventory preparation"
-    & plink -batch -i $SshKeyFile $remote $remoteCommand
-    if ($LASTEXITCODE -ne 0) { Fail "remote prepare_vps3_inventory.sh failed" }
+    Invoke-PlinkKey $puttyKeyFile $remote $remoteCommand "remote prepare_vps3_inventory.sh" $hostKeyFingerprint
 
     Write-Host "Control node nodes.csv and inventory.ini are in sync"
 } finally {
     Remove-Item -LiteralPath $sanitized -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $puttyKeyFile -Force -ErrorAction SilentlyContinue
 }

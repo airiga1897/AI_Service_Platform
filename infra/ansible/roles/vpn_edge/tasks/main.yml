@@ -1,0 +1,128 @@
+---
+- name: Validate vpn_edge state
+  ansible.builtin.assert:
+    that:
+      - vpn_state in ['present', 'absent']
+      - vpn_purge_data in [true, false, 'true', 'false', 'True', 'False']
+    fail_msg: "vpn_state must be present|absent and vpn_purge_data must be boolean-like."
+
+- name: Check edge seed config on control node
+  ansible.builtin.stat:
+    path: "{{ vpn_edge_seed_config }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_edge_seed_stat
+  when: vpn_state == 'present'
+
+- name: Require edge seed config
+  ansible.builtin.assert:
+    that:
+      - vpn_edge_seed_stat.stat.exists
+      - vpn_edge_seed_stat.stat.isreg
+    fail_msg: "Missing SoftEther edge seed config on control node: {{ vpn_edge_seed_config }}"
+  when: vpn_state == 'present'
+
+- name: Check node-specific edge overrides on control node
+  ansible.builtin.stat:
+    path: "{{ vpn_edge_local_override_dir }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_edge_override_stat
+  when: vpn_state == 'present'
+
+- name: Ensure vpn_edge runtime directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+  loop:
+    - "{{ vpn_edge_root_dir }}"
+    - "{{ vpn_edge_data_dir }}"
+    - "{{ vpn_edge_logs_dir }}"
+    - "{{ vpn_edge_backup_dir }}"
+    - "{{ vpn_edge_overrides_dir }}"
+    - "{{ vpn_edge_tls_dir }}"
+  when: vpn_state == 'present'
+
+- name: Check existing remote edge config
+  ansible.builtin.stat:
+    path: "{{ vpn_edge_data_dir }}/vpn_server.config"
+  register: vpn_edge_remote_config_stat
+  when: vpn_state == 'present'
+
+- name: Backup existing remote edge config before replacement
+  ansible.builtin.copy:
+    src: "{{ vpn_edge_data_dir }}/vpn_server.config"
+    dest: "{{ vpn_edge_backup_dir }}/vpn_server.config.pre-vpn-edge-apply"
+    remote_src: true
+    mode: "0600"
+    backup: true
+  no_log: true
+  when:
+    - vpn_state == 'present'
+    - vpn_edge_remote_config_stat.stat.exists
+    - not ansible_check_mode
+
+- name: Install opaque SoftEther edge seed config
+  ansible.builtin.copy:
+    src: "{{ vpn_edge_seed_config }}"
+    dest: "{{ vpn_edge_data_dir }}/vpn_server.config"
+    mode: "0600"
+  no_log: true
+  when: vpn_state == 'present'
+
+- name: Stage node-specific edge overrides when present
+  ansible.builtin.copy:
+    src: "{{ vpn_edge_local_override_dir }}/"
+    dest: "{{ vpn_edge_overrides_dir }}/"
+    mode: preserve
+  no_log: true
+  when:
+    - vpn_state == 'present'
+    - vpn_edge_override_stat.stat.exists
+    - vpn_edge_override_stat.stat.isdir
+
+- name: Render vpn_edge Docker Compose
+  ansible.builtin.template:
+    src: docker-compose.vpn-edge.yml.j2
+    dest: "{{ vpn_edge_compose_file }}"
+    mode: "0640"
+  when: vpn_state == 'present'
+
+- name: Start vpn_edge container
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ vpn_edge_compose_file }}" up -d
+    chdir: "{{ vpn_edge_root_dir }}"
+  changed_when: true
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+
+- name: Check vpn_edge compose file
+  ansible.builtin.stat:
+    path: "{{ vpn_edge_compose_file }}"
+  register: vpn_edge_compose_stat
+  when: vpn_state == 'absent'
+
+- name: Stop vpn_edge container
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ vpn_edge_compose_file }}" down
+    chdir: "{{ vpn_edge_root_dir }}"
+  changed_when: true
+  when:
+    - vpn_state == 'absent'
+    - vpn_edge_compose_stat.stat.exists
+    - not ansible_check_mode
+
+- name: Purge vpn_edge runtime data when explicitly requested
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ vpn_edge_data_dir }}"
+    - "{{ vpn_edge_logs_dir }}"
+    - "{{ vpn_edge_overrides_dir }}"
+  when:
+    - vpn_state == 'absent'
+    - vpn_purge_data in [true, 'true', 'True']
+    - not ansible_check_mode
