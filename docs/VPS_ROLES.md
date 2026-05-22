@@ -1,29 +1,29 @@
 # Platform Nodes, Roles And Service State
 
-Платформа разделяет две вещи:
+Platform uses two operator files:
 
-- `nodes.csv` — какие VPS существуют и как к ним подключаться.
-- `state.csv` — какие роли и сервисы должны быть активны на этих VPS.
+- `nodes.csv` describes which VPS nodes exist and how to connect to them.
+- `state.csv` describes which roles and services should be active on those nodes.
 
-`vps1`, `vps2`, `vps3` — короткие operator aliases текущей схемы. Это не platform roles.
+`vps1`, `vps2`, `vps3` are short operator aliases for the current scheme. They are not platform roles.
 
 ## Operator Files
 
-Real operator files хранятся вне git:
+Real operator files stay outside git:
 
 ```text
 operator/nodes.csv
 operator/state.csv
 ```
 
-На control/orchestration node они синхронизируются как:
+On the control/orchestration node they are synced to:
 
 ```text
 /opt/ai-service-platform/operator/nodes.csv
 /opt/ai-service-platform/operator/state.csv
 ```
 
-Безопасные шаблоны:
+Safe examples live in:
 
 ```text
 infra/ansible/nodes.example.csv
@@ -38,16 +38,16 @@ Header:
 current_alias,endpoint,connection,ansible_group,roles,root_password
 ```
 
-Смысл:
+Meaning:
 
-- `current_alias` — короткий ключ узла, например `vps1`.
-- `endpoint` — DNS/IP для operator bootstrap; real value не коммитится.
-- `connection` — `ssh` для bootstrap с операторской машины, `local` только на control node.
-- `ansible_group` — базовая группа узла для старых/fallback сценариев.
-- `roles` — базовые capabilities узла, например `production+vpn-edge`.
-- `root_password` — временный пароль только для первого bootstrap; runner очищает его после успеха.
+- `current_alias` is a short node key, for example `vps1`.
+- `endpoint` is operator-side DNS/IP and must not be committed with real values.
+- `connection` is `ssh` for bootstrap from operator machine; `local` is only for control-node-local inventory.
+- `ansible_group` is a fallback/default group for old flows.
+- `roles` are basic node capabilities, for example `production+vpn-edge`.
+- `root_password` is temporary bootstrap input and is cleared after successful bootstrap.
 
-`root_password` не копируется на control node: sync всегда отправляет sanitized CSV.
+`root_password` is never copied to the control node in real form. Sync always sends sanitized `nodes.csv`.
 
 ## state.csv
 
@@ -57,7 +57,7 @@ Header:
 kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state
 ```
 
-Пример:
+Current example:
 
 ```csv
 kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state
@@ -65,68 +65,75 @@ role,production,prod,vps1,,,present
 role,preprod,backup,vps2,,,present
 role,backup,backup,vps2,,,present
 role,orchestration,management,vps3,,,present
-service,vpn,vpn_edges,vps1+vps2+vps3,,,present
+role,monitoring,monitoring,vps3,,,present
+service,vpn_edge,vpn_edges,vps1+vps2+vps3,,,present
+service,vpn_cascade,vpn_cascades,,,,absent
 ```
 
-Смысл:
+Meaning:
 
-- `kind=role` — назначение узла, например `orchestration`.
-- `kind=service` — устанавливаемый platform service, например `vpn`.
-- `active_aliases` — где роль/сервис сейчас должны быть активны.
-- `candidate_aliases` — узлы-кандидаты для миграции или подготовки.
-- `old_aliases` — прежние узлы на rollback window.
-- `state` — желаемое состояние: `present`, `absent`, `purged`.
+- `kind=role` is a platform responsibility, for example `orchestration`.
+- `kind=service` is an installable platform service, for example `vpn_edge`.
+- `active_aliases` are where a role/service should be active now.
+- `candidate_aliases` are nodes prepared for migration.
+- `old_aliases` are previous nodes kept during rollback window.
+- `state` is one of `present`, `absent`, `purged`.
 
-Внутри alias-полей несколько значений разделяются через `+`.
+Multiple aliases inside one field are separated with `+`.
 
-## state Values
+## State Values
 
-`present` означает: роль или сервис должны существовать.
+`present` means the role or service should exist.
 
-Для VPN:
+`absent` means the service should not be active, but data is preserved. Real removal is explicit, for example `service vpn_edge absent`.
 
-```csv
-service,vpn,vpn_edges,vps1+vps2+vps3,,,present
-```
+`purged` means service data may be deleted, but only by explicit command with confirmation, for example `service vpn_edge purge --confirm-purge`.
 
-означает: VPN должен быть развернут на `vps1`, `vps2`, `vps3`.
+Changing CSV files does not automatically run destructive actions.
 
-`absent` означает: сервис не должен быть активен, но данные не удаляются. Реальное отключение выполняется только явной командой `service vpn absent`.
+## Core Roles
 
-`purged` означает: данные можно удалить, но только явной командой `service vpn purge --confirm-purge`.
+- `management` is control tooling: Ansible, Semaphore, orchestration scripts, future control plane.
+- `monitoring` is observability: Prometheus, Grafana, Loki, Alertmanager.
+- `vpn_edges` is user VPN ingress through HAProxy/SoftEther.
+- `vpn_cascades` is reserved for future site-to-site/cascade transport between VPS nodes.
 
-Изменение CSV само по себе не запускает разрушительные действия.
-
-## Control Node
-
-Control node выбирается по `state.csv`:
+`management` and `monitoring` can live on the same VPS now:
 
 ```csv
 role,orchestration,management,vps3,,,present
+role,monitoring,monitoring,vps3,,,present
 ```
 
-Правила:
-
-- должен быть ровно один active alias для `role,orchestration`;
-- резервный orchestration node указывается в `candidate_aliases`;
-- перенос control role делается изменением `state.csv`, а не hardcode alias `vps3`.
-
-Пример подготовки резерва:
+Later monitoring can move without changing the control node:
 
 ```csv
-role,orchestration,management,vps3,vps4,,present
+role,orchestration,management,vps3,,,present
+role,monitoring,monitoring,vps4,,,present
 ```
-
-Здесь `vps3` остается active, а `vps4` является candidate.
 
 ## Inventory Generation
 
-`create_inventory.sh` берет:
+`create_inventory.sh` takes:
 
-- endpoint/connection из `nodes.csv`;
-- группы active/candidate/old из `state.csv`.
+- endpoint/connection from `nodes.csv`;
+- active/candidate/old groups from `state.csv`.
 
-Пример:
+For every safe `ansible_group` in `state.csv`, the generator creates:
+
+```text
+<group>
+candidate_<group>
+old_<group>
+```
+
+Group names must match:
+
+```text
+[a-z][a-z0-9_]*
+```
+
+Example:
 
 ```bash
 sudo bash tools/bootstrap/create_inventory.sh \
@@ -135,35 +142,35 @@ sudo bash tools/bootstrap/create_inventory.sh \
   --include vps1,vps2,vps3
 ```
 
-Результат:
+Expected result:
 
-- active `production` попадает в `[prod]`;
-- active `vpn` попадает в `[vpn_edges]`;
-- candidate aliases попадают в `[candidate_*]`;
-- old aliases попадают в `[old_*]`.
+- `vps1` appears in `[prod]`;
+- `vps3` appears in `[management]` and `[monitoring]`;
+- `vps1`, `vps2`, `vps3` appear in `[vpn_edges]`;
+- `vpn_cascades`, `candidate_vpn_cascades`, `old_vpn_cascades` exist even before rollout.
 
-## VPN Service
+## VPN Edge Service
 
-VPN — первый platform service после infrastructure preparation.
+The current user-facing VPN service is `vpn_edge`, not generic `vpn`.
 
-Он управляется строкой:
+It is controlled by:
 
 ```csv
-service,vpn,vpn_edges,vps1+vps2+vps3,,,present
+service,vpn_edge,vpn_edges,vps1+vps2+vps3,,,present
 ```
 
-Проверить план:
+Check plan:
 
 ```bash
-bash tools/services/service.sh vpn plan \
+bash tools/services/service.sh vpn_edge plan \
   --nodes-file /opt/ai-service-platform/operator/nodes.csv \
   --state-file /opt/ai-service-platform/operator/state.csv
 ```
 
-Применить осторожно на одном узле:
+Apply carefully to one node:
 
 ```bash
-bash tools/services/service.sh vpn apply \
+bash tools/services/service.sh vpn_edge apply \
   --nodes-file /opt/ai-service-platform/operator/nodes.csv \
   --state-file /opt/ai-service-platform/operator/state.csv \
   --inventory /opt/ai-service-platform/inventory.ini \
@@ -171,21 +178,11 @@ bash tools/services/service.sh vpn apply \
   --check
 ```
 
-Удаление сервиса не автоматическое:
+Removal is explicit:
 
 ```bash
-bash tools/services/service.sh vpn absent --limit vps1
-bash tools/services/service.sh vpn purge --limit vps1 --confirm-purge
+bash tools/services/service.sh vpn_edge absent --limit vps1
+bash tools/services/service.sh vpn_edge purge --limit vps1 --confirm-purge
 ```
 
-## Current Physical Placement
-
-Минимальная физическая информация остается в `services.yml`: страна, город и датацентр. Real endpoints остаются в operator-local CSV.
-
-Текущая схема:
-
-| Alias | Country | City | Datacenter |
-| --- | --- | --- | --- |
-| `vps1` | Netherlands | Amsterdam | Qupra DC2 |
-| `vps2` | Kazakhstan | Almaty | Ahost |
-| `vps3` | Russia | Moscow | IXcellerate |
+`vpn_cascade` is documented in `state.csv` but rollout is not implemented yet.

@@ -76,60 +76,60 @@
     - "{{ monitoring_dir }}/provisioning/datasources"
     - "{{ monitoring_dir }}/provisioning/dashboards"
     - "{{ monitoring_dir }}/dashboards"
-  when: "'management' in group_names"
+  when: "'monitoring' in group_names"
 
 - name: Скопировать docker-compose мониторинга
   template:
     src: docker-compose.monitoring.yml.j2
     dest: "{{ monitoring_dir }}/docker-compose.yml"
     mode: "0644"
-  when: "'management' in group_names"
+  when: "'monitoring' in group_names"
 
 - name: Создать конфиг Prometheus
   template:
     src: prometheus.yml.j2
     dest: "{{ monitoring_dir }}/prometheus.yml"
     mode: "0644"
-  when: "'management' in group_names"
+  when: "'monitoring' in group_names"
 
 - name: Создать правила алертов
   template:
     src: alert-rules.yml.j2
     dest: "{{ monitoring_dir }}/alert-rules.yml"
     mode: "0644"
-  when: "'management' in group_names"
+  when: "'monitoring' in group_names"
 
 - name: Создать конфиг Alertmanager
   template:
     src: alertmanager.yml.j2
     dest: "{{ monitoring_dir }}/alertmanager.yml"
     mode: "0600"
-  when: "'management' in group_names"
+  when: "'monitoring' in group_names"
 
 - name: Создать конфиг Loki
   template:
     src: loki-config.yml.j2
     dest: "{{ monitoring_dir }}/loki-config.yml"
     mode: "0644"
-  when: "'management' in group_names"
+  when: "'monitoring' in group_names"
 
 - name: Создать Grafana datasources provisioning
   template:
     src: grafana-datasources.yml.j2
     dest: "{{ monitoring_dir }}/provisioning/datasources/datasources.yml"
     mode: "0644"
-  when: "'management' in group_names"
+  when: "'monitoring' in group_names"
 
 - name: Создать Grafana dashboards provisioning
   template:
     src: grafana-dashboards-provisioning.yml.j2
     dest: "{{ monitoring_dir }}/provisioning/dashboards/dashboards.yml"
     mode: "0644"
-  when: "'management' in group_names"
+  when: "'monitoring' in group_names"
 
 - name: Запустить Prometheus + Grafana + Loki + Alertmanager
   community.docker.docker_compose_v2:
     project_src: "{{ monitoring_dir }}"
     state: present
     pull: always
-  when: "'management' in group_names"
+  when: "'monitoring' in group_names"

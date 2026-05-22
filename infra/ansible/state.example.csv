@@ -3,4 +3,6 @@ role,production,prod,vps1,,,present
 role,preprod,backup,vps2,,,present
 role,backup,backup,vps2,,,present
 role,orchestration,management,vps3,,,present
-service,vpn,vpn_edges,vps1+vps2+vps3,,,present
+role,monitoring,monitoring,vps3,,,present
+service,vpn_edge,vpn_edges,vps1+vps2+vps3,,,present
+service,vpn_cascade,vpn_cascades,,,,absent

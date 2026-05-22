@@ -52,7 +52,8 @@ State CSV header must be exactly:
 State CSV example:
   role,production,prod,vps1,,,present
   role,orchestration,management,vps3,vps4,,present
-  service,vpn,vpn_edges,vps1+vps2+vps3,,,present
+  service,vpn_edge,vpn_edges,vps1+vps2+vps3,,,present
+  service,vpn_cascade,vpn_cascades,,,,absent
 
 Fallback without CSV:
   --active ROLE:NODE=ENDPOINT
@@ -229,13 +230,11 @@ validate_connection() {
 validate_group() {
     local group="$1"
     local line_number="$2"
-    case "$group" in
-        prod|backup|management|vpn_edges|candidate_prod|old_prod|candidate_backup|old_backup|candidate_management|old_management|candidate_vpn_edges|old_vpn_edges) ;;
-        *)
-            print_error "nodes.csv line $line_number has unsupported ansible_group: $group"
-            exit 1
-            ;;
-    esac
+    if ! printf '%s\n' "$group" | grep -Eq '^[a-z][a-z0-9_]*$'; then
+        print_error "CSV line $line_number has unsafe ansible_group: $group"
+        print_error "Group names must match: [a-z][a-z0-9_]*"
+        exit 1
+    fi
 }
 
 validate_roles() {
@@ -308,6 +307,34 @@ get_node_record() {
         fi
     done
     return 1
+}
+
+array_contains() {
+    local needle="$1"
+    shift
+    local item
+    for item in "$@"; do
+        [ "$item" = "$needle" ] && return 0
+    done
+    return 1
+}
+
+register_group() {
+    local base_group="$1"
+    validate_group "$base_group" "generated"
+
+    if ! array_contains "$base_group" "${BASE_GROUP_NAMES[@]:-}"; then
+        BASE_GROUP_NAMES+=("$base_group")
+    fi
+    if ! array_contains "$base_group" "${GROUP_NAMES[@]:-}"; then
+        GROUP_NAMES+=("$base_group")
+    fi
+    if ! array_contains "candidate_$base_group" "${GROUP_NAMES[@]:-}"; then
+        GROUP_NAMES+=("candidate_$base_group")
+    fi
+    if ! array_contains "old_$base_group" "${GROUP_NAMES[@]:-}"; then
+        GROUP_NAMES+=("old_$base_group")
+    fi
 }
 
 add_state_alias_binding() {
@@ -395,8 +422,10 @@ read_nodes_file() {
             matched_count=$((matched_count + 1))
             matched_aliases="${matched_aliases}${current_alias},"
             if [ -z "$STATE_FILE" ]; then
+                register_group "$ansible_group"
                 PARSED_BINDINGS+=("active|$roles|$ansible_group|$current_alias|$current_alias|$endpoint|$connection")
                 if roles_have "$roles" "vpn-edge" && [ "$ansible_group" != "vpn_edges" ]; then
+                    register_group "vpn_edges"
                     PARSED_BINDINGS+=("active|$roles|vpn_edges|$current_alias|$current_alias|$endpoint|$connection")
                 fi
             fi
@@ -489,6 +518,7 @@ read_state_file() {
         validate_state_kind "$kind" "$line_number"
         validate_group "$ansible_group" "$line_number"
         validate_state_value "$state" "$line_number"
+        register_group "$ansible_group"
 
         local alias_item
         while IFS= read -r alias_item; do
@@ -551,6 +581,7 @@ parse_fallback_binding() {
     local host_alias
     local connection
     base_group="$(role_to_group "$role")"
+    register_group "$base_group"
     group="$(state_group_name "$state" "$base_group")"
     host_alias="$(node_to_host_alias "$node")"
     connection="ssh"
@@ -570,6 +601,8 @@ if [ -n "$INCLUDE_ALIASES" ] && printf '%s\n' "$INCLUDE_ALIASES" | grep -Eq '[[:
 fi
 
 PARSED_BINDINGS=()
+GROUP_NAMES=()
+BASE_GROUP_NAMES=()
 if [ -n "$NODES_FILE" ]; then
     if [ "${#BINDINGS[@]}" -gt 0 ]; then
         print_error "--nodes-file cannot be combined with --active/--candidate/--old fallback bindings"
@@ -625,7 +658,7 @@ umask 077
 
 EOF
 
-    for group in prod backup management vpn_edges candidate_prod old_prod candidate_backup old_backup candidate_management old_management candidate_vpn_edges old_vpn_edges; do
+    for group in "${GROUP_NAMES[@]}"; do
         echo "[$group]"
         printed_hosts=","
         for parsed in "${PARSED_BINDINGS[@]}"; do
@@ -646,13 +679,13 @@ EOF
         echo ""
     done
 
-    cat <<'EOF'
-[platform_nodes:children]
-prod
-backup
-management
-vpn_edges
+    echo "[platform_nodes:children]"
+    for group in "${BASE_GROUP_NAMES[@]}"; do
+        echo "$group"
+    done
+    echo ""
 
+    cat <<'EOF'
 [all:vars]
 ansible_python_interpreter=/usr/bin/python3
 EOF

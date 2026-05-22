@@ -17,10 +17,10 @@ EXPECTED_STATE_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,
 usage() {
     cat <<'USAGE'
 Usage:
-  bash tools/services/service.sh vpn plan [options]
-  bash tools/services/service.sh vpn apply [options]
-  bash tools/services/service.sh vpn absent [options]
-  bash tools/services/service.sh vpn purge --confirm-purge [options]
+  bash tools/services/service.sh vpn_edge plan [options]
+  bash tools/services/service.sh vpn_edge apply [options]
+  bash tools/services/service.sh vpn_edge absent [options]
+  bash tools/services/service.sh vpn_edge purge --confirm-purge [options]
 
 Options:
   --nodes-file PATH      Operator nodes.csv. Default: ./operator/nodes.csv
@@ -69,7 +69,13 @@ if [ "$SERVICE" = "-h" ] || [ "$SERVICE" = "--help" ]; then
     exit 0
 fi
 
-[ "$SERVICE" = "vpn" ] || fail "Only service 'vpn' is supported now."
+if [ "$SERVICE" = "vpn" ]; then
+    fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
+fi
+if [ "$SERVICE" = "vpn_cascade" ]; then
+    fail "Service 'vpn_cascade' is reserved for future site-to-site/cascade rollout and is not implemented yet."
+fi
+[ "$SERVICE" = "vpn_edge" ] || fail "Unsupported service '$SERVICE'. Supported now: vpn_edge. Reserved: vpn_cascade."
 case "$ACTION" in
     plan|apply|absent|purge) ;;
     *) usage; fail "Action must be one of: plan, apply, absent, purge" ;;
@@ -138,8 +144,8 @@ while IFS=, read -r kind name ansible_group active_aliases candidate_aliases old
     old_aliases="${old_aliases//$'\r'/}"
     row_state="${row_state//$'\r'/}"
     extra="${extra//$'\r'/}"
-    [ "$kind" = "service" ] && [ "$name" = "vpn" ] || continue
-    [ -z "$extra" ] || fail "state.csv vpn row has too many columns"
+    [ "$kind" = "service" ] && [ "$name" = "vpn_edge" ] || continue
+    [ -z "$extra" ] || fail "state.csv vpn_edge row has too many columns"
     vpn_found="true"
     vpn_group="$ansible_group"
     vpn_active_aliases="$active_aliases"
@@ -149,15 +155,15 @@ while IFS=, read -r kind name ansible_group active_aliases candidate_aliases old
     break
 done < <(tail -n +2 "$STATE_FILE")
 
-[ "$vpn_found" = "true" ] || fail "state.csv must contain a service row for vpn"
+[ "$vpn_found" = "true" ] || fail "state.csv must contain a service row for vpn_edge"
 case "$vpn_row_state" in
     present|absent|purged) ;;
-    *) fail "vpn state must be one of: present, absent, purged" ;;
+    *) fail "vpn_edge state must be one of: present, absent, purged" ;;
 esac
 [ -n "$vpn_group" ] || fail "vpn ansible_group is empty in state.csv"
 
 if [ "$ACTION" = "plan" ]; then
-    echo "Service: vpn"
+    echo "Service: vpn_edge"
     echo "State file: $STATE_FILE"
     echo "Service state: $vpn_row_state"
     echo "Ansible group: $vpn_group"
@@ -190,10 +196,10 @@ if [ "$ACTION" = "purge" ] && [ "$CONFIRM_PURGE" != "true" ]; then
     fail "purge requires --confirm-purge"
 fi
 if [ "$ACTION" = "apply" ] && [ "$vpn_row_state" != "present" ]; then
-    fail "vpn apply requires state=present in $STATE_FILE"
+    fail "vpn_edge apply requires state=present in $STATE_FILE"
 fi
 if [ "$ACTION" = "apply" ] && [ -z "$vpn_active_aliases" ]; then
-    fail "No active aliases for vpn found in $STATE_FILE"
+    fail "No active aliases for vpn_edge found in $STATE_FILE"
 fi
 
 vpn_state="present"

@@ -13,7 +13,6 @@
   roles:
     - docker
     - security
-    - monitoring
 
 - name: Обязанности backup-клиента на продакшн-ноде
   hosts: prod
@@ -33,4 +32,9 @@
   roles:
     - management
     - semaphore
+
+- name: Monitoring stack
+  hosts: monitoring
+  become: true
+  roles:
     - monitoring

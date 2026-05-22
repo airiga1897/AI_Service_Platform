@@ -1,6 +1,5 @@
 param(
     [Parameter(Mandatory=$true, Position=0)]
-    [ValidateSet("vpn")]
     [string]$Service,
 
     [Parameter(Mandatory=$true, Position=1)]
@@ -57,6 +56,15 @@ function Invoke-External($FilePath, $Arguments) {
     }
 }
 
+if ($Service -eq "vpn") {
+    Fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
+}
+if ($Service -eq "vpn_cascade") {
+    Fail "Service 'vpn_cascade' is reserved for future site-to-site/cascade rollout and is not implemented yet."
+}
+if ($Service -ne "vpn_edge") {
+    Fail "Unsupported service '$Service'. Supported now: vpn_edge. Reserved: vpn_cascade."
+}
 Require-File $NodesFile "NodesFile"
 Require-File $StateFile "StateFile"
 $firstLine = Get-Content -LiteralPath $NodesFile -TotalCount 1
@@ -70,17 +78,17 @@ if ($stateFirstLine -ne $ExpectedStateHeader) {
 
 $rows = Import-Csv -LiteralPath $NodesFile
 $stateRows = Import-Csv -LiteralPath $StateFile
-$vpnRow = $stateRows | Where-Object { $_.kind -eq "service" -and $_.name -eq "vpn" } | Select-Object -First 1
+$vpnRow = $stateRows | Where-Object { $_.kind -eq "service" -and $_.name -eq "vpn_edge" } | Select-Object -First 1
 if (-not $vpnRow) {
-    Fail "state.csv must contain a service row for vpn"
+    Fail "state.csv must contain a service row for vpn_edge"
 }
 if ($vpnRow.state -notin @("present", "absent", "purged")) {
-    Fail "vpn state must be one of: present, absent, purged"
+    Fail "vpn_edge state must be one of: present, absent, purged"
 }
 $desiredNodes = @(Split-AliasList $vpnRow.active_aliases)
 
 if ($Action -eq "plan") {
-    Write-Host "Service: vpn"
+    Write-Host "Service: vpn_edge"
     Write-Host "State file: $StateFile"
     Write-Host "Service state: $($vpnRow.state)"
     Write-Host "Ansible group: $($vpnRow.ansible_group)"
@@ -108,10 +116,10 @@ Require-File $Inventory "Inventory"
 Require-File $Playbook "Playbook"
 
 if ($desiredNodes.Count -eq 0 -and ($Action -eq "apply")) {
-    Fail "No active aliases for vpn found in $StateFile"
+    Fail "No active aliases for vpn_edge found in $StateFile"
 }
 if ($Action -eq "apply" -and $vpnRow.state -ne "present") {
-    Fail "vpn apply requires state=present in $StateFile"
+    Fail "vpn_edge apply requires state=present in $StateFile"
 }
 if ($Action -eq "purge" -and -not $ConfirmPurge) {
     Fail "purge requires -ConfirmPurge"
