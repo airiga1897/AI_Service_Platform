@@ -4,7 +4,7 @@
 
 ## Основной порядок
 
-1. [VPS3 management bootstrap](01-vps3-management-bootstrap.md) — после fresh reinstall OS сначала обновляется `operator/nodes.csv`, затем bootstrap `vps3` как Ansible control node, bootstrap `vps1`/`vps2` как managed nodes, inventory и проверка Ansible connectivity.
+1. [VPS3 management bootstrap](01-vps3-management-bootstrap.md) — после fresh reinstall OS сначала обновляется `operator/nodes.csv`, затем bootstrap `vps3` как Ansible control node, bootstrap managed nodes, автоочистка временных root passwords, sync sanitized CSV на VPS3, inventory и проверка Ansible connectivity.
 2. [GitHub Actions deploy access](02-github-actions-deploy-access-ai-retail-dev-preprod.md) — GitHub Environment/secrets/predeploy-check для `ai-retail-dev-preprod` как infrastructure/deploy-access слой, без product `pull/up`.
 3. [VPN first service rollout](03-vpn-first-service-rollout.md) — SoftEther/VPN как первый настоящий platform service после infrastructure preparation.
 

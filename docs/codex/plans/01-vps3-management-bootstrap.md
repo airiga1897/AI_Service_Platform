@@ -30,8 +30,10 @@ Bootstrap runners не запускают `ansible-playbook`.
 2. Bootstrap `vps3` первым с `-Force`, чтобы локальный `./operator/ansible_control.managed_nodes.pub`
    точно был обновлен от новой ОС.
 3. Bootstrap `vps1` и `vps2` только с новым `./operator/ansible_control.managed_nodes.pub`.
-4. Проверить SSH-доступ пользователя `ansible` с `vps3` на `vps1`/`vps2`.
-5. Создать real inventory на `vps3` и выполнить `ansible all -i inventory.ini -m ping`.
+4. После каждого успешного bootstrap runner очищает `root_password` только в строке этого alias в `./operator/nodes.csv`.
+5. Синхронизировать sanitized `nodes.csv` на `vps3`, если после bootstrap `vps1`/`vps2` или добавления нового VPS локальный CSV изменился.
+6. Проверить SSH-доступ пользователя `ansible` с `vps3` на `vps1`/`vps2`.
+7. Создать real inventory на `vps3` и выполнить `ansible all -i inventory.ini -m ping`.
 
 GitHub deploy-access, VPN и product deploy не запускаются, пока этот fresh bootstrap проход не завершен успешно.
 
@@ -99,7 +101,9 @@ vps2,vps02.example.com,ssh,backup,preprod+hot-standby+backup+vpn-edge,<TEMP_ROOT
 vps3,vps03.example.com,ssh,management,management+monitoring+orchestration+vpn-edge,<TEMP_ROOT_PASSWORD_VPS3>
 ```
 
-`root_password` используется только runner-ом для первого входа на голую VPS. На VPS копируется sanitized CSV без root password. Постоянный вход по паролю не включается.
+`root_password` используется только runner-ом для первого входа на голую VPS. После успешного bootstrap конкретного alias runner очищает пароль в локальном `./operator/nodes.csv`. Если bootstrap упал, пароль остаётся, чтобы можно было повторить запуск.
+
+На VPS всегда копируется sanitized CSV без root password. Эта очистка на стороне VPS3 остаётся обязательной страховкой, даже если локальный CSV уже очищен. Постоянный вход по паролю не включается.
 
 Для первого bootstrap с Windows/WSL/Linux/macOS у `vps3` должен быть реальный DNS или IP и `connection=ssh`. Строка `vps3,local,local,...` для этого шага не подходит: `local` используется только позже, если Ansible inventory готовится и запускается прямо на VPS3.
 
@@ -177,6 +181,8 @@ Private key остается только на VPS3. Public key runner авто�
 
 `.\operator\vps3\ansible_control.managed_nodes.pub` должен совпадать с `.\operator\ansible_control.managed_nodes.pub`.
 
+После успешного bootstrap `vps3` runner очистит `root_password` в строке `vps3` локального `.\operator\nodes.csv`.
+
 Во время шага `run remote bootstrap` runner должен показать строку:
 
 ```text
@@ -218,6 +224,8 @@ bash tools/bootstrap/bootstrap_from_unix.sh \
 ```text
 ./operator/ansible_control.managed_nodes.pub
 ```
+
+После успешного bootstrap `vps3` runner очистит `root_password` в строке `vps3` локального `./operator/nodes.csv`.
 
 Если файл уже существует, runner остановится. Для осознанной перезаписи:
 
@@ -290,6 +298,8 @@ Runner копирует на VPS временные файлы:
 ```
 
 После успешного bootstrap runner удаляет эти временные файлы.
+После успешного bootstrap runner также очищает `root_password` в строке соответствующего alias в локальном `./operator/nodes.csv`.
+Если bootstrap завершился ошибкой, пароль остаётся на месте для повторного запуска.
 
 После bootstrap `vps1` и `vps2` вручную сохрани напечатанные private keys в operator-local alias-папки:
 
@@ -347,13 +357,81 @@ sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash ins
 
 ## 5. Подготовить inventory на VPS3
 
+Основной путь — автоматически через bootstrap runner `vps3`.
+Во время bootstrap `vps3` operator runner уже копирует sanitized `nodes.csv` без root passwords,
+переводит `vps3` в `local/local`, кладёт helper-скрипты в `/opt/ai-service-platform/tools/bootstrap`
+и генерирует `/opt/ai-service-platform/inventory.ini`.
+
+После bootstrap `vps3` должны быть готовы:
+
+```text
+/opt/ai-service-platform/operator/nodes.csv
+/opt/ai-service-platform/inventory.ini
+```
+
+Важно: при bootstrap только `vps3` проверка `ansible ping` ещё не запускается, потому что `vps1`
+и `vps2` могут быть ещё не готовы.
+
+После bootstrap `vps1`/`vps2` или после добавления нового VPS сначала синхронизируй актуальный
+operator-local `nodes.csv` на VPS3. Sync-скрипт отправляет только sanitized CSV без root passwords,
+запускает `prepare_vps3_inventory.sh` на VPS3 и удаляет временный remote-файл.
+
+Windows:
+
+```powershell
+.\tools\bootstrap\sync_nodes_to_vps3.ps1 `
+  -NodesFile .\operator\nodes.csv `
+  -SshKeyFile .\operator\vps3\admin_key
+```
+
+WSL/Linux/macOS:
+
+```bash
+bash tools/bootstrap/sync_nodes_to_vps3.sh \
+  --nodes-file ./operator/nodes.csv \
+  --ssh-key-file ./operator/vps3/admin_key
+```
+
+По умолчанию sync подключается к VPS3 как `useradmin`. Если нужен другой пользователь:
+
+```powershell
+.\tools\bootstrap\sync_nodes_to_vps3.ps1 `
+  -NodesFile .\operator\nodes.csv `
+  -SshUser useradmin `
+  -SshKeyFile .\operator\vps3\admin_key
+```
+
+После sync запусти проверку на VPS3:
+
+```bash
+cd /opt/ai-service-platform
+ansible all -i inventory.ini -m ping
+```
+
+Fallback, если нужно вручную пересоздать sanitized CSV и inventory на VPS3 без sync-скрипта:
+
+1. Передай operator-local `nodes.csv` на VPS3 во временный файл:
+
+```text
+/tmp/nodes.csv
+```
+
+2. Выполни:
+
+```bash
+cd /opt/ai-service-platform
+sudo bash tools/bootstrap/prepare_vps3_inventory.sh \
+  --source-nodes-file /tmp/nodes.csv
+```
+
 Real CSV для дальнейшего управления хранится на VPS3 вне git:
 
 ```text
 /opt/ai-service-platform/operator/nodes.csv
 ```
 
-Он может быть скопирован из operator-local `./operator/nodes.csv`, но без временных root passwords. Последняя колонка `root_password` должна быть пустой.
+Последняя колонка `root_password` в этом файле должна быть пустой. Скрипт делает это автоматически.
+Даже если оператор случайно передал файл с паролями, `prepare_vps3_inventory.sh` запишет на VPS3 только sanitized copy.
 
 Если Ansible запускается прямо на VPS3, строку `vps3` в этом VPS3-local CSV можно заменить на local connection:
 
@@ -362,8 +440,9 @@ vps3,local,local,management,management+monitoring+orchestration+vpn-edge,
 ```
 
 Для operator-local bootstrap CSV на Windows/WSL так делать нельзя: там нужен реальный endpoint VPS3.
+Скрипт меняет `vps3` на `local/local` только в sanitized копии на VPS3.
 
-Сгенерировать inventory:
+Fallback: сгенерировать inventory вручную:
 
 ```bash
 cd /opt/ai-service-platform

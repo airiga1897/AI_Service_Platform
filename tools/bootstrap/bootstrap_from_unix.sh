@@ -43,6 +43,8 @@ Options:
   --nodes-file PATH                  Real operator CSV with root_password.
   --alias VALUE                      current_alias to bootstrap.
   --setup-script PATH                setup_vps.sh path. Default: tools/bootstrap/setup_vps.sh
+  --create-inventory-script PATH     create_inventory.sh path. Default: tools/bootstrap/create_inventory.sh
+  --prepare-inventory-script PATH    prepare_vps3_inventory.sh path. Default: tools/bootstrap/prepare_vps3_inventory.sh
   --ansible-authorized-key-file PATH VPS3 public key for managed nodes.
   --output-ansible-authorized-key-file PATH
                                      Where to save the VPS3 public key after management bootstrap.
@@ -59,6 +61,8 @@ USAGE
 NODES_FILE=""
 NODE_ALIAS=""
 SETUP_SCRIPT="tools/bootstrap/setup_vps.sh"
+CREATE_INVENTORY_SCRIPT="tools/bootstrap/create_inventory.sh"
+PREPARE_INVENTORY_SCRIPT="tools/bootstrap/prepare_vps3_inventory.sh"
 ANSIBLE_AUTHORIZED_KEY_FILE=""
 OUTPUT_ANSIBLE_AUTHORIZED_KEY_FILE="./operator/ansible_control.managed_nodes.pub"
 FORCE_OVERWRITE="false"
@@ -76,6 +80,14 @@ while [ "$#" -gt 0 ]; do
             ;;
         --setup-script)
             SETUP_SCRIPT="${2:-}"
+            shift 2
+            ;;
+        --create-inventory-script)
+            CREATE_INVENTORY_SCRIPT="${2:-}"
+            shift 2
+            ;;
+        --prepare-inventory-script)
+            PREPARE_INVENTORY_SCRIPT="${2:-}"
             shift 2
             ;;
         --ansible-authorized-key-file)
@@ -122,6 +134,60 @@ has_role() {
         *"+$wanted+"*) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+clear_root_password_for_alias() {
+    local path="$1"
+    local alias_to_clear="$2"
+    local tmp_file
+    local line_number=0
+    local found_alias="false"
+
+    tmp_file="$(mktemp)"
+    while IFS=, read -r csv_alias csv_endpoint csv_connection csv_group csv_roles csv_root_password extra || [ -n "${csv_alias:-}" ]; do
+        line_number=$((line_number + 1))
+        csv_alias="${csv_alias//$'\r'/}"
+        csv_endpoint="${csv_endpoint//$'\r'/}"
+        csv_connection="${csv_connection//$'\r'/}"
+        csv_group="${csv_group//$'\r'/}"
+        csv_roles="${csv_roles//$'\r'/}"
+        csv_root_password="${csv_root_password//$'\r'/}"
+        extra="${extra//$'\r'/}"
+
+        if [ "$line_number" -eq 1 ]; then
+            local header
+            header="$csv_alias,$csv_endpoint,$csv_connection,$csv_group,$csv_roles,$csv_root_password"
+            if [ "$header" != "$EXPECTED_CSV_HEADER" ] || [ -n "$extra" ]; then
+                rm -f "$tmp_file"
+                print_error "nodes.csv header must be exactly:"
+                echo "$EXPECTED_CSV_HEADER"
+                exit 1
+            fi
+            echo "$EXPECTED_CSV_HEADER" > "$tmp_file"
+            continue
+        fi
+
+        [ -n "$csv_alias" ] || continue
+        if [ -n "$extra" ]; then
+            rm -f "$tmp_file"
+            print_error "nodes.csv row for $csv_alias has too many columns"
+            exit 1
+        fi
+        if [ "$csv_alias" = "$alias_to_clear" ]; then
+            csv_root_password=""
+            found_alias="true"
+        fi
+        printf '%s,%s,%s,%s,%s,%s\n' "$csv_alias" "$csv_endpoint" "$csv_connection" "$csv_group" "$csv_roles" "$csv_root_password" >> "$tmp_file"
+    done < "$path"
+
+    if [ "$found_alias" != "true" ]; then
+        rm -f "$tmp_file"
+        print_error "Alias not found while clearing root_password: $alias_to_clear"
+        exit 1
+    fi
+
+    mv "$tmp_file" "$path"
+    print_success "Cleared root_password in local nodes.csv for $alias_to_clear"
 }
 
 require_file "$NODES_FILE" "--nodes-file"
@@ -204,6 +270,10 @@ is_management_node="false"
 if has_role "$roles" management || has_role "$roles" orchestration; then
     is_management_node="true"
 fi
+if [ "$is_management_node" = "true" ]; then
+    require_file "$CREATE_INVENTORY_SCRIPT" "--create-inventory-script"
+    require_file "$PREPARE_INVENTORY_SCRIPT" "--prepare-inventory-script"
+fi
 if [ "$REGENERATE_REMOTE_KEYS" = "true" ] &&
     [ "$is_management_node" = "true" ] &&
     [ "$FORCE_OVERWRITE" != "true" ]; then
@@ -244,8 +314,13 @@ echo "Step 1/4: copy setup_vps.sh"
 "${scp_base[@]}" "$SETUP_SCRIPT" "$remote:/tmp/setup_vps.sh"
 echo "Step 2/4: copy sanitized nodes.csv"
 "${scp_base[@]}" "$sanitized_nodes" "$remote:/tmp/nodes.csv"
+if [ "$is_management_node" = "true" ]; then
+    echo "Step 2b/4: copy VPS3 inventory helpers"
+    "${scp_base[@]}" "$CREATE_INVENTORY_SCRIPT" "$remote:/tmp/create_inventory.sh"
+    "${scp_base[@]}" "$PREPARE_INVENTORY_SCRIPT" "$remote:/tmp/prepare_vps3_inventory.sh"
+fi
 if [ -n "$ANSIBLE_AUTHORIZED_KEY_FILE" ]; then
-    echo "Step 2b/4: copy Ansible control public key"
+    echo "Step 2c/4: copy Ansible control public key"
     "${scp_base[@]}" "$ANSIBLE_AUTHORIZED_KEY_FILE" "$remote:/tmp/ansible_control.managed_nodes.pub"
 fi
 
@@ -259,16 +334,25 @@ if [ "$REGENERATE_REMOTE_KEYS" = "true" ]; then
 fi
 
 if [ "$is_management_node" = "true" ]; then
+    prepare_inventory_command="if [ \$rc -eq 0 ]; then mkdir -p /opt/ai-service-platform/tools/bootstrap; install -m 700 /tmp/create_inventory.sh /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; install -m 700 /tmp/prepare_vps3_inventory.sh /opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh; bash /opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh --source-nodes-file /tmp/nodes.csv --skip-check; fi"
     emit_key_command="if [ \$rc -eq 0 ]; then echo $PUBLIC_KEY_BEGIN_MARKER; cat /home/ansible/.ssh/ansible_control.managed_nodes.pub; echo $PUBLIC_KEY_END_MARKER; fi"
 else
+    prepare_inventory_command=":"
     emit_key_command=":"
 fi
-remote_command="set +e; $setup_command; rc=\$?; $emit_key_command; rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/ansible_control.managed_nodes.pub; exit \$rc"
+remote_command="set +e; $setup_command; rc=\$?; $prepare_inventory_command; $emit_key_command; rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/ansible_control.managed_nodes.pub /tmp/create_inventory.sh /tmp/prepare_vps3_inventory.sh; exit \$rc"
 
 echo "Step 3/4: run remote bootstrap"
 echo "Expected next output: AI Service Platform VPS bootstrap"
 echo "If this step stays silent for a long time, check SSH host key prompts, SSH banner prompts, and root password auth."
+set +e
 "${ssh_base[@]}" "$remote_command" 2>&1 | tee "$remote_log"
+remote_exit_code="${PIPESTATUS[0]}"
+set -e
+if [ "$remote_exit_code" -ne 0 ]; then
+    print_error "remote setup_vps.sh failed"
+    exit 1
+fi
 
 if [ "$is_management_node" = "true" ]; then
     echo "Step 4/4: save Ansible control public key"
@@ -294,4 +378,5 @@ if [ "$is_management_node" = "true" ]; then
 else
     echo "Step 4/4: no Ansible public key download needed for managed node"
 fi
+clear_root_password_for_alias "$NODES_FILE" "$NODE_ALIAS"
 print_success "Bootstrap completed for $NODE_ALIAS"

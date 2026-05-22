@@ -7,6 +7,10 @@ param(
 
     [string]$SetupScript = "tools/bootstrap/setup_vps.sh",
 
+    [string]$CreateInventoryScript = "tools/bootstrap/create_inventory.sh",
+
+    [string]$PrepareInventoryScript = "tools/bootstrap/prepare_vps3_inventory.sh",
+
     [string]$AnsibleAuthorizedKeyFile,
 
     [string]$OutputAnsibleAuthorizedKeyFile = ".\operator\ansible_control.managed_nodes.pub",
@@ -38,6 +42,45 @@ function Has-Role($Roles, $Role) {
 
 function Is-ManagementNode($Roles) {
     return (Has-Role $Roles "management") -or (Has-Role $Roles "orchestration")
+}
+
+function Clear-RootPasswordForAlias($Path, $AliasToClear) {
+    $lines = Get-Content -LiteralPath $Path
+    if (-not $lines -or $lines.Count -eq 0) {
+        Fail "nodes.csv is empty: $Path"
+    }
+    if ($lines[0] -ne $ExpectedHeader) {
+        Fail "nodes.csv header must be exactly: $ExpectedHeader"
+    }
+
+    $updated = New-Object System.Collections.Generic.List[string]
+    $updated.Add($ExpectedHeader)
+    $foundAlias = $false
+
+    for ($i = 1; $i -lt $lines.Count; $i++) {
+        $line = [string]$lines[$i]
+        if (-not $line) {
+            continue
+        }
+
+        $fields = $line -split ",", 6
+        if ($fields.Count -ne 6) {
+            Fail "nodes.csv row has invalid column count: $line"
+        }
+
+        if ($fields[0] -eq $AliasToClear) {
+            $fields[5] = ""
+            $foundAlias = $true
+        }
+        $updated.Add(($fields -join ","))
+    }
+
+    if (-not $foundAlias) {
+        Fail "Alias not found while clearing root_password: $AliasToClear"
+    }
+
+    Set-Content -LiteralPath $Path -Value $updated -Encoding ascii
+    Write-Host "Cleared root_password in local nodes.csv for $AliasToClear"
 }
 
 function Invoke-PlinkCommand($Remote, $Password, $Command, $LogPath) {
@@ -93,6 +136,10 @@ if (-not (Has-Role $row.roles "management") -and -not (Has-Role $row.roles "orch
 }
 
 $isManagementNode = Is-ManagementNode $row.roles
+if ($isManagementNode) {
+    Require-File $CreateInventoryScript "CreateInventoryScript"
+    Require-File $PrepareInventoryScript "PrepareInventoryScript"
+}
 if ($RegenerateRemoteKeys -and $isManagementNode -and -not $Force) {
     Fail "RegenerateRemoteKeys for a management node requires -Force so the local Ansible public key file is refreshed explicitly."
 }
@@ -119,8 +166,16 @@ try {
     & pscp -pw $row.root_password $sanitized "${remote}:/tmp/nodes.csv"
     if ($LASTEXITCODE -ne 0) { Fail "pscp sanitized nodes.csv failed" }
 
+    if ($isManagementNode) {
+        Write-Host "Step 2b/4: copy VPS3 inventory helpers"
+        & pscp -pw $row.root_password $CreateInventoryScript "${remote}:/tmp/create_inventory.sh"
+        if ($LASTEXITCODE -ne 0) { Fail "pscp create_inventory.sh failed" }
+        & pscp -pw $row.root_password $PrepareInventoryScript "${remote}:/tmp/prepare_vps3_inventory.sh"
+        if ($LASTEXITCODE -ne 0) { Fail "pscp prepare_vps3_inventory.sh failed" }
+    }
+
     if ($AnsibleAuthorizedKeyFile) {
-        Write-Host "Step 2b/4: copy Ansible control public key"
+        Write-Host "Step 2c/4: copy Ansible control public key"
         & pscp -pw $row.root_password $AnsibleAuthorizedKeyFile "${remote}:/tmp/ansible_control.managed_nodes.pub"
         if ($LASTEXITCODE -ne 0) { Fail "pscp Ansible public key failed" }
     }
@@ -135,11 +190,13 @@ try {
     }
 
     if ($isManagementNode) {
+        $prepareInventoryCommand = "if [ `$rc -eq 0 ]; then mkdir -p /opt/ai-service-platform/tools/bootstrap; install -m 700 /tmp/create_inventory.sh /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; install -m 700 /tmp/prepare_vps3_inventory.sh /opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh; bash /opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh --source-nodes-file /tmp/nodes.csv --skip-check; fi"
         $emitKeyCommand = "if [ `$rc -eq 0 ]; then echo $PublicKeyBeginMarker; cat /home/ansible/.ssh/ansible_control.managed_nodes.pub; echo $PublicKeyEndMarker; fi"
     } else {
+        $prepareInventoryCommand = ":"
         $emitKeyCommand = ":"
     }
-    $remoteCommand = "set +e; $setupCommand; rc=`$?; $emitKeyCommand; rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/ansible_control.managed_nodes.pub; exit `$rc"
+    $remoteCommand = "set +e; $setupCommand; rc=`$?; $prepareInventoryCommand; $emitKeyCommand; rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/ansible_control.managed_nodes.pub /tmp/create_inventory.sh /tmp/prepare_vps3_inventory.sh; exit `$rc"
 
     Write-Host "Step 3/4: run remote bootstrap"
     Write-Host "Expected next output: AI Service Platform VPS bootstrap"
@@ -185,6 +242,7 @@ try {
         Write-Host "Step 4/4: no Ansible public key download needed for managed node"
     }
 
+    Clear-RootPasswordForAlias $NodesFile $Alias
     Write-Host "Bootstrap completed for $Alias"
 } finally {
     Remove-Item -LiteralPath $sanitized -Force -ErrorAction SilentlyContinue
