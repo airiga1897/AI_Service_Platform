@@ -24,9 +24,13 @@ param(
 
     [switch]$AutoAcceptHostKey,
 
+    [switch]$FixKeyAcl,
+
     [switch]$RegenerateRemoteKeys,
 
     [switch]$SkipSync,
+
+    [switch]$SkipVerify,
 
     [switch]$SkipManaged
 )
@@ -271,14 +275,24 @@ if (-not $SkipSync) {
     if ($AutoAcceptHostKey) {
         $syncArgs += "-AutoAcceptHostKey"
     }
+    if ($SkipVerify) {
+        $syncArgs += "-SkipVerify"
+    }
+    if ($FixKeyAcl) {
+        Write-Warning "-FixKeyAcl is deprecated. sync_nodes_to_vps3.ps1 now fixes OpenSSH key ACL automatically."
+    }
 
     Write-Host "Step 3/4: sync sanitized nodes.csv to control node"
     Invoke-ChildScript $SyncRunner $syncArgs
 } else {
-    Write-Host "Step 3/4: sync skipped"
+    Write-Host "Step 3/4: sync skipped; verify skipped too"
 }
 
-Write-Host "Step 4/4: next manual check on control node"
-Write-Host "  cd /opt/ai-service-platform"
-Write-Host "  ansible all -i inventory.ini -m ping"
+if ($SkipSync) {
+    Write-Host "Step 4/4: verify skipped because sync was skipped"
+} elseif ($SkipVerify) {
+    Write-Host "Step 4/4: verify skipped by -SkipVerify"
+} else {
+    Write-Host "Step 4/4: verify control node and managed nodes completed by sync runner"
+}
 Write-Host "Bootstrap-all completed."

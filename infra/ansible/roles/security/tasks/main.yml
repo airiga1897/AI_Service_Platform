@@ -1,6 +1,6 @@
 ---
-- name: Установить fail2ban и ufw
-  apt:
+- name: Install fail2ban and ufw
+  ansible.builtin.apt:
     name:
       - fail2ban
       - ufw
@@ -8,73 +8,149 @@
     update_cache: true
 
 # --- ufw ---
-- name: Сбросить ufw в дефолт
-  ufw:
+- name: Reset ufw to defaults
+  community.general.ufw:
     state: reset
 
-- name: Запретить входящий трафик по умолчанию
-  ufw:
+- name: Deny incoming traffic by default
+  community.general.ufw:
     default: deny
     direction: incoming
 
-- name: Разрешить исходящий трафик
-  ufw:
+- name: Allow outgoing traffic by default
+  community.general.ufw:
     default: allow
     direction: outgoing
 
-- name: Разрешить нужные порты
-  ufw:
+- name: Allow required TCP ports
+  community.general.ufw:
     rule: allow
     port: "{{ item }}"
     proto: tcp
   loop: "{{ ufw_allowed_ports }}"
 
-- name: Включить ufw
-  ufw:
+- name: Enable ufw
+  community.general.ufw:
     state: enabled
 
-# --- SSH — только ключи ---
-- name: Запретить вход по паролю SSH
-  lineinfile:
+# --- SSH key-only hardening ---
+- name: Ensure sshd drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/ssh/sshd_config.d
+    state: directory
+    mode: "0755"
+
+- name: Normalize SSH hardening directives in main sshd_config
+  ansible.builtin.replace:
     path: /etc/ssh/sshd_config
-    regexp: "^#?PasswordAuthentication"
-    line: "PasswordAuthentication no"
-    state: present
+    regexp: "(?im)^\\s*{{ item.key }}\\s+.*$"
+    replace: "{{ item.key }} {{ item.value }}"
+  loop:
+    - { key: "PermitRootLogin", value: "no" }
+    - { key: "PasswordAuthentication", value: "no" }
+    - { key: "KbdInteractiveAuthentication", value: "no" }
+    - { key: "ChallengeResponseAuthentication", value: "no" }
+    - { key: "PubkeyAuthentication", value: "yes" }
   notify: restart sshd
 
-- name: Запретить root-вход по паролю
-  lineinfile:
+- name: Ensure SSH hardening directives exist in main sshd_config
+  ansible.builtin.lineinfile:
     path: /etc/ssh/sshd_config
-    regexp: "^#?PermitRootLogin"
-    line: "PermitRootLogin prohibit-password"
-    state: present
+    regexp: "(?i)^\\s*{{ item.key }}\\s+"
+    line: "{{ item.key }} {{ item.value }}"
+    insertafter: EOF
+  loop:
+    - { key: "PermitRootLogin", value: "no" }
+    - { key: "PasswordAuthentication", value: "no" }
+    - { key: "KbdInteractiveAuthentication", value: "no" }
+    - { key: "ChallengeResponseAuthentication", value: "no" }
+    - { key: "PubkeyAuthentication", value: "yes" }
   notify: restart sshd
+
+- name: Find sshd drop-in files
+  ansible.builtin.find:
+    paths: /etc/ssh/sshd_config.d
+    patterns: "*.conf"
+    file_type: file
+  register: sshd_dropin_files
+
+- name: Normalize SSH hardening directives in existing sshd drop-ins
+  ansible.builtin.replace:
+    path: "{{ item.0.path }}"
+    regexp: "(?im)^\\s*{{ item.1.key }}\\s+.*$"
+    replace: "{{ item.1.key }} {{ item.1.value }}"
+  loop: "{{ sshd_dropin_files.files | product(ssh_hardening_directives) | list }}"
+  vars:
+    ssh_hardening_directives:
+      - { key: "PermitRootLogin", value: "no" }
+      - { key: "PasswordAuthentication", value: "no" }
+      - { key: "KbdInteractiveAuthentication", value: "no" }
+      - { key: "ChallengeResponseAuthentication", value: "no" }
+      - { key: "PubkeyAuthentication", value: "yes" }
+  notify: restart sshd
+
+- name: Remove legacy AI Service Platform SSH hardening drop-in
+  ansible.builtin.file:
+    path: /etc/ssh/sshd_config.d/99-ai-service-platform-hardening.conf
+    state: absent
+  notify: restart sshd
+
+- name: Install AI Service Platform SSH hardening drop-in
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/00-ai-service-platform-hardening.conf
+    mode: "0644"
+    content: |
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      ChallengeResponseAuthentication no
+      PubkeyAuthentication yes
+  notify: restart sshd
+
+- name: Validate sshd config after hardening drop-in
+  ansible.builtin.command: sshd -t
+  changed_when: false
+
+- name: Flush SSH hardening handler before effective config check
+  ansible.builtin.meta: flush_handlers
+
+- name: Read effective sshd configuration
+  ansible.builtin.command: sshd -T
+  changed_when: false
+  register: sshd_effective_config
+
+- name: Assert SSH root and password login are disabled
+  ansible.builtin.assert:
+    that:
+      - "'permitrootlogin no' in sshd_effective_config.stdout"
+      - "'passwordauthentication no' in sshd_effective_config.stdout"
+    fail_msg: "SSH hardening did not take effect: expected permitrootlogin no and passwordauthentication no."
 
 # --- fail2ban ---
-- name: Скопировать конфиг fail2ban jail.local
-  template:
+- name: Copy fail2ban jail.local
+  ansible.builtin.template:
     src: jail.local.j2
     dest: /etc/fail2ban/jail.local
     mode: "0644"
   notify: restart fail2ban
 
-- name: Скопировать фильтр для Nginx (X-Forwarded-For)
-  template:
+- name: Copy fail2ban Nginx X-Forwarded-For filter
+  ansible.builtin.template:
     src: nginx-req-limit.conf.j2
     dest: /etc/fail2ban/filter.d/nginx-req-limit.conf
     mode: "0644"
   when: "'prod' in group_names"
   notify: restart fail2ban
 
-- name: Запустить и включить fail2ban
-  systemd:
+- name: Start and enable fail2ban
+  ansible.builtin.systemd:
     name: fail2ban
     state: started
     enabled: true
 
-# --- ICMP блокировка (только VPS1) ---
-- name: Отключить ответы на ping (VPS1)
-  sysctl:
+# --- ICMP policy ---
+- name: Disable ping replies on prod nodes
+  ansible.posix.sysctl:
     name: net.ipv4.icmp_echo_ignore_all
     value: "1"
     state: present

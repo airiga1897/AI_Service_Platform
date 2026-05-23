@@ -386,6 +386,117 @@ install_authorized_key() {
     chmod 600 "$authorized_keys"
 }
 
+apply_ssh_hardening() {
+    local sshd_config="/etc/ssh/sshd_config"
+    local dropin_dir="/etc/ssh/sshd_config.d"
+    local dropin_file="$dropin_dir/00-ai-service-platform-hardening.conf"
+    local old_dropin_file="$dropin_dir/99-ai-service-platform-hardening.conf"
+    local managed_begin="# BEGIN AI Service Platform SSH hardening"
+    local managed_end="# END AI Service Platform SSH hardening"
+    local hardening_directives
+    local effective_config
+    local permit_root
+    local password_auth
+
+    if ! command -v sshd >/dev/null 2>&1; then
+        print_warning "sshd command not found. Configure SSH hardening manually."
+        return
+    fi
+
+    hardening_directives="$(cat <<'EOF'
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PubkeyAuthentication yes
+EOF
+)"
+
+    normalize_ssh_hardening_file() {
+        local config_file="$1"
+        if [ ! -f "$config_file" ]; then
+            return
+        fi
+        while IFS= read -r directive; do
+            local key
+            key="${directive%% *}"
+            if grep -Eiq "^[[:space:]]*${key}[[:space:]]+" "$config_file"; then
+                sed -i -E "s|^[[:space:]]*${key}[[:space:]].*|${directive}|I" "$config_file"
+            else
+                printf '%s\n' "$directive" >> "$config_file"
+            fi
+        done <<EOF
+$hardening_directives
+EOF
+    }
+
+    if [ -f "$sshd_config" ]; then
+        if grep -qF "$managed_begin" "$sshd_config"; then
+            sed -i "/$managed_begin/,/$managed_end/d" "$sshd_config"
+        fi
+        normalize_ssh_hardening_file "$sshd_config"
+        print_success "SSH hardening normalized in $sshd_config"
+    fi
+
+    if [ -d "$dropin_dir" ] || mkdir -p "$dropin_dir" 2>/dev/null; then
+        local existing_dropin
+        for existing_dropin in "$dropin_dir"/*.conf; do
+            [ -e "$existing_dropin" ] || continue
+            normalize_ssh_hardening_file "$existing_dropin"
+        done
+        rm -f "$old_dropin_file"
+        printf '%s\n' "$hardening_directives" > "$dropin_file"
+        chmod 644 "$dropin_file"
+        print_success "SSH hardening drop-in written: $dropin_file"
+    elif [ -f "$sshd_config" ]; then
+        if grep -qF "$managed_begin" "$sshd_config"; then
+            sed -i "/$managed_begin/,/$managed_end/d" "$sshd_config"
+        fi
+        cat >> "$sshd_config" <<EOF
+
+$managed_begin
+$hardening_directives
+$managed_end
+EOF
+        print_success "SSH hardening managed block written to $sshd_config"
+    else
+        print_warning "$sshd_config not found. Configure SSH hardening manually."
+        return
+    fi
+
+    if ! sshd -t; then
+        print_error "sshd config validation failed after hardening changes."
+        exit 1
+    fi
+
+    if systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null; then
+        print_success "SSH service restarted"
+    else
+        print_error "Could not restart SSH automatically. Run: systemctl restart ssh || systemctl restart sshd"
+        exit 1
+    fi
+
+    effective_config="$(sshd -T 2>/dev/null || true)"
+    permit_root="$(printf '%s\n' "$effective_config" | awk '$1 == "permitrootlogin" {print $2; exit}')"
+    password_auth="$(printf '%s\n' "$effective_config" | awk '$1 == "passwordauthentication" {print $2; exit}')"
+
+    echo "Effective SSH hardening:"
+    echo "  permitrootlogin ${permit_root:-unknown}"
+    echo "  passwordauthentication ${password_auth:-unknown}"
+
+    if [ "$permit_root" != "no" ] || [ "$password_auth" != "no" ]; then
+        echo ""
+        echo "Active SSH directives found in config files:"
+        grep -RniE '^[[:space:]]*(Include|PermitRootLogin|PasswordAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication|PubkeyAuthentication)[[:space:]]+' \
+            "$sshd_config" "$dropin_dir"/*.conf 2>/dev/null || true
+        echo ""
+        print_error "SSH hardening did not take effect. Expected: permitrootlogin no, passwordauthentication no."
+        exit 1
+    fi
+
+    print_success "Root SSH login and password authentication are disabled"
+}
+
 resolve_ansible_authorized_key() {
     if [ -n "$ANSIBLE_AUTHORIZED_KEY_FILE" ]; then
         if [ ! -f "$ANSIBLE_AUTHORIZED_KEY_FILE" ]; then
@@ -530,22 +641,7 @@ else
 fi
 
 print_header "5/7 - SSH hardening"
-SSHD_CONFIG="/etc/ssh/sshd_config"
-if [ -f "$SSHD_CONFIG" ]; then
-    if grep -qE '^[#[:space:]]*PermitRootLogin' "$SSHD_CONFIG"; then
-        sed -i 's/^[#[:space:]]*PermitRootLogin.*/PermitRootLogin no/' "$SSHD_CONFIG"
-    else
-        echo "PermitRootLogin no" >> "$SSHD_CONFIG"
-    fi
-
-    if systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null; then
-        print_success "Root SSH login disabled and SSH service restarted"
-    else
-        print_warning "Could not restart SSH automatically. Run: systemctl restart sshd"
-    fi
-else
-    print_warning "$SSHD_CONFIG not found. Configure PermitRootLogin manually."
-fi
+apply_ssh_hardening
 
 print_header "6/7 - Docker readiness note"
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then

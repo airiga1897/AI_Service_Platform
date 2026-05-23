@@ -47,6 +47,7 @@ Options:
   --setup-script PATH                setup_vps.sh path. Default: tools/bootstrap/setup_vps.sh
   --create-inventory-script PATH     create_inventory.sh path. Default: tools/bootstrap/create_inventory.sh
   --prepare-inventory-script PATH    prepare_vps3_inventory.sh path. Default: tools/bootstrap/prepare_vps3_inventory.sh
+  --verify-control-script PATH       verify_control_node.sh path. Default: tools/bootstrap/verify_control_node.sh
   --ansible-authorized-key-file PATH VPS3 public key for managed nodes.
   --operator-dir PATH                Where to save extracted bootstrap keys.
                                      Default: ./operator
@@ -68,6 +69,7 @@ NODE_ALIAS=""
 SETUP_SCRIPT="tools/bootstrap/setup_vps.sh"
 CREATE_INVENTORY_SCRIPT="tools/bootstrap/create_inventory.sh"
 PREPARE_INVENTORY_SCRIPT="tools/bootstrap/prepare_vps3_inventory.sh"
+VERIFY_CONTROL_SCRIPT="tools/bootstrap/verify_control_node.sh"
 ANSIBLE_AUTHORIZED_KEY_FILE=""
 OPERATOR_DIR="./operator"
 OUTPUT_ANSIBLE_AUTHORIZED_KEY_FILE="./operator/ansible_control.managed_nodes.pub"
@@ -98,6 +100,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --prepare-inventory-script)
             PREPARE_INVENTORY_SCRIPT="${2:-}"
+            shift 2
+            ;;
+        --verify-control-script)
+            VERIFY_CONTROL_SCRIPT="${2:-}"
             shift 2
             ;;
         --ansible-authorized-key-file)
@@ -413,6 +419,7 @@ fi
 if [ "$is_management_node" = "true" ]; then
     require_file "$CREATE_INVENTORY_SCRIPT" "--create-inventory-script"
     require_file "$PREPARE_INVENTORY_SCRIPT" "--prepare-inventory-script"
+    require_file "$VERIFY_CONTROL_SCRIPT" "--verify-control-script"
 fi
 if [ "$REGENERATE_REMOTE_KEYS" = "true" ] &&
     [ "$is_management_node" = "true" ] &&
@@ -455,6 +462,7 @@ if [ "$is_management_node" = "true" ]; then
     echo "Step 2b/4: copy control inventory helpers"
     "${scp_base[@]}" "$CREATE_INVENTORY_SCRIPT" "$remote:/tmp/create_inventory.sh"
     "${scp_base[@]}" "$PREPARE_INVENTORY_SCRIPT" "$remote:/tmp/prepare_vps3_inventory.sh"
+    "${scp_base[@]}" "$VERIFY_CONTROL_SCRIPT" "$remote:/tmp/verify_control_node.sh"
 fi
 if [ -n "$ANSIBLE_AUTHORIZED_KEY_FILE" ]; then
     echo "Step 2c/4: copy Ansible control public key"
@@ -476,13 +484,13 @@ if [ "$is_management_node" = "true" ]; then
     else
         state_arg=""
     fi
-    prepare_inventory_command="if [ \$rc -eq 0 ]; then mkdir -p /opt/ai-service-platform/tools/bootstrap; install -m 700 /tmp/create_inventory.sh /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; install -m 700 /tmp/prepare_vps3_inventory.sh /opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh; bash /opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh --source-nodes-file /tmp/nodes.csv $state_arg --skip-check; fi"
+    prepare_inventory_command="if [ \$rc -eq 0 ]; then mkdir -p /opt/ai-service-platform/tools/bootstrap; install -m 700 /tmp/create_inventory.sh /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; install -m 700 /tmp/prepare_vps3_inventory.sh /opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh; install -m 700 /tmp/verify_control_node.sh /opt/ai-service-platform/tools/bootstrap/verify_control_node.sh; bash /opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh --source-nodes-file /tmp/nodes.csv $state_arg --skip-check; fi"
     emit_key_command="if [ \$rc -eq 0 ]; then echo $PUBLIC_KEY_BEGIN_MARKER; cat /home/ansible/.ssh/ansible_control.managed_nodes.pub; echo $PUBLIC_KEY_END_MARKER; fi"
 else
     prepare_inventory_command=":"
     emit_key_command=":"
 fi
-remote_command="set +e; $setup_command; rc=\$?; $prepare_inventory_command; $emit_key_command; rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/state.csv /tmp/ansible_control.managed_nodes.pub /tmp/create_inventory.sh /tmp/prepare_vps3_inventory.sh; exit \$rc"
+remote_command="set +e; $setup_command; rc=\$?; $prepare_inventory_command; $emit_key_command; rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/state.csv /tmp/ansible_control.managed_nodes.pub /tmp/create_inventory.sh /tmp/prepare_vps3_inventory.sh /tmp/verify_control_node.sh; exit \$rc"
 
 echo "Step 3/4: run remote bootstrap"
 echo "Expected next output: AI Service Platform VPS bootstrap"

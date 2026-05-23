@@ -23,14 +23,23 @@ param(
 
     [string]$RemotePrepareScript = "/opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh",
 
+    [string]$VerifyControlScript = "tools/bootstrap/verify_control_node.sh",
+
+    [string]$RemoteVerifyScript = "/opt/ai-service-platform/tools/bootstrap/verify_control_node.sh",
+
     [string]$Include = "",
 
-    [switch]$AutoAcceptHostKey
+    [switch]$AutoAcceptHostKey,
+
+    [switch]$FixKeyAcl,
+
+    [switch]$SkipVerify
 )
 
 $ErrorActionPreference = "Stop"
 $ExpectedHeader = "current_alias,endpoint,connection,ansible_group,roles,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
+$IsWindowsPlatform = ($PSVersionTable.PSEdition -eq "Desktop") -or ($PSVersionTable.ContainsKey("Platform") -and $PSVersionTable.Platform -eq "Win32NT") -or ($env:OS -eq "Windows_NT")
 
 function Fail($Message) {
     Write-Error $Message
@@ -147,15 +156,29 @@ function Resolve-ControlNodeFromState($NodeRows, $StateRows, $Role, $ExplicitAli
 }
 
 Require-File $NodesFile "NodesFile"
+if (-not $SkipVerify) {
+    Require-File $VerifyControlScript "VerifyControlScript"
+}
 
-if (-not (Get-Command plink -ErrorAction SilentlyContinue)) {
-    Fail "plink not found in PATH"
+if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
+    Fail "ssh not found in PATH. Install Windows OpenSSH Client or fix PATH."
 }
-if (-not (Get-Command pscp -ErrorAction SilentlyContinue)) {
-    Fail "pscp not found in PATH"
+if (-not (Get-Command scp -ErrorAction SilentlyContinue)) {
+    Fail "scp not found in PATH. Install Windows OpenSSH Client or fix PATH."
 }
-if (-not (Get-Command puttygen -ErrorAction SilentlyContinue)) {
-    Fail "puttygen not found in PATH. It is required to convert OpenSSH private keys to PuTTY .ppk for plink/pscp."
+if (-not (Get-Command ssh-keygen -ErrorAction SilentlyContinue)) {
+    Fail "ssh-keygen not found in PATH. Install Windows OpenSSH Client or fix PATH."
+}
+
+try {
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $sshVersion = (& ssh -V 2>&1 | ForEach-Object { [string]$_ }) -join "`n"
+} finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+}
+if ($sshVersion -notmatch "OpenSSH") {
+    Fail "ssh in PATH does not look like OpenSSH. Output:`n$sshVersion"
 }
 
 $firstLine = Get-Content -LiteralPath $NodesFile -TotalCount 1
@@ -189,120 +212,136 @@ if (-not $Include) {
 }
 
 $sanitized = New-SanitizedNodesFile $NodesFile
+$remoteVerifyTemp = "/tmp/ai-service-platform.verify_control_node.sh"
 $remote = "$SshUser@$($controlNode.endpoint)"
 
-function Convert-ToPuttyPrivateKey($OpenSshKeyFile) {
-    $tempPpk = [System.IO.Path]::ChangeExtension((New-TemporaryFile).FullName, ".ppk")
-    Remove-Item -LiteralPath $tempPpk -Force -ErrorAction SilentlyContinue
-
-    & puttygen $OpenSshKeyFile -O private -o $tempPpk
-    if ($LASTEXITCODE -ne 0) {
-        Fail "puttygen failed to convert OpenSSH key to PuTTY .ppk: $OpenSshKeyFile"
-    }
-    if (-not (Test-Path -LiteralPath $tempPpk -PathType Leaf)) {
-        Fail "puttygen did not create .ppk file: $tempPpk"
-    }
-
-    return $tempPpk
-}
-
-function Get-PuttyHostKeyFingerprint($Remote, $KeyFile) {
-    if (-not $AutoAcceptHostKey) {
-        return ""
-    }
-
-    $previousErrorActionPreference = $ErrorActionPreference
-    try {
-        $script:ErrorActionPreference = "Continue"
-        $output = & plink -batch -no-antispoof -i $KeyFile $Remote exit 2>&1
-    } finally {
-        $script:ErrorActionPreference = $previousErrorActionPreference
-    }
-
-    $outputText = ($output | ForEach-Object { [string]$_ }) -join "`n"
-    $match = [regex]::Match($outputText, "SHA256:[A-Za-z0-9+/=]+")
-    if (-not $match.Success) {
-        Fail "Could not detect SSH host key fingerprint for $Remote. PuTTY output:`n$outputText"
-    }
-
-    Write-Host "Detected SSH host key fingerprint for $Remote`: $($match.Value)"
-    return $match.Value
-}
-
-function Invoke-PscpKey($KeyFile, $Source, $Target, $Label, $HostKeyFingerprint) {
-    $pscpArgs = @("-i", $KeyFile, $Source, $Target)
-    if ($HostKeyFingerprint) {
-        $pscpArgs = @("-hostkey", $HostKeyFingerprint) + $pscpArgs
-    }
-    & pscp @pscpArgs
-    if ($LASTEXITCODE -ne 0) {
-        Fail "$Label failed"
-    }
-}
-
-function Invoke-PscpKeyRecursive($KeyFile, $Source, $Target, $Label, $HostKeyFingerprint) {
-    $pscpArgs = @("-r", "-i", $KeyFile, $Source, $Target)
-    if ($HostKeyFingerprint) {
-        $pscpArgs = @("-hostkey", $HostKeyFingerprint) + $pscpArgs
-    }
-    & pscp @pscpArgs
-    if ($LASTEXITCODE -ne 0) {
-        Fail "$Label failed"
-    }
-}
-
-function Invoke-PlinkKey($KeyFile, $Remote, $Command, $Label, $HostKeyFingerprint) {
-    $plinkArgs = @("-batch", "-no-antispoof", "-i", $KeyFile, $Remote, $Command)
-    if ($HostKeyFingerprint) {
-        $plinkArgs = @("-hostkey", $HostKeyFingerprint) + $plinkArgs
-    }
-    & plink @plinkArgs
-    if ($LASTEXITCODE -ne 0) {
-        Fail "$Label failed"
-    }
-}
-
-function Clear-PuttyHostKeyCache($Endpoint) {
-    if (-not $AutoAcceptHostKey) {
-        return
-    }
-
-    $registryPath = "HKCU:\Software\SimonTatham\PuTTY\SshHostKeys"
-    if (-not (Test-Path -LiteralPath $registryPath)) {
-        return
-    }
-
-    $keyItem = Get-Item -LiteralPath $registryPath
-    foreach ($property in $keyItem.GetValueNames()) {
-        if ($property -like "*@*:$Endpoint") {
-            Remove-ItemProperty -LiteralPath $registryPath -Name $property -ErrorAction SilentlyContinue
-            Write-Host "Removed PuTTY cached host key: $property"
+function Test-PrivateKeyAcl($KeyFile) {
+    $broadPrincipalSids = @(
+        "S-1-1-0",       # Everyone
+        "S-1-5-11",      # Authenticated Users
+        "S-1-5-32-545"   # BUILTIN\Users
+    )
+    $acl = Get-Acl -LiteralPath $KeyFile
+    $badEntries = @()
+    foreach ($entry in $acl.Access) {
+        $identity = [string]$entry.IdentityReference
+        $sid = ""
+        try {
+            $sid = $entry.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+        } catch {
+            $sid = ""
+        }
+        $hasRead = (($entry.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::Read) -ne 0) -or
+            (($entry.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::ReadData) -ne 0) -or
+            (($entry.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne 0)
+        if ($entry.AccessControlType -eq "Allow" -and $hasRead -and ($broadPrincipalSids -contains $sid)) {
+            $badEntries += $identity
         }
     }
+    return @($badEntries | Select-Object -Unique)
 }
 
-Clear-PuttyHostKeyCache $controlNode.endpoint
-$puttyKeyFile = Convert-ToPuttyPrivateKey $SshKeyFile
-$hostKeyFingerprint = Get-PuttyHostKeyFingerprint $remote $puttyKeyFile
+function Repair-PrivateKeyAcl($KeyFile) {
+    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    Write-Host "Fixing OpenSSH private key ACL for $KeyFile"
+    & icacls $KeyFile "/inheritance:r" | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        Fail "icacls failed to disable inheritance for $KeyFile"
+    }
+    & icacls $KeyFile "/grant:r" "$currentUser`:R" | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        Fail "icacls failed to grant read access to $currentUser for $KeyFile"
+    }
+}
+
+function Ensure-PrivateKeyAcl($KeyFile) {
+    if (-not $IsWindowsPlatform) {
+        return
+    }
+
+    $badEntries = Test-PrivateKeyAcl $KeyFile
+    if ($badEntries.Count -eq 0) {
+        return
+    }
+
+    $badText = $badEntries -join ", "
+    Write-Warning "OpenSSH private key ACL is too open for $KeyFile. Broad readable entries: $badText. Fixing automatically."
+    Repair-PrivateKeyAcl $KeyFile
+    $remainingBadEntries = Test-PrivateKeyAcl $KeyFile
+    if ($remainingBadEntries.Count -gt 0) {
+        Fail "OpenSSH private key ACL is still too open after automatic repair: $($remainingBadEntries -join ', ')"
+    }
+}
+
+function Get-SshCommonArgs($KeyFile) {
+    $args = @("-i", $KeyFile, "-o", "IdentitiesOnly=yes")
+    if ($AutoAcceptHostKey) {
+        $args += @("-o", "StrictHostKeyChecking=accept-new")
+    }
+    return $args
+}
+
+function Invoke-ScpKey($KeyFile, $Source, $Target, $Label) {
+    $scpArgs = @(Get-SshCommonArgs $KeyFile) + @($Source, $Target)
+    & scp @scpArgs
+    if ($LASTEXITCODE -ne 0) {
+        Fail "$Label failed"
+    }
+}
+
+function Invoke-ScpKeyRecursive($KeyFile, $Source, $Target, $Label) {
+    $scpArgs = @("-r") + @(Get-SshCommonArgs $KeyFile) + @($Source, $Target)
+    & scp @scpArgs
+    if ($LASTEXITCODE -ne 0) {
+        Fail "$Label failed"
+    }
+}
+
+function Invoke-SshKey($KeyFile, $Remote, $Command, $Label) {
+    $sshArgs = @(Get-SshCommonArgs $KeyFile) + @($Remote, $Command)
+    & ssh @sshArgs
+    if ($LASTEXITCODE -ne 0) {
+        Fail "$Label failed"
+    }
+}
+
+function Clear-OpenSshHostKey($Endpoint) {
+    if (-not $AutoAcceptHostKey) {
+        return
+    }
+
+    Write-Host "Removing old OpenSSH known_hosts entries for $Endpoint"
+    & ssh-keygen -R $Endpoint | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        Fail "ssh-keygen -R failed for $Endpoint"
+    }
+}
+
+Ensure-PrivateKeyAcl $SshKeyFile
+Clear-OpenSshHostKey $controlNode.endpoint
 
 try {
     Write-Host "Syncing sanitized nodes.csv to control node $($controlNode.current_alias) at $remote"
-    Invoke-PscpKey $puttyKeyFile $sanitized "${remote}:$RemoteNodesFile" "pscp sanitized nodes.csv" $hostKeyFingerprint
+    Invoke-ScpKey $SshKeyFile $sanitized "${remote}:$RemoteNodesFile" "scp sanitized nodes.csv"
 
     $remoteStateFile = "/tmp/ai-service-platform.state.csv"
     if ($useStateFile) {
         Write-Host "Syncing state.csv to control node $($controlNode.current_alias)"
-        Invoke-PscpKey $puttyKeyFile $StateFile "${remote}:$remoteStateFile" "pscp state.csv" $hostKeyFingerprint
+        Invoke-ScpKey $SshKeyFile $StateFile "${remote}:$remoteStateFile" "scp state.csv"
     }
 
     $syncSoftether = Test-Path -LiteralPath $SoftetherDir -PathType Container
     if ($syncSoftether) {
         Write-Host "Syncing SoftEther operator secret directory to control node $($controlNode.current_alias)"
-        Invoke-PlinkKey $puttyKeyFile $remote "rm -rf '$RemoteSoftetherDir'" "remote cleanup SoftEther temp dir" $hostKeyFingerprint
-        Invoke-PscpKeyRecursive $puttyKeyFile $SoftetherDir "${remote}:$RemoteSoftetherDir" "pscp SoftEther operator directory" $hostKeyFingerprint
+        Invoke-SshKey $SshKeyFile $remote "rm -rf '$RemoteSoftetherDir'" "remote cleanup SoftEther temp dir"
+        Invoke-ScpKeyRecursive $SshKeyFile $SoftetherDir "${remote}:$RemoteSoftetherDir" "scp SoftEther operator directory"
+    }
+    if (-not $SkipVerify) {
+        Write-Host "Syncing verify_control_node.sh to control node $($controlNode.current_alias)"
+        Invoke-ScpKey $SshKeyFile $VerifyControlScript "${remote}:$remoteVerifyTemp" "scp verify_control_node.sh"
     }
 
-    $prepareCommand = "sudo bash '$RemotePrepareScript' --source-nodes-file '$RemoteNodesFile'"
+    $prepareCommand = "sudo bash '$RemotePrepareScript' --source-nodes-file '$RemoteNodesFile' --skip-check"
     if ($useStateFile) {
         $prepareCommand = "$prepareCommand --source-state-file '$remoteStateFile'"
     }
@@ -313,13 +352,20 @@ try {
     if ($syncSoftether) {
         $softetherCommand = "sudo mkdir -p /opt/ai-service-platform/operator; if [ -d '$RemoteSoftetherDir/softether' ]; then sudo rm -rf /opt/ai-service-platform/operator/softether && sudo cp -a '$RemoteSoftetherDir/softether' /opt/ai-service-platform/operator/softether; else sudo rm -rf /opt/ai-service-platform/operator/softether && sudo cp -a '$RemoteSoftetherDir' /opt/ai-service-platform/operator/softether; fi;"
     }
-    $remoteCommand = "set -e; $softetherCommand $prepareCommand; rm -rf '$RemoteSoftetherDir'; rm -f '$RemoteNodesFile' '$remoteStateFile'"
+    $verifyCommand = ""
+    if (-not $SkipVerify) {
+        $verifyCommand = "sudo mkdir -p `"`$(dirname '$RemoteVerifyScript')`"; sudo install -m 700 '$remoteVerifyTemp' '$RemoteVerifyScript'; sudo bash '$RemoteVerifyScript';"
+    }
+    $remoteCommand = "set -e; $softetherCommand $prepareCommand; $verifyCommand rm -rf '$RemoteSoftetherDir'; rm -f '$RemoteNodesFile' '$remoteStateFile' '$remoteVerifyTemp'"
 
     Write-Host "Running control node inventory preparation"
-    Invoke-PlinkKey $puttyKeyFile $remote $remoteCommand "remote prepare_vps3_inventory.sh" $hostKeyFingerprint
+    Invoke-SshKey $SshKeyFile $remote $remoteCommand "remote prepare_vps3_inventory.sh"
 
-    Write-Host "Control node nodes.csv and inventory.ini are in sync"
+    if ($SkipVerify) {
+        Write-Host "Control node nodes.csv and inventory.ini are in sync; verify skipped"
+    } else {
+        Write-Host "Control node nodes.csv, inventory.ini, and verification are complete"
+    }
 } finally {
     Remove-Item -LiteralPath $sanitized -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $puttyKeyFile -Force -ErrorAction SilentlyContinue
 }

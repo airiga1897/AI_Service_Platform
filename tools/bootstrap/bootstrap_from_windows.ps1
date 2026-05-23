@@ -13,6 +13,8 @@ param(
 
     [string]$PrepareInventoryScript = "tools/bootstrap/prepare_vps3_inventory.sh",
 
+    [string]$VerifyControlScript = "tools/bootstrap/verify_control_node.sh",
+
     [string]$AnsibleAuthorizedKeyFile,
 
     [string]$OperatorDir = ".\operator",
@@ -296,6 +298,7 @@ $isManagementNode = Is-ManagementNode $row.roles
 if ($isManagementNode) {
     Require-File $CreateInventoryScript "CreateInventoryScript"
     Require-File $PrepareInventoryScript "PrepareInventoryScript"
+    Require-File $VerifyControlScript "VerifyControlScript"
 }
 if ($RegenerateRemoteKeys -and $isManagementNode -and -not $Force) {
     Fail "RegenerateRemoteKeys for a management node requires -Force so the local Ansible public key file is refreshed explicitly."
@@ -330,6 +333,7 @@ try {
         Write-Host "Step 2b/4: copy control inventory helpers"
         Invoke-PscpPassword $row.root_password $CreateInventoryScript "${remote}:/tmp/create_inventory.sh" "pscp create_inventory.sh" $hostKeyFingerprint
         Invoke-PscpPassword $row.root_password $PrepareInventoryScript "${remote}:/tmp/prepare_vps3_inventory.sh" "pscp prepare_vps3_inventory.sh" $hostKeyFingerprint
+        Invoke-PscpPassword $row.root_password $VerifyControlScript "${remote}:/tmp/verify_control_node.sh" "pscp verify_control_node.sh" $hostKeyFingerprint
     }
 
     if ($AnsibleAuthorizedKeyFile) {
@@ -352,13 +356,13 @@ try {
         } else {
             $stateArg = ""
         }
-        $prepareInventoryCommand = "if [ `$rc -eq 0 ]; then mkdir -p /opt/ai-service-platform/tools/bootstrap; install -m 700 /tmp/create_inventory.sh /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; install -m 700 /tmp/prepare_vps3_inventory.sh /opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh; bash /opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh --source-nodes-file /tmp/nodes.csv $stateArg --skip-check; fi"
+        $prepareInventoryCommand = "if [ `$rc -eq 0 ]; then mkdir -p /opt/ai-service-platform/tools/bootstrap; install -m 700 /tmp/create_inventory.sh /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; install -m 700 /tmp/prepare_vps3_inventory.sh /opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh; install -m 700 /tmp/verify_control_node.sh /opt/ai-service-platform/tools/bootstrap/verify_control_node.sh; bash /opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh --source-nodes-file /tmp/nodes.csv $stateArg --skip-check; fi"
         $emitKeyCommand = "if [ `$rc -eq 0 ]; then echo $PublicKeyBeginMarker; cat /home/ansible/.ssh/ansible_control.managed_nodes.pub; echo $PublicKeyEndMarker; fi"
     } else {
         $prepareInventoryCommand = ":"
         $emitKeyCommand = ":"
     }
-    $remoteCommand = "set +e; $setupCommand; rc=`$?; $prepareInventoryCommand; $emitKeyCommand; rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/state.csv /tmp/ansible_control.managed_nodes.pub /tmp/create_inventory.sh /tmp/prepare_vps3_inventory.sh; exit `$rc"
+    $remoteCommand = "set +e; $setupCommand; rc=`$?; $prepareInventoryCommand; $emitKeyCommand; rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/state.csv /tmp/ansible_control.managed_nodes.pub /tmp/create_inventory.sh /tmp/prepare_vps3_inventory.sh /tmp/verify_control_node.sh; exit `$rc"
 
     Write-Host "Step 3/4: run remote bootstrap"
     Write-Host "Expected next output: AI Service Platform VPS bootstrap"

@@ -1,14 +1,19 @@
 ---
-# Хендлеры роли `security`. Имена (`name:`) используются как
-# идентификаторы для `notify:` в задачах — это технический контракт,
-# поэтому они оставлены на английском в snake_case-стиле Ansible.
-
 - name: restart sshd
-  systemd:
-    name: sshd
-    state: restarted
+  ansible.builtin.shell: |
+    set -e
+    if systemctl list-unit-files ssh.service >/dev/null 2>&1; then
+      systemctl restart ssh
+    elif systemctl list-unit-files sshd.service >/dev/null 2>&1; then
+      systemctl restart sshd
+    else
+      systemctl restart ssh || systemctl restart sshd
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: true
 
 - name: restart fail2ban
-  systemd:
+  ansible.builtin.systemd:
     name: fail2ban
     state: restarted

@@ -14,7 +14,11 @@ REMOTE_STATE_FILE="/tmp/ai-service-platform.state.csv"
 SOFTETHER_DIR="./operator/softether"
 REMOTE_SOFTETHER_DIR="/tmp/ai-service-platform.softether"
 REMOTE_PREPARE_SCRIPT="/opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh"
+VERIFY_CONTROL_SCRIPT="tools/bootstrap/verify_control_node.sh"
+REMOTE_VERIFY_SCRIPT="/opt/ai-service-platform/tools/bootstrap/verify_control_node.sh"
+REMOTE_VERIFY_TEMP="/tmp/ai-service-platform.verify_control_node.sh"
 INCLUDE_ALIASES=""
+RUN_VERIFY="true"
 
 usage() {
     cat <<'USAGE'
@@ -34,6 +38,12 @@ Options:
                              Default: ./operator/softether
   --remote-prepare-script PATH
                              Remote prepare script path.
+  --verify-control-script PATH
+                             Local verify_control_node.sh path.
+                             Default: tools/bootstrap/verify_control_node.sh
+  --remote-verify-script PATH
+                             Remote verify script path.
+  --skip-verify              Sync and inventory only; do not run post-bootstrap verify.
   --include LIST             Optional aliases to include when generating inventory.
   -h, --help                 Show this help.
 USAGE
@@ -84,6 +94,18 @@ while [ "$#" -gt 0 ]; do
             REMOTE_PREPARE_SCRIPT="${2:-}"
             shift 2
             ;;
+        --verify-control-script)
+            VERIFY_CONTROL_SCRIPT="${2:-}"
+            shift 2
+            ;;
+        --remote-verify-script)
+            REMOTE_VERIFY_SCRIPT="${2:-}"
+            shift 2
+            ;;
+        --skip-verify)
+            RUN_VERIFY="false"
+            shift
+            ;;
         --include)
             INCLUDE_ALIASES="${2:-}"
             shift 2
@@ -102,6 +124,9 @@ require_file "$NODES_FILE" "--nodes-file"
 require_file "$SSH_KEY_FILE" "--ssh-key-file"
 if [ -n "$STATE_FILE" ]; then
     require_file "$STATE_FILE" "--state-file"
+fi
+if [ "$RUN_VERIFY" = "true" ]; then
+    require_file "$VERIFY_CONTROL_SCRIPT" "--verify-control-script"
 fi
 
 first_line="$(head -n 1 "$NODES_FILE" | tr -d '\r')"
@@ -165,8 +190,12 @@ if [ -d "$SOFTETHER_DIR" ]; then
     ssh -i "$SSH_KEY_FILE" "$remote" "rm -rf '$REMOTE_SOFTETHER_DIR'"
     scp -r -i "$SSH_KEY_FILE" "$SOFTETHER_DIR" "$remote:$REMOTE_SOFTETHER_DIR"
 fi
+if [ "$RUN_VERIFY" = "true" ]; then
+    echo "Syncing verify_control_node.sh to $remote"
+    scp -i "$SSH_KEY_FILE" "$VERIFY_CONTROL_SCRIPT" "$remote:$REMOTE_VERIFY_TEMP"
+fi
 
-prepare_command="sudo bash '$REMOTE_PREPARE_SCRIPT' --source-nodes-file '$REMOTE_NODES_FILE'"
+prepare_command="sudo bash '$REMOTE_PREPARE_SCRIPT' --source-nodes-file '$REMOTE_NODES_FILE' --skip-check"
 if [ -n "$STATE_FILE" ]; then
     prepare_command="$prepare_command --source-state-file '$REMOTE_STATE_FILE'"
 fi
@@ -178,7 +207,19 @@ if [ -d "$SOFTETHER_DIR" ]; then
     softether_command="sudo mkdir -p /opt/ai-service-platform/operator; if [ -d '$REMOTE_SOFTETHER_DIR/softether' ]; then sudo rm -rf /opt/ai-service-platform/operator/softether && sudo cp -a '$REMOTE_SOFTETHER_DIR/softether' /opt/ai-service-platform/operator/softether; else sudo rm -rf /opt/ai-service-platform/operator/softether && sudo cp -a '$REMOTE_SOFTETHER_DIR' /opt/ai-service-platform/operator/softether; fi;"
     remote_command="set -e; $softether_command $prepare_command; rm -rf '$REMOTE_SOFTETHER_DIR'; rm -f '$REMOTE_NODES_FILE' '$REMOTE_STATE_FILE'"
 fi
+if [ "$RUN_VERIFY" = "true" ]; then
+    verify_command="sudo mkdir -p \"\$(dirname '$REMOTE_VERIFY_SCRIPT')\"; sudo install -m 700 '$REMOTE_VERIFY_TEMP' '$REMOTE_VERIFY_SCRIPT'; sudo bash '$REMOTE_VERIFY_SCRIPT';"
+    if [ -d "$SOFTETHER_DIR" ]; then
+        remote_command="set -e; $softether_command $prepare_command; $verify_command rm -rf '$REMOTE_SOFTETHER_DIR'; rm -f '$REMOTE_NODES_FILE' '$REMOTE_STATE_FILE' '$REMOTE_VERIFY_TEMP'"
+    else
+        remote_command="set -e; $prepare_command; $verify_command rm -f '$REMOTE_NODES_FILE' '$REMOTE_STATE_FILE' '$REMOTE_VERIFY_TEMP'"
+    fi
+fi
 
 echo "Running VPS3 inventory preparation"
 ssh -i "$SSH_KEY_FILE" "$remote" "$remote_command"
-echo "[OK] VPS3 nodes.csv and inventory.ini are in sync"
+if [ "$RUN_VERIFY" = "true" ]; then
+    echo "[OK] VPS3 nodes.csv, inventory.ini, and verification are complete"
+else
+    echo "[OK] VPS3 nodes.csv and inventory.ini are in sync; verify skipped"
+fi
