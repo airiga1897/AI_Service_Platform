@@ -175,6 +175,9 @@ service_active_aliases=""
 service_candidate_aliases=""
 service_old_aliases=""
 service_row_state=""
+service_match_count=0
+service_total_count=0
+service_plan_rows=()
 while IFS=, read -r kind name ansible_group active_aliases candidate_aliases old_aliases row_state extra || [ -n "${kind:-}" ]; do
     kind="${kind//$'\r'/}"
     name="${name//$'\r'/}"
@@ -186,16 +189,57 @@ while IFS=, read -r kind name ansible_group active_aliases candidate_aliases old
     extra="${extra//$'\r'/}"
     [ "$kind" = "service" ] && [ "$name" = "$SERVICE" ] || continue
     [ -z "$extra" ] || fail "state.csv $SERVICE row has too many columns"
+    service_total_count=$((service_total_count + 1))
+    service_plan_rows+=("$ansible_group|$active_aliases|$candidate_aliases|$old_aliases|$row_state")
+
+    if [ -n "$LIMIT" ]; then
+        alias_in_list "$LIMIT" "$active_aliases" || continue
+    elif [ "$service_total_count" -gt 1 ]; then
+        continue
+    fi
+
     service_found="true"
+    service_match_count=$((service_match_count + 1))
     service_group="$ansible_group"
     service_active_aliases="$active_aliases"
     service_candidate_aliases="$candidate_aliases"
     service_old_aliases="$old_aliases"
     service_row_state="$row_state"
-    break
 done < <(tail -n +2 "$STATE_FILE")
 
-[ "$service_found" = "true" ] || fail "state.csv must contain a service row for $SERVICE"
+if [ "$ACTION" = "plan" ] && [ -z "$LIMIT" ]; then
+    [ "$service_total_count" -gt 0 ] || fail "state.csv must contain a service row for $SERVICE"
+    echo "Service: $SERVICE"
+    echo "State file: $STATE_FILE"
+    echo "Nodes file: $NODES_FILE"
+    echo ""
+    for row in "${service_plan_rows[@]}"; do
+        IFS='|' read -r plan_group plan_active_aliases plan_candidate_aliases plan_old_aliases plan_row_state <<< "$row"
+        echo "Service state: $plan_row_state"
+        echo "Ansible group: $plan_group"
+        tail -n +2 "$NODES_FILE" | while IFS=, read -r current_alias _endpoint _connection _root_password _extra || [ -n "${current_alias:-}" ]; do
+            current_alias="${current_alias//$'\r'/}"
+            [ -n "$current_alias" ] || continue
+            if [ "$plan_row_state" = "present" ] && alias_in_list "$current_alias" "$plan_active_aliases"; then
+                echo "$current_alias: desired present"
+            else
+                echo "$current_alias: desired absent"
+            fi
+        done
+        if [ -n "$plan_candidate_aliases" ]; then
+            echo "Candidates: $plan_candidate_aliases"
+        fi
+        if [ -n "$plan_old_aliases" ]; then
+            echo "Old: $plan_old_aliases"
+        fi
+        echo ""
+    done
+    exit 0
+fi
+
+[ "$service_total_count" -gt 0 ] || fail "state.csv must contain a service row for $SERVICE"
+[ "$service_found" = "true" ] || fail "state.csv must contain a service row for $SERVICE matching --limit ${LIMIT:-<none>}"
+[ "$service_match_count" -eq 1 ] || fail "state.csv has multiple $SERVICE rows matching --limit ${LIMIT:-<none>}; keep one target row per alias"
 case "$service_row_state" in
     present|absent|purged) ;;
     *) fail "$SERVICE state must be one of: present, absent, purged" ;;
