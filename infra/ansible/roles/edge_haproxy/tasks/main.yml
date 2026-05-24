@@ -261,6 +261,23 @@
     mode: "0640"
   when: edge_haproxy_state == 'present'
 
+- name: Ensure Docker service is running for edge_haproxy
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify Docker Compose plugin is available for edge_haproxy
+  ansible.builtin.command:
+    cmd: docker compose version
+  changed_when: false
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+
 - name: Ensure shared edge Docker network exists
   ansible.builtin.command:
     cmd: docker network create --subnet "{{ edge_haproxy_network_subnet }}" "{{ edge_haproxy_network_name }}"
@@ -295,6 +312,25 @@
     path: "{{ edge_haproxy_compose_file }}"
   register: edge_haproxy_compose_stat
   when: edge_haproxy_state == 'absent'
+
+- name: Ensure Docker service is running before stopping edge_haproxy
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+  when:
+    - edge_haproxy_state == 'absent'
+    - edge_haproxy_compose_stat.stat.exists
+    - not ansible_check_mode
+
+- name: Verify Docker Compose plugin is available before stopping edge_haproxy
+  ansible.builtin.command:
+    cmd: docker compose version
+  changed_when: false
+  when:
+    - edge_haproxy_state == 'absent'
+    - edge_haproxy_compose_stat.stat.exists
+    - not ansible_check_mode
 
 - name: Stop edge_haproxy container
   ansible.builtin.command:

@@ -89,6 +89,23 @@
     mode: "0640"
   when: vpn_state == 'present'
 
+- name: Ensure Docker service is running for vpn_edge
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify Docker Compose plugin is available for vpn_edge
+  ansible.builtin.command:
+    cmd: docker compose version
+  changed_when: false
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+
 - name: Ensure shared edge Docker network exists
   ansible.builtin.command:
     cmd: docker network create --subnet "{{ vpn_edge_network_subnet }}" "{{ vpn_edge_network_name }}"
@@ -115,6 +132,25 @@
     path: "{{ vpn_edge_compose_file }}"
   register: vpn_edge_compose_stat
   when: vpn_state == 'absent'
+
+- name: Ensure Docker service is running before stopping vpn_edge
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+  when:
+    - vpn_state == 'absent'
+    - vpn_edge_compose_stat.stat.exists
+    - not ansible_check_mode
+
+- name: Verify Docker Compose plugin is available before stopping vpn_edge
+  ansible.builtin.command:
+    cmd: docker compose version
+  changed_when: false
+  when:
+    - vpn_state == 'absent'
+    - vpn_edge_compose_stat.stat.exists
+    - not ansible_check_mode
 
 - name: Stop vpn_edge container
   ansible.builtin.command:
