@@ -12,7 +12,7 @@ param(
 
     [string]$Inventory = "inventory.ini",
 
-    [string]$Playbook = "infra\ansible\vpn.yml",
+    [string]$Playbook = "",
 
     [string]$Limit,
 
@@ -22,7 +22,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedHeader = "current_alias,endpoint,connection,ansible_group,roles,root_password"
+$ExpectedHeader = "current_alias,endpoint,connection,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 
 function Fail($Message) {
@@ -56,17 +56,41 @@ function Invoke-External($FilePath, $Arguments) {
     }
 }
 
+function Get-ServicePlaybook($Name) {
+    switch ($Name) {
+        "edge_haproxy" { return "infra\ansible\edge_haproxy.yml" }
+        "vpn_edge" { return "infra\ansible\vpn.yml" }
+        default { Fail "No default playbook for service: $Name" }
+    }
+}
+
+function Get-ServiceExtraVars($Name, $State, $PurgeData) {
+    switch ($Name) {
+        "edge_haproxy" {
+            return @("-e", "edge_haproxy_state=$State", "-e", "edge_haproxy_purge_data=$PurgeData")
+        }
+        "vpn_edge" {
+            return @("-e", "vpn_state=$State", "-e", "vpn_purge_data=$PurgeData")
+        }
+        default {
+            Fail "Unsupported service '$Name'. Supported now: edge_haproxy, vpn_edge. Reserved: vpn_cascade."
+        }
+    }
+}
+
 if ($Service -eq "vpn") {
     Fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 }
 if ($Service -eq "vpn_cascade") {
     Fail "Service 'vpn_cascade' is reserved for future site-to-site/cascade rollout and is not implemented yet."
 }
-if ($Service -ne "vpn_edge") {
-    Fail "Unsupported service '$Service'. Supported now: vpn_edge. Reserved: vpn_cascade."
+if ($Service -notin @("edge_haproxy", "vpn_edge")) {
+    Fail "Unsupported service '$Service'. Supported now: edge_haproxy, vpn_edge. Reserved: vpn_cascade."
 }
+
 Require-File $NodesFile "NodesFile"
 Require-File $StateFile "StateFile"
+
 $firstLine = Get-Content -LiteralPath $NodesFile -TotalCount 1
 if ($firstLine -ne $ExpectedHeader) {
     Fail "nodes.csv header must be exactly: $ExpectedHeader"
@@ -78,73 +102,79 @@ if ($stateFirstLine -ne $ExpectedStateHeader) {
 
 $rows = Import-Csv -LiteralPath $NodesFile
 $stateRows = Import-Csv -LiteralPath $StateFile
-$vpnRow = $stateRows | Where-Object { $_.kind -eq "service" -and $_.name -eq "vpn_edge" } | Select-Object -First 1
-if (-not $vpnRow) {
-    Fail "state.csv must contain a service row for vpn_edge"
+$serviceRow = $stateRows | Where-Object { $_.kind -eq "service" -and $_.name -eq $Service } | Select-Object -First 1
+if (-not $serviceRow) {
+    Fail "state.csv must contain a service row for $Service"
 }
-if ($vpnRow.state -notin @("present", "absent", "purged")) {
-    Fail "vpn_edge state must be one of: present, absent, purged"
+if ($serviceRow.state -notin @("present", "absent", "purged")) {
+    Fail "$Service state must be one of: present, absent, purged"
 }
-$desiredNodes = @(Split-AliasList $vpnRow.active_aliases)
+if (-not $serviceRow.ansible_group) {
+    Fail "$Service ansible_group is empty in state.csv"
+}
+
+$desiredNodes = @(Split-AliasList $serviceRow.active_aliases)
 
 if ($Action -eq "plan") {
-    Write-Host "Service: vpn_edge"
+    Write-Host "Service: $Service"
     Write-Host "State file: $StateFile"
-    Write-Host "Service state: $($vpnRow.state)"
-    Write-Host "Ansible group: $($vpnRow.ansible_group)"
+    Write-Host "Service state: $($serviceRow.state)"
+    Write-Host "Ansible group: $($serviceRow.ansible_group)"
     Write-Host "Nodes file: $NodesFile"
     Write-Host ""
     foreach ($row in $rows) {
-        $state = "absent"
-        if ($vpnRow.state -eq "present" -and ($desiredNodes -contains $row.current_alias)) {
-            $state = "present"
+        $desired = "absent"
+        if ($serviceRow.state -eq "present" -and ($desiredNodes -contains $row.current_alias)) {
+            $desired = "present"
         }
-        Write-Host ("{0}: desired {1}" -f $row.current_alias, $state)
+        Write-Host ("{0}: desired {1}" -f $row.current_alias, $desired)
     }
-    if ($vpnRow.candidate_aliases) {
+    if ($serviceRow.candidate_aliases) {
         Write-Host ""
-        Write-Host "Candidates: $($vpnRow.candidate_aliases)"
+        Write-Host "Candidates: $($serviceRow.candidate_aliases)"
     }
-    if ($vpnRow.old_aliases) {
-        Write-Host "Old: $($vpnRow.old_aliases)"
+    if ($serviceRow.old_aliases) {
+        Write-Host "Old: $($serviceRow.old_aliases)"
     }
     exit 0
 }
 
 Require-Command ansible-playbook
 Require-File $Inventory "Inventory"
+if (-not $Playbook) {
+    $Playbook = Get-ServicePlaybook $Service
+}
 Require-File $Playbook "Playbook"
 
-if ($desiredNodes.Count -eq 0 -and ($Action -eq "apply")) {
-    Fail "No active aliases for vpn_edge found in $StateFile"
+if ($Action -eq "apply" -and $serviceRow.state -ne "present") {
+    Fail "$Service apply requires state=present in $StateFile"
 }
-if ($Action -eq "apply" -and $vpnRow.state -ne "present") {
-    Fail "vpn_edge apply requires state=present in $StateFile"
+if ($Action -eq "apply" -and $desiredNodes.Count -eq 0) {
+    Fail "No active aliases for $Service found in $StateFile"
 }
 if ($Action -eq "purge" -and -not $ConfirmPurge) {
     Fail "purge requires -ConfirmPurge"
 }
 
-$vpnState = "present"
-$vpnPurgeData = "false"
+$serviceState = "present"
+$servicePurgeData = "false"
 if ($Action -eq "absent" -or $Action -eq "purge") {
-    $vpnState = "absent"
+    $serviceState = "absent"
 }
 if ($Action -eq "purge") {
-    $vpnPurgeData = "true"
+    $servicePurgeData = "true"
 }
 
 $args = @(
     "-i", $Inventory,
-    $Playbook,
-    "-e", "vpn_state=$vpnState",
-    "-e", "vpn_purge_data=$vpnPurgeData"
+    $Playbook
 )
+$args += Get-ServiceExtraVars $Service $serviceState $servicePurgeData
 
 if ($Limit) {
     $args += @("--limit", $Limit)
 } else {
-    $args += @("--limit", $vpnRow.ansible_group)
+    $args += @("--limit", $serviceRow.ansible_group)
 }
 if ($Check) {
     $args += "--check"

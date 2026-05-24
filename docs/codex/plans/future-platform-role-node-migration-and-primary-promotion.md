@@ -99,9 +99,9 @@ prod_candidate ansible_host=<CANDIDATE_PUBLIC_IP_OR_DNS> ansible_user=ansible an
 С management node:
 
 ```bash
-ansible -i inventory.ini candidate_prod -m ping
-ansible-playbook -i inventory.ini infra/ansible/site.yml --limit candidate_prod --check
-ansible-playbook -i inventory.ini infra/ansible/site.yml --limit candidate_prod
+sudo -u ansible ansible -i inventory.ini candidate_prod -m ping
+sudo -u ansible ansible-playbook -i inventory.ini infra/ansible/site.yml --limit candidate_prod --check
+sudo -u ansible ansible-playbook -i inventory.ini infra/ansible/site.yml --limit candidate_prod
 ```
 
 Если текущие playbooks пока ожидают только группы `prod`, `backup` или
@@ -174,7 +174,7 @@ orchestration на новом.
 С management node и локально проверить:
 
 ```bash
-ansible -i inventory.ini all -m ping
+sudo -u ansible ansible -i inventory.ini all -m ping
 ```
 
 Дополнительно проверить:

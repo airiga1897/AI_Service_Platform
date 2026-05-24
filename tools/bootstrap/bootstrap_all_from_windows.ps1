@@ -14,7 +14,7 @@ param(
 
     [string]$BootstrapRunner = "tools/bootstrap/bootstrap_from_windows.ps1",
 
-    [string]$SyncRunner = "tools/bootstrap/sync_nodes_to_vps3.ps1",
+[string]$SyncRunner = "tools/bootstrap/sync_to_orchestration.ps1",
 
     [string]$AnsibleAuthorizedKeyFile = "",
 
@@ -32,21 +32,14 @@ param(
 
     [switch]$SkipVerify,
 
+    [switch]$SkipServicePlan,
+
     [switch]$SkipManaged
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedHeader = "current_alias,endpoint,connection,ansible_group,roles,root_password"
+$ExpectedHeader = "current_alias,endpoint,connection,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
-$ManagedRoleSet = @(
-    "production",
-    "production-runtime",
-    "preprod",
-    "hot-standby",
-    "backup",
-    "vpn-edge",
-    "vpn-cascade"
-)
 
 function Fail($Message) {
     Write-Error $Message
@@ -59,34 +52,6 @@ function Require-File($Path, $Label) {
     }
 }
 
-function Has-Role($Roles, $Role) {
-    return ("+$Roles+").Contains("+$Role+")
-}
-
-function Resolve-ControlNode($Rows, $Role, $ExplicitAlias) {
-    if ($ExplicitAlias) {
-        $node = $Rows | Where-Object { $_.current_alias -eq $ExplicitAlias } | Select-Object -First 1
-        if (-not $node) {
-            Fail "Control alias not found in nodes file: $ExplicitAlias"
-        }
-        if (-not (Has-Role $node.roles $Role)) {
-            Fail "Control alias $ExplicitAlias does not have required role: $Role"
-        }
-        return $node
-    }
-
-    $matches = @($Rows | Where-Object { Has-Role $_.roles $Role })
-    if ($matches.Count -eq 0) {
-        Fail "No control node found: nodes.csv must contain exactly one row with role '$Role', or pass -ControlAlias."
-    }
-    if ($matches.Count -gt 1) {
-        $aliases = ($matches | ForEach-Object { $_.current_alias }) -join ", "
-        Fail "Multiple control nodes found for role '$Role': $aliases. Pass -ControlAlias to choose one explicitly."
-    }
-
-    return $matches[0]
-}
-
 function Split-AliasList($Value) {
     if (-not $Value) {
         return @()
@@ -95,9 +60,9 @@ function Split-AliasList($Value) {
 }
 
 function Resolve-ControlNodeFromState($NodeRows, $StateRows, $Role, $ExplicitAlias) {
-    $roleRows = @($StateRows | Where-Object { $_.kind -eq "role" -and $_.name -eq $Role -and $_.state -eq "present" })
+    $roleRows = @($StateRows | Where-Object { ($_.kind -eq "platform_role" -or $_.kind -eq "role") -and $_.name -eq $Role -and $_.state -eq "present" })
     if ($roleRows.Count -eq 0) {
-        Fail "No active control role found in state.csv: kind=role,name=$Role,state=present"
+        Fail "No active control role found in state.csv: kind=platform_role,name=$Role,state=present"
     }
     if ($roleRows.Count -gt 1) {
         Fail "Multiple state.csv rows found for control role '$Role'. Keep exactly one row."
@@ -124,13 +89,16 @@ function Resolve-ControlNodeFromState($NodeRows, $StateRows, $Role, $ExplicitAli
     return $node
 }
 
-function Has-AnyManagedRole($Roles) {
-    foreach ($role in $ManagedRoleSet) {
-        if (Has-Role $Roles $role) {
-            return $true
+function Get-StateReferencedAliases($StateRows) {
+    $aliases = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($row in $StateRows) {
+        foreach ($field in @("active_aliases", "candidate_aliases", "old_aliases")) {
+            foreach ($alias in (Split-AliasList $row.$field)) {
+                [void]$aliases.Add($alias)
+            }
         }
     }
-    return $false
+    return $aliases
 }
 
 function Invoke-ChildScript($ScriptPath, $Arguments) {
@@ -162,17 +130,16 @@ if ($RegenerateRemoteKeys -and -not $ForceOverwriteKeys) {
 
 $rows = Import-Csv -LiteralPath $NodesFile
 $useStateFile = $false
-if ($StateFile -and (Test-Path -LiteralPath $StateFile -PathType Leaf)) {
-    $stateFirstLine = Get-Content -LiteralPath $StateFile -TotalCount 1
-    if ($stateFirstLine -ne $ExpectedStateHeader) {
-        Fail "state.csv header must be exactly: $ExpectedStateHeader"
-    }
-    $stateRows = Import-Csv -LiteralPath $StateFile
-    $controlNode = Resolve-ControlNodeFromState $rows $stateRows $ControlRole $ControlAlias
-    $useStateFile = $true
-} else {
-    $controlNode = Resolve-ControlNode $rows $ControlRole $ControlAlias
+if (-not $StateFile -or -not (Test-Path -LiteralPath $StateFile -PathType Leaf)) {
+    Fail "StateFile is required. Control/managed selection lives in state.csv."
 }
+$stateFirstLine = Get-Content -LiteralPath $StateFile -TotalCount 1
+if ($stateFirstLine -ne $ExpectedStateHeader) {
+    Fail "state.csv header must be exactly: $ExpectedStateHeader"
+}
+$stateRows = Import-Csv -LiteralPath $StateFile
+$controlNode = Resolve-ControlNodeFromState $rows $stateRows $ControlRole $ControlAlias
+$useStateFile = $true
 if ($controlNode.connection -ne "ssh" -or $controlNode.endpoint -eq "local") {
     Fail "Control node $($controlNode.current_alias) must use connection=ssh and a real endpoint for operator bootstrap."
 }
@@ -182,13 +149,14 @@ if (-not $AnsibleAuthorizedKeyFile) {
 }
 
 if ($ManagedAliases.Count -eq 0) {
+    $referencedAliases = Get-StateReferencedAliases $stateRows
     $ManagedAliases = @(
         $rows |
             Where-Object {
                 $_.current_alias -ne $controlNode.current_alias -and
                 $_.connection -eq "ssh" -and
                 $_.endpoint -ne "local" -and
-                (Has-AnyManagedRole $_.roles)
+                $referencedAliases.Contains($_.current_alias)
             } |
             ForEach-Object { $_.current_alias }
     )
@@ -278,6 +246,9 @@ if (-not $SkipSync) {
     if ($SkipVerify) {
         $syncArgs += "-SkipVerify"
     }
+    if ($SkipServicePlan) {
+        $syncArgs += "-SkipServicePlan"
+    }
     if ($FixKeyAcl) {
         Write-Warning "-FixKeyAcl is deprecated. sync_nodes_to_vps3.ps1 now fixes OpenSSH key ACL automatically."
     }
@@ -294,5 +265,8 @@ if ($SkipSync) {
     Write-Host "Step 4/4: verify skipped by -SkipVerify"
 } else {
     Write-Host "Step 4/4: verify control node and managed nodes completed by sync runner"
+}
+if ($SkipServicePlan) {
+    Write-Host "Service plan skipped by -SkipServicePlan"
 }
 Write-Host "Bootstrap-all completed."

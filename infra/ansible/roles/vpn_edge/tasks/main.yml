@@ -89,6 +89,18 @@
     mode: "0640"
   when: vpn_state == 'present'
 
+- name: Ensure shared edge Docker network exists
+  ansible.builtin.command:
+    cmd: docker network create --subnet "{{ vpn_edge_network_subnet }}" "{{ vpn_edge_network_name }}"
+  register: vpn_edge_network_create
+  changed_when: vpn_edge_network_create.rc == 0
+  failed_when:
+    - vpn_edge_network_create.rc != 0
+    - "'already exists' not in (vpn_edge_network_create.stderr | default(''))"
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+
 - name: Start vpn_edge container
   ansible.builtin.command:
     cmd: docker compose -f "{{ vpn_edge_compose_file }}" up -d

@@ -21,7 +21,15 @@ param(
 
     [string]$RemoteSoftetherDir = "/tmp/ai-service-platform.softether",
 
+    [string]$HaproxyDir = ".\operator\haproxy",
+
+    [string]$RemoteHaproxyDir = "/tmp/ai-service-platform.haproxy",
+
     [string]$RemotePrepareScript = "/opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh",
+
+    [string]$CreateInventoryScript = "tools/bootstrap/create_inventory.sh",
+
+    [string]$PrepareInventoryScript = "tools/bootstrap/prepare_vps3_inventory.sh",
 
     [string]$VerifyControlScript = "tools/bootstrap/verify_control_node.sh",
 
@@ -33,11 +41,13 @@ param(
 
     [switch]$FixKeyAcl,
 
-    [switch]$SkipVerify
+    [switch]$SkipVerify,
+
+    [switch]$SkipServicePlan
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedHeader = "current_alias,endpoint,connection,ansible_group,roles,root_password"
+$ExpectedHeader = "current_alias,endpoint,connection,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 $IsWindowsPlatform = ($PSVersionTable.PSEdition -eq "Desktop") -or ($PSVersionTable.ContainsKey("Platform") -and $PSVersionTable.Platform -eq "Win32NT") -or ($env:OS -eq "Windows_NT")
 
@@ -69,48 +79,15 @@ function New-SanitizedNodesFile($SourcePath) {
         if (-not $line) {
             continue
         }
-        $fields = $line -split ",", 6
-        if ($fields.Count -ne 6) {
+        $fields = $line -split ",", 5
+        if ($fields.Count -ne 4) {
             Fail "nodes.csv row has invalid column count: $line"
         }
-        $fields[5] = ""
+        $fields[3] = ""
         Add-Content -LiteralPath $tempFile -Value ($fields -join ",") -Encoding ascii
     }
 
     return $tempFile
-}
-
-function Has-Role($Roles, $Role) {
-    return ("+$Roles+").Contains("+$Role+")
-}
-
-function Resolve-ControlNode($Rows, $Role, $ExplicitAlias, $DeprecatedAlias) {
-    if ($DeprecatedAlias -and -not $ExplicitAlias) {
-        Write-Warning "-Vps3Alias is deprecated. Use -ControlAlias instead."
-        $ExplicitAlias = $DeprecatedAlias
-    }
-
-    if ($ExplicitAlias) {
-        $node = $Rows | Where-Object { $_.current_alias -eq $ExplicitAlias } | Select-Object -First 1
-        if (-not $node) {
-            Fail "Control alias not found in nodes file: $ExplicitAlias"
-        }
-        if (-not (Has-Role $node.roles $Role)) {
-            Fail "Control alias $ExplicitAlias does not have required role: $Role"
-        }
-        return $node
-    }
-
-    $matches = @($Rows | Where-Object { Has-Role $_.roles $Role })
-    if ($matches.Count -eq 0) {
-        Fail "No control node found: nodes.csv must contain exactly one row with role '$Role', or pass -ControlAlias."
-    }
-    if ($matches.Count -gt 1) {
-        $aliases = ($matches | ForEach-Object { $_.current_alias }) -join ", "
-        Fail "Multiple control nodes found for role '$Role': $aliases. Pass -ControlAlias to choose one explicitly."
-    }
-
-    return $matches[0]
 }
 
 function Split-AliasList($Value) {
@@ -120,15 +97,55 @@ function Split-AliasList($Value) {
     return @($Value -split "\+" | Where-Object { $_ })
 }
 
+function Write-ServicePlan($NodeRows, $StateRows) {
+    Write-Host ""
+    Write-Host "========================================"
+    Write-Host "  Service plan"
+    Write-Host "========================================"
+
+    $serviceRows = @($StateRows | Where-Object { $_.kind -eq "service" })
+    if ($serviceRows.Count -eq 0) {
+        Write-Host "No service rows found in state.csv"
+        return
+    }
+
+    foreach ($service in $serviceRows) {
+        $activeAliases = @(Split-AliasList $service.active_aliases)
+        Write-Host ""
+        Write-Host ("Service: {0}" -f $service.name)
+        Write-Host ("  state:         {0}" -f $service.state)
+        Write-Host ("  ansible_group: {0}" -f $service.ansible_group)
+
+        foreach ($node in $NodeRows) {
+            if (-not $node.current_alias) {
+                continue
+            }
+
+            $desired = "absent"
+            if ($service.state -eq "present" -and ($activeAliases -contains $node.current_alias)) {
+                $desired = "present"
+            }
+            Write-Host ("  {0}: desired {1}" -f $node.current_alias, $desired)
+        }
+
+        if ($service.candidate_aliases) {
+            Write-Host ("  candidates: {0}" -f $service.candidate_aliases)
+        }
+        if ($service.old_aliases) {
+            Write-Host ("  old:        {0}" -f $service.old_aliases)
+        }
+    }
+}
+
 function Resolve-ControlNodeFromState($NodeRows, $StateRows, $Role, $ExplicitAlias, $DeprecatedAlias) {
     if ($DeprecatedAlias -and -not $ExplicitAlias) {
         Write-Warning "-Vps3Alias is deprecated. Use -ControlAlias instead."
         $ExplicitAlias = $DeprecatedAlias
     }
 
-    $roleRows = @($StateRows | Where-Object { $_.kind -eq "role" -and $_.name -eq $Role -and $_.state -eq "present" })
+    $roleRows = @($StateRows | Where-Object { ($_.kind -eq "platform_role" -or $_.kind -eq "role") -and $_.name -eq $Role -and $_.state -eq "present" })
     if ($roleRows.Count -eq 0) {
-        Fail "No active control role found in state.csv: kind=role,name=$Role,state=present"
+        Fail "No active control role found in state.csv: kind=platform_role,name=$Role,state=present"
     }
     if ($roleRows.Count -gt 1) {
         Fail "Multiple state.csv rows found for control role '$Role'. Keep exactly one row."
@@ -156,9 +173,9 @@ function Resolve-ControlNodeFromState($NodeRows, $StateRows, $Role, $ExplicitAli
 }
 
 Require-File $NodesFile "NodesFile"
-if (-not $SkipVerify) {
-    Require-File $VerifyControlScript "VerifyControlScript"
-}
+Require-File $CreateInventoryScript "CreateInventoryScript"
+Require-File $PrepareInventoryScript "PrepareInventoryScript"
+Require-File $VerifyControlScript "VerifyControlScript"
 
 if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
     Fail "ssh not found in PATH. Install Windows OpenSSH Client or fix PATH."
@@ -188,17 +205,16 @@ if ($firstLine -ne $ExpectedHeader) {
 
 $rows = Import-Csv -LiteralPath $NodesFile
 $useStateFile = $false
-if ($StateFile -and (Test-Path -LiteralPath $StateFile -PathType Leaf)) {
-    $stateFirstLine = Get-Content -LiteralPath $StateFile -TotalCount 1
-    if ($stateFirstLine -ne $ExpectedStateHeader) {
-        Fail "state.csv header must be exactly: $ExpectedStateHeader"
-    }
-    $stateRows = Import-Csv -LiteralPath $StateFile
-    $controlNode = Resolve-ControlNodeFromState $rows $stateRows $ControlRole $ControlAlias $Vps3Alias
-    $useStateFile = $true
-} else {
-    $controlNode = Resolve-ControlNode $rows $ControlRole $ControlAlias $Vps3Alias
+if (-not $StateFile -or -not (Test-Path -LiteralPath $StateFile -PathType Leaf)) {
+    Fail "StateFile is required. Control/orchestration selection lives in state.csv."
 }
+$stateFirstLine = Get-Content -LiteralPath $StateFile -TotalCount 1
+if ($stateFirstLine -ne $ExpectedStateHeader) {
+    Fail "state.csv header must be exactly: $ExpectedStateHeader"
+}
+$stateRows = Import-Csv -LiteralPath $StateFile
+$controlNode = Resolve-ControlNodeFromState $rows $stateRows $ControlRole $ControlAlias $Vps3Alias
+$useStateFile = $true
 if ($controlNode.endpoint -eq "local" -or $controlNode.connection -eq "local") {
     Fail "Cannot sync to control node when endpoint/connection is local in operator nodes.csv: $($controlNode.current_alias)"
 }
@@ -212,6 +228,8 @@ if (-not $Include) {
 }
 
 $sanitized = New-SanitizedNodesFile $NodesFile
+$remoteCreateInventoryTemp = "/tmp/ai-service-platform.create_inventory.sh"
+$remotePrepareInventoryTemp = "/tmp/ai-service-platform.prepare_vps3_inventory.sh"
 $remoteVerifyTemp = "/tmp/ai-service-platform.verify_control_node.sh"
 $remote = "$SshUser@$($controlNode.endpoint)"
 
@@ -336,12 +354,21 @@ try {
         Invoke-SshKey $SshKeyFile $remote "rm -rf '$RemoteSoftetherDir'" "remote cleanup SoftEther temp dir"
         Invoke-ScpKeyRecursive $SshKeyFile $SoftetherDir "${remote}:$RemoteSoftetherDir" "scp SoftEther operator directory"
     }
-    if (-not $SkipVerify) {
-        Write-Host "Syncing verify_control_node.sh to control node $($controlNode.current_alias)"
-        Invoke-ScpKey $SshKeyFile $VerifyControlScript "${remote}:$remoteVerifyTemp" "scp verify_control_node.sh"
+    $syncHaproxy = Test-Path -LiteralPath $HaproxyDir -PathType Container
+    if ($syncHaproxy) {
+        Write-Host "Syncing HAProxy operator directory to control node $($controlNode.current_alias)"
+        Invoke-SshKey $SshKeyFile $remote "rm -rf '$RemoteHaproxyDir'" "remote cleanup HAProxy temp dir"
+        Invoke-ScpKeyRecursive $SshKeyFile $HaproxyDir "${remote}:$RemoteHaproxyDir" "scp HAProxy operator directory"
     }
+    Write-Host "Syncing bootstrap helper scripts to control node $($controlNode.current_alias)"
+    Invoke-ScpKey $SshKeyFile $CreateInventoryScript "${remote}:$remoteCreateInventoryTemp" "scp create_inventory.sh"
+    Invoke-ScpKey $SshKeyFile $PrepareInventoryScript "${remote}:$remotePrepareInventoryTemp" "scp prepare_vps3_inventory.sh"
+    Invoke-ScpKey $SshKeyFile $VerifyControlScript "${remote}:$remoteVerifyTemp" "scp verify_control_node.sh"
 
     $prepareCommand = "sudo bash '$RemotePrepareScript' --source-nodes-file '$RemoteNodesFile' --skip-check"
+    if ($AutoAcceptHostKey) {
+        $prepareCommand = "$prepareCommand --refresh-known-hosts"
+    }
     if ($useStateFile) {
         $prepareCommand = "$prepareCommand --source-state-file '$remoteStateFile'"
     }
@@ -352,11 +379,16 @@ try {
     if ($syncSoftether) {
         $softetherCommand = "sudo mkdir -p /opt/ai-service-platform/operator; if [ -d '$RemoteSoftetherDir/softether' ]; then sudo rm -rf /opt/ai-service-platform/operator/softether && sudo cp -a '$RemoteSoftetherDir/softether' /opt/ai-service-platform/operator/softether; else sudo rm -rf /opt/ai-service-platform/operator/softether && sudo cp -a '$RemoteSoftetherDir' /opt/ai-service-platform/operator/softether; fi;"
     }
+    $haproxyCommand = ""
+    if ($syncHaproxy) {
+        $haproxyCommand = "sudo mkdir -p /opt/ai-service-platform/operator; if [ -d '$RemoteHaproxyDir/haproxy' ]; then sudo rm -rf /opt/ai-service-platform/operator/haproxy && sudo cp -a '$RemoteHaproxyDir/haproxy' /opt/ai-service-platform/operator/haproxy; else sudo rm -rf /opt/ai-service-platform/operator/haproxy && sudo cp -a '$RemoteHaproxyDir' /opt/ai-service-platform/operator/haproxy; fi;"
+    }
     $verifyCommand = ""
     if (-not $SkipVerify) {
         $verifyCommand = "sudo mkdir -p `"`$(dirname '$RemoteVerifyScript')`"; sudo install -m 700 '$remoteVerifyTemp' '$RemoteVerifyScript'; sudo bash '$RemoteVerifyScript';"
     }
-    $remoteCommand = "set -e; $softetherCommand $prepareCommand; $verifyCommand rm -rf '$RemoteSoftetherDir'; rm -f '$RemoteNodesFile' '$remoteStateFile' '$remoteVerifyTemp'"
+    $helperCommand = "sudo mkdir -p /opt/ai-service-platform/tools/bootstrap; sudo install -m 700 '$remoteCreateInventoryTemp' /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; sudo install -m 700 '$remotePrepareInventoryTemp' '$RemotePrepareScript'; sudo install -m 700 '$remoteVerifyTemp' '$RemoteVerifyScript';"
+    $remoteCommand = "set -e; $helperCommand $softetherCommand $haproxyCommand $prepareCommand; $verifyCommand rm -rf '$RemoteSoftetherDir' '$RemoteHaproxyDir'; rm -f '$RemoteNodesFile' '$remoteStateFile' '$remoteCreateInventoryTemp' '$remotePrepareInventoryTemp' '$remoteVerifyTemp'"
 
     Write-Host "Running control node inventory preparation"
     Invoke-SshKey $SshKeyFile $remote $remoteCommand "remote prepare_vps3_inventory.sh"
@@ -365,6 +397,12 @@ try {
         Write-Host "Control node nodes.csv and inventory.ini are in sync; verify skipped"
     } else {
         Write-Host "Control node nodes.csv, inventory.ini, and verification are complete"
+    }
+
+    if ($useStateFile -and -not $SkipServicePlan) {
+        Write-ServicePlan $rows $stateRows
+    } elseif ($SkipServicePlan) {
+        Write-Host "Service plan skipped"
     }
 } finally {
     Remove-Item -LiteralPath $sanitized -Force -ErrorAction SilentlyContinue

@@ -1,0 +1,140 @@
+---
+- name: Validate edge_haproxy state
+  ansible.builtin.assert:
+    that:
+      - edge_haproxy_state in ['present', 'absent']
+      - edge_haproxy_purge_data in [true, false, 'true', 'false', 'True', 'False']
+    fail_msg: "edge_haproxy_state must be present|absent and edge_haproxy_purge_data must be boolean-like."
+
+- name: Check operator HAProxy management allowlist on control node
+  ansible.builtin.stat:
+    path: "{{ edge_haproxy_operator_vpn_mgmt_ips }}"
+  delegate_to: localhost
+  become: false
+  register: edge_haproxy_mgmt_allowlist_stat
+  when: edge_haproxy_state == 'present'
+
+- name: Check operator HAProxy blacklist on control node
+  ansible.builtin.stat:
+    path: "{{ edge_haproxy_operator_blocked_ips }}"
+  delegate_to: localhost
+  become: false
+  register: edge_haproxy_blacklist_stat
+  when: edge_haproxy_state == 'present'
+
+- name: Ensure edge_haproxy runtime directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+  loop:
+    - "{{ edge_haproxy_root_dir }}"
+    - "{{ edge_haproxy_config_dir }}"
+    - "{{ edge_haproxy_lists_dir }}"
+  when: edge_haproxy_state == 'present'
+
+- name: Install VPN management allowlist when provided
+  ansible.builtin.copy:
+    src: "{{ edge_haproxy_operator_vpn_mgmt_ips }}"
+    dest: "{{ edge_haproxy_lists_dir }}/vpn_mgmt_ips.lst"
+    mode: "0640"
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_mgmt_allowlist_stat.stat.exists
+    - edge_haproxy_mgmt_allowlist_stat.stat.isreg
+
+- name: Close VPN management allowlist when operator file is missing
+  ansible.builtin.copy:
+    dest: "{{ edge_haproxy_lists_dir }}/vpn_mgmt_ips.lst"
+    content: ""
+    mode: "0640"
+  when:
+    - edge_haproxy_state == 'present'
+    - not edge_haproxy_mgmt_allowlist_stat.stat.exists or not edge_haproxy_mgmt_allowlist_stat.stat.isreg
+
+- name: Install manual blacklist when provided
+  ansible.builtin.copy:
+    src: "{{ edge_haproxy_operator_blocked_ips }}"
+    dest: "{{ edge_haproxy_lists_dir }}/blocked_ips.lst"
+    mode: "0640"
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_blacklist_stat.stat.exists
+    - edge_haproxy_blacklist_stat.stat.isreg
+
+- name: Create empty manual blacklist when operator file is missing
+  ansible.builtin.copy:
+    dest: "{{ edge_haproxy_lists_dir }}/blocked_ips.lst"
+    content: ""
+    mode: "0640"
+  when:
+    - edge_haproxy_state == 'present'
+    - not edge_haproxy_blacklist_stat.stat.exists or not edge_haproxy_blacklist_stat.stat.isreg
+
+- name: Render edge_haproxy config
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: "{{ edge_haproxy_config_dir }}/haproxy.cfg"
+    mode: "0640"
+  when: edge_haproxy_state == 'present'
+
+- name: Render edge_haproxy Docker Compose
+  ansible.builtin.template:
+    src: docker-compose.edge-haproxy.yml.j2
+    dest: "{{ edge_haproxy_compose_file }}"
+    mode: "0640"
+  when: edge_haproxy_state == 'present'
+
+- name: Ensure shared edge Docker network exists
+  ansible.builtin.command:
+    cmd: docker network create --subnet "{{ edge_haproxy_network_subnet }}" "{{ edge_haproxy_network_name }}"
+  register: edge_haproxy_network_create
+  changed_when: edge_haproxy_network_create.rc == 0
+  failed_when:
+    - edge_haproxy_network_create.rc != 0
+    - "'already exists' not in (edge_haproxy_network_create.stderr | default(''))"
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+
+- name: Validate edge_haproxy config
+  ansible.builtin.command:
+    cmd: docker run --rm -v "{{ edge_haproxy_config_dir }}/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro" -v "{{ edge_haproxy_lists_dir }}:/usr/local/etc/haproxy/lists:ro" "{{ edge_haproxy_image }}" haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
+  changed_when: false
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+
+- name: Start edge_haproxy container
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ edge_haproxy_compose_file }}" up -d
+    chdir: "{{ edge_haproxy_root_dir }}"
+  changed_when: true
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+
+- name: Check edge_haproxy compose file
+  ansible.builtin.stat:
+    path: "{{ edge_haproxy_compose_file }}"
+  register: edge_haproxy_compose_stat
+  when: edge_haproxy_state == 'absent'
+
+- name: Stop edge_haproxy container
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ edge_haproxy_compose_file }}" down
+    chdir: "{{ edge_haproxy_root_dir }}"
+  changed_when: true
+  when:
+    - edge_haproxy_state == 'absent'
+    - edge_haproxy_compose_stat.stat.exists
+    - not ansible_check_mode
+
+- name: Purge edge_haproxy runtime data when explicitly requested
+  ansible.builtin.file:
+    path: "{{ edge_haproxy_root_dir }}"
+    state: absent
+  when:
+    - edge_haproxy_state == 'absent'
+    - edge_haproxy_purge_data in [true, 'true', 'True']
+    - not ansible_check_mode

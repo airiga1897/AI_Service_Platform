@@ -1,169 +1,111 @@
 # Step-by-step: VPN Edge First Service Rollout
 
-This document describes the first real platform service rollout after infrastructure preparation.
+После infrastructure preparation первым service rollout остаётся VPN path:
 
-Order:
+1. `edge_haproxy` - TCP edge перед VPN и будущими сайтами.
+2. `vpn_edge` - SoftEther user ingress за HAProxy.
 
-1. Bootstrap VPS nodes from `nodes.csv`.
-2. Sync `nodes.csv` and `state.csv` to the control/orchestration node.
-3. Verify Ansible connectivity.
-4. Complete GitHub deploy-access/predeploy-check.
-5. Roll out the first service: `vpn_edge`.
+Product deploy остаётся позже.
 
-Product deploy is still later.
+## Source Of Truth
 
-## 1. Source Of Truth
+`nodes.csv` - только адресная книга:
 
-VPN edge uses two operator-local files:
-
-```text
-operator/nodes.csv
-operator/state.csv
+```csv
+current_alias,endpoint,connection,root_password
+vps1,vps01.example.com,ssh,
+vps2,vps02.example.com,ssh,
+vps3,vps03.example.com,ssh,
 ```
 
-`nodes.csv` describes VPS nodes and endpoints.
-
-`state.csv` describes desired service state:
+`state.csv` - роли, сервисы и lifecycle:
 
 ```csv
 kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state
+platform_role,orchestration,orchestration,vps3,,,present
+service,edge_haproxy,edge_haproxy,vps1,,,present
 service,vpn_edge,vpn_edges,vps1+vps2+vps3,,,present
 service,vpn_cascade,vpn_cascades,,,,absent
 ```
 
-`vpn_edge` is the user VPN ingress service. Its seed config is the opaque
-operator secret `operator/softether/edge/vpn_server.config`.
+`vpn_cascade` reserved/not implemented.
 
-`vpn_cascade` is reserved for future site-to-site/cascade transport and is not rolled out now.
-It must get a separate config/container/volume design before implementation.
+## HAProxy Operator Lists
 
-## 2. Prepare Inventory
+Operator-local files:
 
-On the control node:
-
-```bash
-cd /opt/ai-service-platform
-
-sudo bash tools/bootstrap/create_inventory.sh \
-  --nodes-file /opt/ai-service-platform/operator/nodes.csv \
-  --state-file /opt/ai-service-platform/operator/state.csv \
-  --include vps1,vps2,vps3 \
-  --check
+```text
+operator/haproxy/lists/vpn_mgmt_ips.lst
+operator/haproxy/lists/blocked_ips.lst
 ```
 
-Inventory should contain:
+Initial `vpn_mgmt_ips.lst`:
 
-- `vps1`, `vps2`, `vps3` in `[vpn_edges]`;
-- empty `[vpn_cascades]`, `[candidate_vpn_cascades]`, `[old_vpn_cascades]` groups until cascade rollout exists.
+```text
+91.204.75.25
+95.31.25.30
+```
 
-## 3. Plan
+`vpn_mgmt_ips.lst` controls access to SoftEther management port `5555/tcp`. If missing or empty, `5555/tcp` is closed for everyone.
 
-Windows/operator:
+## Rollout Command
+
+Обычный запуск с operator machine:
 
 ```powershell
-.\tools\services\service.ps1 vpn_edge plan `
+.\tools\services\rollout_from_state.ps1 `
   -NodesFile .\operator\nodes.csv `
   -StateFile .\operator\state.csv
 ```
 
-Control node/Linux:
+Скрипт делает:
 
-```bash
-bash tools/services/service.sh vpn_edge plan \
-  --nodes-file /opt/ai-service-platform/operator/nodes.csv \
-  --state-file /opt/ai-service-platform/operator/state.csv
+1. sync на active orchestration node;
+2. verify;
+3. читает все `kind=service`;
+4. для `present` делает `plan`, `apply --check`, `apply`;
+5. для `absent` делает `plan`, `absent`;
+6. для `purged` делает `plan`, `purge`.
+
+Изменение `state.csv` само ничего не запускает.
+
+## HAProxy Lifecycle
+
+Запустить на `vps1`:
+
+```csv
+service,edge_haproxy,edge_haproxy,vps1,,,present
 ```
 
-`plan` does not change anything.
+Остановить, сохранив config/data:
 
-## 4. First Careful Apply
+```csv
+service,edge_haproxy,edge_haproxy,vps1,,,absent
+```
 
-First target:
+Удалить runtime data явно:
+
+```csv
+service,edge_haproxy,edge_haproxy,vps1,,,purged
+```
+
+## VPN Edge Config
+
+`vpn_edge` использует operator-only seed:
 
 ```text
-vps1
+operator/softether/edge/vpn_server.config
 ```
 
-Dry run:
+Это opaque secret state file. В v1 он копируется как baseline и не редактируется строковыми заменами.
 
-```bash
-bash tools/services/service.sh vpn_edge apply \
-  --nodes-file /opt/ai-service-platform/operator/nodes.csv \
-  --state-file /opt/ai-service-platform/operator/state.csv \
-  --inventory /opt/ai-service-platform/inventory.ini \
-  --limit vps1 \
-  --check
-```
+## TCP Contract
 
-Real apply:
+Current TCP ports:
 
-```bash
-bash tools/services/service.sh vpn_edge apply \
-  --nodes-file /opt/ai-service-platform/operator/nodes.csv \
-  --state-file /opt/ai-service-platform/operator/state.csv \
-  --inventory /opt/ai-service-platform/inventory.ini \
-  --limit vps1
-```
+- `443/tcp` - SNI routing, VPN domain to `softether-edge:443`;
+- `992/tcp` - SoftEther through HAProxy;
+- `1194/tcp` - SoftEther through HAProxy;
+- `5555/tcp` - SoftEther management, allowlist only.
 
-After validating `vps1`, repeat for `vps2` and `vps3`.
-
-## 5. Remove Model
-
-Changing `state.csv` does not remove services automatically.
-
-Stop/remove service without deleting data:
-
-```bash
-bash tools/services/service.sh vpn_edge absent \
-  --nodes-file /opt/ai-service-platform/operator/nodes.csv \
-  --state-file /opt/ai-service-platform/operator/state.csv \
-  --inventory /opt/ai-service-platform/inventory.ini \
-  --limit vps1
-```
-
-Delete stopped service data only with explicit confirmation:
-
-```bash
-bash tools/services/service.sh vpn_edge purge \
-  --nodes-file /opt/ai-service-platform/operator/nodes.csv \
-  --state-file /opt/ai-service-platform/operator/state.csv \
-  --inventory /opt/ai-service-platform/inventory.ini \
-  --limit vps1 \
-  --confirm-purge
-```
-
-## 6. SoftEther Contract
-
-SoftEther/VPN is a platform service, not part of `AromaFlowAI` or `AI_E_Retail`.
-This rollout covers `vpn_edge` only; `vpn_cascade` remains reserved.
-
-`vpn_server.config` is copied as an opaque edge seed. Ansible v1 must not parse
-VirtualHUBs, users, groups, passwords, SecureNAT/DHCP, or certificates from it
-and must not patch it with string replacements.
-
-Current TCP-only contract:
-
-| Port | Protocol | Purpose |
-| --- | --- | --- |
-| `443` | TCP | SSTP/SSL VPN through HAProxy SNI routing |
-| `992` | TCP | Alternative SoftEther SSL endpoint |
-| `1194` | TCP | OpenVPN-compatible TCP endpoint |
-| `5555` | TCP | SoftEther Server Manager, allowlist only |
-
-UDP is not enabled yet.
-
-HAProxy publishes TCP ports externally. SoftEther stays inside Docker network and does not publish ports directly.
-
-## 7. Acceptance Checklist
-
-- `state.csv` contains `service,vpn_edge,...,present`.
-- `state.csv` contains reserved `service,vpn_cascade,...,absent`.
-- `create_inventory.sh --state-file` adds active VPN edge aliases to `[vpn_edges]`.
-- `service vpn_edge plan` does not change anything.
-- `service vpn_edge apply --limit vps1 --check` runs without destructive actions.
-- `service vpn` is rejected.
-- `service vpn_cascade` is rejected as reserved/not implemented.
-- SoftEther container starts on the target node.
-- Both existing VirtualHUBs from the opaque edge seed are still present.
-- TCP ports `443`, `992`, `1194`, `5555` follow the edge contract.
-- `vpn_server.config`, private keys, real IPs, passwords, and generated inventory are not committed.
+UDP и cascade/site-to-site остаются future work.

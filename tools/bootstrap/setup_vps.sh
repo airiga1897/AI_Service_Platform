@@ -7,7 +7,8 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
-EXPECTED_CSV_HEADER="current_alias,endpoint,connection,ansible_group,roles,root_password"
+EXPECTED_CSV_HEADER="current_alias,endpoint,connection,root_password"
+EXPECTED_STATE_CSV_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 
 print_header() {
     echo ""
@@ -32,8 +33,8 @@ print_error() {
 usage() {
     cat <<'USAGE'
 Usage:
-  sudo bash tools/bootstrap/setup_vps.sh --nodes-file /tmp/nodes.csv --alias vps3
-  sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash tools/bootstrap/setup_vps.sh --nodes-file /tmp/nodes.csv --alias vps2
+  sudo bash tools/bootstrap/setup_vps.sh --nodes-file /tmp/nodes.csv --state-file /tmp/state.csv --alias vps3
+  sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash tools/bootstrap/setup_vps.sh --nodes-file /tmp/nodes.csv --state-file /tmp/state.csv --alias vps2
 
 Fallback target mode:
   sudo bash tools/bootstrap/setup_vps.sh vps3-management
@@ -56,54 +57,77 @@ Supported targets:
   ai-retail-dev-preprod Temporary alias for GitHub Actions deploy access to VPS2.
 
 CSV columns:
-  current_alias,endpoint,connection,ansible_group,roles,root_password
+  current_alias,endpoint,connection,root_password
+
+State CSV columns:
+  kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state
 USAGE
 }
 
 NODES_FILE=""
+STATE_FILE=""
 NODE_ALIAS=""
 TARGET=""
-CSV_ROLES=""
 
-has_role() {
-    local wanted="$1"
-    case "+$CSV_ROLES+" in
+split_aliases_has() {
+    local aliases="$1"
+    local wanted="$2"
+    case "+$aliases+" in
         *"+$wanted+"*) return 0 ;;
         *) return 1 ;;
     esac
 }
 
-validate_roles() {
-    local roles="$1"
-    local line_number="$2"
-    local role
-    local old_ifs="$IFS"
-    IFS=+
-    for role in $roles; do
-        IFS="$old_ifs"
-        case "$role" in
-            production|production-runtime|preprod|hot-standby|backup|management|monitoring|orchestration|vpn-edge|vpn-cascade) ;;
-            *)
-                print_error "nodes.csv line $line_number has unsupported role: $role"
-                exit 1
-                ;;
-        esac
-        IFS=+
-    done
-    IFS="$old_ifs"
-}
+resolve_behavior_from_state() {
+    [ -n "$STATE_FILE" ] || {
+        print_error "--state-file is required with --nodes-file/--alias. nodes.csv is only an address book."
+        exit 1
+    }
+    [ -f "$STATE_FILE" ] || {
+        print_error "state file not found: $STATE_FILE"
+        exit 1
+    }
 
-resolve_behavior_from_roles() {
-    if has_role management || has_role orchestration; then
-        NODE_ROLE="management"
-        DEPLOY_DIR="/opt/ai-service-platform"
-        RUNTIME_ENV_FILE=""
-        GITHUB_ENVIRONMENT="$NODE_ALIAS"
-        TARGET="$NODE_ALIAS"
-        return
-    fi
+    local first_state_line
+    first_state_line="$(head -n 1 "$STATE_FILE" | tr -d '\r')"
+    [ "$first_state_line" = "$EXPECTED_STATE_CSV_HEADER" ] || {
+        print_error "state.csv header must be exactly:"
+        echo "$EXPECTED_STATE_CSV_HEADER"
+        exit 1
+    }
 
-    if has_role production || has_role production-runtime || has_role preprod || has_role hot-standby || has_role backup || has_role vpn-edge || has_role vpn-cascade; then
+    local line_number=0
+    local mentioned="false"
+    local kind name ansible_group active_aliases candidate_aliases old_aliases state extra
+    while IFS=, read -r kind name ansible_group active_aliases candidate_aliases old_aliases state extra || [ -n "${kind:-}" ]; do
+        line_number=$((line_number + 1))
+        kind="${kind//$'\r'/}"
+        name="${name//$'\r'/}"
+        active_aliases="${active_aliases//$'\r'/}"
+        candidate_aliases="${candidate_aliases//$'\r'/}"
+        old_aliases="${old_aliases//$'\r'/}"
+        state="${state//$'\r'/}"
+        extra="${extra//$'\r'/}"
+        [ "$line_number" -eq 1 ] && continue
+        [ -z "$kind" ] && continue
+        [ -z "$extra" ] || {
+            print_error "state.csv line $line_number has too many columns"
+            exit 1
+        }
+        if split_aliases_has "$active_aliases" "$NODE_ALIAS" || split_aliases_has "$candidate_aliases" "$NODE_ALIAS" || split_aliases_has "$old_aliases" "$NODE_ALIAS"; then
+            mentioned="true"
+        fi
+        if { [ "$kind" = "platform_role" ] || [ "$kind" = "role" ]; } && [ "$name" = "orchestration" ] && [ "$state" = "present" ] && split_aliases_has "$active_aliases" "$NODE_ALIAS"; then
+            NODE_ROLE="management"
+            DEPLOY_DIR="/opt/ai-service-platform"
+            RUNTIME_ENV_FILE=""
+            GITHUB_ENVIRONMENT="$NODE_ALIAS"
+            TARGET="$NODE_ALIAS"
+            return
+        fi
+    done < "$STATE_FILE"
+
+    if [ "$mentioned" = "true" ]; then
         NODE_ROLE="managed"
         DEPLOY_DIR="/opt/stacks"
         RUNTIME_ENV_FILE=""
@@ -112,7 +136,7 @@ resolve_behavior_from_roles() {
         return
     fi
 
-    print_error "Alias $NODE_ALIAS has no bootstrap-supported role in nodes.csv: $CSV_ROLES"
+    print_error "Alias $NODE_ALIAS is not referenced by state.csv. Add it to platform_role/service active/candidate/old aliases before bootstrap."
     exit 1
 }
 
@@ -124,21 +148,19 @@ resolve_target_from_nodes_file() {
 
     local line_number=0
     local header_seen="false"
-    local current_alias endpoint connection ansible_group roles root_password extra
+    local current_alias endpoint connection root_password extra
 
-    while IFS=, read -r current_alias endpoint connection ansible_group roles root_password extra || [ -n "${current_alias:-}" ]; do
+    while IFS=, read -r current_alias endpoint connection root_password extra || [ -n "${current_alias:-}" ]; do
         line_number=$((line_number + 1))
         current_alias="${current_alias//$'\r'/}"
         endpoint="${endpoint//$'\r'/}"
         connection="${connection//$'\r'/}"
-        ansible_group="${ansible_group//$'\r'/}"
-        roles="${roles//$'\r'/}"
         root_password="${root_password//$'\r'/}"
         extra="${extra//$'\r'/}"
 
         if [ "$line_number" -eq 1 ]; then
             local header
-            header="$current_alias,$endpoint,$connection,$ansible_group,$roles,$root_password"
+            header="$current_alias,$endpoint,$connection,$root_password"
             if [ "$header" != "$EXPECTED_CSV_HEADER" ] || [ -n "$extra" ]; then
                 print_error "nodes.csv header must be exactly:"
                 echo "$EXPECTED_CSV_HEADER"
@@ -149,13 +171,7 @@ resolve_target_from_nodes_file() {
         fi
 
         if [ "$current_alias" = "$NODE_ALIAS" ]; then
-            if [ -z "$roles" ]; then
-                print_error "nodes.csv line $line_number has empty roles for alias $NODE_ALIAS"
-                exit 1
-            fi
-            validate_roles "$roles" "$line_number"
-            CSV_ROLES="$roles"
-            resolve_behavior_from_roles
+            resolve_behavior_from_state
             return
         fi
     done < "$NODES_FILE"
@@ -173,6 +189,10 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --nodes-file)
             NODES_FILE="${2:-}"
+            shift 2
+            ;;
+        --state-file)
+            STATE_FILE="${2:-}"
             shift 2
             ;;
         --alias)
@@ -523,14 +543,14 @@ if [ "$NODE_ROLE" = "managed" ] && [ -z "$ANSIBLE_AUTHORIZED_KEY" ]; then
     echo ""
     echo "Then run:"
     if [ "$CSV_MODE" = "true" ]; then
-        echo "  sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash setup_vps.sh --nodes-file $NODES_FILE --alias $NODE_ALIAS"
+        echo "  sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash setup_vps.sh --nodes-file $NODES_FILE --state-file $STATE_FILE --alias $NODE_ALIAS"
     else
         echo "  sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash setup_vps.sh $TARGET"
     fi
     echo ""
     echo "String fallback:"
     if [ "$CSV_MODE" = "true" ]; then
-        echo "  sudo ANSIBLE_AUTHORIZED_KEY='ssh-ed25519 ... ansible-control@vps3-management' bash setup_vps.sh --nodes-file $NODES_FILE --alias $NODE_ALIAS"
+        echo "  sudo ANSIBLE_AUTHORIZED_KEY='ssh-ed25519 ... ansible-control@orchestration' bash setup_vps.sh --nodes-file $NODES_FILE --state-file $STATE_FILE --alias $NODE_ALIAS"
     else
         echo "  sudo ANSIBLE_AUTHORIZED_KEY='ssh-ed25519 ... ansible-control@vps3-management' bash setup_vps.sh $TARGET"
     fi

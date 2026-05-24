@@ -129,18 +129,16 @@ if [ -n "$NODES_FILE" ] || [ -n "$NODE_ALIAS" ]; then
     [ -f "$NODES_FILE" ] || fail "nodes file not found: $NODES_FILE"
     line_number=0
     found="false"
-    while IFS=, read -r csv_alias csv_endpoint csv_connection _csv_group _csv_roles _csv_root_password extra || [ -n "${csv_alias:-}" ]; do
+    while IFS=, read -r csv_alias csv_endpoint csv_connection _csv_root_password extra || [ -n "${csv_alias:-}" ]; do
         line_number=$((line_number + 1))
         csv_alias="${csv_alias//$'\r'/}"
         csv_endpoint="${csv_endpoint//$'\r'/}"
         csv_connection="${csv_connection//$'\r'/}"
-        _csv_group="${_csv_group//$'\r'/}"
-        _csv_roles="${_csv_roles//$'\r'/}"
         _csv_root_password="${_csv_root_password//$'\r'/}"
         extra="${extra//$'\r'/}"
         if [ "$line_number" -eq 1 ]; then
-            header="$csv_alias,$csv_endpoint,$csv_connection,$_csv_group,$_csv_roles,$_csv_root_password"
-            expected_header="current_alias,endpoint,connection,ansible_group,roles,root_password"
+            header="$csv_alias,$csv_endpoint,$csv_connection,$_csv_root_password"
+            expected_header="current_alias,endpoint,connection,root_password"
             [ "$header" = "$expected_header" ] && [ -z "$extra" ] || fail "nodes.csv header must be exactly: $expected_header"
             continue
         fi

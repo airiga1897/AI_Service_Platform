@@ -7,16 +7,20 @@ ACTION="${2:-}"
 NODES_FILE="./operator/nodes.csv"
 STATE_FILE="./operator/state.csv"
 INVENTORY="inventory.ini"
-PLAYBOOK="infra/ansible/vpn.yml"
+PLAYBOOK=""
 LIMIT=""
 CHECK="false"
 CONFIRM_PURGE="false"
-EXPECTED_HEADER="current_alias,endpoint,connection,ansible_group,roles,root_password"
+EXPECTED_HEADER="current_alias,endpoint,connection,root_password"
 EXPECTED_STATE_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 
 usage() {
     cat <<'USAGE'
 Usage:
+  bash tools/services/service.sh edge_haproxy plan [options]
+  bash tools/services/service.sh edge_haproxy apply [options]
+  bash tools/services/service.sh edge_haproxy absent [options]
+  bash tools/services/service.sh edge_haproxy purge --confirm-purge [options]
   bash tools/services/service.sh vpn_edge plan [options]
   bash tools/services/service.sh vpn_edge apply [options]
   bash tools/services/service.sh vpn_edge absent [options]
@@ -26,8 +30,8 @@ Options:
   --nodes-file PATH      Operator nodes.csv. Default: ./operator/nodes.csv
   --state-file PATH      Operator state.csv. Default: ./operator/state.csv
   --inventory PATH       Generated Ansible inventory. Default: inventory.ini
-  --playbook PATH        Service playbook. Default: infra/ansible/vpn.yml
-  --limit VALUE          Ansible --limit. Default: vpn_edges
+  --playbook PATH        Override service playbook.
+  --limit VALUE          Ansible --limit. Default: service ansible_group.
   --check                Pass --check to ansible-playbook.
   --confirm-purge        Required for purge.
   -h, --help             Show help.
@@ -64,6 +68,39 @@ alias_in_list() {
     return 1
 }
 
+service_playbook() {
+    case "$1" in
+        edge_haproxy) echo "infra/ansible/edge_haproxy.yml" ;;
+        vpn_edge) echo "infra/ansible/vpn.yml" ;;
+        *) return 1 ;;
+    esac
+}
+
+service_extra_vars() {
+    local service="$1"
+    local state="$2"
+    local purge="$3"
+    case "$service" in
+        edge_haproxy)
+            printf '%s\n' "-e" "edge_haproxy_state=$state" "-e" "edge_haproxy_purge_data=$purge"
+            ;;
+        vpn_edge)
+            printf '%s\n' "-e" "vpn_state=$state" "-e" "vpn_purge_data=$purge"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+run_ansible_playbook() {
+    if [ "$(id -u)" -eq 0 ]; then
+        sudo -u ansible ansible-playbook "$@"
+    else
+        ansible-playbook "$@"
+    fi
+}
+
 if [ "$SERVICE" = "-h" ] || [ "$SERVICE" = "--help" ]; then
     usage
     exit 0
@@ -75,7 +112,10 @@ fi
 if [ "$SERVICE" = "vpn_cascade" ]; then
     fail "Service 'vpn_cascade' is reserved for future site-to-site/cascade rollout and is not implemented yet."
 fi
-[ "$SERVICE" = "vpn_edge" ] || fail "Unsupported service '$SERVICE'. Supported now: vpn_edge. Reserved: vpn_cascade."
+case "$SERVICE" in
+    edge_haproxy|vpn_edge) ;;
+    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge. Reserved: vpn_cascade." ;;
+esac
 case "$ACTION" in
     plan|apply|absent|purge) ;;
     *) usage; fail "Action must be one of: plan, apply, absent, purge" ;;
@@ -129,12 +169,12 @@ first_line="$(head -n 1 "$NODES_FILE" | tr -d '\r')"
 state_first_line="$(head -n 1 "$STATE_FILE" | tr -d '\r')"
 [ "$state_first_line" = "$EXPECTED_STATE_HEADER" ] || fail "state.csv header must be exactly: $EXPECTED_STATE_HEADER"
 
-vpn_found="false"
-vpn_group=""
-vpn_active_aliases=""
-vpn_candidate_aliases=""
-vpn_old_aliases=""
-vpn_row_state=""
+service_found="false"
+service_group=""
+service_active_aliases=""
+service_candidate_aliases=""
+service_old_aliases=""
+service_row_state=""
 while IFS=, read -r kind name ansible_group active_aliases candidate_aliases old_aliases row_state extra || [ -n "${kind:-}" ]; do
     kind="${kind//$'\r'/}"
     name="${name//$'\r'/}"
@@ -144,84 +184,88 @@ while IFS=, read -r kind name ansible_group active_aliases candidate_aliases old
     old_aliases="${old_aliases//$'\r'/}"
     row_state="${row_state//$'\r'/}"
     extra="${extra//$'\r'/}"
-    [ "$kind" = "service" ] && [ "$name" = "vpn_edge" ] || continue
-    [ -z "$extra" ] || fail "state.csv vpn_edge row has too many columns"
-    vpn_found="true"
-    vpn_group="$ansible_group"
-    vpn_active_aliases="$active_aliases"
-    vpn_candidate_aliases="$candidate_aliases"
-    vpn_old_aliases="$old_aliases"
-    vpn_row_state="$row_state"
+    [ "$kind" = "service" ] && [ "$name" = "$SERVICE" ] || continue
+    [ -z "$extra" ] || fail "state.csv $SERVICE row has too many columns"
+    service_found="true"
+    service_group="$ansible_group"
+    service_active_aliases="$active_aliases"
+    service_candidate_aliases="$candidate_aliases"
+    service_old_aliases="$old_aliases"
+    service_row_state="$row_state"
     break
 done < <(tail -n +2 "$STATE_FILE")
 
-[ "$vpn_found" = "true" ] || fail "state.csv must contain a service row for vpn_edge"
-case "$vpn_row_state" in
+[ "$service_found" = "true" ] || fail "state.csv must contain a service row for $SERVICE"
+case "$service_row_state" in
     present|absent|purged) ;;
-    *) fail "vpn_edge state must be one of: present, absent, purged" ;;
+    *) fail "$SERVICE state must be one of: present, absent, purged" ;;
 esac
-[ -n "$vpn_group" ] || fail "vpn ansible_group is empty in state.csv"
+[ -n "$service_group" ] || fail "$SERVICE ansible_group is empty in state.csv"
 
 if [ "$ACTION" = "plan" ]; then
-    echo "Service: vpn_edge"
+    echo "Service: $SERVICE"
     echo "State file: $STATE_FILE"
-    echo "Service state: $vpn_row_state"
-    echo "Ansible group: $vpn_group"
+    echo "Service state: $service_row_state"
+    echo "Ansible group: $service_group"
     echo "Nodes file: $NODES_FILE"
     echo ""
-    tail -n +2 "$NODES_FILE" | while IFS=, read -r current_alias _endpoint _connection _group roles _root_password extra || [ -n "${current_alias:-}" ]; do
+    tail -n +2 "$NODES_FILE" | while IFS=, read -r current_alias _endpoint _connection _root_password _extra || [ -n "${current_alias:-}" ]; do
         current_alias="${current_alias//$'\r'/}"
         [ -n "$current_alias" ] || continue
-        if [ "$vpn_row_state" = "present" ] && alias_in_list "$current_alias" "$vpn_active_aliases"; then
+        if [ "$service_row_state" = "present" ] && alias_in_list "$current_alias" "$service_active_aliases"; then
             echo "$current_alias: desired present"
         else
             echo "$current_alias: desired absent"
         fi
     done
-    if [ -n "$vpn_candidate_aliases" ]; then
+    if [ -n "$service_candidate_aliases" ]; then
         echo ""
-        echo "Candidates: $vpn_candidate_aliases"
+        echo "Candidates: $service_candidate_aliases"
     fi
-    if [ -n "$vpn_old_aliases" ]; then
-        echo "Old: $vpn_old_aliases"
+    if [ -n "$service_old_aliases" ]; then
+        echo "Old: $service_old_aliases"
     fi
     exit 0
 fi
 
 command -v ansible-playbook >/dev/null 2>&1 || fail "ansible-playbook not found in PATH"
 [ -f "$INVENTORY" ] || fail "inventory not found: $INVENTORY"
+if [ -z "$PLAYBOOK" ]; then
+    PLAYBOOK="$(service_playbook "$SERVICE")" || fail "No default playbook for service: $SERVICE"
+fi
 [ -f "$PLAYBOOK" ] || fail "playbook not found: $PLAYBOOK"
 
 if [ "$ACTION" = "purge" ] && [ "$CONFIRM_PURGE" != "true" ]; then
     fail "purge requires --confirm-purge"
 fi
-if [ "$ACTION" = "apply" ] && [ "$vpn_row_state" != "present" ]; then
-    fail "vpn_edge apply requires state=present in $STATE_FILE"
+if [ "$ACTION" = "apply" ] && [ "$service_row_state" != "present" ]; then
+    fail "$SERVICE apply requires state=present in $STATE_FILE"
 fi
-if [ "$ACTION" = "apply" ] && [ -z "$vpn_active_aliases" ]; then
-    fail "No active aliases for vpn_edge found in $STATE_FILE"
+if [ "$ACTION" = "apply" ] && [ -z "$service_active_aliases" ]; then
+    fail "No active aliases for $SERVICE found in $STATE_FILE"
 fi
 
-vpn_state="present"
-vpn_purge_data="false"
+service_state="present"
+service_purge_data="false"
 if [ "$ACTION" = "absent" ] || [ "$ACTION" = "purge" ]; then
-    vpn_state="absent"
+    service_state="absent"
 fi
 if [ "$ACTION" = "purge" ]; then
-    vpn_purge_data="true"
+    service_purge_data="true"
 fi
 
-limit_args=(--limit "${LIMIT:-$vpn_group}")
+limit_args=(--limit "${LIMIT:-$service_group}")
 check_args=()
 if [ "$CHECK" = "true" ]; then
     check_args=(--check)
 fi
 
+mapfile -t extra_vars < <(service_extra_vars "$SERVICE" "$service_state" "$service_purge_data")
+
 set -x
-ansible-playbook \
+run_ansible_playbook \
     -i "$INVENTORY" \
     "$PLAYBOOK" \
-    -e "vpn_state=$vpn_state" \
-    -e "vpn_purge_data=$vpn_purge_data" \
+    "${extra_vars[@]}" \
     "${limit_args[@]}" \
     "${check_args[@]}"

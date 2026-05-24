@@ -21,7 +21,4 @@ services:
 
 networks:
   {{ vpn_edge_network_name }}:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: {{ vpn_edge_network_subnet }}
+    external: true

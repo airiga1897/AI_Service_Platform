@@ -29,7 +29,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedHeader = "current_alias,endpoint,connection,ansible_group,roles,root_password"
+$ExpectedHeader = "current_alias,endpoint,connection,root_password"
+$ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 $PublicKeyBeginMarker = "__ANSIBLE_CONTROL_PUBLIC_KEY_BEGIN__"
 $PublicKeyEndMarker = "__ANSIBLE_CONTROL_PUBLIC_KEY_END__"
 
@@ -42,14 +43,6 @@ function Require-File($Path, $Label) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         Fail "$Label not found: $Path"
     }
-}
-
-function Has-Role($Roles, $Role) {
-    return ("+$Roles+").Contains("+$Role+")
-}
-
-function Is-ManagementNode($Roles) {
-    return (Has-Role $Roles "management") -or (Has-Role $Roles "orchestration")
 }
 
 function Clear-RootPasswordForAlias($Path, $AliasToClear) {
@@ -71,13 +64,13 @@ function Clear-RootPasswordForAlias($Path, $AliasToClear) {
             continue
         }
 
-        $fields = $line -split ",", 6
-        if ($fields.Count -ne 6) {
+        $fields = $line -split ",", 5
+        if ($fields.Count -ne 4) {
             Fail "nodes.csv row has invalid column count: $line"
         }
 
         if ($fields[0] -eq $AliasToClear) {
-            $fields[5] = ""
+            $fields[3] = ""
             $foundAlias = $true
         }
         $updated.Add(($fields -join ","))
@@ -89,6 +82,26 @@ function Clear-RootPasswordForAlias($Path, $AliasToClear) {
 
     Set-Content -LiteralPath $Path -Value $updated -Encoding ascii
     Write-Host "Cleared root_password in local nodes.csv for $AliasToClear"
+}
+
+function Split-AliasList($Value) {
+    if (-not $Value) { return @() }
+    return @($Value -split "\+" | Where-Object { $_ })
+}
+
+function Is-ActiveOrchestrationNode($StateRows, $AliasToCheck) {
+    $rows = @($StateRows | Where-Object { ($_.kind -eq "platform_role" -or $_.kind -eq "role") -and $_.name -eq "orchestration" -and $_.state -eq "present" })
+    if ($rows.Count -eq 0) {
+        Fail "No active orchestration platform_role found in state.csv."
+    }
+    if ($rows.Count -gt 1) {
+        Fail "Multiple orchestration rows found in state.csv. Keep exactly one present row."
+    }
+    $activeAliases = @(Split-AliasList $rows[0].active_aliases)
+    if ($activeAliases.Count -ne 1) {
+        Fail "orchestration must have exactly one active alias in state.csv."
+    }
+    return ($activeAliases[0] -eq $AliasToCheck)
 }
 
 function Get-MarkedBlock($Lines, $BeginMarker, $EndMarker, $Label) {
@@ -278,6 +291,15 @@ $firstLine = Get-Content -LiteralPath $NodesFile -TotalCount 1
 if ($firstLine -ne $ExpectedHeader) {
     Fail "nodes.csv header must be exactly: $ExpectedHeader"
 }
+$stateRows = @()
+if (-not $StateFile) {
+    Fail "-StateFile is required. nodes.csv is only an address book; bootstrap behavior is selected from state.csv."
+}
+$stateFirstLine = Get-Content -LiteralPath $StateFile -TotalCount 1
+if ($stateFirstLine -ne $ExpectedStateHeader) {
+    Fail "state.csv header must be exactly: $ExpectedStateHeader"
+}
+$stateRows = Import-Csv -LiteralPath $StateFile
 
 $rows = Import-Csv -LiteralPath $NodesFile
 $row = $rows | Where-Object { $_.current_alias -eq $Alias } | Select-Object -First 1
@@ -290,11 +312,11 @@ if ($row.connection -eq "local" -or $row.endpoint -eq "local") {
 if (-not $row.root_password) {
     Fail "root_password is required for first remote bootstrap from Windows runner: $Alias"
 }
-if (-not (Has-Role $row.roles "management") -and -not (Has-Role $row.roles "orchestration") -and -not $AnsibleAuthorizedKeyFile) {
+if (-not (Is-ActiveOrchestrationNode $stateRows $Alias) -and -not $AnsibleAuthorizedKeyFile) {
     Fail "Managed node $Alias requires -AnsibleAuthorizedKeyFile"
 }
 
-$isManagementNode = Is-ManagementNode $row.roles
+$isManagementNode = Is-ActiveOrchestrationNode $stateRows $Alias
 if ($isManagementNode) {
     Require-File $CreateInventoryScript "CreateInventoryScript"
     Require-File $PrepareInventoryScript "PrepareInventoryScript"
@@ -310,7 +332,7 @@ $remoteLog = New-TemporaryFile
 try {
     Set-Content -LiteralPath $sanitized -Value $ExpectedHeader -Encoding ascii
     foreach ($item in $rows) {
-        Add-Content -LiteralPath $sanitized -Value ("{0},{1},{2},{3},{4}," -f $item.current_alias,$item.endpoint,$item.connection,$item.ansible_group,$item.roles) -Encoding ascii
+        Add-Content -LiteralPath $sanitized -Value ("{0},{1},{2}," -f $item.current_alias,$item.endpoint,$item.connection) -Encoding ascii
     }
 
     $remote = "root@$($row.endpoint)"
@@ -342,9 +364,9 @@ try {
     }
 
     if ($AnsibleAuthorizedKeyFile) {
-        $setupCommand = "ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash /tmp/setup_vps.sh --nodes-file /tmp/nodes.csv --alias '$Alias'"
+        $setupCommand = "ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash /tmp/setup_vps.sh --nodes-file /tmp/nodes.csv --state-file /tmp/state.csv --alias '$Alias'"
     } else {
-        $setupCommand = "bash /tmp/setup_vps.sh --nodes-file /tmp/nodes.csv --alias '$Alias'"
+        $setupCommand = "bash /tmp/setup_vps.sh --nodes-file /tmp/nodes.csv --state-file /tmp/state.csv --alias '$Alias'"
     }
     if ($RegenerateRemoteKeys) {
         $setupCommand = "FORCE_REGENERATE_KEYS=1 $setupCommand"

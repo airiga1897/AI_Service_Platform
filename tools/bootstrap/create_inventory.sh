@@ -7,7 +7,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
-EXPECTED_CSV_HEADER="current_alias,endpoint,connection,ansible_group,roles,root_password"
+EXPECTED_CSV_HEADER="current_alias,endpoint,connection,root_password"
 EXPECTED_STATE_CSV_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 
 print_header() {
@@ -30,6 +30,14 @@ print_error() {
     echo -e "${RED}[ERROR] $1${NC}"
 }
 
+run_ansible() {
+    if [ "$(id -u)" -eq 0 ]; then
+        sudo -u ansible ansible "$@"
+    else
+        ansible "$@"
+    fi
+}
+
 usage() {
     cat <<'USAGE'
 Usage:
@@ -39,19 +47,19 @@ Usage:
     --check
 
 CSV header must be exactly:
-  current_alias,endpoint,connection,ansible_group,roles,root_password
+  current_alias,endpoint,connection,root_password
 
 CSV example:
-  vps1,vps01.example.com,ssh,prod,production+vpn-edge,
-  vps2,vps02.example.com,ssh,backup,preprod+hot-standby+backup+vpn-edge,
-  vps3,local,local,management,management+monitoring+orchestration+vpn-edge,
+  vps1,vps01.example.com,ssh,
+  vps2,vps02.example.com,ssh,
+  vps3,local,local,
 
 State CSV header must be exactly:
   kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state
 
 State CSV example:
-  role,production,prod,vps1,,,present
-  role,orchestration,management,vps3,vps4,,present
+  platform_role,production,prod,vps1,,,present
+  platform_role,orchestration,orchestration,vps3,vps4,,present
   service,vpn_edge,vpn_edges,vps1+vps2+vps3,,,present
   service,vpn_cascade,vpn_cascades,,,,absent
 
@@ -67,7 +75,7 @@ Options:
   --output PATH      Inventory output path. Default: /opt/ai-service-platform/inventory.ini
   --key-file PATH    Ansible private key path. Default: /home/ansible/.ssh/ansible_control
   --ansible-user     Managed nodes SSH user. Default: ansible
-  --check            Run ansible -i <output> all -m ping after writing.
+  --check            Run ansible ping after writing. If started as root, use local user ansible.
   -h, --help         Show this help.
 
 Use connection=local for the management node when Ansible runs on that same node.
@@ -179,15 +187,6 @@ include_alias() {
     esac
 }
 
-roles_have() {
-    local roles="$1"
-    local wanted="$2"
-    case "+$roles+" in
-        *"+$wanted+"*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 role_to_group() {
     case "$1" in
         production|production-runtime) echo "prod" ;;
@@ -237,33 +236,14 @@ validate_group() {
     fi
 }
 
-validate_roles() {
-    local roles="$1"
-    local line_number="$2"
-    local role
-    local old_ifs="$IFS"
-    IFS=+
-    for role in $roles; do
-        IFS="$old_ifs"
-        case "$role" in
-            production|production-runtime|preprod|hot-standby|backup|management|monitoring|orchestration|vpn-edge|vpn-cascade) ;;
-            *)
-                print_error "nodes.csv line $line_number has unsupported role: $role"
-                exit 1
-                ;;
-        esac
-        IFS=+
-    done
-    IFS="$old_ifs"
-}
-
 validate_state_kind() {
     local kind="$1"
     local line_number="$2"
     case "$kind" in
-        role|service) ;;
+        platform_role|role|service) ;;
         *)
             print_error "state.csv line $line_number has unsupported kind: $kind"
+            print_error "Supported kinds: platform_role, service"
             exit 1
             ;;
     esac
@@ -300,7 +280,7 @@ get_node_record() {
     local alias="$1"
     local record
     for record in "${NODE_RECORDS[@]}"; do
-        IFS='|' read -r node_alias _endpoint _connection _ansible_group _roles <<< "$record"
+        IFS='|' read -r node_alias _endpoint _connection <<< "$record"
         if [ "$node_alias" = "$alias" ]; then
             printf '%s\n' "$record"
             return 0
@@ -355,7 +335,7 @@ add_state_alias_binding() {
         exit 1
     fi
 
-    IFS='|' read -r node_alias endpoint connection _primary_group roles <<< "$record"
+    IFS='|' read -r node_alias endpoint connection <<< "$record"
     local group
     group="$(state_group_name "$lifecycle" "$ansible_group")"
     PARSED_BINDINGS+=("$lifecycle|$kind:$name|$group|$node_alias|$node_alias|$endpoint|$connection")
@@ -371,22 +351,20 @@ read_nodes_file() {
     local matched_count=0
     local matched_aliases=","
     local header_seen="false"
-    local current_alias endpoint connection ansible_group roles root_password extra
+    local current_alias endpoint connection root_password extra
     NODE_RECORDS=()
 
-    while IFS=, read -r current_alias endpoint connection ansible_group roles root_password extra || [ -n "${current_alias:-}" ]; do
+    while IFS=, read -r current_alias endpoint connection root_password extra || [ -n "${current_alias:-}" ]; do
         line_number=$((line_number + 1))
         current_alias="${current_alias//$'\r'/}"
         endpoint="${endpoint//$'\r'/}"
         connection="${connection//$'\r'/}"
-        ansible_group="${ansible_group//$'\r'/}"
-        roles="${roles//$'\r'/}"
         root_password="${root_password//$'\r'/}"
         extra="${extra//$'\r'/}"
 
         if [ "$line_number" -eq 1 ]; then
             local header
-            header="$current_alias,$endpoint,$connection,$ansible_group,$roles,$root_password"
+            header="$current_alias,$endpoint,$connection,$root_password"
             if [ "$header" != "$EXPECTED_CSV_HEADER" ] || [ -n "$extra" ]; then
                 print_error "nodes.csv header must be exactly:"
                 echo "$EXPECTED_CSV_HEADER"
@@ -396,7 +374,7 @@ read_nodes_file() {
             continue
         fi
 
-        if [ -z "$current_alias" ] && [ -z "$endpoint" ] && [ -z "$connection" ] && [ -z "$ansible_group" ] && [ -z "$roles" ] && [ -z "$root_password" ]; then
+        if [ -z "$current_alias" ] && [ -z "$endpoint" ] && [ -z "$connection" ] && [ -z "$root_password" ]; then
             continue
         fi
         if [ -n "$extra" ]; then
@@ -407,11 +385,7 @@ read_nodes_file() {
         require_csv_value "$current_alias" "current_alias" "$line_number"
         require_csv_value "$endpoint" "endpoint" "$line_number"
         require_csv_value "$connection" "connection" "$line_number"
-        require_csv_value "$ansible_group" "ansible_group" "$line_number"
-        require_csv_value "$roles" "roles" "$line_number"
         validate_connection "$connection" "$line_number"
-        validate_group "$ansible_group" "$line_number"
-        validate_roles "$roles" "$line_number"
 
         if [ "$connection" = "local" ] && [ "$endpoint" != "local" ]; then
             print_error "nodes.csv line $line_number uses connection=local but endpoint is not local"
@@ -421,16 +395,8 @@ read_nodes_file() {
         if include_alias "$current_alias"; then
             matched_count=$((matched_count + 1))
             matched_aliases="${matched_aliases}${current_alias},"
-            if [ -z "$STATE_FILE" ]; then
-                register_group "$ansible_group"
-                PARSED_BINDINGS+=("active|$roles|$ansible_group|$current_alias|$current_alias|$endpoint|$connection")
-                if roles_have "$roles" "vpn-edge" && [ "$ansible_group" != "vpn_edges" ]; then
-                    register_group "vpn_edges"
-                    PARSED_BINDINGS+=("active|$roles|vpn_edges|$current_alias|$current_alias|$endpoint|$connection")
-                fi
-            fi
         fi
-        NODE_RECORDS+=("$current_alias|$endpoint|$connection|$ansible_group|$roles")
+        NODE_RECORDS+=("$current_alias|$endpoint|$connection")
     done < "$NODES_FILE"
 
     if [ "$header_seen" != "true" ]; then
@@ -603,7 +569,7 @@ fi
 PARSED_BINDINGS=()
 GROUP_NAMES=()
 BASE_GROUP_NAMES=()
-if [ -n "$NODES_FILE" ]; then
+    if [ -n "$NODES_FILE" ]; then
     if [ "${#BINDINGS[@]}" -gt 0 ]; then
         print_error "--nodes-file cannot be combined with --active/--candidate/--old fallback bindings"
         exit 1
@@ -611,6 +577,9 @@ if [ -n "$NODES_FILE" ]; then
     read_nodes_file
     if [ -n "$STATE_FILE" ]; then
         read_state_file
+    else
+        print_error "--state-file is required with --nodes-file. nodes.csv is only an address book; assignments live in state.csv."
+        exit 1
     fi
 else
     if [ -n "$STATE_FILE" ]; then
@@ -692,6 +661,9 @@ EOF
 } > "$tmp_file"
 
 mv "$tmp_file" "$OUTPUT_PATH"
+if id ansible >/dev/null 2>&1; then
+    chown ansible:ansible "$OUTPUT_PATH"
+fi
 chmod 600 "$OUTPUT_PATH"
 print_success "Inventory written: $OUTPUT_PATH"
 
@@ -701,7 +673,7 @@ if [ "$RUN_CHECK" = "true" ]; then
         exit 1
     fi
     print_header "Running Ansible connectivity check"
-    ansible -i "$OUTPUT_PATH" all -m ping
+    run_ansible -i "$OUTPUT_PATH" all -m ping
     print_success "Ansible connectivity check completed"
 fi
 

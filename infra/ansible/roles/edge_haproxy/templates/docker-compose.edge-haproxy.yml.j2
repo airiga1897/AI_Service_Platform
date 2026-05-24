@@ -1,0 +1,21 @@
+services:
+  edge-haproxy:
+    image: {{ edge_haproxy_image }}
+    container_name: {{ edge_haproxy_container_name }}
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+      - "992:992/tcp"
+      - "1194:1194/tcp"
+      - "5555:5555/tcp"
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./haproxy/lists:/usr/local/etc/haproxy/lists:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: always
+    networks:
+      - {{ edge_haproxy_network_name }}
+
+networks:
+  {{ edge_haproxy_network_name }}:
+    external: true

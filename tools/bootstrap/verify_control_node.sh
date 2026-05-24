@@ -54,14 +54,26 @@ done
 [ -f "$INVENTORY_PATH" ] || fail "inventory not found: $INVENTORY_PATH"
 command -v ansible >/dev/null 2>&1 || fail "ansible command not found"
 
+if ! id ansible >/dev/null 2>&1; then
+    fail "local ansible user not found"
+fi
+
+run_ansible() {
+    if [ "$(id -u)" -eq 0 ]; then
+        sudo -u ansible ansible "$@"
+    else
+        ansible "$@"
+    fi
+}
+
 cd "$REPO_DIR"
 
 print_header "Verify Ansible connectivity"
-ansible all -i "$INVENTORY_PATH" -m ping
+run_ansible all -i "$INVENTORY_PATH" -m ping
 echo "[OK] Ansible connectivity verified"
 
 print_header "Verify SSH hardening on all nodes"
-ansible all -i "$INVENTORY_PATH" --become -m shell -a 'set -e; effective="$(sshd -T)"; printf "%s\n" "$effective" | awk "/^(permitrootlogin|passwordauthentication) / {print}"; printf "%s\n" "$effective" | grep -qx "permitrootlogin no"; printf "%s\n" "$effective" | grep -qx "passwordauthentication no"'
+run_ansible all -i "$INVENTORY_PATH" --become -m shell -a 'set -e; effective="$(sshd -T)"; printf "%s\n" "$effective" | awk "/^(permitrootlogin|passwordauthentication) / {print}"; printf "%s\n" "$effective" | grep -qx "permitrootlogin no"; printf "%s\n" "$effective" | grep -qx "passwordauthentication no"'
 echo "[OK] SSH hardening verified on all nodes"
 
 echo "[OK] Control node verification completed"

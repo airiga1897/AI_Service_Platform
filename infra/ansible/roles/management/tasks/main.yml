@@ -38,7 +38,7 @@
     name: "Обновление GeoIP и деплой на VPS1"
     cron_file: geoip-update
     user: root
-    job: "{{ geoip_script_dir }}/update-geoip.sh && ansible-playbook -i {{ ansible_control_dir }}/inventory.ini {{ ansible_control_dir }}/site.yml --tags geoip >> /var/log/geoip-update.log 2>&1"
+    job: "{{ geoip_script_dir }}/update-geoip.sh && sudo -u ansible ansible-playbook -i {{ ansible_control_dir }}/inventory.ini {{ ansible_control_dir }}/site.yml --tags geoip >> /var/log/geoip-update.log 2>&1"
     special_time: weekly
 
 - name: Скопировать SSH ключ для управления VPS1 и VPS2

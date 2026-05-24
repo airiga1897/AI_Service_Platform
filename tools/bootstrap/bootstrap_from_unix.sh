@@ -7,7 +7,8 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
-EXPECTED_CSV_HEADER="current_alias,endpoint,connection,ansible_group,roles,root_password"
+EXPECTED_CSV_HEADER="current_alias,endpoint,connection,root_password"
+EXPECTED_STATE_CSV_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 PUBLIC_KEY_BEGIN_MARKER="__ANSIBLE_CONTROL_PUBLIC_KEY_BEGIN__"
 PUBLIC_KEY_END_MARKER="__ANSIBLE_CONTROL_PUBLIC_KEY_END__"
 
@@ -42,7 +43,7 @@ Usage:
 
 Options:
   --nodes-file PATH                  Real operator CSV with root_password.
-  --state-file PATH                  Optional operator state.csv.
+  --state-file PATH                  Operator state.csv. Required with nodes.csv.
   --alias VALUE                      current_alias to bootstrap.
   --setup-script PATH                setup_vps.sh path. Default: tools/bootstrap/setup_vps.sh
   --create-inventory-script PATH     create_inventory.sh path. Default: tools/bootstrap/create_inventory.sh
@@ -147,10 +148,10 @@ require_file() {
     fi
 }
 
-has_role() {
-    local roles="$1"
+alias_list_has() {
+    local aliases="$1"
     local wanted="$2"
-    case "+$roles+" in
+    case "+$aliases+" in
         *"+$wanted+"*) return 0 ;;
         *) return 1 ;;
     esac
@@ -164,19 +165,17 @@ clear_root_password_for_alias() {
     local found_alias="false"
 
     tmp_file="$(mktemp)"
-    while IFS=, read -r csv_alias csv_endpoint csv_connection csv_group csv_roles csv_root_password extra || [ -n "${csv_alias:-}" ]; do
+    while IFS=, read -r csv_alias csv_endpoint csv_connection csv_root_password extra || [ -n "${csv_alias:-}" ]; do
         line_number=$((line_number + 1))
         csv_alias="${csv_alias//$'\r'/}"
         csv_endpoint="${csv_endpoint//$'\r'/}"
         csv_connection="${csv_connection//$'\r'/}"
-        csv_group="${csv_group//$'\r'/}"
-        csv_roles="${csv_roles//$'\r'/}"
         csv_root_password="${csv_root_password//$'\r'/}"
         extra="${extra//$'\r'/}"
 
         if [ "$line_number" -eq 1 ]; then
             local header
-            header="$csv_alias,$csv_endpoint,$csv_connection,$csv_group,$csv_roles,$csv_root_password"
+            header="$csv_alias,$csv_endpoint,$csv_connection,$csv_root_password"
             if [ "$header" != "$EXPECTED_CSV_HEADER" ] || [ -n "$extra" ]; then
                 rm -f "$tmp_file"
                 print_error "nodes.csv header must be exactly:"
@@ -197,7 +196,7 @@ clear_root_password_for_alias() {
             csv_root_password=""
             found_alias="true"
         fi
-        printf '%s,%s,%s,%s,%s,%s\n' "$csv_alias" "$csv_endpoint" "$csv_connection" "$csv_group" "$csv_roles" "$csv_root_password" >> "$tmp_file"
+        printf '%s,%s,%s,%s\n' "$csv_alias" "$csv_endpoint" "$csv_connection" "$csv_root_password" >> "$tmp_file"
     done < "$path"
 
     if [ "$found_alias" != "true" ]; then
@@ -334,9 +333,11 @@ save_bootstrap_keys() {
 }
 
 require_file "$NODES_FILE" "--nodes-file"
-if [ -n "$STATE_FILE" ]; then
-    require_file "$STATE_FILE" "--state-file"
-fi
+[ -n "$STATE_FILE" ] || {
+    print_error "--state-file is required. nodes.csv is only an address book; bootstrap behavior is selected from state.csv."
+    exit 1
+}
+require_file "$STATE_FILE" "--state-file"
 require_file "$SETUP_SCRIPT" "--setup-script"
 if [ -n "$ANSIBLE_AUTHORIZED_KEY_FILE" ]; then
     require_file "$ANSIBLE_AUTHORIZED_KEY_FILE" "--ansible-authorized-key-file"
@@ -352,22 +353,18 @@ found="false"
 current_alias=""
 endpoint=""
 connection=""
-ansible_group=""
-roles=""
 root_password=""
 
-while IFS=, read -r csv_alias csv_endpoint csv_connection csv_group csv_roles csv_root_password extra || [ -n "${csv_alias:-}" ]; do
+while IFS=, read -r csv_alias csv_endpoint csv_connection csv_root_password extra || [ -n "${csv_alias:-}" ]; do
     line_number=$((line_number + 1))
     csv_alias="${csv_alias//$'\r'/}"
     csv_endpoint="${csv_endpoint//$'\r'/}"
     csv_connection="${csv_connection//$'\r'/}"
-    csv_group="${csv_group//$'\r'/}"
-    csv_roles="${csv_roles//$'\r'/}"
     csv_root_password="${csv_root_password//$'\r'/}"
     extra="${extra//$'\r'/}"
 
     if [ "$line_number" -eq 1 ]; then
-        header="$csv_alias,$csv_endpoint,$csv_connection,$csv_group,$csv_roles,$csv_root_password"
+        header="$csv_alias,$csv_endpoint,$csv_connection,$csv_root_password"
         if [ "$header" != "$EXPECTED_CSV_HEADER" ] || [ -n "$extra" ]; then
             print_error "nodes.csv header must be exactly:"
             echo "$EXPECTED_CSV_HEADER"
@@ -380,8 +377,6 @@ while IFS=, read -r csv_alias csv_endpoint csv_connection csv_group csv_roles cs
         current_alias="$csv_alias"
         endpoint="$csv_endpoint"
         connection="$csv_connection"
-        ansible_group="$csv_group"
-        roles="$csv_roles"
         root_password="$csv_root_password"
         found="true"
         break
@@ -407,14 +402,39 @@ if ! command -v sshpass >/dev/null 2>&1; then
     exit 1
 fi
 
-if ! has_role "$roles" management && ! has_role "$roles" orchestration && [ -z "$ANSIBLE_AUTHORIZED_KEY_FILE" ]; then
+is_management_node="false"
+state_first_line="$(head -n 1 "$STATE_FILE" | tr -d '\r')"
+[ "$state_first_line" = "$EXPECTED_STATE_CSV_HEADER" ] || {
+    print_error "state.csv header must be exactly: $EXPECTED_STATE_CSV_HEADER"
+    exit 1
+}
+orchestration_rows=0
+while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _old_aliases row_state extra || [ -n "${kind:-}" ]; do
+    kind="${kind//$'\r'/}"
+    name="${name//$'\r'/}"
+    active_aliases="${active_aliases//$'\r'/}"
+    row_state="${row_state//$'\r'/}"
+    extra="${extra//$'\r'/}"
+    [ "$kind" = "$EXPECTED_STATE_CSV_HEADER" ] && continue
+    [ -z "$kind" ] && continue
+    [ -z "$extra" ] || {
+        print_error "state.csv orchestration row has too many columns"
+        exit 1
+    }
+    if { [ "$kind" = "platform_role" ] || [ "$kind" = "role" ]; } && [ "$name" = "orchestration" ] && [ "$row_state" = "present" ]; then
+        orchestration_rows=$((orchestration_rows + 1))
+        if alias_list_has "$active_aliases" "$NODE_ALIAS"; then
+            is_management_node="true"
+        fi
+    fi
+done < "$STATE_FILE"
+[ "$orchestration_rows" -eq 1 ] || {
+    print_error "state.csv must contain exactly one present platform_role orchestration row"
+    exit 1
+}
+if [ "$is_management_node" != "true" ] && [ -z "$ANSIBLE_AUTHORIZED_KEY_FILE" ]; then
     print_error "Managed node $NODE_ALIAS requires --ansible-authorized-key-file"
     exit 1
-fi
-
-is_management_node="false"
-if has_role "$roles" management || has_role "$roles" orchestration; then
-    is_management_node="true"
 fi
 if [ "$is_management_node" = "true" ]; then
     require_file "$CREATE_INVENTORY_SCRIPT" "--create-inventory-script"
@@ -433,14 +453,12 @@ remote_log="$(mktemp)"
 trap 'rm -f "$sanitized_nodes" "$remote_log"' EXIT
 {
     echo "$EXPECTED_CSV_HEADER"
-    tail -n +2 "$NODES_FILE" | while IFS=, read -r csv_alias csv_endpoint csv_connection csv_group csv_roles _csv_root_password extra || [ -n "${csv_alias:-}" ]; do
+    tail -n +2 "$NODES_FILE" | while IFS=, read -r csv_alias csv_endpoint csv_connection _csv_root_password extra || [ -n "${csv_alias:-}" ]; do
         csv_alias="${csv_alias//$'\r'/}"
         csv_endpoint="${csv_endpoint//$'\r'/}"
         csv_connection="${csv_connection//$'\r'/}"
-        csv_group="${csv_group//$'\r'/}"
-        csv_roles="${csv_roles//$'\r'/}"
         if [ -n "$csv_alias" ]; then
-            printf '%s,%s,%s,%s,%s,\n' "$csv_alias" "$csv_endpoint" "$csv_connection" "$csv_group" "$csv_roles"
+            printf '%s,%s,%s,\n' "$csv_alias" "$csv_endpoint" "$csv_connection"
         fi
     done
 } > "$sanitized_nodes"
@@ -470,9 +488,9 @@ if [ -n "$ANSIBLE_AUTHORIZED_KEY_FILE" ]; then
 fi
 
 if [ -n "$ANSIBLE_AUTHORIZED_KEY_FILE" ]; then
-    setup_command="ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash /tmp/setup_vps.sh --nodes-file /tmp/nodes.csv --alias '$NODE_ALIAS'"
+    setup_command="ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash /tmp/setup_vps.sh --nodes-file /tmp/nodes.csv --state-file /tmp/state.csv --alias '$NODE_ALIAS'"
 else
-    setup_command="bash /tmp/setup_vps.sh --nodes-file /tmp/nodes.csv --alias '$NODE_ALIAS'"
+    setup_command="bash /tmp/setup_vps.sh --nodes-file /tmp/nodes.csv --state-file /tmp/state.csv --alias '$NODE_ALIAS'"
 fi
 if [ "$REGENERATE_REMOTE_KEYS" = "true" ]; then
     setup_command="FORCE_REGENERATE_KEYS=1 $setup_command"
