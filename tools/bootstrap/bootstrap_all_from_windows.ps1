@@ -1,6 +1,5 @@
 param(
-    [Parameter(Mandatory=$true)]
-    [string]$NodesFile,
+    [string]$NodesFile = ".\operator\nodes.csv",
 
     [string]$StateFile = ".\operator\state.csv",
 
@@ -14,7 +13,7 @@ param(
 
     [string]$BootstrapRunner = "tools/bootstrap/bootstrap_from_windows.ps1",
 
-[string]$SyncRunner = "tools/bootstrap/sync_to_orchestration.ps1",
+    [string]$SyncRunner = "tools/bootstrap/sync_to_orchestration.ps1",
 
     [string]$AnsibleAuthorizedKeyFile = "",
 
@@ -89,22 +88,20 @@ function Resolve-ControlNodeFromState($NodeRows, $StateRows, $Role, $ExplicitAli
     return $node
 }
 
-function Get-StateReferencedAliases($StateRows) {
-    $aliases = New-Object System.Collections.Generic.HashSet[string]
-    foreach ($row in $StateRows) {
-        foreach ($field in @("active_aliases", "candidate_aliases", "old_aliases")) {
-            foreach ($alias in (Split-AliasList $row.$field)) {
-                [void]$aliases.Add($alias)
-            }
-        }
-    }
-    return $aliases
-}
-
 function Invoke-ChildScript($ScriptPath, $Arguments) {
     & powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath @Arguments
     if ($LASTEXITCODE -ne 0) {
         Fail "Child script failed: $ScriptPath"
+    }
+}
+
+function Has-RootPassword($Node) {
+    return -not [string]::IsNullOrWhiteSpace([string]$Node.root_password)
+}
+
+function Require-RemoteNode($Node, $Label) {
+    if ($Node.connection -ne "ssh" -or $Node.endpoint -eq "local") {
+        Fail "$Label $($Node.current_alias) must use connection=ssh and a real endpoint for operator bootstrap."
     }
 }
 
@@ -148,50 +145,79 @@ if (-not $AnsibleAuthorizedKeyFile) {
     $AnsibleAuthorizedKeyFile = Join-Path $OperatorDir "ansible_control.managed_nodes.pub"
 }
 
+$controlNeedsBootstrap = Has-RootPassword $controlNode
+$explicitManagedAliases = ($ManagedAliases.Count -gt 0)
 if ($ManagedAliases.Count -eq 0) {
-    $referencedAliases = Get-StateReferencedAliases $stateRows
     $ManagedAliases = @(
         $rows |
             Where-Object {
                 $_.current_alias -ne $controlNode.current_alias -and
                 $_.connection -eq "ssh" -and
                 $_.endpoint -ne "local" -and
-                $referencedAliases.Contains($_.current_alias)
+                (Has-RootPassword $_)
             } |
             ForEach-Object { $_.current_alias }
     )
 }
 
 Write-Host "Control node: $($controlNode.current_alias) via role '$ControlRole'"
+if ($controlNeedsBootstrap) {
+    Write-Host "Control bootstrap: pending root_password found"
+} else {
+    Write-Host "Control bootstrap: skipped; no root_password for $($controlNode.current_alias)"
+}
 if ($SkipManaged) {
     Write-Host "Managed nodes: skipped"
+} elseif ($ManagedAliases.Count -eq 0) {
+    Write-Host "Managed nodes: none pending"
 } else {
     Write-Host "Managed nodes: $($ManagedAliases -join ', ')"
 }
 
-$controlArgs = @(
-    "-NodesFile", $NodesFile,
-    "-Alias", $controlNode.current_alias,
-    "-OperatorDir", $OperatorDir,
-    "-OutputAnsibleAuthorizedKeyFile", $AnsibleAuthorizedKeyFile
-)
-if ($useStateFile) {
-    $controlArgs += @("-StateFile", $StateFile)
-}
-if ($ForceManagementKeyRefresh -or $ForceOverwriteKeys) {
-    $controlArgs += "-Force"
-}
-if ($RegenerateRemoteKeys) {
-    $controlArgs += "-RegenerateRemoteKeys"
-}
-if ($AutoAcceptHostKey) {
-    $controlArgs += "-AutoAcceptHostKey"
+if (-not $controlNeedsBootstrap) {
+    if ($ForceManagementKeyRefresh) {
+        Write-Warning "-ForceManagementKeyRefresh ignored because active orchestration node $($controlNode.current_alias) has no root_password; existing control keys will be used."
+    }
+
+    $controlAdminKey = Join-Path (Join-Path $OperatorDir $controlNode.current_alias) "admin_key"
+    if (-not $SkipSync) {
+        Require-File $controlAdminKey "Control admin key"
+    }
+    if (-not $SkipManaged -and $ManagedAliases.Count -gt 0) {
+        Require-File $AnsibleAuthorizedKeyFile "AnsibleAuthorizedKeyFile"
+    }
 }
 
-Write-Host "Step 1/4: bootstrap control node $($controlNode.current_alias)"
-Invoke-ChildScript $BootstrapRunner $controlArgs
+if ($controlNeedsBootstrap) {
+    Require-RemoteNode $controlNode "Control node"
+    $controlArgs = @(
+        "-NodesFile", $NodesFile,
+        "-Alias", $controlNode.current_alias,
+        "-OperatorDir", $OperatorDir,
+        "-OutputAnsibleAuthorizedKeyFile", $AnsibleAuthorizedKeyFile
+    )
+    if ($useStateFile) {
+        $controlArgs += @("-StateFile", $StateFile)
+    }
+    if ($ForceManagementKeyRefresh -or $ForceOverwriteKeys) {
+        $controlArgs += "-Force"
+    }
+    if ($RegenerateRemoteKeys) {
+        $controlArgs += "-RegenerateRemoteKeys"
+    }
+    if ($AutoAcceptHostKey) {
+        $controlArgs += "-AutoAcceptHostKey"
+    }
 
-Require-File $AnsibleAuthorizedKeyFile "AnsibleAuthorizedKeyFile"
+    Write-Host "Step 1/4: bootstrap control node $($controlNode.current_alias)"
+    Invoke-ChildScript $BootstrapRunner $controlArgs
+} else {
+    Write-Host "Step 1/4: control node bootstrap skipped"
+}
+
+if ($controlNeedsBootstrap -or (-not $SkipManaged -and $ManagedAliases.Count -gt 0)) {
+    Require-File $AnsibleAuthorizedKeyFile "AnsibleAuthorizedKeyFile"
+}
 
 if (-not $SkipManaged) {
     foreach ($managedAlias in $ManagedAliases) {
@@ -202,8 +228,12 @@ if (-not $SkipManaged) {
         if ($managedNode.current_alias -eq $controlNode.current_alias) {
             Fail "Managed alias cannot be the same as control alias: $managedAlias"
         }
-        if ($managedNode.connection -ne "ssh" -or $managedNode.endpoint -eq "local") {
-            Fail "Managed node $managedAlias must use connection=ssh and a real endpoint for operator bootstrap."
+        Require-RemoteNode $managedNode "Managed node"
+        if (-not (Has-RootPassword $managedNode)) {
+            if ($explicitManagedAliases) {
+                Fail "Managed alias $managedAlias was requested explicitly but has empty root_password in nodes.csv."
+            }
+            Fail "Managed alias $managedAlias has empty root_password in nodes.csv."
         }
 
         $managedArgs = @(
@@ -250,7 +280,7 @@ if (-not $SkipSync) {
         $syncArgs += "-SkipServicePlan"
     }
     if ($FixKeyAcl) {
-        Write-Warning "-FixKeyAcl is deprecated. sync_nodes_to_vps3.ps1 now fixes OpenSSH key ACL automatically."
+        Write-Warning "-FixKeyAcl is deprecated. sync_to_orchestration.ps1 now fixes OpenSSH key ACL automatically."
     }
 
     Write-Host "Step 3/4: sync sanitized nodes.csv to control node"

@@ -5,7 +5,27 @@
 1. `edge_haproxy` - TCP edge перед VPN и будущими сайтами.
 2. `vpn_edge` - SoftEther user ingress за HAProxy.
 
+Service naming is semantic, not positional:
+
+- `edge_haproxy` - edge proxy implemented with HAProxy.
+- `vpn_edge` - SoftEther user VPN ingress behind the edge proxy.
+- `vpn_cascade` - reserved future SoftEther cascade/site-to-site service.
+
 Product deploy остаётся позже.
+
+## Edge Network Contract
+
+Static container IP используется только для edge/L4 contract endpoints:
+
+```text
+ai_service_edge 172.20.0.0/24
+softether-edge  172.20.0.2
+edge-haproxy    172.20.0.3
+```
+
+HAProxy routes SoftEther backends на `172.20.0.2`. `edge-haproxy` имеет свой fixed IP `172.20.0.3`, чтобы не конфликтовать с SoftEther в общей edge-сети.
+
+Будущие frontend/backend/data services должны идти через Docker DNS names и network aliases, а не через static IP, пока не появится настоящий L3/L4 contract.
 
 ## Source Of Truth
 
@@ -25,6 +45,8 @@ kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state
 platform_role,orchestration,orchestration,vps3,,,present
 service,edge_haproxy,edge_haproxy,vps1,,,present
 service,vpn_edge,vpn_edges,vps1+vps2+vps3,,,present
+edge_route,vpn_ingress,vpn_ingress,vps1,,,present
+edge_route,minecraft,minecraft_edge,vps1,,,absent
 service,vpn_cascade,vpn_cascades,,,,absent
 ```
 
@@ -58,6 +80,14 @@ Initial `vpn_mgmt_ips.lst`:
   -StateFile .\operator\state.csv
 ```
 
+WSL/Linux equivalent:
+
+```bash
+bash tools/services/rollout_from_state.sh \
+  --nodes-file ./operator/nodes.csv \
+  --state-file ./operator/state.csv
+```
+
 Скрипт делает:
 
 1. sync на active orchestration node;
@@ -65,7 +95,8 @@ Initial `vpn_mgmt_ips.lst`:
 3. читает все `kind=service`;
 4. для `present` делает `plan`, `apply --check`, `apply`;
 5. для `absent` делает `plan`, `absent`;
-6. для `purged` делает `plan`, `purge`.
+6. для `purged` делает `plan`, `purge`;
+7. читает `kind=edge_route` и переотрисовывает `edge_haproxy` для aliases с active routes.
 
 Изменение `state.csv` само ничего не запускает.
 
@@ -98,6 +129,43 @@ operator/softether/edge/vpn_server.config
 ```
 
 Это opaque secret state file. В v1 он копируется как baseline и не редактируется строковыми заменами.
+
+## HAProxy Routes Config
+
+Route settings хранятся вне git:
+
+```text
+operator/haproxy/routes.yml
+```
+
+Example:
+
+```text
+infra/ansible/haproxy.routes.example.yml
+```
+
+`vpn_edge` - это SoftEther container service. `vpn_ingress` - это HAProxy route к нему:
+
+```csv
+service,vpn_edge,vpn_edges,vps1,,,present
+edge_route,vpn_ingress,vpn_ingress,vps1,,,present
+```
+
+VPN DNS:
+
+```text
+vpn-vps1.mine-craft.su -> vps1
+vpn-vps2.mine-craft.su -> vps2
+vpn-vps3.mine-craft.su -> vps3
+```
+
+`mainsrv01.mine-craft.su` относится только к Minecraft route:
+
+```csv
+edge_route,minecraft,minecraft_edge,vps1,,,absent
+```
+
+Когда route будет включён, HAProxy публикует `25565/tcp` и `25575/tcp`; `newnout01` используется как primary backend, `mainserv01.netcraze.pro` как fallback backend.
 
 ## TCP Contract
 

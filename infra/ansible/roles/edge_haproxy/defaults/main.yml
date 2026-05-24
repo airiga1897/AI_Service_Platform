@@ -6,6 +6,8 @@ edge_haproxy_compose_file: "{{ edge_haproxy_root_dir }}/docker-compose.yml"
 
 edge_haproxy_operator_dir: "{{ playbook_dir }}/../../operator/haproxy"
 edge_haproxy_operator_lists_dir: "{{ edge_haproxy_operator_dir }}/lists"
+edge_haproxy_operator_routes_file: "{{ edge_haproxy_operator_dir }}/routes.yml"
+edge_haproxy_operator_state_file: "{{ playbook_dir }}/../../operator/state.csv"
 edge_haproxy_operator_vpn_mgmt_ips: "{{ edge_haproxy_operator_lists_dir }}/vpn_mgmt_ips.lst"
 edge_haproxy_operator_blocked_ips: "{{ edge_haproxy_operator_lists_dir }}/blocked_ips.lst"
 
@@ -13,6 +15,7 @@ edge_haproxy_image: haproxy:2.9-alpine
 edge_haproxy_container_name: edge-haproxy
 edge_haproxy_network_name: ai_service_edge
 edge_haproxy_network_subnet: 172.20.0.0/24
+edge_haproxy_container_ipv4: 172.20.0.3
 
 edge_haproxy_softether_host: 172.20.0.2
 edge_haproxy_stats_bind: 127.0.0.1:8404
@@ -20,3 +23,5 @@ edge_haproxy_stats_bind: 127.0.0.1:8404
 edge_haproxy_tcp_rate_limit: 60
 edge_haproxy_tcp_rate_window: 10s
 edge_haproxy_tcp_conn_cur_limit: 80
+edge_haproxy_minecraft_game_rate_limit: 10
+edge_haproxy_minecraft_rcon_rate_limit: 5

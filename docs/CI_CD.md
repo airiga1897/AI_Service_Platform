@@ -48,7 +48,7 @@
 - `ai-retail-dev`
 - `vps1-prod`
 - `vps2-preprod`
-- `vps3-management`
+- `orchestration-management`
 
 ## Локальная разработка и pre-commit
 

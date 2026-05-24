@@ -22,11 +22,187 @@
   register: edge_haproxy_blacklist_stat
   when: edge_haproxy_state == 'present'
 
+- name: Check operator state.csv on control node
+  ansible.builtin.stat:
+    path: "{{ edge_haproxy_operator_state_file }}"
+  delegate_to: localhost
+  become: false
+  register: edge_haproxy_state_file_stat
+  when: edge_haproxy_state == 'present'
+
+- name: Check operator HAProxy routes.yml on control node
+  ansible.builtin.stat:
+    path: "{{ edge_haproxy_operator_routes_file }}"
+  delegate_to: localhost
+  become: false
+  register: edge_haproxy_routes_file_stat
+  when: edge_haproxy_state == 'present'
+
+- name: Build edge_haproxy route model
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - <<'PY'
+    import csv
+    import json
+    import os
+    import sys
+
+    try:
+        import yaml
+    except Exception as exc:
+        print(f"PyYAML is required to read routes.yml: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    alias = os.environ["EDGE_ALIAS"]
+    state_file = os.environ["STATE_FILE"]
+    routes_file = os.environ["ROUTES_FILE"]
+    default_softether_host = os.environ["DEFAULT_SOFTETHER_HOST"]
+    default_game_rate = int(os.environ["DEFAULT_GAME_RATE"])
+    default_rcon_rate = int(os.environ["DEFAULT_RCON_RATE"])
+
+    def split_aliases(value):
+        return [item for item in (value or "").split("+") if item]
+
+    def fail(message):
+        print(message, file=sys.stderr)
+        sys.exit(1)
+
+    if not os.path.isfile(state_file):
+        fail(f"state.csv not found for edge_haproxy route rendering: {state_file}")
+
+    with open(state_file, newline="", encoding="utf-8-sig") as handle:
+        rows = list(csv.DictReader(handle))
+
+    def present_on(kind, name, node_alias):
+        return any(
+            row.get("kind") == kind
+            and row.get("name") == name
+            and row.get("state") == "present"
+            and node_alias in split_aliases(row.get("active_aliases"))
+            for row in rows
+        )
+
+    present_routes = [
+        row.get("name")
+        for row in rows
+        if row.get("kind") == "edge_route"
+        and row.get("state") == "present"
+        and alias in split_aliases(row.get("active_aliases"))
+    ]
+
+    if present_routes and not present_on("service", "edge_haproxy", alias):
+        fail(f"edge_route present on {alias}, but service edge_haproxy is not present on the same alias")
+    if "vpn_ingress" in present_routes and not present_on("service", "vpn_edge", alias):
+        fail(f"edge_route vpn_ingress is present on {alias}, but service vpn_edge is not present on the same alias")
+
+    route_config = {}
+    if present_routes:
+        if not os.path.isfile(routes_file):
+            fail(f"operator HAProxy routes.yml is required when edge_route is present: {routes_file}")
+        with open(routes_file, encoding="utf-8") as handle:
+            route_config = yaml.safe_load(handle) or {}
+
+    model = {
+        "present_routes": present_routes,
+        "vpn_ingress_enabled": False,
+        "minecraft_enabled": False,
+    }
+
+    if "vpn_ingress" in present_routes:
+        cfg = route_config.get("vpn_ingress") or {}
+        per_alias = (cfg.get("per_alias") or {}).get(alias) or {}
+        sni = per_alias.get("sni") or []
+        if not sni:
+            fail(f"routes.yml vpn_ingress.per_alias.{alias}.sni must contain at least one SNI")
+        ports = {
+            "sstp": 443,
+            "softether_alt": 992,
+            "openvpn_tcp": 1194,
+            "management": 5555,
+        }
+        ports.update(cfg.get("ports") or {})
+        backend_host = (cfg.get("backend") or {}).get("host") or default_softether_host
+        model.update({
+            "vpn_ingress_enabled": True,
+            "vpn_ingress": {
+                "sni": sni,
+                "backend_host": backend_host,
+                "ports": ports,
+            },
+        })
+
+    if "minecraft" in present_routes:
+        cfg = route_config.get("minecraft") or {}
+        per_alias = (cfg.get("per_alias") or {}).get(alias) or {}
+        if not per_alias:
+            fail(f"routes.yml minecraft.per_alias.{alias} is required when minecraft route is present on {alias}")
+        backends = per_alias.get("backends") or {}
+        game = backends.get("game") or {}
+        rcon = backends.get("rcon") or {}
+        if not game.get("primary") or not game.get("fallback"):
+            fail(f"routes.yml minecraft.per_alias.{alias}.backends.game primary and fallback are required")
+        ports = {"game": 25565, "rcon": 25575}
+        ports.update(cfg.get("ports") or {})
+        policy = {
+            "blacklist": True,
+            "rate_limit": "soft",
+            "rcon_public": True,
+            "rcon_rate_limit": "strict",
+            "geoip": "disabled",
+        }
+        policy.update(cfg.get("policy") or {})
+        if policy.get("rcon_public", True) and (not rcon.get("primary") or not rcon.get("fallback")):
+            fail(f"routes.yml minecraft.per_alias.{alias}.backends.rcon primary and fallback are required when rcon_public=true")
+        model.update({
+            "minecraft_enabled": True,
+            "minecraft": {
+                "public_names": per_alias.get("public_names") or [],
+                "ports": ports,
+                "policy": policy,
+                "game": {
+                    "primary": game["primary"],
+                    "fallback": game["fallback"],
+                    "rate_limit": default_game_rate,
+                },
+                "rcon": {
+                    "primary": rcon.get("primary"),
+                    "fallback": rcon.get("fallback"),
+                    "rate_limit": default_rcon_rate,
+                },
+            },
+        })
+
+    print(json.dumps(model, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    EDGE_ALIAS: "{{ inventory_hostname }}"
+    STATE_FILE: "{{ edge_haproxy_operator_state_file }}"
+    ROUTES_FILE: "{{ edge_haproxy_operator_routes_file }}"
+    DEFAULT_SOFTETHER_HOST: "{{ edge_haproxy_softether_host }}"
+    DEFAULT_GAME_RATE: "{{ edge_haproxy_minecraft_game_rate_limit }}"
+    DEFAULT_RCON_RATE: "{{ edge_haproxy_minecraft_rcon_rate_limit }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  failed_when:
+    - edge_haproxy_route_model_command.rc != 0
+      or (edge_haproxy_route_model_command.stdout | trim | length) == 0
+  register: edge_haproxy_route_model_command
+  when: edge_haproxy_state == 'present'
+
+- name: Store edge_haproxy route model
+  ansible.builtin.set_fact:
+    edge_haproxy_route_model: "{{ edge_haproxy_route_model_command.stdout | trim | from_json }}"
+  when: edge_haproxy_state == 'present'
+
 - name: Ensure edge_haproxy runtime directories
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
-    mode: "0750"
+    mode: "0755"
   loop:
     - "{{ edge_haproxy_root_dir }}"
     - "{{ edge_haproxy_config_dir }}"
@@ -37,7 +213,7 @@
   ansible.builtin.copy:
     src: "{{ edge_haproxy_operator_vpn_mgmt_ips }}"
     dest: "{{ edge_haproxy_lists_dir }}/vpn_mgmt_ips.lst"
-    mode: "0640"
+    mode: "0644"
   when:
     - edge_haproxy_state == 'present'
     - edge_haproxy_mgmt_allowlist_stat.stat.exists
@@ -47,7 +223,7 @@
   ansible.builtin.copy:
     dest: "{{ edge_haproxy_lists_dir }}/vpn_mgmt_ips.lst"
     content: ""
-    mode: "0640"
+    mode: "0644"
   when:
     - edge_haproxy_state == 'present'
     - not edge_haproxy_mgmt_allowlist_stat.stat.exists or not edge_haproxy_mgmt_allowlist_stat.stat.isreg
@@ -56,7 +232,7 @@
   ansible.builtin.copy:
     src: "{{ edge_haproxy_operator_blocked_ips }}"
     dest: "{{ edge_haproxy_lists_dir }}/blocked_ips.lst"
-    mode: "0640"
+    mode: "0644"
   when:
     - edge_haproxy_state == 'present'
     - edge_haproxy_blacklist_stat.stat.exists
@@ -66,7 +242,7 @@
   ansible.builtin.copy:
     dest: "{{ edge_haproxy_lists_dir }}/blocked_ips.lst"
     content: ""
-    mode: "0640"
+    mode: "0644"
   when:
     - edge_haproxy_state == 'present'
     - not edge_haproxy_blacklist_stat.stat.exists or not edge_haproxy_blacklist_stat.stat.isreg
@@ -75,7 +251,7 @@
   ansible.builtin.template:
     src: haproxy.cfg.j2
     dest: "{{ edge_haproxy_config_dir }}/haproxy.cfg"
-    mode: "0640"
+    mode: "0644"
   when: edge_haproxy_state == 'present'
 
 - name: Render edge_haproxy Docker Compose
@@ -99,7 +275,7 @@
 
 - name: Validate edge_haproxy config
   ansible.builtin.command:
-    cmd: docker run --rm -v "{{ edge_haproxy_config_dir }}/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro" -v "{{ edge_haproxy_lists_dir }}:/usr/local/etc/haproxy/lists:ro" "{{ edge_haproxy_image }}" haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
+    cmd: docker run --rm -v "{{ edge_haproxy_config_dir }}:/usr/local/etc/haproxy:ro" "{{ edge_haproxy_image }}" haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
   changed_when: false
   when:
     - edge_haproxy_state == 'present'
@@ -107,7 +283,7 @@
 
 - name: Start edge_haproxy container
   ansible.builtin.command:
-    cmd: docker compose -f "{{ edge_haproxy_compose_file }}" up -d
+    cmd: docker compose -f "{{ edge_haproxy_compose_file }}" up -d --force-recreate
     chdir: "{{ edge_haproxy_root_dir }}"
   changed_when: true
   when:

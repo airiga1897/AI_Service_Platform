@@ -6,6 +6,4 @@
     edge_haproxy_state: "{{ edge_haproxy_state | default('present') }}"
     edge_haproxy_purge_data: "{{ edge_haproxy_purge_data | default(false) }}"
   roles:
-    - role: docker
-      when: edge_haproxy_state == 'present'
     - edge_haproxy

@@ -40,7 +40,7 @@
     enabled: true
     daemon_reload: true
 
-# Promtail — на всех VPS (отправляет логи в Loki на VPS3)
+# Promtail — на всех VPS (отправляет логи в Loki на active orchestration node)
 - name: Создать директорию конфига Promtail
   file:
     path: /etc/promtail

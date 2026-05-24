@@ -33,7 +33,7 @@
     dest: "{{ ansible_control_dir }}/inventory.ini"
     mode: "0600"
 
-- name: Настроить cron обновления GeoIP с VPS3
+- name: Настроить cron обновления GeoIP с active orchestration node
   cron:
     name: "Обновление GeoIP и деплой на VPS1"
     cron_file: geoip-update

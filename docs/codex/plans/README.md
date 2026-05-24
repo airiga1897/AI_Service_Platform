@@ -1,10 +1,10 @@
-# Codex Plans
+﻿# Codex Plans
 
 Эта папка хранит operational order и будущие планы. Numbered-файлы описывают основной порядок внедрения. `future-*` и prompt/archive документы не являются текущим порядком выполнения.
 
 ## Основной Порядок
 
-1. [Control/orchestration node bootstrap](01-vps3-management-bootstrap.md) - bootstrap, sync `nodes.csv`/`state.csv`, inventory и verify.
+1. [Control/orchestration node bootstrap](01-orchestration-bootstrap.md) - bootstrap, sync `nodes.csv`/`state.csv`, inventory и verify.
 2. [GitHub Actions deploy access](02-github-actions-deploy-access-ai-retail-dev-preprod.md) - GitHub Environment/secrets/predeploy-check для `ai-retail-dev-preprod`, без product `pull/up`.
 3. [VPN first service rollout](03-vpn-first-service-rollout.md) - `edge_haproxy` как TCP edge и `vpn_edge` как SoftEther user ingress.
 4. [Platform services manual rollout, then GitHub gate](04-platform-services-manual-rollout-then-github-gate.md) - ручная проверка platform services, затем перенос проверенного rollout в GitHub Actions.
@@ -13,6 +13,7 @@
 
 - `nodes.csv` - только адресная книга: `current_alias,endpoint,connection,root_password`.
 - `state.csv` - источник истины для `platform_role`, `service`, `active/candidate/old` и `present/absent/purged`.
+- `edge_route` - HAProxy route внутри `edge_haproxy`, не отдельный контейнер.
 - `plan` - команда runner-а, а не состояние сервиса.
 - Active orchestration node выбирается из `state.csv`, не по hardcoded `vps3`.
 - Основной rollout без GitHub:
@@ -21,6 +22,14 @@
   .\tools\services\rollout_from_state.ps1 `
     -NodesFile .\operator\nodes.csv `
     -StateFile .\operator\state.csv
+  ```
+
+  WSL/Linux equivalent:
+
+  ```bash
+  bash tools/services/rollout_from_state.sh \
+    --nodes-file ./operator/nodes.csv \
+    --state-file ./operator/state.csv
   ```
 
 GitHub Actions позже должны вызывать эти же scripts, а не содержать отдельную deploy-логику.

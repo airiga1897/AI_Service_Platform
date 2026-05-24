@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 
 set -euo pipefail
 
@@ -47,13 +47,13 @@ Options:
   --alias VALUE                      current_alias to bootstrap.
   --setup-script PATH                setup_vps.sh path. Default: tools/bootstrap/setup_vps.sh
   --create-inventory-script PATH     create_inventory.sh path. Default: tools/bootstrap/create_inventory.sh
-  --prepare-inventory-script PATH    prepare_vps3_inventory.sh path. Default: tools/bootstrap/prepare_vps3_inventory.sh
+  --prepare-inventory-script PATH    prepare_orchestration_inventory.sh path. Default: tools/bootstrap/prepare_orchestration_inventory.sh
   --verify-control-script PATH       verify_control_node.sh path. Default: tools/bootstrap/verify_control_node.sh
-  --ansible-authorized-key-file PATH VPS3 public key for managed nodes.
+  --ansible-authorized-key-file PATH Orchestration public key for managed nodes.
   --operator-dir PATH                Where to save extracted bootstrap keys.
                                      Default: ./operator
   --output-ansible-authorized-key-file PATH
-                                     Where to save the VPS3 public key after management bootstrap.
+                                     Where to save the orchestration public key after management bootstrap.
                                      Default: ./operator/ansible_control.managed_nodes.pub
   --force                            Overwrite output public key file when it already exists.
   --regenerate-remote-keys           Set FORCE_REGENERATE_KEYS=1 for remote setup_vps.sh.
@@ -69,7 +69,7 @@ STATE_FILE=""
 NODE_ALIAS=""
 SETUP_SCRIPT="tools/bootstrap/setup_vps.sh"
 CREATE_INVENTORY_SCRIPT="tools/bootstrap/create_inventory.sh"
-PREPARE_INVENTORY_SCRIPT="tools/bootstrap/prepare_vps3_inventory.sh"
+PREPARE_INVENTORY_SCRIPT="tools/bootstrap/prepare_orchestration_inventory.sh"
 VERIFY_CONTROL_SCRIPT="tools/bootstrap/verify_control_node.sh"
 ANSIBLE_AUTHORIZED_KEY_FILE=""
 OPERATOR_DIR="./operator"
@@ -390,7 +390,7 @@ fi
 if [ "$connection" = "local" ] || [ "$endpoint" = "local" ]; then
     print_error "Cannot bootstrap remote VPS with endpoint=local: $NODE_ALIAS"
     print_error "For first bootstrap from this runner, set endpoint to the VPS public DNS/IP and connection=ssh."
-    print_error "Use local only later in the VPS3 inventory CSV if needed."
+    print_error "Use local only later in the Orchestration inventory CSV if needed."
     exit 1
 fi
 if [ -z "$root_password" ]; then
@@ -479,7 +479,7 @@ fi
 if [ "$is_management_node" = "true" ]; then
     echo "Step 2b/4: copy control inventory helpers"
     "${scp_base[@]}" "$CREATE_INVENTORY_SCRIPT" "$remote:/tmp/create_inventory.sh"
-    "${scp_base[@]}" "$PREPARE_INVENTORY_SCRIPT" "$remote:/tmp/prepare_vps3_inventory.sh"
+    "${scp_base[@]}" "$PREPARE_INVENTORY_SCRIPT" "$remote:/tmp/prepare_orchestration_inventory.sh"
     "${scp_base[@]}" "$VERIFY_CONTROL_SCRIPT" "$remote:/tmp/verify_control_node.sh"
 fi
 if [ -n "$ANSIBLE_AUTHORIZED_KEY_FILE" ]; then
@@ -502,13 +502,13 @@ if [ "$is_management_node" = "true" ]; then
     else
         state_arg=""
     fi
-    prepare_inventory_command="if [ \$rc -eq 0 ]; then mkdir -p /opt/ai-service-platform/tools/bootstrap; install -m 700 /tmp/create_inventory.sh /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; install -m 700 /tmp/prepare_vps3_inventory.sh /opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh; install -m 700 /tmp/verify_control_node.sh /opt/ai-service-platform/tools/bootstrap/verify_control_node.sh; bash /opt/ai-service-platform/tools/bootstrap/prepare_vps3_inventory.sh --source-nodes-file /tmp/nodes.csv $state_arg --skip-check; fi"
+    prepare_inventory_command="if [ \$rc -eq 0 ]; then mkdir -p /opt/ai-service-platform/tools/bootstrap; install -m 700 /tmp/create_inventory.sh /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; install -m 700 /tmp/prepare_orchestration_inventory.sh /opt/ai-service-platform/tools/bootstrap/prepare_orchestration_inventory.sh; install -m 700 /tmp/verify_control_node.sh /opt/ai-service-platform/tools/bootstrap/verify_control_node.sh; bash /opt/ai-service-platform/tools/bootstrap/prepare_orchestration_inventory.sh --source-nodes-file /tmp/nodes.csv $state_arg --skip-check; fi"
     emit_key_command="if [ \$rc -eq 0 ]; then echo $PUBLIC_KEY_BEGIN_MARKER; cat /home/ansible/.ssh/ansible_control.managed_nodes.pub; echo $PUBLIC_KEY_END_MARKER; fi"
 else
     prepare_inventory_command=":"
     emit_key_command=":"
 fi
-remote_command="set +e; $setup_command; rc=\$?; $prepare_inventory_command; $emit_key_command; rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/state.csv /tmp/ansible_control.managed_nodes.pub /tmp/create_inventory.sh /tmp/prepare_vps3_inventory.sh /tmp/verify_control_node.sh; exit \$rc"
+remote_command="set +e; $setup_command; rc=\$?; $prepare_inventory_command; $emit_key_command; rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/state.csv /tmp/ansible_control.managed_nodes.pub /tmp/create_inventory.sh /tmp/prepare_orchestration_inventory.sh /tmp/verify_control_node.sh; exit \$rc"
 
 echo "Step 3/4: run remote bootstrap"
 echo "Expected next output: AI Service Platform VPS bootstrap"

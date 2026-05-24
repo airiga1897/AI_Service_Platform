@@ -240,10 +240,10 @@ validate_state_kind() {
     local kind="$1"
     local line_number="$2"
     case "$kind" in
-        platform_role|role|service) ;;
+        platform_role|role|service|edge_route) ;;
         *)
             print_error "state.csv line $line_number has unsupported kind: $kind"
-            print_error "Supported kinds: platform_role, service"
+            print_error "Supported kinds: platform_role, service, edge_route"
             exit 1
             ;;
     esac
@@ -677,4 +677,4 @@ if [ "$RUN_CHECK" = "true" ]; then
     print_success "Ansible connectivity check completed"
 fi
 
-print_warning "Do not commit $OUTPUT_PATH. Real inventory belongs on VPS3/operator storage only."
+print_warning "Do not commit $OUTPUT_PATH. Real inventory belongs on active orchestration/operator storage only."

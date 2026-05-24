@@ -33,6 +33,18 @@ function Split-AliasList($Value) {
     return @($Value -split "\+" | Where-Object { $_ })
 }
 
+function Get-PresentServiceAliases($Rows, $Name) {
+    $row = $Rows | Where-Object { $_.kind -eq "service" -and $_.name -eq $Name -and $_.state -eq "present" } | Select-Object -First 1
+    if (-not $row) { return @() }
+    return @(Split-AliasList $row.active_aliases)
+}
+
+function Add-UniqueAlias($List, $Alias) {
+    if ($List -notcontains $Alias) {
+        [void]$List.Add($Alias)
+    }
+}
+
 function Invoke-ChildScript($ScriptPath, $Arguments, $Label) {
     & powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath @Arguments
     if ($LASTEXITCODE -ne 0) {
@@ -114,6 +126,32 @@ $serviceRows = @($stateRows | Where-Object { $_.kind -eq "service" })
 if ($serviceRows.Count -eq 0) {
     Fail "state.csv has no service rows"
 }
+$edgeRouteRows = @($stateRows | Where-Object { $_.kind -eq "edge_route" })
+$edgeHaproxyAliases = @(Get-PresentServiceAliases $stateRows "edge_haproxy")
+$vpnEdgeAliases = @(Get-PresentServiceAliases $stateRows "vpn_edge")
+$edgeRouteApplyAliases = New-Object System.Collections.Generic.List[string]
+
+foreach ($routeRow in $edgeRouteRows) {
+    if ($routeRow.state -notin @("present", "absent", "purged")) {
+        Fail "$($routeRow.name) edge_route state must be one of: present, absent, purged"
+    }
+    if ($routeRow.state -ne "present") {
+        continue
+    }
+    $routeAliases = @(Split-AliasList $routeRow.active_aliases)
+    if ($routeAliases.Count -eq 0) {
+        Fail "edge_route $($routeRow.name) has state=present but active_aliases is empty"
+    }
+    foreach ($alias in $routeAliases) {
+        if ($edgeHaproxyAliases -notcontains $alias) {
+            Fail "edge_route $($routeRow.name) is present on $alias, but service edge_haproxy is not present on the same alias"
+        }
+        if ($routeRow.name -eq "vpn_ingress" -and ($vpnEdgeAliases -notcontains $alias)) {
+            Fail "edge_route vpn_ingress is present on $alias, but service vpn_edge is not present on the same alias"
+        }
+        Add-UniqueAlias $edgeRouteApplyAliases $alias
+    }
+}
 
 if (-not $SkipSync) {
     Write-Host "Step 1/3: sync operator state to active orchestration node"
@@ -179,6 +217,18 @@ foreach ($serviceRow in $serviceRows) {
             Invoke-Postcheck $service $state $alias
             $summary.Add("$service ${alias}: purged") | Out-Null
         }
+    }
+}
+
+if ($edgeRouteApplyAliases.Count -gt 0) {
+    Write-Host ""
+    Write-Host "Step 2b/3: apply edge route rendering through edge_haproxy"
+    foreach ($alias in $edgeRouteApplyAliases) {
+        Write-Host "edge_haproxy routes on ${alias}: dry-run"
+        Invoke-ServiceRemote "edge_haproxy" "apply" $alias -Check
+        Write-Host "edge_haproxy routes on ${alias}: apply"
+        Invoke-ServiceRemote "edge_haproxy" "apply" $alias
+        $summary.Add("edge_haproxy routes ${alias}: applied") | Out-Null
     }
 }
 

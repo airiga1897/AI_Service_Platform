@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 
 set -euo pipefail
 
@@ -14,7 +14,7 @@ Usage:
 
 Environment overrides:
   ANSIBLE_USER=ansible
-  ANSIBLE_AUTHORIZED_KEY='ssh-ed25519 ... ansible-control@vps3-management'
+  ANSIBLE_AUTHORIZED_KEY='ssh-ed25519 ... ansible-control@orchestration'
   ANSIBLE_AUTHORIZED_KEY_FILE=/path/to/public/key.pub
 USAGE
 }
@@ -62,5 +62,5 @@ chown "$ANSIBLE_USER:$ANSIBLE_USER" "$AUTHORIZED_KEYS"
 chmod 600 "$AUTHORIZED_KEYS"
 passwd -l "$ANSIBLE_USER" >/dev/null 2>&1 || true
 
-echo "[OK] Installed VPS3 Ansible control public key for $ANSIBLE_USER"
+echo "[OK] Installed orchestration Ansible control public key for $ANSIBLE_USER"
 echo "[OK] Password login locked for $ANSIBLE_USER"

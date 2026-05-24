@@ -26,31 +26,32 @@ frontend http_in
     mode http
     acl is_acme path_beg /.well-known/acme-challenge/
     http-request deny deny_status 403 if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst } !is_acme
-    use_backend be_acme_placeholder if is_acme
     http-request redirect scheme https code 301 unless is_acme
+    use_backend be_acme_placeholder if is_acme
 
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
 frontend https_in
-    bind *:443
+    bind *:{{ edge_haproxy_route_model.vpn_ingress.ports.sstp }}
     mode tcp
     option tcplog
+    tcp-request connection reject if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
     tcp-request inspect-delay 5s
     tcp-request content accept if { req_ssl_hello_type 1 }
-    tcp-request connection reject if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
     tcp-request content track-sc0 src table st_tcp_rates
     tcp-request content reject if { sc0_conn_rate gt {{ edge_haproxy_tcp_rate_limit }} }
     tcp-request content reject if { sc0_conn_cur gt {{ edge_haproxy_tcp_conn_cur_limit }} }
 
-    acl is_softether req_ssl_sni -m beg vpn.
+    acl is_softether req_ssl_sni -i{% for sni in edge_haproxy_route_model.vpn_ingress.sni %} {{ sni }}{% endfor %}
     tcp-request content reject unless is_softether
     use_backend be_softether_https if is_softether
 
 backend be_softether_https
     mode tcp
     option tcp-check
-    server softether {{ edge_haproxy_softether_host }}:443 check inter 5s fall 3 rise 2
+    server softether {{ edge_haproxy_route_model.vpn_ingress.backend_host }}:{{ edge_haproxy_route_model.vpn_ingress.ports.sstp }} check inter 5s fall 3 rise 2
 
 frontend softether_tcp_992
-    bind *:992
+    bind *:{{ edge_haproxy_route_model.vpn_ingress.ports.softether_alt }}
     mode tcp
     option tcplog
     tcp-request connection reject if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
@@ -62,10 +63,10 @@ frontend softether_tcp_992
 backend be_softether_992
     mode tcp
     option tcp-check
-    server softether {{ edge_haproxy_softether_host }}:992 check inter 5s fall 3 rise 2
+    server softether {{ edge_haproxy_route_model.vpn_ingress.backend_host }}:{{ edge_haproxy_route_model.vpn_ingress.ports.softether_alt }} check inter 5s fall 3 rise 2
 
 frontend softether_tcp_1194
-    bind *:1194
+    bind *:{{ edge_haproxy_route_model.vpn_ingress.ports.openvpn_tcp }}
     mode tcp
     option tcplog
     tcp-request connection reject if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
@@ -77,10 +78,10 @@ frontend softether_tcp_1194
 backend be_softether_1194
     mode tcp
     option tcp-check
-    server softether {{ edge_haproxy_softether_host }}:1194 check inter 5s fall 3 rise 2
+    server softether {{ edge_haproxy_route_model.vpn_ingress.backend_host }}:{{ edge_haproxy_route_model.vpn_ingress.ports.openvpn_tcp }} check inter 5s fall 3 rise 2
 
 frontend softether_mgmt
-    bind *:5555
+    bind *:{{ edge_haproxy_route_model.vpn_ingress.ports.management }}
     mode tcp
     option tcplog
     tcp-request connection reject if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
@@ -90,7 +91,53 @@ frontend softether_mgmt
 backend be_softether_mgmt
     mode tcp
     option tcp-check
-    server softether {{ edge_haproxy_softether_host }}:5555 check inter 5s fall 3 rise 2
+    server softether {{ edge_haproxy_route_model.vpn_ingress.backend_host }}:{{ edge_haproxy_route_model.vpn_ingress.ports.management }} check inter 5s fall 3 rise 2
+{% endif %}
 
+{% if edge_haproxy_route_model.minecraft_enabled | default(false) %}
+frontend minecraft_game
+    bind *:{{ edge_haproxy_route_model.minecraft.ports.game }}
+    mode tcp
+    option tcplog
+    tcp-request connection reject if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
+    tcp-request connection track-sc0 src table st_minecraft_game_rates
+    tcp-request connection reject if { sc0_conn_rate gt {{ edge_haproxy_route_model.minecraft.game.rate_limit }} }
+    default_backend be_minecraft_game
+
+backend be_minecraft_game
+    mode tcp
+    option tcp-check
+    server primary {{ edge_haproxy_route_model.minecraft.game.primary }} check inter 5s fall 3 rise 2 init-addr last,libc,none
+    server fallback {{ edge_haproxy_route_model.minecraft.game.fallback }} check backup inter 5s fall 3 rise 2 init-addr last,libc,none
+
+{% if edge_haproxy_route_model.minecraft.policy.rcon_public | default(true) %}
+frontend minecraft_rcon
+    bind *:{{ edge_haproxy_route_model.minecraft.ports.rcon }}
+    mode tcp
+    option tcplog
+    tcp-request connection reject if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
+    tcp-request connection track-sc0 src table st_minecraft_rcon_rates
+    tcp-request connection reject if { sc0_conn_rate gt {{ edge_haproxy_route_model.minecraft.rcon.rate_limit }} }
+    default_backend be_minecraft_rcon
+
+backend be_minecraft_rcon
+    mode tcp
+    option tcp-check
+    server primary {{ edge_haproxy_route_model.minecraft.rcon.primary }} check inter 5s fall 3 rise 2 init-addr last,libc,none
+    server fallback {{ edge_haproxy_route_model.minecraft.rcon.fallback }} check backup inter 5s fall 3 rise 2 init-addr last,libc,none
+{% endif %}
+{% endif %}
+
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
 backend st_tcp_rates
     stick-table type ip size 100k expire 5m store conn_rate({{ edge_haproxy_tcp_rate_window }}),conn_cur
+{% endif %}
+{% if edge_haproxy_route_model.minecraft_enabled | default(false) %}
+backend st_minecraft_game_rates
+    stick-table type ip size 100k expire 5m store conn_rate({{ edge_haproxy_tcp_rate_window }})
+
+{% if edge_haproxy_route_model.minecraft.policy.rcon_public | default(true) %}
+backend st_minecraft_rcon_rates
+    stick-table type ip size 50k expire 5m store conn_rate({{ edge_haproxy_tcp_rate_window }})
+{% endif %}
+{% endif %}

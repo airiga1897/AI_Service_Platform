@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 
 set -euo pipefail
 
@@ -18,10 +18,10 @@ REFRESH_KNOWN_HOSTS="false"
 usage() {
     cat <<'USAGE'
 Usage:
-  sudo bash tools/bootstrap/prepare_vps3_inventory.sh \
+  sudo bash tools/bootstrap/prepare_orchestration_inventory.sh \
     --source-nodes-file /tmp/nodes.csv
 
-This script runs on VPS3 after bootstrap. It:
+This script runs on the active orchestration node after bootstrap. It:
   1. verifies that /opt/ai-service-platform exists;
   2. writes sanitized /opt/ai-service-platform/operator/nodes.csv;
   3. generates /opt/ai-service-platform/inventory.ini;
@@ -276,4 +276,4 @@ fi
 cd "$REPO_DIR"
 bash "${create_args[@]}"
 
-echo "[OK] VPS3 inventory prepared: $INVENTORY_OUTPUT"
+echo "[OK] Orchestration inventory prepared: $INVENTORY_OUTPUT"

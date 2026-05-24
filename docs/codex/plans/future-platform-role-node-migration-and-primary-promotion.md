@@ -9,7 +9,9 @@
 `preprod-hot-standby-backup`, `management-monitoring-orchestration` или
 `vpn-only-edge`.
 
-`physical_node` — конкретный VPS в стране, городе и датацентре.
+`physical_node` — конкретный VPS/provider instance с alias, endpoint,
+ресурсным профилем и operational notes. Географическое размещение не является
+source of truth в документации.
 
 `VPS1`, `VPS2`, `VPS3` — current aliases текущей схемы, а не настоящие роли.
 
@@ -18,7 +20,7 @@
 ```yaml
 platform_roles:
   production-runtime:
-    active_node: vps-nl-qupra-01
+    active_node: vps-prod-01
     candidate_node: null
     old_node: null
 ```
@@ -35,16 +37,17 @@ platform_roles:
 
 ## 2. Когда менять repo
 
-Если меняется только IP/DNS active node, а страна, город и датацентр остаются
-тем же operational target, обычно достаточно обновить real inventory, DNS/CDN и
-allowlist вне repo.
+Если меняется только IP/DNS active node, но alias и operational target остаются
+теми же, обычно достаточно обновить real inventory, DNS/CDN и allowlist вне
+repo.
 
-Если меняется страна, город, датацентр или назначение узла, нужно обновить:
+Если меняется alias, provider instance, ресурсный профиль или назначение узла,
+нужно обновить:
 
 - `services.yml`;
 - `docs/VPS_ROLES.md`;
 - связанные docs про SoftEther, GeoPolicy, CDN или backup, если там есть
-  assumptions по стране или routing.
+  assumptions по routing, latency, capacity или provider behavior.
 
 IP, DNS, private keys, `.env`, provider id, тариф и generated inventory не
 коммитятся.
@@ -163,7 +166,8 @@ orchestration на новом.
 2. Выполнить финальную синхронизацию данных.
 3. Проверить readiness candidate.
 4. Обновить `platform_roles.<role>.active_node` в плановом изменении repo, если
-   меняется страна/город/датацентр или physical node metadata.
+   меняется alias, provider instance, ресурсный профиль или physical node
+   metadata.
 5. В real inventory заменить active-группу на candidate.
 6. Переключить DNS/CDN origin/edge routing, если роль принимает внешний трафик.
 7. Старый active node сохранить как `old_node` или old inventory group на

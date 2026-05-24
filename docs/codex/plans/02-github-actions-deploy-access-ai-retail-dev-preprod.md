@@ -1,4 +1,4 @@
-# Step-by-step: GitHub Environment ai-retail-dev-preprod
+﻿# Step-by-step: GitHub Environment ai-retail-dev-preprod
 
 Эта инструкция нужна для первого безопасного predeploy-check сценария:
 
@@ -9,19 +9,19 @@
 
 Текущий workflow пока не запускает `docker compose pull/up`. Он подключается по SSH, копирует compose-bundle на VPS2 и выполняет `docker compose config`.
 
-Важно: это **infrastructure/deploy-access слой для GitHub Actions**, а не product service и не полноценный rollout приложения. Нормальная platform-последовательность начинается с `VPS3` как Ansible control node; см. [`01-vps3-management-bootstrap.md`](01-vps3-management-bootstrap.md). После этого шага первым настоящим platform service будет SoftEther/VPN; см. [`03-vpn-first-service-rollout.md`](03-vpn-first-service-rollout.md).
+Важно: это **infrastructure/deploy-access слой для GitHub Actions**, а не product service и не полноценный rollout приложения. Нормальная platform-последовательность начинается с active orchestration node как Ansible control node; см. [`01-orchestration-bootstrap.md`](01-orchestration-bootstrap.md). После этого шага первым настоящим platform service будет SoftEther/VPN; см. [`03-vpn-first-service-rollout.md`](03-vpn-first-service-rollout.md).
 
 Главная идея: VPS и доступы не настраиваются руками. Сначала на VPS2 запускается bootstrap-скрипт в target `ai-retail-dev-preprod`, он создаёт пользователей, SSH-ключи, каталог деплоя и выводит готовые значения `SSH_HOST`, `SSH_USER`, `SSH_PORT`, `SSH_KEY`. Затем operator-local скрипт проверяет GitHub Environment, создаёт его при отсутствии и идемпотентно задаёт Environment secrets.
 
-## 1. Проверить, что VPS3 уже bootstrap/control-ready
+## 1. Проверить, что active orchestration node уже bootstrap/control-ready
 
-Перед deploy-access на VPS2 сначала подготовь VPS3:
+Перед deploy-access на VPS2 сначала подготовь active orchestration node:
 
 ```bash
-sudo bash setup_vps.sh vps3-management
+sudo bash setup_vps.sh orchestration-management
 ```
 
-VPS3 должен стать Ansible control node. После этого VPS2 можно bootstrap-ить как managed node и deploy target для predeploy-check.
+Active orchestration node должен стать Ansible control node. После этого VPS2 можно bootstrap-ить как managed node и deploy target для predeploy-check.
 
 ## 2. Запустить deploy-access bootstrap на VPS2
 
@@ -239,7 +239,7 @@ sudo test -f /opt/stacks/ai-retail-dev-preprod/.env.ai-retail.dev
 
 ## 10. Проверить готовность Docker
 
-Текущий deploy-access bootstrap готовит пользователей, ключи и каталог, но полноценный provisioning ОС остаётся за Ansible с VPS3.
+Текущий deploy-access bootstrap готовит пользователей, ключи и каталог, но полноценный provisioning ОС остаётся за Ansible с active orchestration node.
 
 Перед predeploy-check на VPS2 должен работать Docker Compose plugin:
 

@@ -19,8 +19,8 @@ Current v1 protection:
 
 Add these only after VPN over HAProxy is stable:
 
-- GeoIP generated country allow/deny lists;
-- site-specific country policies;
+- GeoIP/generated policy allow/deny lists;
+- site-specific routing/security policies;
 - scanner-path autoban for HTTP frontends;
 - HTTP error-rate bans;
 - ACME bypass rules that never block Let's Encrypt validation;

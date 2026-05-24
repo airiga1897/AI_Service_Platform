@@ -4,17 +4,25 @@ services:
     container_name: {{ edge_haproxy_container_name }}
     ports:
       - "80:80/tcp"
-      - "443:443/tcp"
-      - "992:992/tcp"
-      - "1194:1194/tcp"
-      - "5555:5555/tcp"
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+      - "{{ edge_haproxy_route_model.vpn_ingress.ports.sstp }}:{{ edge_haproxy_route_model.vpn_ingress.ports.sstp }}/tcp"
+      - "{{ edge_haproxy_route_model.vpn_ingress.ports.softether_alt }}:{{ edge_haproxy_route_model.vpn_ingress.ports.softether_alt }}/tcp"
+      - "{{ edge_haproxy_route_model.vpn_ingress.ports.openvpn_tcp }}:{{ edge_haproxy_route_model.vpn_ingress.ports.openvpn_tcp }}/tcp"
+      - "{{ edge_haproxy_route_model.vpn_ingress.ports.management }}:{{ edge_haproxy_route_model.vpn_ingress.ports.management }}/tcp"
+{% endif %}
+{% if edge_haproxy_route_model.minecraft_enabled | default(false) %}
+      - "{{ edge_haproxy_route_model.minecraft.ports.game }}:{{ edge_haproxy_route_model.minecraft.ports.game }}/tcp"
+{% if edge_haproxy_route_model.minecraft.policy.rcon_public | default(true) %}
+      - "{{ edge_haproxy_route_model.minecraft.ports.rcon }}:{{ edge_haproxy_route_model.minecraft.ports.rcon }}/tcp"
+{% endif %}
+{% endif %}
     volumes:
-      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-      - ./haproxy/lists:/usr/local/etc/haproxy/lists:ro
+      - ./haproxy:/usr/local/etc/haproxy:ro
       - /etc/localtime:/etc/localtime:ro
     restart: always
     networks:
-      - {{ edge_haproxy_network_name }}
+      {{ edge_haproxy_network_name }}:
+        ipv4_address: {{ edge_haproxy_container_ipv4 }}
 
 networks:
   {{ edge_haproxy_network_name }}:

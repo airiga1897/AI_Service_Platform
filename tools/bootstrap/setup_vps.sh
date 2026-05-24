@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 
 set -euo pipefail
 
@@ -33,11 +33,11 @@ print_error() {
 usage() {
     cat <<'USAGE'
 Usage:
-  sudo bash tools/bootstrap/setup_vps.sh --nodes-file /tmp/nodes.csv --state-file /tmp/state.csv --alias vps3
+  sudo bash tools/bootstrap/setup_vps.sh --nodes-file /tmp/nodes.csv --state-file /tmp/state.csv --alias <orchestration-alias>
   sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash tools/bootstrap/setup_vps.sh --nodes-file /tmp/nodes.csv --state-file /tmp/state.csv --alias vps2
 
 Fallback target mode:
-  sudo bash tools/bootstrap/setup_vps.sh vps3-management
+  sudo bash tools/bootstrap/setup_vps.sh orchestration-management
   sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash tools/bootstrap/setup_vps.sh vps2-preprod
   sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash tools/bootstrap/setup_vps.sh vps1-prod
 
@@ -45,13 +45,13 @@ Environment overrides:
   DEPLOY_USER=depuser
   ADMIN_USER=useradmin
   ANSIBLE_USER=ansible
-  ANSIBLE_AUTHORIZED_KEY='ssh-ed25519 ... ansible-control@vps3-management'
+  ANSIBLE_AUTHORIZED_KEY='ssh-ed25519 ... ansible-control@orchestration'
   ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub
   FORCE_REGENERATE_KEYS=0
   SSH_PORT=22
 
 Supported targets:
-  vps3-management       First node to bootstrap. Ansible control/management node.
+  orchestration-management First node to bootstrap. Ansible control/orchestration node.
   vps2-preprod          Managed preprod / hot-standby / backup node.
   vps1-prod             Managed production node.
   ai-retail-dev-preprod Temporary alias for GitHub Actions deploy access to VPS2.
@@ -127,17 +127,15 @@ resolve_behavior_from_state() {
         fi
     done < "$STATE_FILE"
 
-    if [ "$mentioned" = "true" ]; then
-        NODE_ROLE="managed"
-        DEPLOY_DIR="/opt/stacks"
-        RUNTIME_ENV_FILE=""
-        GITHUB_ENVIRONMENT="$NODE_ALIAS"
-        TARGET="$NODE_ALIAS"
-        return
+    NODE_ROLE="managed"
+    DEPLOY_DIR="/opt/stacks"
+    RUNTIME_ENV_FILE=""
+    GITHUB_ENVIRONMENT="$NODE_ALIAS"
+    TARGET="$NODE_ALIAS"
+    if [ "$mentioned" != "true" ]; then
+        print_warning "Alias $NODE_ALIAS is not referenced by state.csv; bootstrapping it as a managed platform node from nodes.csv."
     fi
-
-    print_error "Alias $NODE_ALIAS is not referenced by state.csv. Add it to platform_role/service active/candidate/old aliases before bootstrap."
-    exit 1
+    return
 }
 
 resolve_target_from_nodes_file() {
@@ -243,11 +241,11 @@ fi
 
 if [ "$CSV_MODE" != "true" ]; then
     case "$TARGET" in
-        vps3-management)
+        orchestration-management)
             NODE_ROLE="management"
             DEPLOY_DIR="/opt/ai-service-platform"
             RUNTIME_ENV_FILE=""
-            GITHUB_ENVIRONMENT="vps3-management"
+            GITHUB_ENVIRONMENT="orchestration-management"
             ;;
         vps2-preprod)
             NODE_ROLE="managed"
@@ -315,6 +313,149 @@ ensure_command() {
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
     apt-get install -y "$package_name"
+}
+
+docker_runtime_ready() {
+    command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1
+}
+
+apt_candidate() {
+    local package_name="$1"
+    apt-cache policy "$package_name" | awk '/Candidate:/ {print $2; exit}'
+}
+
+print_docker_package_diagnostics() {
+    print_warning "Docker package candidates:"
+    apt-cache policy docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io docker-compose-v2 || true
+}
+
+enable_universe_if_available() {
+    if command -v add-apt-repository >/dev/null 2>&1; then
+        add-apt-repository -y universe >/dev/null 2>&1 || true
+        return
+    fi
+
+    if apt-get install -y software-properties-common >/dev/null 2>&1; then
+        add-apt-repository -y universe >/dev/null 2>&1 || true
+    fi
+}
+
+try_install_official_docker() {
+    local codename="$1"
+    local official_candidate
+
+    if [ -z "$codename" ]; then
+        print_warning "Cannot detect Ubuntu codename; skipping Docker official repo"
+        return 1
+    fi
+
+    install -d -m 0755 /etc/apt/keyrings
+    if [ ! -f /etc/apt/keyrings/docker.asc ]; then
+        if ! curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc; then
+            print_warning "Could not download Docker official repo GPG key; using distro packages"
+            rm -f /etc/apt/keyrings/docker.asc
+            return 1
+        fi
+        chmod 0644 /etc/apt/keyrings/docker.asc
+    fi
+
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $codename stable" > /etc/apt/sources.list.d/docker.list
+    if ! apt-get update -y; then
+        print_warning "Docker official repo update failed for Ubuntu codename '$codename'; using distro packages"
+        return 1
+    fi
+
+    official_candidate="$(apt_candidate docker-ce)"
+    if [ -z "$official_candidate" ] || [ "$official_candidate" = "(none)" ]; then
+        print_warning "Docker official repo has no docker-ce candidate for Ubuntu codename '$codename'; using distro packages"
+        return 1
+    fi
+
+    print_warning "Installing Docker from official Docker repo for Ubuntu codename '$codename'"
+    if apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+        return 0
+    fi
+
+    print_warning "Docker official package installation failed; using distro packages"
+    return 1
+}
+
+try_install_distro_docker() {
+    local compose_package=""
+    local compose_v2_candidate
+    local compose_plugin_candidate
+
+    rm -f /etc/apt/sources.list.d/docker.list
+    if ! apt-get update -y; then
+        print_warning "apt-get update failed before distro Docker fallback"
+        return 1
+    fi
+    enable_universe_if_available
+    if ! apt-get update -y; then
+        print_warning "apt-get update failed after enabling universe"
+        return 1
+    fi
+
+    compose_v2_candidate="$(apt_candidate docker-compose-v2)"
+    compose_plugin_candidate="$(apt_candidate docker-compose-plugin)"
+
+    if [ -n "$compose_v2_candidate" ] && [ "$compose_v2_candidate" != "(none)" ]; then
+        compose_package="docker-compose-v2"
+    elif [ -n "$compose_plugin_candidate" ] && [ "$compose_plugin_candidate" != "(none)" ]; then
+        compose_package="docker-compose-plugin"
+    fi
+
+    print_warning "Installing Docker from Ubuntu distro packages"
+    if [ -n "$compose_package" ]; then
+        if apt-get install -y docker.io "$compose_package"; then
+            return 0
+        fi
+    else
+        if apt-get install -y docker.io; then
+            return 0
+        fi
+    fi
+
+    print_warning "Ubuntu distro Docker package installation failed"
+    return 1
+}
+
+install_docker_runtime() {
+    local codename
+
+    if docker_runtime_ready; then
+        systemctl enable --now docker >/dev/null 2>&1 || true
+        print_success "Docker runtime already available"
+        return
+    fi
+
+    print_warning "Docker runtime is not available; installing it as bootstrap baseline"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y
+    apt-get install -y ca-certificates curl gnupg lsb-release
+
+    codename="$(
+        . /etc/os-release
+        printf '%s' "${VERSION_CODENAME:-}"
+    )"
+
+    if ! try_install_official_docker "$codename"; then
+        if ! try_install_distro_docker; then
+            print_error "Docker installation failed from both official and distro package sources"
+            print_docker_package_diagnostics
+            exit 1
+        fi
+    fi
+
+    systemctl enable --now docker
+
+    if ! docker_runtime_ready; then
+        print_error "Docker runtime is still unavailable after installation"
+        print_docker_package_diagnostics
+        exit 1
+    fi
+
+    print_success "Docker runtime is ready"
 }
 
 create_user() {
@@ -536,9 +677,9 @@ resolve_ansible_authorized_key() {
 resolve_ansible_authorized_key
 
 if [ "$NODE_ROLE" = "managed" ] && [ -z "$ANSIBLE_AUTHORIZED_KEY" ]; then
-    print_error "Managed target $TARGET requires the VPS3 Ansible control public key."
+    print_error "Managed target $TARGET requires the orchestration Ansible control public key."
     echo ""
-    echo "Copy this public key file from VPS3 to the managed VPS:"
+    echo "Copy this public key file from the active orchestration node to the managed VPS:"
     echo "  /home/ansible/.ssh/ansible_control.managed_nodes.pub -> /tmp/ansible_control.managed_nodes.pub"
     echo ""
     echo "Then run:"
@@ -552,7 +693,7 @@ if [ "$NODE_ROLE" = "managed" ] && [ -z "$ANSIBLE_AUTHORIZED_KEY" ]; then
     if [ "$CSV_MODE" = "true" ]; then
         echo "  sudo ANSIBLE_AUTHORIZED_KEY='ssh-ed25519 ... ansible-control@orchestration' bash setup_vps.sh --nodes-file $NODES_FILE --state-file $STATE_FILE --alias $NODE_ALIAS"
     else
-        echo "  sudo ANSIBLE_AUTHORIZED_KEY='ssh-ed25519 ... ansible-control@vps3-management' bash setup_vps.sh $TARGET"
+        echo "  sudo ANSIBLE_AUTHORIZED_KEY='ssh-ed25519 ... ansible-control@orchestration' bash setup_vps.sh $TARGET"
     fi
     exit 1
 fi
@@ -620,18 +761,18 @@ else
     ANSIBLE_HOME="$(getent passwd "$ANSIBLE_USER" | cut -d: -f6)"
     if [ -n "$ANSIBLE_AUTHORIZED_KEY" ]; then
         install_authorized_key "$ANSIBLE_USER" "$ANSIBLE_AUTHORIZED_KEY"
-        print_success "VPS3 Ansible control public key installed for $ANSIBLE_USER"
+        print_success "orchestration Ansible control public key installed for $ANSIBLE_USER"
     else
         mkdir -p "$ANSIBLE_HOME/.ssh"
         touch "$ANSIBLE_HOME/.ssh/authorized_keys"
         chown -R "$ANSIBLE_USER:$ANSIBLE_USER" "$ANSIBLE_HOME/.ssh"
         chmod 700 "$ANSIBLE_HOME/.ssh"
         chmod 600 "$ANSIBLE_HOME/.ssh/authorized_keys"
-        print_warning "Add the VPS3 Ansible control public key to this node after VPS3 bootstrap."
+        print_warning "Add the orchestration Ansible control public key to this node after orchestration bootstrap."
         print_warning "Or rerun bootstrap with ANSIBLE_AUTHORIZED_KEY='ssh-ed25519 ...'."
     fi
     lock_user_password "$ANSIBLE_USER"
-    print_warning "Ansible provisioning should run from VPS3, not directly from GitHub Actions."
+    print_warning "Ansible provisioning should run from the active orchestration node, not directly from GitHub Actions."
 fi
 
 print_header "4/7 - Deploy directory and runtime env placeholder"
@@ -660,16 +801,11 @@ else
     print_success "No runtime env placeholder is required for target $TARGET"
 fi
 
-print_header "5/7 - SSH hardening"
-apply_ssh_hardening
+print_header "5/7 - Docker runtime baseline"
+install_docker_runtime
 
-print_header "6/7 - Docker readiness note"
-if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    print_success "Docker Compose plugin is available"
-else
-    print_warning "Docker Compose plugin is not available yet."
-    print_warning "Install it with the Ansible docker role before running predeploy-check."
-fi
+print_header "6/7 - SSH hardening"
+apply_ssh_hardening
 
 print_header "7/7 - Values for GitHub Environment"
 SERVER_IP="$(curl -fsS https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"
@@ -734,10 +870,10 @@ if [ "$NODE_ROLE" = "management" ]; then
     echo "  1. Bootstrap VPS1/VPS2 as managed nodes."
     echo "  2. Add the Ansible control public key above to managed nodes."
     echo "  3. Prepare encrypted inventory/vault outside the repository."
-    echo "  4. Run infra/ansible/site.yml from VPS3."
+    echo "  4. Run infra/ansible/site.yml from the active orchestration node."
 else
-    echo "  1. Add the VPS3 Ansible control public key to this node."
-    echo "  2. Run infra/ansible/site.yml from VPS3 to finish OS provisioning."
+    echo "  1. Add the orchestration Ansible control public key to this node."
+    echo "  2. Run infra/ansible/site.yml from the active orchestration node to finish OS provisioning."
     echo "  3. For temporary GitHub deploy access, store SSH_HOST, SSH_USER, SSH_PORT, SSH_KEY in the relevant GitHub Environment."
     if [ -n "$RUNTIME_ENV_FILE" ]; then
         echo "  4. Fill runtime secrets in $RUNTIME_ENV_FILE on this VPS."

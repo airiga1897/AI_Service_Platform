@@ -103,7 +103,7 @@
 
 - name: Start vpn_edge container
   ansible.builtin.command:
-    cmd: docker compose -f "{{ vpn_edge_compose_file }}" up -d
+    cmd: docker compose -f "{{ vpn_edge_compose_file }}" up -d --force-recreate
     chdir: "{{ vpn_edge_root_dir }}"
   changed_when: true
   when:

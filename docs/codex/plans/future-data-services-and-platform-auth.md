@@ -55,6 +55,11 @@ Before GitHub Actions are enabled, product images may be built manually and
 deployed by immutable `image_ref`. Avoid building product images directly on the
 production runtime node unless there is no other practical option.
 
+Data/app services should use Docker DNS names and network aliases by default.
+Do not reserve manual static container IPs for `frontend`, `backend`,
+`postgres`, `redis`, `monitoring`, `semaphore`, or product runtimes unless a
+service becomes a real L3/L4 contract endpoint.
+
 Final model remains:
 
 - product repos build and publish images;

@@ -1,4 +1,4 @@
-# Future Plan: Management Control Plane And Knowledge Retrieval
+﻿# Future Plan: Management Control Plane And Knowledge Retrieval
 
 ## Summary
 
@@ -15,7 +15,7 @@
    - `nodes.csv`;
    - bootstrap runner-ы;
    - сохранение ключей в `operator/<alias>/`;
-   - real inventory на VPS3.
+   - real inventory на active orchestration node.
 
 2. Поднять Ansible provisioning:
    - Docker;
@@ -45,7 +45,7 @@
    - первые сценарии: “что делать дальше?” и “почему deploy упал?”.
 
 6. Только после этого добавить controlled actions:
-   - UI запускает GitHub Actions, Semaphore jobs или Ansible на VPS3;
+   - UI запускает GitHub Actions, Semaphore jobs или Ansible на active orchestration node;
    - production-действия требуют явного подтверждения;
    - AI может рекомендовать действия, но не выполняет опасные операции сам.
 
@@ -56,7 +56,7 @@
 - Правильный поток управления:
 
   ```text
-  UI -> GitHub Actions / Semaphore / VPS3 Ansible -> VPS
+  UI -> GitHub Actions / Semaphore / active orchestration Ansible -> VPS
   ```
 
 - `knowledge-retrieval` использует документацию, registry, логи и историю операций как источники знаний.

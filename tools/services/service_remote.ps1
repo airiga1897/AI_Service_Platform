@@ -66,10 +66,48 @@ function Quote-BashArg($Value) {
     return "'" + ($text -replace "'", "'\''") + "'"
 }
 
+function New-TarGzBundle($ServiceRunnerScript, $AnsibleDir) {
+    if (-not (Get-Command tar -ErrorAction SilentlyContinue)) {
+        Fail "tar not found in PATH. It is required to upload service bundles as a single archive."
+    }
+
+    $stagingDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-service-platform.service-remote." + [guid]::NewGuid().ToString("N"))
+    $archivePath = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-service-platform.service-remote." + [guid]::NewGuid().ToString("N") + ".tar.gz")
+    New-Item -ItemType Directory -Path $stagingDir | Out-Null
+    try {
+        Copy-Item -LiteralPath $ServiceRunnerScript -Destination (Join-Path $stagingDir "service.sh")
+        Copy-Item -LiteralPath $AnsibleDir -Destination (Join-Path $stagingDir "ansible") -Recurse
+        & tar -czf $archivePath -C $stagingDir .
+        if ($LASTEXITCODE -ne 0) {
+            Fail "Failed to create service bundle archive"
+        }
+        return @{ ArchivePath = $archivePath; StagingDir = $stagingDir }
+    } catch {
+        Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
 function Invoke-External($FilePath, $Arguments, $Label) {
     & $FilePath @Arguments
     if ($LASTEXITCODE -ne 0) {
         Fail "$Label failed with exit code $LASTEXITCODE"
+    }
+}
+
+function Invoke-ExternalRetryTransport($FilePath, $Arguments, $Label, $Attempts = 3) {
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        & $FilePath @Arguments
+        if ($LASTEXITCODE -eq 0) {
+            return
+        }
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 255 -or $attempt -eq $Attempts) {
+            Fail "$Label failed with exit code $exitCode"
+        }
+        Write-Host "$Label hit SSH transport reset (exit 255), retrying $attempt/$Attempts..."
+        Start-Sleep -Seconds 2
     }
 }
 
@@ -148,6 +186,7 @@ if (-not (Test-Path -LiteralPath $AnsibleDir -PathType Container)) {
 
 $remote = "$SshUser@$($controlNode.endpoint)"
 $remoteBundleDir = "/tmp/ai-service-platform.service-remote.$([guid]::NewGuid().ToString('N'))"
+$remoteBundleArchive = "$remoteBundleDir.tar.gz"
 $remoteServiceRunnerTemp = "$remoteBundleDir/service.sh"
 $remoteAnsibleTemp = "$remoteBundleDir/ansible"
 $remoteArgs = @(
@@ -201,29 +240,49 @@ $sshArgs = @(
 )
 
 try {
-    Invoke-External "ssh" @(
+    Write-Host "Preparing local service bundle..."
+    $bundle = New-TarGzBundle $ServiceRunnerScript $AnsibleDir
+
+    Write-Host "Creating remote temporary bundle directory..."
+    Invoke-ExternalRetryTransport "ssh" @(
         "-i", $SshKeyFile,
         "-o", "IdentitiesOnly=yes",
         $remote,
         "mkdir -p $(Quote-BashArg $remoteBundleDir)"
     ) "remote service bundle directory creation"
 
+    Write-Host "Uploading service bundle archive..."
     Invoke-External "scp" @(
         "-i", $SshKeyFile,
         "-o", "IdentitiesOnly=yes",
-        $ServiceRunnerScript,
-        "${remote}:$remoteServiceRunnerTemp"
-    ) "service runner upload"
+        $bundle.ArchivePath,
+        "${remote}:$remoteBundleArchive"
+    ) "service bundle upload"
 
-    Invoke-External "scp" @(
+    $extractCommand = @(
+        "set -e",
+        "rm -rf $(Quote-BashArg $remoteBundleDir)",
+        "mkdir -p $(Quote-BashArg $remoteBundleDir)",
+        "tar -xzf $(Quote-BashArg $remoteBundleArchive) -C $(Quote-BashArg $remoteBundleDir)",
+        "test -f $(Quote-BashArg $remoteServiceRunnerTemp)",
+        "test -d $(Quote-BashArg $remoteAnsibleTemp)"
+    ) -join "; "
+
+    Write-Host "Extracting service bundle on orchestration node..."
+    Invoke-ExternalRetryTransport "ssh" @(
         "-i", $SshKeyFile,
         "-o", "IdentitiesOnly=yes",
-        "-r",
-        $AnsibleDir,
-        "${remote}:$remoteBundleDir/"
-    ) "Ansible bundle upload"
+        $remote,
+        $extractCommand
+    ) "remote service bundle extract"
 
+    Write-Host "Installing service bundle and running remote service command..."
     Invoke-External "ssh" $sshArgs "remote service command"
 } finally {
-    & ssh -i $SshKeyFile -o IdentitiesOnly=yes $remote "rm -rf $(Quote-BashArg $remoteBundleDir)" 2>$null | Out-Null
+    if ($bundle) {
+        Remove-Item -LiteralPath $bundle.ArchivePath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $bundle.StagingDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host "Cleaning remote temporary service bundle..."
+    & ssh -i $SshKeyFile -o IdentitiesOnly=yes $remote "rm -rf $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteBundleArchive)" 2>$null | Out-Null
 }

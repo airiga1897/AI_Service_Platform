@@ -10,8 +10,8 @@ Service Platform.
 
 - сайты: ускорение, защита, кеширование;
 - VPN: выбор ближайшего входа и будущая проверка ускорения SSTP;
-- исходящий VPN-трафик: выбор страны выхода;
-- защита edge: списки стран, allowlist, blacklist, rate limit.
+- исходящий VPN-трафик: выбор egress-профиля;
+- защита edge: policy lists, allowlist, blacklist, rate limit.
 
 ## CDN для сайтов
 
@@ -47,10 +47,10 @@ GeoPolicy должен быть одним общим источником да�
 
 Выходы GeoPolicy зафиксированы в [`services.yml`](../services.yml) под ключом `platform.geo_policy.data_outputs`; обоснование — в [ADR-0007](adr/0007-shared-geo-policy-service.md). Перечень ниже — производное для людей:
 
-- HAProxy country lists для защиты сайтов и edge endpoints;
+- HAProxy policy lists для защиты сайтов и edge endpoints;
 - VPN GeoDNS targets для выбора ближайшего VPS;
-- egress country rules для выбора страны выхода VPN-трафика;
-- CDN country policy inputs для CDN/WAF правил.
+- egress policy rules для выбора выходного профиля VPN-трафика;
+- CDN policy inputs для CDN/WAF правил.
 
 Правила безопасности:
 
@@ -65,12 +65,13 @@ GeoPolicy должен быть одним общим источником да�
 
 ```text
 vpn.example.com
-  Russia users     -> VPS3 Russia
-  Kazakhstan users -> VPS2 Kazakhstan
-  Europe users     -> VPS1 Netherlands
+  policy target A -> active VPN edge alias A
+  policy target B -> active VPN edge alias B
+  fallback        -> healthy default VPN edge alias
 ```
 
-GeoDNS выбирает ближайший или наиболее подходящий VPS до подключения клиента.
+GeoDNS выбирает ближайший или наиболее подходящий VPS по текущей policy до
+подключения клиента.
 После DNS-выбора клиент подключается уже к конкретному IP.
 
 GeoDNS не заменяет firewall, HAProxy allowlist, healthcheck или мониторинг.
