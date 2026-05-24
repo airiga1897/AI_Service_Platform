@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$NodesFile = ".\operator\nodes.csv",
 
     [string]$StateFile = ".\operator\state.csv",

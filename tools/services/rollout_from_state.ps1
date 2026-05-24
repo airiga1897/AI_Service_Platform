@@ -6,6 +6,7 @@ param(
     [string]$ControlAlias = "",
     [string]$SyncScript = "tools/bootstrap/sync_to_orchestration.ps1",
     [string]$ServiceRemoteScript = "tools/services/service_remote.ps1",
+    [string]$VpnIngressDomain = "mine-craft.su",
     [switch]$AutoAcceptHostKey,
     [switch]$SkipSync,
     [switch]$SkipPostcheck
@@ -43,6 +44,187 @@ function Add-UniqueAlias($List, $Alias) {
     if ($List -notcontains $Alias) {
         [void]$List.Add($Alias)
     }
+}
+
+function Write-StateCsv($Path, $Rows) {
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add($ExpectedStateHeader)
+    foreach ($row in $Rows) {
+        $lines.Add(("{0},{1},{2},{3},{4},{5},{6}" -f
+            $row.kind,
+            $row.name,
+            $row.ansible_group,
+            $row.active_aliases,
+            $row.candidate_aliases,
+            $row.old_aliases,
+            $row.state))
+    }
+    Set-Content -LiteralPath $Path -Value $lines -Encoding ascii
+}
+
+function Normalize-StateRows($Rows, $NodeRows, $StatePath) {
+    $nodeAliases = @($NodeRows | ForEach-Object { $_.current_alias } | Where-Object { $_ })
+    $changed = $false
+
+    foreach ($row in $Rows) {
+        if ($row.kind -eq "role") {
+            $row.kind = "platform_role"
+            $changed = $true
+        }
+
+        foreach ($field in @("active_aliases", "candidate_aliases", "old_aliases")) {
+            foreach ($alias in (Split-AliasList $row.$field)) {
+                if ($nodeAliases -notcontains $alias) {
+                    Fail "state.csv references alias '$alias' in $($row.kind):$($row.name), but nodes.csv has no such alias."
+                }
+            }
+        }
+    }
+
+    if ($changed) {
+        Write-StateCsv $StatePath $Rows
+        Write-Host "Normalized state.csv: role -> platform_role"
+    }
+
+    return $Rows
+}
+
+function Get-PresentVpnIngressAliases($Rows) {
+    $aliases = New-Object System.Collections.Generic.List[string]
+    $rows = @($Rows | Where-Object { $_.kind -eq "edge_route" -and $_.name -eq "vpn_ingress" -and $_.state -eq "present" })
+    foreach ($row in $rows) {
+        foreach ($alias in (Split-AliasList $row.active_aliases)) {
+            Add-UniqueAlias $aliases $alias
+        }
+    }
+    return @($aliases)
+}
+
+function New-VpnIngressAliasBlock($Aliases, $Domain) {
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($alias in $Aliases) {
+        $lines.Add("    ${alias}:")
+        $lines.Add("      sni:")
+        $lines.Add("        - vpn-${alias}.${Domain}")
+    }
+    return @($lines)
+}
+
+function New-VpnIngressRoutesBlock($Aliases, $Domain) {
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("vpn_ingress:")
+    $lines.Add("  per_alias:")
+    foreach ($line in (New-VpnIngressAliasBlock $Aliases $Domain)) {
+        $lines.Add($line)
+    }
+    $lines.Add("  backend:")
+    $lines.Add("    host: 172.20.0.2")
+    $lines.Add("  ports:")
+    $lines.Add("    sstp: 443")
+    $lines.Add("    softether_alt: 992")
+    $lines.Add("    openvpn_tcp: 1194")
+    $lines.Add("    management: 5555")
+    return @($lines)
+}
+
+function Find-TopLevelSectionEnd($Lines, $StartIndex) {
+    for ($i = $StartIndex + 1; $i -lt $Lines.Count; $i++) {
+        if ($Lines[$i] -match "^\S") {
+            return $i
+        }
+    }
+    return $Lines.Count
+}
+
+function Normalize-HaproxyRoutes($RoutesPath, $VpnAliases, $Domain) {
+    if ($VpnAliases.Count -eq 0) {
+        return
+    }
+
+    $routesDir = Split-Path -Parent $RoutesPath
+    if ($routesDir -and -not (Test-Path -LiteralPath $routesDir -PathType Container)) {
+        New-Item -ItemType Directory -Force -Path $routesDir | Out-Null
+    }
+
+    if (-not (Test-Path -LiteralPath $RoutesPath -PathType Leaf)) {
+        Set-Content -LiteralPath $RoutesPath -Value (New-VpnIngressRoutesBlock $VpnAliases $Domain) -Encoding ascii
+        Write-Host "Created HAProxy routes.yml with vpn_ingress aliases: $($VpnAliases -join ', ')"
+        return
+    }
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($line in (Get-Content -LiteralPath $RoutesPath)) {
+        $lines.Add([string]$line)
+    }
+
+    $vpnIndex = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match "^vpn_ingress:\s*$") {
+            $vpnIndex = $i
+            break
+        }
+    }
+
+    if ($vpnIndex -lt 0) {
+        $newLines = New-Object System.Collections.Generic.List[string]
+        foreach ($line in (New-VpnIngressRoutesBlock $VpnAliases $Domain)) {
+            $newLines.Add($line)
+        }
+        $newLines.Add("")
+        foreach ($line in $lines) {
+            $newLines.Add($line)
+        }
+        Set-Content -LiteralPath $RoutesPath -Value $newLines -Encoding ascii
+        Write-Host "Added vpn_ingress route config for aliases: $($VpnAliases -join ', ')"
+        return
+    }
+
+    $vpnEnd = Find-TopLevelSectionEnd $lines $vpnIndex
+    $perAliasIndex = -1
+    for ($i = $vpnIndex + 1; $i -lt $vpnEnd; $i++) {
+        if ($lines[$i] -match "^  per_alias:\s*$") {
+            $perAliasIndex = $i
+            break
+        }
+    }
+
+    if ($perAliasIndex -lt 0) {
+        $insertAt = $vpnIndex + 1
+        $insertLines = New-Object System.Collections.Generic.List[string]
+        $insertLines.Add("  per_alias:")
+        foreach ($line in (New-VpnIngressAliasBlock $VpnAliases $Domain)) {
+            $insertLines.Add($line)
+        }
+        $lines.InsertRange($insertAt, [string[]]$insertLines)
+        Set-Content -LiteralPath $RoutesPath -Value $lines -Encoding ascii
+        Write-Host "Added vpn_ingress.per_alias for aliases: $($VpnAliases -join ', ')"
+        return
+    }
+
+    $perAliasEnd = $vpnEnd
+    for ($i = $perAliasIndex + 1; $i -lt $vpnEnd; $i++) {
+        if ($lines[$i] -match "^  \S") {
+            $perAliasEnd = $i
+            break
+        }
+    }
+
+    $existing = @()
+    for ($i = $perAliasIndex + 1; $i -lt $perAliasEnd; $i++) {
+        $match = [regex]::Match($lines[$i], "^    ([A-Za-z0-9_.-]+):\s*$")
+        if ($match.Success) {
+            $existing += $match.Groups[1].Value
+        }
+    }
+
+    $missing = @($VpnAliases | Where-Object { $existing -notcontains $_ })
+    if ($missing.Count -eq 0) {
+        return
+    }
+
+    $lines.InsertRange($perAliasEnd, [string[]](New-VpnIngressAliasBlock $missing $Domain))
+    Set-Content -LiteralPath $RoutesPath -Value $lines -Encoding ascii
+    Write-Host "Added vpn_ingress routes for aliases: $($missing -join ', ')"
 }
 
 function Invoke-ChildScript($ScriptPath, $Arguments, $Label) {
@@ -121,7 +303,11 @@ if ($stateHeader -ne $ExpectedStateHeader) {
     Fail "state.csv header must be exactly: $ExpectedStateHeader"
 }
 
+$nodeRows = Import-Csv -LiteralPath $NodesFile
 $stateRows = Import-Csv -LiteralPath $StateFile
+$stateRows = @(Normalize-StateRows $stateRows $nodeRows $StateFile)
+Normalize-HaproxyRoutes (Join-Path (Join-Path $OperatorDir "haproxy") "routes.yml") (Get-PresentVpnIngressAliases $stateRows) $VpnIngressDomain
+
 $serviceRows = @($stateRows | Where-Object { $_.kind -eq "service" })
 if ($serviceRows.Count -eq 0) {
     Fail "state.csv has no service rows"

@@ -131,6 +131,11 @@ infra/ansible/haproxy.routes.example.yml
 
 `vpn_ingress` включает HAProxy routes `443/992/1194/5555` к `softether-edge`. VPN SNI задаётся точно, например `vpn-vps1.mine-craft.su`; `mainsrv01.mine-craft.su` не используется для VPN.
 
+Перед rollout runner нормализует derived VPN route config: если active
+`edge_route,vpn_ingress` содержит новый alias, отсутствующий в
+`operator/haproxy/routes.yml`, он добавляет default SNI
+`vpn-<alias>.mine-craft.su`. Existing custom SNI не перезаписывается.
+
 `minecraft` включает `25565/tcp` для Minecraft game и `25575/tcp` для RCON. В первом rollout target - `vps1`; `vps3` может стать candidate позже после проверки ресурсов.
 
 ## Inventory Generation
@@ -186,7 +191,9 @@ kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state
 platform_role,orchestration,orchestration,vps4,,vps3,present
 ```
 
-`role` как legacy kind пока поддерживается скриптами, но новый документируемый вариант - `platform_role`.
+`role` как legacy kind пока поддерживается скриптами, но runner нормализует его
+в `platform_role` перед rollout. Новый документируемый вариант -
+`platform_role`.
 
 ## Rollout
 

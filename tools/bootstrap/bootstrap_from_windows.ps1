@@ -44,6 +44,14 @@ function Require-File($Path, $Label) {
     }
 }
 
+function Assert-NoUtf8Bom($Path, $Label) {
+    Require-File $Path $Label
+    $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $Path))
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        Fail "$Label must be UTF-8 without BOM: $Path"
+    }
+}
+
 function Clear-RootPasswordForAlias($Path, $AliasToClear) {
     $lines = Get-Content -LiteralPath $Path
     if (-not $lines -or $lines.Count -eq 0) {
@@ -311,15 +319,16 @@ if ($row.connection -eq "local" -or $row.endpoint -eq "local") {
 if (-not $row.root_password) {
     Fail "root_password is required for first remote bootstrap from Windows runner: $Alias"
 }
+Assert-NoUtf8Bom $SetupScript "SetupScript"
 $isManagementNode = Is-ActiveOrchestrationNode $stateRows $Alias
 if (-not $isManagementNode -and -not $AnsibleAuthorizedKeyFile) {
     $AnsibleAuthorizedKeyFile = Join-Path $OperatorDir "ansible_control.managed_nodes.pub"
     Require-File $AnsibleAuthorizedKeyFile "AnsibleAuthorizedKeyFile"
 }
 if ($isManagementNode) {
-    Require-File $CreateInventoryScript "CreateInventoryScript"
-    Require-File $PrepareInventoryScript "PrepareInventoryScript"
-    Require-File $VerifyControlScript "VerifyControlScript"
+    Assert-NoUtf8Bom $CreateInventoryScript "CreateInventoryScript"
+    Assert-NoUtf8Bom $PrepareInventoryScript "PrepareInventoryScript"
+    Assert-NoUtf8Bom $VerifyControlScript "VerifyControlScript"
 }
 if ($RegenerateRemoteKeys -and $isManagementNode -and -not $Force) {
     Fail "RegenerateRemoteKeys for a management node requires -Force so the local Ansible public key file is refreshed explicitly."

@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 
 set -euo pipefail
 
@@ -310,23 +310,48 @@ ensure_command() {
         return
     fi
     print_warning "$command_name not found; installing package $package_name"
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y
-    apt-get install -y "$package_name"
+    run_apt_get update -y
+    run_apt_get install -y "$package_name"
 }
 
 docker_runtime_ready() {
     command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1
 }
 
+docker_command_available() {
+    command -v docker >/dev/null 2>&1
+}
+
+docker_compose_available() {
+    docker compose version >/dev/null 2>&1
+}
+
+run_apt_get() {
+    DEBIAN_FRONTEND=noninteractive LC_ALL=C LANG=C LANGUAGE=C apt-get "$@"
+}
+
 apt_candidate() {
     local package_name="$1"
-    apt-cache policy "$package_name" | awk '/Candidate:/ {print $2; exit}'
+    LC_ALL=C LANG=C LANGUAGE=C apt-cache policy "$package_name" | awk '/Candidate:/ {print $2; exit}'
 }
 
 print_docker_package_diagnostics() {
+    print_warning "Docker command status:"
+    if docker_command_available; then
+        docker --version || true
+    else
+        echo "docker: not found"
+    fi
+
+    print_warning "Docker Compose plugin status:"
+    if docker_command_available; then
+        docker compose version || true
+    else
+        echo "docker compose: docker command is not available"
+    fi
+
     print_warning "Docker package candidates:"
-    apt-cache policy docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io docker-compose-v2 || true
+    LC_ALL=C LANG=C LANGUAGE=C apt-cache policy docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io docker-compose-v2 || true
 }
 
 enable_universe_if_available() {
@@ -335,7 +360,7 @@ enable_universe_if_available() {
         return
     fi
 
-    if apt-get install -y software-properties-common >/dev/null 2>&1; then
+    if run_apt_get install -y software-properties-common >/dev/null 2>&1; then
         add-apt-repository -y universe >/dev/null 2>&1 || true
     fi
 }
@@ -360,7 +385,7 @@ try_install_official_docker() {
     fi
 
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $codename stable" > /etc/apt/sources.list.d/docker.list
-    if ! apt-get update -y; then
+    if ! run_apt_get update -y; then
         print_warning "Docker official repo update failed for Ubuntu codename '$codename'; using distro packages"
         return 1
     fi
@@ -372,7 +397,7 @@ try_install_official_docker() {
     fi
 
     print_warning "Installing Docker from official Docker repo for Ubuntu codename '$codename'"
-    if apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+    if run_apt_get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
         return 0
     fi
 
@@ -380,48 +405,59 @@ try_install_official_docker() {
     return 1
 }
 
-try_install_distro_docker() {
-    local compose_package=""
+install_distro_compose_plugin() {
     local compose_v2_candidate
     local compose_plugin_candidate
 
-    rm -f /etc/apt/sources.list.d/docker.list
-    if ! apt-get update -y; then
-        print_warning "apt-get update failed before distro Docker fallback"
-        return 1
-    fi
-    enable_universe_if_available
-    if ! apt-get update -y; then
-        print_warning "apt-get update failed after enabling universe"
-        return 1
+    if docker_compose_available; then
+        return 0
     fi
 
     compose_v2_candidate="$(apt_candidate docker-compose-v2)"
     compose_plugin_candidate="$(apt_candidate docker-compose-plugin)"
 
     if [ -n "$compose_v2_candidate" ] && [ "$compose_v2_candidate" != "(none)" ]; then
-        compose_package="docker-compose-v2"
-    elif [ -n "$compose_plugin_candidate" ] && [ "$compose_plugin_candidate" != "(none)" ]; then
-        compose_package="docker-compose-plugin"
+        print_warning "Installing Docker Compose plugin from docker-compose-v2"
+        run_apt_get install -y docker-compose-v2
+        docker_compose_available
+        return
+    fi
+
+    if [ -n "$compose_plugin_candidate" ] && [ "$compose_plugin_candidate" != "(none)" ]; then
+        print_warning "Installing Docker Compose plugin from docker-compose-plugin"
+        run_apt_get install -y docker-compose-plugin
+        docker_compose_available
+        return
+    fi
+
+    print_warning "No Docker Compose plugin package candidate is available"
+    return 1
+}
+
+try_install_distro_docker() {
+    rm -f /etc/apt/sources.list.d/docker.list
+    if ! run_apt_get update -y; then
+        print_warning "apt-get update failed before distro Docker fallback"
+        return 1
+    fi
+    enable_universe_if_available
+    if ! run_apt_get update -y; then
+        print_warning "apt-get update failed after enabling universe"
+        return 1
     fi
 
     print_warning "Installing Docker from Ubuntu distro packages"
-    if [ -n "$compose_package" ]; then
-        if apt-get install -y docker.io "$compose_package"; then
-            return 0
-        fi
-    else
-        if apt-get install -y docker.io; then
-            return 0
-        fi
+    if ! run_apt_get install -y docker.io; then
+        print_warning "Ubuntu distro Docker package installation failed"
+        return 1
     fi
 
-    print_warning "Ubuntu distro Docker package installation failed"
-    return 1
+    install_distro_compose_plugin
 }
 
 install_docker_runtime() {
     local codename
+    local os_id
 
     if docker_runtime_ready; then
         systemctl enable --now docker >/dev/null 2>&1 || true
@@ -430,15 +466,24 @@ install_docker_runtime() {
     fi
 
     print_warning "Docker runtime is not available; installing it as bootstrap baseline"
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y
-    apt-get install -y ca-certificates curl gnupg lsb-release
+    run_apt_get update -y
+    run_apt_get install -y ca-certificates curl gnupg lsb-release
+
+    os_id="$(
+        . /etc/os-release
+        printf '%s' "${ID:-}"
+    )"
+    if [ "$os_id" != "ubuntu" ]; then
+        print_error "Docker bootstrap currently supports Ubuntu only; detected OS ID: ${os_id:-unknown}"
+        exit 1
+    fi
 
     codename="$(
         . /etc/os-release
         printf '%s' "${VERSION_CODENAME:-}"
     )"
 
+    print_warning "Ubuntu Docker install strategy: try official Docker repo for '$codename', then Ubuntu distro packages if unavailable"
     if ! try_install_official_docker "$codename"; then
         if ! try_install_distro_docker; then
             print_error "Docker installation failed from both official and distro package sources"
@@ -448,6 +493,14 @@ install_docker_runtime() {
     fi
 
     systemctl enable --now docker
+
+    if docker_command_available && ! docker_compose_available; then
+        print_warning "Docker daemon is available but Docker Compose plugin is missing; installing compose plugin"
+        run_apt_get update -y
+        enable_universe_if_available
+        run_apt_get update -y
+        install_distro_compose_plugin || true
+    fi
 
     if ! docker_runtime_ready; then
         print_error "Docker runtime is still unavailable after installation"
