@@ -111,6 +111,13 @@ function Invoke-ExternalRetryTransport($FilePath, $Arguments, $Label, $Attempts 
     }
 }
 
+function Invoke-CleanupSsh($Arguments, $Label) {
+    & ssh @Arguments 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "$Label failed with exit code $LASTEXITCODE; continuing because cleanup is best-effort"
+    }
+}
+
 function Resolve-ControlNodeFromState($NodeRows, $StateRows, $Role, $ExplicitAlias) {
     $roleRows = @($StateRows | Where-Object { ($_.kind -eq "platform_role" -or $_.kind -eq "role") -and $_.name -eq $Role -and $_.state -eq "present" })
     if ($roleRows.Count -eq 0) {
@@ -232,9 +239,27 @@ if ($Check) {
     Write-Host "Check:        true"
 }
 
-$sshArgs = @(
+$sshCommonArgs = @(
+    "-n",
+    "-T",
     "-i", $SshKeyFile,
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=10",
     "-o", "IdentitiesOnly=yes",
+    "-o", "RequestTTY=no",
+    "-o", "ServerAliveInterval=15",
+    "-o", "ServerAliveCountMax=2"
+)
+$scpCommonArgs = @(
+    "-B",
+    "-i", $SshKeyFile,
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=10",
+    "-o", "IdentitiesOnly=yes",
+    "-o", "ServerAliveInterval=15",
+    "-o", "ServerAliveCountMax=2"
+)
+$sshRunArgs = $sshCommonArgs + @(
     $remote,
     $installAndRunCommand
 )
@@ -244,20 +269,16 @@ try {
     $bundle = New-TarGzBundle $ServiceRunnerScript $AnsibleDir
 
     Write-Host "Creating remote temporary bundle directory..."
-    Invoke-ExternalRetryTransport "ssh" @(
-        "-i", $SshKeyFile,
-        "-o", "IdentitiesOnly=yes",
+    Invoke-ExternalRetryTransport "ssh" ($sshCommonArgs + @(
         $remote,
         "mkdir -p $(Quote-BashArg $remoteBundleDir)"
-    ) "remote service bundle directory creation"
+    )) "remote service bundle directory creation"
 
     Write-Host "Uploading service bundle archive..."
-    Invoke-External "scp" @(
-        "-i", $SshKeyFile,
-        "-o", "IdentitiesOnly=yes",
+    Invoke-External "scp" ($scpCommonArgs + @(
         $bundle.ArchivePath,
         "${remote}:$remoteBundleArchive"
-    ) "service bundle upload"
+    )) "service bundle upload"
 
     $extractCommand = @(
         "set -e",
@@ -269,20 +290,23 @@ try {
     ) -join "; "
 
     Write-Host "Extracting service bundle on orchestration node..."
-    Invoke-ExternalRetryTransport "ssh" @(
-        "-i", $SshKeyFile,
-        "-o", "IdentitiesOnly=yes",
+    Invoke-ExternalRetryTransport "ssh" ($sshCommonArgs + @(
         $remote,
         $extractCommand
-    ) "remote service bundle extract"
+    )) "remote service bundle extract"
 
     Write-Host "Installing service bundle and running remote service command..."
-    Invoke-External "ssh" $sshArgs "remote service command"
+    Invoke-External "ssh" $sshRunArgs "remote service command"
 } finally {
     if ($bundle) {
         Remove-Item -LiteralPath $bundle.ArchivePath -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $bundle.StagingDir -Recurse -Force -ErrorAction SilentlyContinue
     }
     Write-Host "Cleaning remote temporary service bundle..."
-    & ssh -i $SshKeyFile -o IdentitiesOnly=yes $remote "rm -rf $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteBundleArchive)" 2>$null | Out-Null
+    if ($remote -and $remoteBundleDir -and $remoteBundleArchive -and $sshCommonArgs) {
+        Invoke-CleanupSsh ($sshCommonArgs + @(
+            $remote,
+            "rm -rf $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteBundleArchive)"
+        )) "remote service bundle cleanup"
+    }
 }

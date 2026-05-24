@@ -92,6 +92,12 @@ invoke_retry_transport() {
     done
 }
 
+run_cleanup_ssh() {
+    if ! ssh "${ssh_common_args[@]}" "$remote" "rm -rf $(quote_bash_arg "$remote_bundle_dir") $(quote_bash_arg "$remote_bundle_archive")" >/dev/null 2>&1; then
+        echo "[!] remote service bundle cleanup failed; continuing because cleanup is best-effort" >&2
+    fi
+}
+
 if [ "$SERVICE" = "-h" ] || [ "$SERVICE" = "--help" ]; then
     usage
     exit 0
@@ -199,10 +205,30 @@ remote_service_runner_temp="$remote_bundle_dir/service.sh"
 remote_ansible_temp="$remote_bundle_dir/ansible"
 archive_path="$(mktemp -t ai-service-platform.service-remote.XXXXXX.tar.gz)"
 staging_dir="$(mktemp -d -t ai-service-platform.service-remote.XXXXXX)"
+ssh_common_args=(
+    -n
+    -T
+    -i "$SSH_KEY_FILE"
+    -o BatchMode=yes
+    -o ConnectTimeout=10
+    -o IdentitiesOnly=yes
+    -o RequestTTY=no
+    -o ServerAliveInterval=15
+    -o ServerAliveCountMax=2
+)
+scp_common_args=(
+    -B
+    -i "$SSH_KEY_FILE"
+    -o BatchMode=yes
+    -o ConnectTimeout=10
+    -o IdentitiesOnly=yes
+    -o ServerAliveInterval=15
+    -o ServerAliveCountMax=2
+)
 
 cleanup() {
     rm -rf "$archive_path" "$staging_dir"
-    ssh -i "$SSH_KEY_FILE" -o IdentitiesOnly=yes "$remote" "rm -rf $(quote_bash_arg "$remote_bundle_dir") $(quote_bash_arg "$remote_bundle_archive")" >/dev/null 2>&1 || true
+    run_cleanup_ssh
 }
 trap cleanup EXIT
 
@@ -233,16 +259,16 @@ cp -a "$ANSIBLE_DIR" "$staging_dir/ansible"
 tar -czf "$archive_path" -C "$staging_dir" .
 
 echo "Creating remote temporary bundle directory..."
-invoke_retry_transport "remote service bundle directory creation" ssh -i "$SSH_KEY_FILE" -o IdentitiesOnly=yes "$remote" "mkdir -p $(quote_bash_arg "$remote_bundle_dir")"
+invoke_retry_transport "remote service bundle directory creation" ssh "${ssh_common_args[@]}" "$remote" "mkdir -p $(quote_bash_arg "$remote_bundle_dir")"
 
 echo "Uploading service bundle archive..."
-scp -i "$SSH_KEY_FILE" -o IdentitiesOnly=yes "$archive_path" "$remote:$remote_bundle_archive"
+scp "${scp_common_args[@]}" "$archive_path" "$remote:$remote_bundle_archive"
 
 extract_command="set -e; rm -rf $(quote_bash_arg "$remote_bundle_dir"); mkdir -p $(quote_bash_arg "$remote_bundle_dir"); tar -xzf $(quote_bash_arg "$remote_bundle_archive") -C $(quote_bash_arg "$remote_bundle_dir"); test -f $(quote_bash_arg "$remote_service_runner_temp"); test -d $(quote_bash_arg "$remote_ansible_temp")"
 echo "Extracting service bundle on orchestration node..."
-invoke_retry_transport "remote service bundle extract" ssh -i "$SSH_KEY_FILE" -o IdentitiesOnly=yes "$remote" "$extract_command"
+invoke_retry_transport "remote service bundle extract" ssh "${ssh_common_args[@]}" "$remote" "$extract_command"
 
 echo "Installing service bundle and running remote service command..."
-ssh -i "$SSH_KEY_FILE" -o IdentitiesOnly=yes "$remote" "$install_and_run_command"
+ssh "${ssh_common_args[@]}" "$remote" "$install_and_run_command"
 
 echo "Cleaning remote temporary service bundle..."
