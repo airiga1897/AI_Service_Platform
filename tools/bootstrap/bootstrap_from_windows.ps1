@@ -32,6 +32,7 @@ $ExpectedHeader = "current_alias,endpoint,connection,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 $PublicKeyBeginMarker = "__ANSIBLE_CONTROL_PUBLIC_KEY_BEGIN__"
 $PublicKeyEndMarker = "__ANSIBLE_CONTROL_PUBLIC_KEY_END__"
+. (Join-Path $PSScriptRoot "..\common\private_key_acl.ps1")
 
 function Fail($Message) {
     Write-Error $Message
@@ -184,8 +185,12 @@ function Save-BootstrapKeys($Lines, $AliasToSave, $IsManagement, $BaseOperatorDi
     $deployKey = Get-MarkedBlock $Lines "--- BEGIN SSH_KEY ---" "--- END SSH_KEY ---" "deploy private key"
     $adminKey = Get-MarkedBlock $Lines "--- BEGIN ADMIN KEY ---" "--- END ADMIN KEY ---" "admin private key"
 
-    Save-TextFile (Join-Path $aliasDir "deploy_key") $deployKey $AllowOverwrite
-    Save-TextFile (Join-Path $aliasDir "admin_key") $adminKey $AllowOverwrite
+    $deployKeyPath = Join-Path $aliasDir "deploy_key"
+    $adminKeyPath = Join-Path $aliasDir "admin_key"
+    Save-TextFile $deployKeyPath $deployKey $AllowOverwrite
+    Ensure-OpenSshPrivateKeyAcl $deployKeyPath
+    Save-TextFile $adminKeyPath $adminKey $AllowOverwrite
+    Ensure-OpenSshPrivateKeyAcl $adminKeyPath
     Write-Host "Saved bootstrap keys: $aliasDir"
 
     if ($IsManagement) {
@@ -195,7 +200,9 @@ function Save-BootstrapKeys($Lines, $AliasToSave, $IsManagement, $BaseOperatorDi
             Fail "Could not capture exactly one Ansible control public key from remote bootstrap output."
         }
 
-        Save-TextFile (Join-Path $aliasDir "ansible_control_key") $ansibleKey $AllowOverwrite
+        $ansibleKeyPath = Join-Path $aliasDir "ansible_control_key"
+        Save-TextFile $ansibleKeyPath $ansibleKey $AllowOverwrite
+        Ensure-OpenSshPrivateKeyAcl $ansibleKeyPath
         Save-TextFile (Join-Path $aliasDir "ansible_control.managed_nodes.pub") $publicKey $AllowOverwrite
         Save-TextFile $PublicKeyPath $publicKey $AllowOverwrite
         Write-Host "Saved Ansible control public key: $PublicKeyPath"

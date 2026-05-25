@@ -130,6 +130,33 @@ operator/softether/edge/vpn_server.config
 
 Это opaque secret state file. В v1 он копируется как baseline и не редактируется строковыми заменами.
 
+After first install, remote `vpn_server.config` is mutable SoftEther runtime state.
+Normal `vpn_edge present` rollout seeds this file only when it is missing and does
+not overwrite an existing config.
+
+To intentionally replace the live SoftEther config, use an explicit reseed action
+for one alias:
+
+```powershell
+.\tools\services\rollout_from_state.ps1 -ReseedVpnEdge vps4
+```
+
+WSL/Linux:
+
+```bash
+bash tools/services/rollout_from_state.sh --reseed-vpn-edge vps4
+```
+
+Low-level debug escape hatch:
+
+```powershell
+.\tools\services\service_remote.ps1 vpn_edge reseed -Limit vps4
+```
+
+`reseed` requires an installed `vpn_edge`, backs up the current remote config,
+copies `operator/softether/edge/vpn_server.config`, restarts `softether-edge`,
+and prints the backup path. Granular `vpncmd`-based updates are future work.
+
 ## HAProxy Routes Config
 
 Route settings хранятся вне git:

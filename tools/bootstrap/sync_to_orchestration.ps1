@@ -48,6 +48,7 @@ $ErrorActionPreference = "Stop"
 $ExpectedHeader = "current_alias,endpoint,connection,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 $IsWindowsPlatform = ($PSVersionTable.PSEdition -eq "Desktop") -or ($PSVersionTable.ContainsKey("Platform") -and $PSVersionTable.Platform -eq "Win32NT") -or ($env:OS -eq "Windows_NT")
+. (Join-Path $PSScriptRoot "..\common\private_key_acl.ps1")
 
 function Fail($Message) {
     Write-Error $Message
@@ -247,64 +248,6 @@ $remotePrepareInventoryTemp = "/tmp/ai-service-platform.prepare_orchestration_in
 $remoteVerifyTemp = "/tmp/ai-service-platform.verify_control_node.sh"
 $remote = "$SshUser@$($controlNode.endpoint)"
 
-function Test-PrivateKeyAcl($KeyFile) {
-    $broadPrincipalSids = @(
-        "S-1-1-0",       # Everyone
-        "S-1-5-11",      # Authenticated Users
-        "S-1-5-32-545"   # BUILTIN\Users
-    )
-    $acl = Get-Acl -LiteralPath $KeyFile
-    $badEntries = @()
-    foreach ($entry in $acl.Access) {
-        $identity = [string]$entry.IdentityReference
-        $sid = ""
-        try {
-            $sid = $entry.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
-        } catch {
-            $sid = ""
-        }
-        $hasRead = (($entry.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::Read) -ne 0) -or
-            (($entry.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::ReadData) -ne 0) -or
-            (($entry.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne 0)
-        if ($entry.AccessControlType -eq "Allow" -and $hasRead -and ($broadPrincipalSids -contains $sid)) {
-            $badEntries += $identity
-        }
-    }
-    return @($badEntries | Select-Object -Unique)
-}
-
-function Repair-PrivateKeyAcl($KeyFile) {
-    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    Write-Host "Fixing OpenSSH private key ACL for $KeyFile"
-    & icacls $KeyFile "/inheritance:r" | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-        Fail "icacls failed to disable inheritance for $KeyFile"
-    }
-    & icacls $KeyFile "/grant:r" "$currentUser`:R" | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-        Fail "icacls failed to grant read access to $currentUser for $KeyFile"
-    }
-}
-
-function Ensure-PrivateKeyAcl($KeyFile) {
-    if (-not $IsWindowsPlatform) {
-        return
-    }
-
-    $badEntries = Test-PrivateKeyAcl $KeyFile
-    if ($badEntries.Count -eq 0) {
-        return
-    }
-
-    $badText = $badEntries -join ", "
-    Write-Warning "OpenSSH private key ACL is too open for $KeyFile. Broad readable entries: $badText. Fixing automatically."
-    Repair-PrivateKeyAcl $KeyFile
-    $remainingBadEntries = Test-PrivateKeyAcl $KeyFile
-    if ($remainingBadEntries.Count -gt 0) {
-        Fail "OpenSSH private key ACL is still too open after automatic repair: $($remainingBadEntries -join ', ')"
-    }
-}
-
 function Get-SshCommonArgs($KeyFile) {
     $args = @("-i", $KeyFile, "-o", "IdentitiesOnly=yes")
     if ($AutoAcceptHostKey) {
@@ -397,7 +340,7 @@ function Clear-OpenSshHostKey($Endpoint) {
     }
 }
 
-Ensure-PrivateKeyAcl $SshKeyFile
+Ensure-OpenSshPrivateKeyAcl $SshKeyFile
 Clear-OpenSshHostKey $controlNode.endpoint
 
 try {

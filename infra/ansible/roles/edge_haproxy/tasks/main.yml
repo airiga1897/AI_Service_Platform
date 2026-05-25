@@ -6,6 +6,12 @@
       - edge_haproxy_purge_data in [true, false, 'true', 'false', 'True', 'False']
     fail_msg: "edge_haproxy_state must be present|absent and edge_haproxy_purge_data must be boolean-like."
 
+- name: Check edge_haproxy compose file
+  ansible.builtin.stat:
+    path: "{{ edge_haproxy_compose_file }}"
+  register: edge_haproxy_compose_stat
+  when: edge_haproxy_state == 'absent'
+
 - name: Check operator HAProxy management allowlist on control node
   ansible.builtin.stat:
     path: "{{ edge_haproxy_operator_vpn_mgmt_ips }}"
@@ -37,6 +43,29 @@
   become: false
   register: edge_haproxy_routes_file_stat
   when: edge_haproxy_state == 'present'
+
+- name: Check PyYAML on control node for route rendering
+  ansible.builtin.command:
+    cmd: python3 -c "import yaml"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  failed_when: false
+  register: edge_haproxy_pyyaml_check
+  when: edge_haproxy_state == 'present'
+
+- name: Install PyYAML on control node for route rendering
+  ansible.builtin.apt:
+    name: python3-yaml
+    state: present
+    update_cache: true
+  delegate_to: localhost
+  become: true
+  check_mode: false
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_pyyaml_check.rc != 0
 
 - name: Build edge_haproxy route model
   ansible.builtin.shell: |
@@ -267,6 +296,13 @@
   register: edge_haproxy_compose_template
   when: edge_haproxy_state == 'present'
 
+- name: Ensure Docker runtime baseline for edge_haproxy
+  ansible.builtin.include_role:
+    name: docker_runtime_baseline
+  when:
+    - not ansible_check_mode
+    - edge_haproxy_state == 'present' or (edge_haproxy_compose_stat.stat.exists | default(false))
+
 - name: Ensure Docker service is running for edge_haproxy
   ansible.builtin.systemd:
     name: docker
@@ -332,11 +368,59 @@
       or (edge_haproxy_blocked_ips_empty.changed | default(false))
       or (edge_haproxy_config_template.changed | default(false))
 
-- name: Check edge_haproxy compose file
-  ansible.builtin.stat:
-    path: "{{ edge_haproxy_compose_file }}"
-  register: edge_haproxy_compose_stat
-  when: edge_haproxy_state == 'absent'
+- name: Verify running edge_haproxy container network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ edge_haproxy_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ edge_haproxy_network_name }}"
+    EXPECTED_IP: "{{ edge_haproxy_container_ipv4 }}"
+  changed_when: false
+  register: edge_haproxy_container_ready
+  until: edge_haproxy_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify edge_haproxy config inside running container
+  ansible.builtin.command:
+    cmd: docker exec "{{ edge_haproxy_container_name }}" haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
+  changed_when: false
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify edge_haproxy published VPN ports when vpn_ingress is enabled
+  ansible.builtin.command:
+    cmd: docker port "{{ edge_haproxy_container_name }}"
+  register: edge_haproxy_docker_ports
+  changed_when: false
+  failed_when: >
+    ('443/tcp' not in edge_haproxy_docker_ports.stdout)
+    or ('992/tcp' not in edge_haproxy_docker_ports.stdout)
+    or ('1194/tcp' not in edge_haproxy_docker_ports.stdout)
+    or ('5555/tcp' not in edge_haproxy_docker_ports.stdout)
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.vpn_ingress_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Verify edge_haproxy published Minecraft ports when minecraft route is enabled
+  ansible.builtin.command:
+    cmd: docker port "{{ edge_haproxy_container_name }}"
+  register: edge_haproxy_minecraft_ports
+  changed_when: false
+  failed_when: >
+    ('25565/tcp' not in edge_haproxy_minecraft_ports.stdout)
+    or ('25575/tcp' not in edge_haproxy_minecraft_ports.stdout)
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.minecraft_enabled | default(false)
+    - not ansible_check_mode
 
 - name: Ensure Docker service is running before stopping edge_haproxy
   ansible.builtin.systemd:
@@ -345,7 +429,7 @@
     enabled: true
   when:
     - edge_haproxy_state == 'absent'
-    - edge_haproxy_compose_stat.stat.exists
+    - edge_haproxy_compose_stat.stat.exists | default(false)
     - not ansible_check_mode
 
 - name: Verify Docker Compose plugin is available before stopping edge_haproxy
@@ -354,7 +438,7 @@
   changed_when: false
   when:
     - edge_haproxy_state == 'absent'
-    - edge_haproxy_compose_stat.stat.exists
+    - edge_haproxy_compose_stat.stat.exists | default(false)
     - not ansible_check_mode
 
 - name: Stop edge_haproxy container
@@ -364,7 +448,7 @@
   changed_when: true
   when:
     - edge_haproxy_state == 'absent'
-    - edge_haproxy_compose_stat.stat.exists
+    - edge_haproxy_compose_stat.stat.exists | default(false)
     - not ansible_check_mode
 
 - name: Purge edge_haproxy runtime data when explicitly requested

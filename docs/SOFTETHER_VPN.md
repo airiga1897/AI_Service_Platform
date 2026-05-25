@@ -104,3 +104,38 @@ VPN-доступа, management-доступа и контролируемой м
   формата логов и реального поведения client IP.
 - Не коммитить `vpn_server.config`, если он содержит пароли, пользователей,
   ключи или другие секреты.
+
+## SoftEther Config Updates
+
+`operator/softether/edge/vpn_server.config` is an install seed, not a file that
+normal rollout continuously enforces. After the first successful start, the
+remote `/opt/ai-service-platform/vpn_edge/softether_data/vpn_server.config`
+belongs to SoftEther runtime state and may be changed by SoftEther itself.
+
+Normal `vpn_edge present` rollout copies the seed only when the remote config is
+missing. It does not overwrite the live config and does not restart
+`softether-edge` because of the seed.
+
+Intentional replacement uses the explicit reseed action and must target one
+alias:
+
+```powershell
+.\tools\services\rollout_from_state.ps1 -ReseedVpnEdge vps4
+```
+
+WSL/Linux equivalent:
+
+```bash
+bash tools/services/rollout_from_state.sh --reseed-vpn-edge vps4
+```
+
+The low-level debug escape hatch is:
+
+```powershell
+.\tools\services\service_remote.ps1 vpn_edge reseed -Limit vps4
+```
+
+The reseed action requires an installed `vpn_edge`, creates a timestamped backup
+of the live config, copies the operator seed, restarts `softether-edge`, verifies
+the container, and prints the backup path. More granular `vpncmd` updates are
+reserved for a later phase.

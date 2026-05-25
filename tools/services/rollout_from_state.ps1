@@ -7,6 +7,7 @@ param(
     [string]$SyncScript = "tools/bootstrap/sync_to_orchestration.ps1",
     [string]$ServiceRemoteScript = "tools/services/service_remote.ps1",
     [string]$VpnIngressDomain = "mine-craft.su",
+    [string[]]$ReseedVpnEdge = @(),
     [switch]$AutoAcceptHostKey,
     [switch]$SkipSync,
     [switch]$SkipPostcheck
@@ -34,9 +35,42 @@ function Split-AliasList($Value) {
     return @($Value -split "\+" | Where-Object { $_ })
 }
 
+function Split-OperatorAliasList($Value) {
+    if (-not $Value) { return @() }
+    $aliases = New-Object System.Collections.Generic.List[string]
+    foreach ($item in @($Value)) {
+        foreach ($alias in @([string]$item -split "[,+]" | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+            Add-UniqueAlias $aliases $alias
+        }
+    }
+    return @($aliases)
+}
+
 function Get-PresentServiceAliases($Rows, $Name) {
     $aliases = New-Object System.Collections.Generic.List[string]
     $rows = @($Rows | Where-Object { $_.kind -eq "service" -and $_.name -eq $Name -and $_.state -eq "present" })
+    foreach ($row in $rows) {
+        foreach ($alias in (Split-AliasList $row.active_aliases)) {
+            Add-UniqueAlias $aliases $alias
+        }
+    }
+    return @($aliases)
+}
+
+function Get-EdgeRouteAliasesByState($Rows, $Name, $States) {
+    $aliases = New-Object System.Collections.Generic.List[string]
+    $rows = @($Rows | Where-Object { $_.kind -eq "edge_route" -and $_.name -eq $Name -and $States -contains $_.state })
+    foreach ($row in $rows) {
+        foreach ($alias in (Split-AliasList $row.active_aliases)) {
+            Add-UniqueAlias $aliases $alias
+        }
+    }
+    return @($aliases)
+}
+
+function Get-AnyEdgeRouteAliasesByState($Rows, $States) {
+    $aliases = New-Object System.Collections.Generic.List[string]
+    $rows = @($Rows | Where-Object { $_.kind -eq "edge_route" -and $States -contains $_.state })
     foreach ($row in $rows) {
         foreach ($alias in (Split-AliasList $row.active_aliases)) {
             Add-UniqueAlias $aliases $alias
@@ -255,6 +289,16 @@ function Invoke-ServiceRemote($Service, $Action, $Limit, [switch]$Check, [switch
     Invoke-ChildScript $ServiceRemoteScript $args "$Service $Action"
 }
 
+function Invoke-VpnEdgeReseed($Alias, $ReseededAliases, $Summary) {
+    if ($ReseededAliases -contains $Alias) {
+        return
+    }
+    Write-Host "vpn_edge on ${Alias}: reseed"
+    Invoke-ServiceRemote "vpn_edge" "reseed" $Alias
+    Add-UniqueAlias $ReseededAliases $Alias
+    $Summary.Add("vpn_edge ${Alias}: reseeded") | Out-Null
+}
+
 function Invoke-Sync() {
     $args = @(
         "-NodesFile", $NodesFile,
@@ -312,6 +356,7 @@ $nodeRows = Import-Csv -LiteralPath $NodesFile
 $stateRows = Import-Csv -LiteralPath $StateFile
 $stateRows = @(Normalize-StateRows $stateRows $nodeRows $StateFile)
 Normalize-HaproxyRoutes (Join-Path (Join-Path $OperatorDir "haproxy") "routes.yml") (Get-PresentVpnIngressAliases $stateRows) $VpnIngressDomain
+$reseedVpnEdgeAliases = @(Split-OperatorAliasList $ReseedVpnEdge)
 
 $serviceRows = @($stateRows | Where-Object { $_.kind -eq "service" })
 if ($serviceRows.Count -eq 0) {
@@ -320,7 +365,20 @@ if ($serviceRows.Count -eq 0) {
 $edgeRouteRows = @($stateRows | Where-Object { $_.kind -eq "edge_route" })
 $edgeHaproxyAliases = @(Get-PresentServiceAliases $stateRows "edge_haproxy")
 $vpnEdgeAliases = @(Get-PresentServiceAliases $stateRows "vpn_edge")
+$vpnIngressAliases = @(Get-EdgeRouteAliasesByState $stateRows "vpn_ingress" @("present"))
+$presentEdgeRouteAliases = @(Get-AnyEdgeRouteAliasesByState $stateRows @("present"))
 $edgeRouteApplyAliases = New-Object System.Collections.Generic.List[string]
+$edgeRouteRemovalAliases = New-Object System.Collections.Generic.List[string]
+
+$nodeAliases = @($nodeRows | ForEach-Object { $_.current_alias } | Where-Object { $_ })
+foreach ($alias in $reseedVpnEdgeAliases) {
+    if ($nodeAliases -notcontains $alias) {
+        Fail "ReseedVpnEdge alias '$alias' is not present in nodes.csv"
+    }
+    if ($vpnEdgeAliases -notcontains $alias) {
+        Fail "ReseedVpnEdge alias '$alias' requires service vpn_edge present on the same alias in state.csv"
+    }
+}
 
 foreach ($routeRow in $edgeRouteRows) {
     if ($routeRow.state -notin @("present", "absent", "purged")) {
@@ -344,6 +402,31 @@ foreach ($routeRow in $edgeRouteRows) {
     }
 }
 
+foreach ($routeRow in @($edgeRouteRows | Where-Object { $_.state -in @("absent", "purged") })) {
+    foreach ($alias in (Split-AliasList $routeRow.active_aliases)) {
+        if ($edgeHaproxyAliases -contains $alias) {
+            Add-UniqueAlias $edgeRouteRemovalAliases $alias
+        }
+    }
+}
+
+foreach ($serviceRow in $serviceRows) {
+    if ($serviceRow.state -notin @("present", "absent", "purged")) {
+        Fail "$($serviceRow.name) state must be one of: present, absent, purged"
+    }
+    foreach ($alias in (Split-AliasList $serviceRow.active_aliases)) {
+        if ($serviceRow.name -eq "vpn_edge" -and $serviceRow.state -eq "present" -and ($vpnIngressAliases -notcontains $alias)) {
+            Fail "service vpn_edge is present on $alias, but edge_route vpn_ingress is not present on the same alias"
+        }
+        if ($serviceRow.name -eq "vpn_edge" -and $serviceRow.state -in @("absent", "purged") -and ($vpnIngressAliases -contains $alias)) {
+            Fail "service vpn_edge is $($serviceRow.state) on $alias, but edge_route vpn_ingress is still present on the same alias"
+        }
+        if ($serviceRow.name -eq "edge_haproxy" -and $serviceRow.state -in @("absent", "purged") -and ($presentEdgeRouteAliases -contains $alias)) {
+            Fail "service edge_haproxy is $($serviceRow.state) on $alias, but an edge_route is still present on the same alias"
+        }
+    }
+}
+
 if (-not $SkipSync) {
     Write-Host "Step 1/3: sync operator state to active orchestration node"
     Invoke-Sync
@@ -354,10 +437,35 @@ if (-not $SkipSync) {
 $summary = New-Object System.Collections.Generic.List[string]
 $plannedServices = New-Object System.Collections.Generic.List[string]
 $processedServiceActions = New-Object System.Collections.Generic.List[string]
+$reseededVpnEdgeAliases = New-Object System.Collections.Generic.List[string]
 Write-Host ""
 Write-Host "Step 2/3: rollout services from state.csv"
 
-foreach ($serviceRow in $serviceRows) {
+if ($edgeRouteRemovalAliases.Count -gt 0) {
+    Write-Host ""
+    Write-Host "Step 2a/3: remove absent edge routes through edge_haproxy before stopping backends"
+    if ($plannedServices -notcontains "edge_haproxy") {
+        Invoke-ServiceRemote "edge_haproxy" "plan" ""
+        Add-UniqueAlias $plannedServices "edge_haproxy"
+    }
+    foreach ($alias in $edgeRouteRemovalAliases) {
+        Write-Host "edge_haproxy route removal on ${alias}: dry-run"
+        Invoke-ServiceRemote "edge_haproxy" "apply" $alias -Check
+        Write-Host "edge_haproxy route removal on ${alias}: apply"
+        Invoke-ServiceRemote "edge_haproxy" "apply" $alias
+        Add-UniqueAlias $processedServiceActions "edge_haproxy|present|$alias"
+        $summary.Add("edge_haproxy routes ${alias}: removed absent routes") | Out-Null
+    }
+}
+
+$orderedServiceRows = @(
+    @($serviceRows | Where-Object { $_.state -eq "present" -and $_.name -ne "edge_haproxy" })
+    @($serviceRows | Where-Object { $_.state -eq "present" -and $_.name -eq "edge_haproxy" })
+    @($serviceRows | Where-Object { $_.state -in @("absent", "purged") -and $_.name -ne "edge_haproxy" })
+    @($serviceRows | Where-Object { $_.state -in @("absent", "purged") -and $_.name -eq "edge_haproxy" })
+)
+
+foreach ($serviceRow in $orderedServiceRows) {
     $service = $serviceRow.name
     $state = $serviceRow.state
     $aliases = @(Split-AliasList $serviceRow.active_aliases)
@@ -409,6 +517,9 @@ foreach ($serviceRow in $serviceRows) {
             Invoke-ServiceRemote $service "apply" $alias
             Invoke-Postcheck $service $state $alias
             $summary.Add("$service ${alias}: present") | Out-Null
+            if ($service -eq "vpn_edge" -and ($reseedVpnEdgeAliases -contains $alias)) {
+                Invoke-VpnEdgeReseed $alias $reseededVpnEdgeAliases $summary
+            }
         } elseif ($state -eq "absent") {
             Write-Host "$service on ${alias}: absent"
             Invoke-ServiceRemote $service "absent" $alias
@@ -427,12 +538,20 @@ if ($edgeRouteApplyAliases.Count -gt 0) {
     Write-Host ""
     Write-Host "Step 2b/3: apply edge route rendering through edge_haproxy"
     foreach ($alias in $edgeRouteApplyAliases) {
+        if ($processedServiceActions -contains "edge_haproxy|present|$alias") {
+            Write-Host "edge_haproxy routes on ${alias}: already applied by edge_haproxy service apply"
+            continue
+        }
         Write-Host "edge_haproxy routes on ${alias}: dry-run"
         Invoke-ServiceRemote "edge_haproxy" "apply" $alias -Check
         Write-Host "edge_haproxy routes on ${alias}: apply"
         Invoke-ServiceRemote "edge_haproxy" "apply" $alias
         $summary.Add("edge_haproxy routes ${alias}: applied") | Out-Null
     }
+}
+
+foreach ($alias in $reseedVpnEdgeAliases) {
+    Invoke-VpnEdgeReseed $alias $reseededVpnEdgeAliases $summary
 }
 
 Write-Host ""

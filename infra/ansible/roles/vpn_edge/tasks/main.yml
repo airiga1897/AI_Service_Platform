@@ -4,7 +4,14 @@
     that:
       - vpn_state in ['present', 'absent']
       - vpn_purge_data in [true, false, 'true', 'false', 'True', 'False']
-    fail_msg: "vpn_state must be present|absent and vpn_purge_data must be boolean-like."
+      - (vpn_reseed_config | default(false)) in [true, false, 'true', 'false', 'True', 'False']
+    fail_msg: "vpn_state must be present|absent and vpn_purge_data/vpn_reseed_config must be boolean-like."
+
+- name: Check vpn_edge compose file
+  ansible.builtin.stat:
+    path: "{{ vpn_edge_compose_file }}"
+  register: vpn_edge_compose_stat
+  when: vpn_state == 'absent' or ((vpn_reseed_config | default(false)) in [true, 'true', 'True'])
 
 - name: Check edge seed config on control node
   ansible.builtin.stat:
@@ -50,17 +57,27 @@
   register: vpn_edge_remote_config_stat
   when: vpn_state == 'present'
 
-- name: Backup existing remote edge config before replacement
+- name: Require installed vpn_edge before reseeding config
+  ansible.builtin.assert:
+    that:
+      - vpn_edge_compose_stat.stat.exists
+      - vpn_edge_remote_config_stat.stat.exists
+    fail_msg: "vpn_edge reseed requires an installed service with compose file and existing vpn_server.config on {{ inventory_hostname }}"
+  when:
+    - vpn_state == 'present'
+    - (vpn_reseed_config | default(false)) in [true, 'true', 'True']
+
+- name: Backup existing remote edge config before explicit reseed
   ansible.builtin.copy:
     src: "{{ vpn_edge_data_dir }}/vpn_server.config"
-    dest: "{{ vpn_edge_backup_dir }}/vpn_server.config.pre-vpn-edge-apply"
+    dest: "{{ vpn_edge_backup_dir }}/vpn_server.config.pre-reseed-{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}"
     remote_src: true
     mode: "0600"
-    backup: true
-  no_log: true
+  register: vpn_edge_reseed_backup
   when:
     - vpn_state == 'present'
     - vpn_edge_remote_config_stat.stat.exists
+    - (vpn_reseed_config | default(false)) in [true, 'true', 'True']
     - not ansible_check_mode
 
 - name: Install opaque SoftEther edge seed config
@@ -70,7 +87,18 @@
     mode: "0600"
   register: vpn_edge_seed_config_copy
   no_log: true
-  when: vpn_state == 'present'
+  when:
+    - vpn_state == 'present'
+    - >
+      (not vpn_edge_remote_config_stat.stat.exists)
+      or ((vpn_reseed_config | default(false)) in [true, 'true', 'True'])
+
+- name: Report SoftEther config reseed backup path
+  ansible.builtin.debug:
+    msg: "SoftEther config backup created before reseed: {{ vpn_edge_reseed_backup.dest }}"
+  when:
+    - vpn_edge_reseed_backup is defined
+    - vpn_edge_reseed_backup.dest is defined
 
 - name: Stage node-specific edge overrides when present
   ansible.builtin.copy:
@@ -91,6 +119,13 @@
     mode: "0640"
   register: vpn_edge_compose_template
   when: vpn_state == 'present'
+
+- name: Ensure Docker runtime baseline for vpn_edge
+  ansible.builtin.include_role:
+    name: docker_runtime_baseline
+  when:
+    - not ansible_check_mode
+    - vpn_state == 'present' or (vpn_edge_compose_stat.stat.exists | default(false))
 
 - name: Ensure Docker service is running for vpn_edge
   ansible.builtin.systemd:
@@ -143,14 +178,26 @@
     - not ansible_check_mode
     - not vpn_edge_compose_up.changed
     - >
-      (vpn_edge_seed_config_copy.changed | default(false))
+      ((vpn_reseed_config | default(false)) in [true, 'true', 'True'])
       or (vpn_edge_overrides_copy.changed | default(false))
 
-- name: Check vpn_edge compose file
-  ansible.builtin.stat:
-    path: "{{ vpn_edge_compose_file }}"
-  register: vpn_edge_compose_stat
-  when: vpn_state == 'absent'
+- name: Verify running vpn_edge container network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ vpn_edge_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ vpn_edge_network_name }}"
+    EXPECTED_IP: "{{ vpn_edge_container_ipv4 }}"
+  changed_when: false
+  register: vpn_edge_container_ready
+  until: vpn_edge_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
 
 - name: Ensure Docker service is running before stopping vpn_edge
   ansible.builtin.systemd:
@@ -159,7 +206,7 @@
     enabled: true
   when:
     - vpn_state == 'absent'
-    - vpn_edge_compose_stat.stat.exists
+    - vpn_edge_compose_stat.stat.exists | default(false)
     - not ansible_check_mode
 
 - name: Verify Docker Compose plugin is available before stopping vpn_edge
@@ -168,7 +215,7 @@
   changed_when: false
   when:
     - vpn_state == 'absent'
-    - vpn_edge_compose_stat.stat.exists
+    - vpn_edge_compose_stat.stat.exists | default(false)
     - not ansible_check_mode
 
 - name: Stop vpn_edge container
@@ -178,7 +225,7 @@
   changed_when: true
   when:
     - vpn_state == 'absent'
-    - vpn_edge_compose_stat.stat.exists
+    - vpn_edge_compose_stat.stat.exists | default(false)
     - not ansible_check_mode
 
 - name: Purge vpn_edge runtime data when explicitly requested

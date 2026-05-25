@@ -12,5 +12,6 @@
   vars:
     vpn_state: present
     vpn_purge_data: false
+    vpn_reseed_config: false
   roles:
     - vpn_edge

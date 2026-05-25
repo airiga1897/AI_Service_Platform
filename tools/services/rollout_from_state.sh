@@ -12,6 +12,7 @@ SERVICE_REMOTE_SCRIPT="tools/services/service_remote.sh"
 AUTO_ACCEPT_HOST_KEY="false"
 SKIP_SYNC="false"
 SKIP_POSTCHECK="false"
+RESEED_VPN_EDGE=""
 
 EXPECTED_HEADER="current_alias,endpoint,connection,root_password"
 EXPECTED_STATE_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
@@ -28,6 +29,8 @@ Options:
   --control-role NAME     Platform role to use as orchestration. Default: orchestration
   --control-alias ALIAS   Optional explicit orchestration alias.
   --auto-accept-host-key  Refresh known_hosts during sync.
+  --reseed-vpn-edge ALIASES
+                         Explicitly reseed SoftEther config for aliases.
   --skip-sync             Skip sync/verify step.
   --skip-postcheck        Skip service postcheck placeholders.
   -h, --help              Show help.
@@ -58,6 +61,12 @@ split_aliases_to_lines() {
     IFS="$old_ifs"
 }
 
+split_operator_aliases_to_lines() {
+    local aliases="$1"
+    aliases="${aliases//,/+}"
+    split_aliases_to_lines "$aliases"
+}
+
 alias_in_list() {
     local alias="$1"
     local aliases="$2"
@@ -75,6 +84,55 @@ add_unique_alias() {
         [ "$existing" = "$alias" ] && return
     done
     edge_route_apply_aliases+=("$alias")
+}
+
+add_unique_to_array() {
+    local array_name="$1"
+    local value="$2"
+    local existing
+    eval "local current_values=(\"\${${array_name}[@]}\")"
+    for existing in "${current_values[@]}"; do
+        [ "$existing" = "$value" ] && return
+    done
+    eval "$array_name+=(\"\$value\")"
+}
+
+array_contains() {
+    local array_name="$1"
+    local value="$2"
+    local existing
+    eval "local current_values=(\"\${${array_name}[@]}\")"
+    for existing in "${current_values[@]}"; do
+        [ "$existing" = "$value" ] && return 0
+    done
+    return 1
+}
+
+append_aliases_to_var() {
+    local var_name="$1"
+    local aliases="$2"
+    local alias current
+    while IFS= read -r alias; do
+        [ -n "$alias" ] || continue
+        eval "current=\"\${$var_name}\""
+        if ! alias_in_list "$alias" "$current"; then
+            if [ -z "$current" ]; then
+                eval "$var_name=\"\$alias\""
+            else
+                eval "$var_name=\"\$current+\$alias\""
+            fi
+        fi
+    done < <(split_aliases_to_lines "$aliases")
+}
+
+ensure_service_plan() {
+    local service="$1"
+    local planned
+    for planned in "${planned_services[@]}"; do
+        [ "$planned" = "$service" ] && return
+    done
+    invoke_service_remote "$service" plan ""
+    planned_services+=("$service")
 }
 
 invoke_service_remote() {
@@ -95,6 +153,17 @@ invoke_service_remote() {
     [ "$check" = "true" ] && args+=("--check")
     [ "$confirm_purge" = "true" ] && args+=("--confirm-purge")
     bash "$SERVICE_REMOTE_SCRIPT" "${args[@]}"
+}
+
+invoke_vpn_edge_reseed() {
+    local alias="$1"
+    if array_contains reseeded_vpn_edge_aliases "$alias"; then
+        return
+    fi
+    echo "vpn_edge on $alias: reseed"
+    invoke_service_remote "vpn_edge" reseed "$alias"
+    reseeded_vpn_edge_aliases+=("$alias")
+    summary+=("vpn_edge $alias: reseeded")
 }
 
 invoke_sync() {
@@ -143,6 +212,7 @@ while [ "$#" -gt 0 ]; do
         --sync-script) SYNC_SCRIPT="${2:-}"; shift 2 ;;
         --service-remote-script) SERVICE_REMOTE_SCRIPT="${2:-}"; shift 2 ;;
         --auto-accept-host-key|--refresh-known-hosts) AUTO_ACCEPT_HOST_KEY="true"; shift ;;
+        --reseed-vpn-edge) RESEED_VPN_EDGE="${2:-}"; shift 2 ;;
         --skip-sync) SKIP_SYNC="true"; shift ;;
         --skip-postcheck) SKIP_POSTCHECK="true"; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -160,8 +230,19 @@ first_line="$(head -n 1 "$NODES_FILE" | tr -d '\r')"
 state_first_line="$(head -n 1 "$STATE_FILE" | tr -d '\r')"
 [ "$state_first_line" = "$EXPECTED_STATE_HEADER" ] || fail "state.csv header must be exactly: $EXPECTED_STATE_HEADER"
 
+node_aliases=""
+while IFS=, read -r current_alias _endpoint _connection _root_password extra || [ -n "${current_alias:-}" ]; do
+    current_alias="${current_alias//$'\r'/}"
+    extra="${extra//$'\r'/}"
+    [ -z "$current_alias" ] && continue
+    [ -z "$extra" ] || fail "nodes.csv row for $current_alias has too many columns"
+    append_aliases_to_var node_aliases "$current_alias"
+done < <(tail -n +2 "$NODES_FILE")
+
 edge_haproxy_aliases=""
 vpn_edge_aliases=""
+vpn_ingress_aliases=""
+present_edge_route_aliases=""
 while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _old_aliases row_state extra || [ -n "${kind:-}" ]; do
     kind="${kind//$'\r'/}"
     name="${name//$'\r'/}"
@@ -171,12 +252,25 @@ while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _
     [ -z "$kind" ] && continue
     [ -z "$extra" ] || fail "state.csv row for $name has too many columns"
     if [ "$kind" = "service" ] && [ "$row_state" = "present" ]; then
-        [ "$name" = "edge_haproxy" ] && edge_haproxy_aliases="$active_aliases"
-        [ "$name" = "vpn_edge" ] && vpn_edge_aliases="$active_aliases"
+        [ "$name" = "edge_haproxy" ] && append_aliases_to_var edge_haproxy_aliases "$active_aliases"
+        [ "$name" = "vpn_edge" ] && append_aliases_to_var vpn_edge_aliases "$active_aliases"
     fi
 done < <(tail -n +2 "$STATE_FILE")
 
+reseed_vpn_edge_aliases=()
+while IFS= read -r alias; do
+    [ -n "$alias" ] || continue
+    if ! alias_in_list "$alias" "$node_aliases"; then
+        fail "reseed-vpn-edge alias '$alias' is not present in nodes.csv"
+    fi
+    if ! alias_in_list "$alias" "$vpn_edge_aliases"; then
+        fail "reseed-vpn-edge alias '$alias' requires service vpn_edge present on the same alias in state.csv"
+    fi
+    add_unique_to_array reseed_vpn_edge_aliases "$alias"
+done < <(split_operator_aliases_to_lines "$RESEED_VPN_EDGE")
+
 edge_route_apply_aliases=()
+edge_route_removal_aliases=()
 while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _old_aliases row_state extra || [ -n "${kind:-}" ]; do
     kind="${kind//$'\r'/}"
     name="${name//$'\r'/}"
@@ -189,7 +283,17 @@ while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _
         present|absent|purged) ;;
         *) fail "$name edge_route state must be one of: present, absent, purged" ;;
     esac
-    [ "$row_state" = "present" ] || continue
+    if [ "$row_state" != "present" ]; then
+        while IFS= read -r alias; do
+            [ -n "$alias" ] || continue
+            if alias_in_list "$alias" "$edge_haproxy_aliases"; then
+                add_unique_to_array edge_route_removal_aliases "$alias"
+            fi
+        done < <(split_aliases_to_lines "$active_aliases")
+        continue
+    fi
+    append_aliases_to_var present_edge_route_aliases "$active_aliases"
+    [ "$name" = "vpn_ingress" ] && append_aliases_to_var vpn_ingress_aliases "$active_aliases"
     mapfile -t route_aliases < <(split_aliases_to_lines "$active_aliases")
     [ "${#route_aliases[@]}" -gt 0 ] || fail "edge_route $name has state=present but active_aliases is empty"
     for alias in "${route_aliases[@]}"; do
@@ -199,6 +303,32 @@ while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _
         fi
         add_unique_alias "$alias"
     done
+done < <(tail -n +2 "$STATE_FILE")
+
+while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _old_aliases row_state extra || [ -n "${kind:-}" ]; do
+    kind="${kind//$'\r'/}"
+    name="${name//$'\r'/}"
+    active_aliases="${active_aliases//$'\r'/}"
+    row_state="${row_state//$'\r'/}"
+    extra="${extra//$'\r'/}"
+    [ "$kind" = "service" ] || continue
+    [ -z "$extra" ] || fail "state.csv row for service $name has too many columns"
+    case "$row_state" in
+        present|absent|purged) ;;
+        *) fail "$name state must be one of: present, absent, purged" ;;
+    esac
+    while IFS= read -r alias; do
+        [ -n "$alias" ] || continue
+        if [ "$name" = "vpn_edge" ] && [ "$row_state" = "present" ] && ! alias_in_list "$alias" "$vpn_ingress_aliases"; then
+            fail "service vpn_edge is present on $alias, but edge_route vpn_ingress is not present on the same alias"
+        fi
+        if [ "$name" = "vpn_edge" ] && { [ "$row_state" = "absent" ] || [ "$row_state" = "purged" ]; } && alias_in_list "$alias" "$vpn_ingress_aliases"; then
+            fail "service vpn_edge is $row_state on $alias, but edge_route vpn_ingress is still present on the same alias"
+        fi
+        if [ "$name" = "edge_haproxy" ] && { [ "$row_state" = "absent" ] || [ "$row_state" = "purged" ]; } && alias_in_list "$alias" "$present_edge_route_aliases"; then
+            fail "service edge_haproxy is $row_state on $alias, but an edge_route is still present on the same alias"
+        fi
+    done < <(split_aliases_to_lines "$active_aliases")
 done < <(tail -n +2 "$STATE_FILE")
 
 if [ "$SKIP_SYNC" = "false" ]; then
@@ -211,13 +341,41 @@ fi
 echo ""
 echo "Step 2/3: rollout services from state.csv"
 summary=()
-while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _old_aliases row_state extra || [ -n "${kind:-}" ]; do
+planned_services=()
+processed_service_actions=()
+reseeded_vpn_edge_aliases=()
+
+if [ "${#edge_route_removal_aliases[@]}" -gt 0 ]; then
+    echo ""
+    echo "Step 2a/3: remove absent edge routes through edge_haproxy before stopping backends"
+    ensure_service_plan "edge_haproxy"
+    for alias in "${edge_route_removal_aliases[@]}"; do
+        echo "edge_haproxy route removal on $alias: dry-run"
+        invoke_service_remote "edge_haproxy" apply "$alias" true
+        echo "edge_haproxy route removal on $alias: apply"
+        invoke_service_remote "edge_haproxy" apply "$alias"
+        add_unique_to_array processed_service_actions "edge_haproxy|present|$alias"
+        summary+=("edge_haproxy routes $alias: removed absent routes")
+    done
+fi
+
+process_service_rows() {
+    local desired_state="$1"
+    local service_filter="$2"
+    while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _old_aliases row_state extra || [ -n "${kind:-}" ]; do
     kind="${kind//$'\r'/}"
     name="${name//$'\r'/}"
     active_aliases="${active_aliases//$'\r'/}"
     row_state="${row_state//$'\r'/}"
     extra="${extra//$'\r'/}"
     [ "$kind" = "service" ] || continue
+    [ "$row_state" = "$desired_state" ] || continue
+    case "$service_filter" in
+        all) ;;
+        non-edge-haproxy) [ "$name" != "edge_haproxy" ] || continue ;;
+        edge-haproxy) [ "$name" = "edge_haproxy" ] || continue ;;
+        *) fail "Unknown service filter: $service_filter" ;;
+    esac
     [ -z "$extra" ] || fail "state.csv row for service $name has too many columns"
 
     case "$row_state" in
@@ -241,7 +399,7 @@ while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _
     echo ""
     echo "Service: $name"
     echo "State:   $row_state"
-    invoke_service_remote "$name" plan ""
+    ensure_service_plan "$name"
 
     mapfile -t aliases < <(split_aliases_to_lines "$active_aliases")
     if [ "${#aliases[@]}" -eq 0 ]; then
@@ -254,6 +412,14 @@ while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _
     fi
 
     for alias in "${aliases[@]}"; do
+        action_key="$name|$row_state|$alias"
+        for processed in "${processed_service_actions[@]}"; do
+            if [ "$processed" = "$action_key" ]; then
+                echo "$name on $alias: duplicate state row for state=$row_state; skipped"
+                continue 2
+            fi
+        done
+        processed_service_actions+=("$action_key")
         case "$row_state" in
             present)
                 echo "$name on $alias: dry-run"
@@ -262,6 +428,9 @@ while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _
                 invoke_service_remote "$name" apply "$alias"
                 invoke_postcheck "$name" "$row_state" "$alias"
                 summary+=("$name $alias: present")
+                if [ "$name" = "vpn_edge" ] && array_contains reseed_vpn_edge_aliases "$alias"; then
+                    invoke_vpn_edge_reseed "$alias"
+                fi
                 ;;
             absent)
                 echo "$name on $alias: absent"
@@ -278,11 +447,30 @@ while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _
         esac
     done
 done < <(tail -n +2 "$STATE_FILE")
+}
+
+process_service_rows present non-edge-haproxy
+process_service_rows present edge-haproxy
+process_service_rows absent non-edge-haproxy
+process_service_rows purged non-edge-haproxy
+process_service_rows absent edge-haproxy
+process_service_rows purged edge-haproxy
 
 if [ "${#edge_route_apply_aliases[@]}" -gt 0 ]; then
     echo ""
     echo "Step 2b/3: apply edge route rendering through edge_haproxy"
     for alias in "${edge_route_apply_aliases[@]}"; do
+        already_applied="false"
+        for processed in "${processed_service_actions[@]}"; do
+            if [ "$processed" = "edge_haproxy|present|$alias" ]; then
+                already_applied="true"
+                break
+            fi
+        done
+        if [ "$already_applied" = "true" ]; then
+            echo "edge_haproxy routes on $alias: already applied by edge_haproxy service apply"
+            continue
+        fi
         echo "edge_haproxy routes on $alias: dry-run"
         invoke_service_remote "edge_haproxy" apply "$alias" true
         echo "edge_haproxy routes on $alias: apply"
@@ -290,6 +478,10 @@ if [ "${#edge_route_apply_aliases[@]}" -gt 0 ]; then
         summary+=("edge_haproxy routes $alias: applied")
     done
 fi
+
+for alias in "${reseed_vpn_edge_aliases[@]}"; do
+    invoke_vpn_edge_reseed "$alias"
+done
 
 echo ""
 echo "Step 3/3: summary"

@@ -39,6 +39,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ExpectedHeader = "current_alias,endpoint,connection,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
+. (Join-Path $PSScriptRoot "..\common\private_key_acl.ps1")
 
 function Fail($Message) {
     Write-Error $Message
@@ -182,6 +183,7 @@ if (-not $controlNeedsBootstrap) {
     $controlAdminKey = Join-Path (Join-Path $OperatorDir $controlNode.current_alias) "admin_key"
     if (-not $SkipSync) {
         Require-File $controlAdminKey "Control admin key"
+        Ensure-OpenSshPrivateKeyAcl $controlAdminKey
     }
     if (-not $SkipManaged -and $ManagedAliases.Count -gt 0) {
         Require-File $AnsibleAuthorizedKeyFile "AnsibleAuthorizedKeyFile"

@@ -31,7 +31,7 @@ EXPECTED_STATE_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,
 usage() {
     cat <<'USAGE'
 Usage:
-  bash tools/services/service_remote.sh <service> <plan|apply|absent|purge> [options]
+  bash tools/services/service_remote.sh <service> <plan|apply|absent|purge|reseed> [options]
 
 Options:
   --nodes-file PATH       Operator nodes.csv. Default: ./operator/nodes.csv
@@ -188,8 +188,8 @@ if [ "$SERVICE" = "-h" ] || [ "$SERVICE" = "--help" ]; then
     exit 0
 fi
 case "$ACTION" in
-    plan|apply|absent|purge) ;;
-    *) usage; fail "Action must be one of: plan, apply, absent, purge" ;;
+    plan|apply|absent|purge|reseed) ;;
+    *) usage; fail "Action must be one of: plan, apply, absent, purge, reseed" ;;
 esac
 if [ "$SERVICE" = "vpn" ]; then
     fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"

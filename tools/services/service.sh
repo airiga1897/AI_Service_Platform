@@ -25,6 +25,7 @@ Usage:
   bash tools/services/service.sh vpn_edge apply [options]
   bash tools/services/service.sh vpn_edge absent [options]
   bash tools/services/service.sh vpn_edge purge --confirm-purge [options]
+  bash tools/services/service.sh vpn_edge reseed --limit ALIAS [options]
 
 Options:
   --nodes-file PATH      Operator nodes.csv. Default: ./operator/nodes.csv
@@ -80,12 +81,13 @@ service_extra_vars() {
     local service="$1"
     local state="$2"
     local purge="$3"
+    local reseed="${4:-false}"
     case "$service" in
         edge_haproxy)
             printf '%s\n' "-e" "edge_haproxy_state=$state" "-e" "edge_haproxy_purge_data=$purge"
             ;;
         vpn_edge)
-            printf '%s\n' "-e" "vpn_state=$state" "-e" "vpn_purge_data=$purge"
+            printf '%s\n' "-e" "vpn_state=$state" "-e" "vpn_purge_data=$purge" "-e" "vpn_reseed_config=$reseed"
             ;;
         *)
             return 1
@@ -117,8 +119,8 @@ case "$SERVICE" in
     *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge. Reserved: vpn_cascade." ;;
 esac
 case "$ACTION" in
-    plan|apply|absent|purge) ;;
-    *) usage; fail "Action must be one of: plan, apply, absent, purge" ;;
+    plan|apply|absent|purge|reseed) ;;
+    *) usage; fail "Action must be one of: plan, apply, absent, purge, reseed" ;;
 esac
 shift 2
 
@@ -282,6 +284,15 @@ fi
 if [ "$ACTION" = "purge" ] && [ "$CONFIRM_PURGE" != "true" ]; then
     fail "purge requires --confirm-purge"
 fi
+if [ "$ACTION" = "reseed" ] && [ "$SERVICE" != "vpn_edge" ]; then
+    fail "reseed is supported only for vpn_edge"
+fi
+if [ "$ACTION" = "reseed" ] && [ -z "$LIMIT" ]; then
+    fail "vpn_edge reseed requires --limit ALIAS"
+fi
+if [ "$ACTION" = "reseed" ] && [ "$service_row_state" != "present" ]; then
+    fail "vpn_edge reseed requires state=present in $STATE_FILE"
+fi
 if [ "$ACTION" = "apply" ] && [ "$service_row_state" != "present" ]; then
     fail "$SERVICE apply requires state=present in $STATE_FILE"
 fi
@@ -291,11 +302,15 @@ fi
 
 service_state="present"
 service_purge_data="false"
+service_reseed_config="false"
 if [ "$ACTION" = "absent" ] || [ "$ACTION" = "purge" ]; then
     service_state="absent"
 fi
 if [ "$ACTION" = "purge" ]; then
     service_purge_data="true"
+fi
+if [ "$ACTION" = "reseed" ]; then
+    service_reseed_config="true"
 fi
 
 limit_args=(--limit "${LIMIT:-$service_group}")
@@ -304,7 +319,7 @@ if [ "$CHECK" = "true" ]; then
     check_args=(--check)
 fi
 
-mapfile -t extra_vars < <(service_extra_vars "$SERVICE" "$service_state" "$service_purge_data")
+mapfile -t extra_vars < <(service_extra_vars "$SERVICE" "$service_state" "$service_purge_data" "$service_reseed_config")
 
 set -x
 run_ansible_playbook \

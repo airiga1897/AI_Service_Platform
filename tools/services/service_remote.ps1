@@ -3,7 +3,7 @@ param(
     [string]$Service,
 
     [Parameter(Mandatory=$true, Position=1)]
-    [ValidateSet("plan", "apply", "absent", "purge")]
+    [ValidateSet("plan", "apply", "absent", "purge", "reseed")]
     [string]$Action,
 
     [string]$NodesFile = ".\operator\nodes.csv",
@@ -50,6 +50,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ExpectedHeader = "current_alias,endpoint,connection,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
+. (Join-Path $PSScriptRoot "..\common\private_key_acl.ps1")
 
 function Fail($Message) {
     Write-Error $Message
@@ -276,6 +277,7 @@ if (-not $SshKeyFile) {
     $SshKeyFile = Join-Path (Join-Path $OperatorDir $controlNode.current_alias) "admin_key"
 }
 Require-File $SshKeyFile "SshKeyFile"
+Ensure-OpenSshPrivateKeyAcl $SshKeyFile
 Require-File $ServiceRunnerScript "ServiceRunnerScript"
 if (-not (Test-Path -LiteralPath $AnsibleDir -PathType Container)) {
     Fail "AnsibleDir not found: $AnsibleDir"
