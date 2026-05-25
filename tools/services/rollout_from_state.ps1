@@ -35,9 +35,14 @@ function Split-AliasList($Value) {
 }
 
 function Get-PresentServiceAliases($Rows, $Name) {
-    $row = $Rows | Where-Object { $_.kind -eq "service" -and $_.name -eq $Name -and $_.state -eq "present" } | Select-Object -First 1
-    if (-not $row) { return @() }
-    return @(Split-AliasList $row.active_aliases)
+    $aliases = New-Object System.Collections.Generic.List[string]
+    $rows = @($Rows | Where-Object { $_.kind -eq "service" -and $_.name -eq $Name -and $_.state -eq "present" })
+    foreach ($row in $rows) {
+        foreach ($alias in (Split-AliasList $row.active_aliases)) {
+            Add-UniqueAlias $aliases $alias
+        }
+    }
+    return @($aliases)
 }
 
 function Add-UniqueAlias($List, $Alias) {
@@ -347,6 +352,8 @@ if (-not $SkipSync) {
 }
 
 $summary = New-Object System.Collections.Generic.List[string]
+$plannedServices = New-Object System.Collections.Generic.List[string]
+$processedServiceActions = New-Object System.Collections.Generic.List[string]
 Write-Host ""
 Write-Host "Step 2/3: rollout services from state.csv"
 
@@ -373,7 +380,10 @@ foreach ($serviceRow in $serviceRows) {
     Write-Host ""
     Write-Host "Service: $service"
     Write-Host "State:   $state"
-    Invoke-ServiceRemote $service "plan" ""
+    if ($plannedServices -notcontains $service) {
+        Invoke-ServiceRemote $service "plan" ""
+        Add-UniqueAlias $plannedServices $service
+    }
 
     if ($aliases.Count -eq 0) {
         if ($state -eq "present") {
@@ -385,6 +395,13 @@ foreach ($serviceRow in $serviceRows) {
     }
 
     foreach ($alias in $aliases) {
+        $actionKey = "$service|$state|$alias"
+        if ($processedServiceActions -contains $actionKey) {
+            Write-Host "$service on ${alias}: duplicate state row for state=$state; skipped"
+            continue
+        }
+        Add-UniqueAlias $processedServiceActions $actionKey
+
         if ($state -eq "present") {
             Write-Host "$service on ${alias}: dry-run"
             Invoke-ServiceRemote $service "apply" $alias -Check

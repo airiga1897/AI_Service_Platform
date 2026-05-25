@@ -38,9 +38,13 @@ param(
 
     [switch]$ConfirmPurge,
 
+    [switch]$DetachedRemoteJob,
+
     [int]$RemoteJobPollSeconds = 2,
 
-    [int]$RemoteJobReconnectAttempts = 30
+    [int]$RemoteJobReconnectAttempts = 30,
+
+    [int]$RemoteJobHeartbeatSeconds = 10
 )
 
 $ErrorActionPreference = "Stop"
@@ -127,9 +131,16 @@ function Invoke-CaptureExternal($FilePath, $Arguments) {
     return @{ ExitCode = $LASTEXITCODE; Output = @($output) }
 }
 
-function Wait-RemoteServiceJob($SshArgs, $Remote, $RemoteLog, $RemoteDone, $RemoteExitCode, $PollSeconds, $ReconnectAttempts) {
+function Format-Elapsed($StartedAt) {
+    $elapsed = [DateTime]::UtcNow - $StartedAt
+    return "{0:00}:{1:00}:{2:00}" -f [int]$elapsed.TotalHours, $elapsed.Minutes, $elapsed.Seconds
+}
+
+function Wait-RemoteServiceJob($SshArgs, $Remote, $RemoteLog, $RemoteDone, $RemoteExitCode, $PollSeconds, $ReconnectAttempts, $HeartbeatSeconds) {
     $printedLines = 0
     $transportFailures = 0
+    $startedAt = [DateTime]::UtcNow
+    $lastHeartbeatAt = $startedAt
 
     while ($true) {
         $pollCommand = @(
@@ -173,12 +184,25 @@ function Wait-RemoteServiceJob($SshArgs, $Remote, $RemoteLog, $RemoteDone, $Remo
             if ($exitCode -ne 0) {
                 Fail "remote service command failed with exit code $exitCode"
             }
+            Write-Host ("remote job completed successfully after {0}" -f (Format-Elapsed $startedAt))
             return
         }
 
+        $printedThisPoll = 0
         foreach ($line in $result.Output) {
-            Write-Host $line
+            if ($line) {
+                Write-Host $line
+                $printedThisPoll++
+            } else {
+                Write-Host ""
+            }
             $printedLines++
+        }
+
+        $now = [DateTime]::UtcNow
+        if ($printedThisPoll -eq 0 -and $HeartbeatSeconds -gt 0 -and (($now - $lastHeartbeatAt).TotalSeconds -ge $HeartbeatSeconds)) {
+            Write-Host ("remote job still running... elapsed {0}, polling every {1}s" -f (Format-Elapsed $startedAt), $PollSeconds)
+            $lastHeartbeatAt = $now
         }
         Start-Sleep -Seconds $PollSeconds
     }
@@ -288,7 +312,7 @@ if ($ConfirmPurge) {
 $serviceCommand = @(
     "set -e",
     "cd $(Quote-BashArg $RemoteRepoDir)",
-    "bash tools/services/service.sh $($remoteArgs -join ' ')"
+    "if command -v stdbuf >/dev/null 2>&1; then stdbuf -oL -eL bash tools/services/service.sh $($remoteArgs -join ' '); else bash tools/services/service.sh $($remoteArgs -join ' '); fi"
 ) -join "; "
 $installCommands = @(
     "set -e",
@@ -308,6 +332,11 @@ if ($Limit) {
 }
 if ($Check) {
     Write-Host "Check:        true"
+}
+if ($DetachedRemoteJob) {
+    Write-Host "Mode:         detached remote job"
+} else {
+    Write-Host "Mode:         direct SSH stream"
 }
 
 $sshCommonArgs = @(
@@ -331,11 +360,34 @@ $scpCommonArgs = @(
     "-o", "ServerAliveCountMax=2"
 )
 $runScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-service-platform.service-job." + [guid]::NewGuid().ToString("N") + ".sh")
+$remoteServiceDisplayArgs = @($Service, $Action)
+if ($Limit) {
+    $remoteServiceDisplayArgs += @("--limit", $Limit)
+}
+if ($Check) {
+    $remoteServiceDisplayArgs += "--check"
+}
+if ($ConfirmPurge) {
+    $remoteServiceDisplayArgs += "--confirm-purge"
+}
+$remoteServiceDisplay = $remoteServiceDisplayArgs -join " "
 $runScriptLines = @(
     "#!/usr/bin/env bash",
     "set +e",
-    "bash -lc $(Quote-BashArg $installCommands) > $(Quote-BashArg $remoteJobLog) 2>&1",
+    "export PYTHONUNBUFFERED=1",
+    "export ANSIBLE_FORCE_COLOR=0",
+    "export ANSIBLE_DISPLAY_SKIPPED_HOSTS=true",
+    "exec > $(Quote-BashArg $remoteJobLog) 2>&1",
+    "log_stage() { printf '[remote-job] %s %s\n' ""`$(date -u '+%H:%M:%S')"" ""`$*""; }",
+    "run_stage() { label=""`$1""; shift; log_stage ""`$label""; ""`$@""; rc=""`$?""; if [ ""`$rc"" -ne 0 ]; then log_stage ""failed: `$label (rc=`$rc)""; return ""`$rc""; fi; }",
+    "run_stage $(Quote-BashArg "prepare repo directories") sudo mkdir -p $(Quote-BashArg "$RemoteRepoDir/tools/services") $(Quote-BashArg "$RemoteRepoDir/infra")",
+    "run_stage $(Quote-BashArg "install service runner") sudo install -m 700 $(Quote-BashArg $remoteServiceRunnerTemp) $(Quote-BashArg "$RemoteRepoDir/tools/services/service.sh")",
+    "run_stage $(Quote-BashArg "remove previous Ansible bundle") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/ansible")",
+    "run_stage $(Quote-BashArg "install Ansible bundle") sudo cp -a $(Quote-BashArg $remoteAnsibleTemp) $(Quote-BashArg "$RemoteRepoDir/infra/ansible")",
+    "log_stage $(Quote-BashArg "running service command: $remoteServiceDisplay")",
+    "sudo bash -lc $(Quote-BashArg $serviceCommand)",
     "rc=`$?",
+    "log_stage ""service command finished with rc=`$rc""",
     "printf '%s\n' `$rc > $(Quote-BashArg $remoteJobExitCode)",
     "touch $(Quote-BashArg $remoteJobDone)",
     "exit `$rc"
@@ -344,13 +396,21 @@ $runScriptLines = @(
 try {
     Write-Host "Preparing local service bundle..."
     $bundle = New-TarGzBundle $ServiceRunnerScript $AnsibleDir
-    Set-Content -LiteralPath $runScriptPath -Value $runScriptLines -Encoding ascii
+    if ($DetachedRemoteJob) {
+        Set-Content -LiteralPath $runScriptPath -Value $runScriptLines -Encoding ascii
+    }
 
-    Write-Host "Creating remote temporary bundle and job directories..."
+    if ($DetachedRemoteJob) {
+        Write-Host "Creating remote temporary bundle and job directories..."
+        $mkdirCommand = "mkdir -p $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteJobDir)"
+    } else {
+        Write-Host "Creating remote temporary bundle directory..."
+        $mkdirCommand = "mkdir -p $(Quote-BashArg $remoteBundleDir)"
+    }
     Invoke-ExternalRetryTransport "ssh" ($sshCommonArgs + @(
         $remote,
-        "mkdir -p $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteJobDir)"
-    )) "remote service bundle and job directory creation"
+        $mkdirCommand
+    )) "remote service bundle directory creation"
 
     Write-Host "Uploading service bundle archive..."
     Invoke-External "scp" ($scpCommonArgs + @(
@@ -358,11 +418,13 @@ try {
         "${remote}:$remoteBundleArchive"
     )) "service bundle upload"
 
-    Write-Host "Uploading remote job runner..."
-    Invoke-External "scp" ($scpCommonArgs + @(
-        $runScriptPath,
-        "${remote}:$remoteJobScript"
-    )) "remote job runner upload"
+    if ($DetachedRemoteJob) {
+        Write-Host "Uploading remote job runner..."
+        Invoke-External "scp" ($scpCommonArgs + @(
+            $runScriptPath,
+            "${remote}:$remoteJobScript"
+        )) "remote job runner upload"
+    }
 
     $extractCommand = @(
         "set -e",
@@ -379,28 +441,40 @@ try {
         $extractCommand
     )) "remote service bundle extract"
 
-    $startJobCommand = @(
-        "set -e",
-        "chmod 700 $(Quote-BashArg $remoteJobScript)",
-        "rm -f $(Quote-BashArg $remoteJobLog) $(Quote-BashArg $remoteJobExitCode) $(Quote-BashArg $remoteJobDone) $(Quote-BashArg $remoteJobPid)",
-        "nohup bash $(Quote-BashArg $remoteJobScript) </dev/null >/dev/null 2>&1 & echo `$! > $(Quote-BashArg $remoteJobPid)"
-    ) -join "; "
+    if ($DetachedRemoteJob) {
+        $startJobCommand = @(
+            "set -e",
+            "chmod 700 $(Quote-BashArg $remoteJobScript)",
+            "rm -f $(Quote-BashArg $remoteJobLog) $(Quote-BashArg $remoteJobExitCode) $(Quote-BashArg $remoteJobDone) $(Quote-BashArg $remoteJobPid)",
+            "nohup bash $(Quote-BashArg $remoteJobScript) </dev/null >/dev/null 2>&1 & echo `$! > $(Quote-BashArg $remoteJobPid)"
+        ) -join "; "
 
-    Write-Host "Starting remote service job..."
-    Invoke-ExternalRetryTransport "ssh" ($sshCommonArgs + @(
-        $remote,
-        $startJobCommand
-    )) "remote service job start"
+        Write-Host "Starting remote service job..."
+        Invoke-ExternalRetryTransport "ssh" ($sshCommonArgs + @(
+            $remote,
+            $startJobCommand
+        )) "remote service job start"
 
-    Write-Host "Following remote service job log..."
-    Wait-RemoteServiceJob -SshArgs $sshCommonArgs -Remote $remote -RemoteLog $remoteJobLog -RemoteDone $remoteJobDone -RemoteExitCode $remoteJobExitCode -PollSeconds $RemoteJobPollSeconds -ReconnectAttempts $RemoteJobReconnectAttempts
+        Write-Host "Following remote service job log..."
+        Wait-RemoteServiceJob -SshArgs $sshCommonArgs -Remote $remote -RemoteLog $remoteJobLog -RemoteDone $remoteJobDone -RemoteExitCode $remoteJobExitCode -PollSeconds $RemoteJobPollSeconds -ReconnectAttempts $RemoteJobReconnectAttempts -HeartbeatSeconds $RemoteJobHeartbeatSeconds
+    } else {
+        Write-Host "Installing service bundle and running remote service command..."
+        Invoke-External "ssh" ($sshCommonArgs + @(
+            $remote,
+            $installCommands
+        )) "remote service command"
+    }
 } finally {
     if ($bundle) {
         Remove-Item -LiteralPath $bundle.ArchivePath -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $bundle.StagingDir -Recurse -Force -ErrorAction SilentlyContinue
     }
     Remove-Item -LiteralPath $runScriptPath -Force -ErrorAction SilentlyContinue
-    Write-Host "Cleaning remote temporary service bundle and job..."
+    if ($DetachedRemoteJob) {
+        Write-Host "Cleaning remote temporary service bundle and job..."
+    } else {
+        Write-Host "Cleaning remote temporary service bundle..."
+    }
     if ($remote -and $remoteBundleDir -and $remoteBundleArchive -and $remoteJobDir -and $sshCommonArgs) {
         Invoke-CleanupSsh ($sshCommonArgs + @(
             $remote,

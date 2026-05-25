@@ -20,8 +20,10 @@ ANSIBLE_DIR="infra/ansible"
 LIMIT=""
 CHECK="false"
 CONFIRM_PURGE="false"
+DETACHED_REMOTE_JOB="false"
 REMOTE_JOB_POLL_SECONDS=2
 REMOTE_JOB_RECONNECT_ATTEMPTS=30
+REMOTE_JOB_HEARTBEAT_SECONDS=10
 
 EXPECTED_HEADER="current_alias,endpoint,connection,root_password"
 EXPECTED_STATE_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
@@ -43,10 +45,13 @@ Options:
   --limit ALIAS           Service target alias.
   --check                 Pass --check to service.sh apply.
   --confirm-purge         Pass --confirm-purge to service.sh purge.
+  --detached-remote-job   Run service command as a detached job and poll its log.
   --remote-job-poll-seconds SECONDS
                           Poll interval for detached remote jobs. Default: 2.
   --remote-job-reconnect-attempts COUNT
                           SSH reconnect attempts while polling remote jobs. Default: 30.
+  --remote-job-heartbeat-seconds SECONDS
+                          Print a progress heartbeat when the remote log is quiet. Default: 10.
   -h, --help              Show help.
 USAGE
 }
@@ -107,12 +112,19 @@ run_cleanup_ssh() {
 wait_remote_service_job() {
     local printed_lines=0
     local transport_failures=0
+    local started_at
+    local last_heartbeat_at
     local poll_command
     local output
     local exit_code
     local line
     local seen_done
     local remote_exit_code
+    local printed_this_poll
+    local now
+
+    started_at="$(date +%s)"
+    last_heartbeat_at="$started_at"
 
     while true; do
         poll_command="if [ -f $(quote_bash_arg "$remote_job_log") ]; then tail -n +$((printed_lines + 1)) $(quote_bash_arg "$remote_job_log"); fi; if [ -f $(quote_bash_arg "$remote_job_done") ]; then echo __SERVICE_JOB_DONE__; cat $(quote_bash_arg "$remote_job_exit_code"); fi"
@@ -135,6 +147,7 @@ wait_remote_service_job() {
         transport_failures=0
         seen_done="false"
         remote_exit_code=""
+        printed_this_poll=0
         if [ -n "$output" ]; then
             while IFS= read -r line || [ -n "$line" ]; do
                 if [ "$seen_done" = "true" ]; then
@@ -147,6 +160,7 @@ wait_remote_service_job() {
                 fi
                 printf '%s\n' "$line"
                 printed_lines=$((printed_lines + 1))
+                printed_this_poll=$((printed_this_poll + 1))
             done <<< "$output"
         fi
 
@@ -155,9 +169,16 @@ wait_remote_service_job() {
                 ''|*[!0-9]*) fail "remote job completed but exit_code is invalid: ${remote_exit_code:-<empty>}" ;;
             esac
             [ "$remote_exit_code" -eq 0 ] || fail "remote service command failed with exit code $remote_exit_code"
+            now="$(date +%s)"
+            printf 'remote job completed successfully after %02d:%02d:%02d\n' "$(((now - started_at) / 3600))" "$((((now - started_at) % 3600) / 60))" "$(((now - started_at) % 60))"
             return 0
         fi
 
+        now="$(date +%s)"
+        if [ "$printed_this_poll" -eq 0 ] && [ "$REMOTE_JOB_HEARTBEAT_SECONDS" -gt 0 ] && [ $((now - last_heartbeat_at)) -ge "$REMOTE_JOB_HEARTBEAT_SECONDS" ]; then
+            printf 'remote job still running... elapsed %02d:%02d:%02d, polling every %ss\n' "$(((now - started_at) / 3600))" "$((((now - started_at) % 3600) / 60))" "$(((now - started_at) % 60))" "$REMOTE_JOB_POLL_SECONDS"
+            last_heartbeat_at="$now"
+        fi
         sleep "$REMOTE_JOB_POLL_SECONDS"
     done
 }
@@ -191,8 +212,10 @@ while [ "$#" -gt 0 ]; do
         --limit) LIMIT="${2:-}"; shift 2 ;;
         --check) CHECK="true"; shift ;;
         --confirm-purge) CONFIRM_PURGE="true"; shift ;;
+        --detached-remote-job) DETACHED_REMOTE_JOB="true"; shift ;;
         --remote-job-poll-seconds) REMOTE_JOB_POLL_SECONDS="${2:-}"; shift 2 ;;
         --remote-job-reconnect-attempts) REMOTE_JOB_RECONNECT_ATTEMPTS="${2:-}"; shift 2 ;;
+        --remote-job-heartbeat-seconds) REMOTE_JOB_HEARTBEAT_SECONDS="${2:-}"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) fail "Unknown option: $1" ;;
     esac
@@ -316,8 +339,9 @@ remote_args=(
 [ "$CHECK" = "true" ] && remote_args+=("--check")
 [ "$CONFIRM_PURGE" = "true" ] && remote_args+=("--confirm-purge")
 
-service_command="set -e; cd $(quote_bash_arg "$REMOTE_REPO_DIR"); bash tools/services/service.sh ${remote_args[*]}"
+service_command="set -e; cd $(quote_bash_arg "$REMOTE_REPO_DIR"); if command -v stdbuf >/dev/null 2>&1; then stdbuf -oL -eL bash tools/services/service.sh ${remote_args[*]}; else bash tools/services/service.sh ${remote_args[*]}; fi"
 install_and_run_command="set -e; sudo mkdir -p $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services") $(quote_bash_arg "$REMOTE_REPO_DIR/infra"); sudo install -m 700 $(quote_bash_arg "$remote_service_runner_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services/service.sh"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible"); sudo cp -a $(quote_bash_arg "$remote_ansible_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible"); sudo bash -lc $(quote_bash_arg "$service_command")"
+remote_service_display="${remote_args[*]}"
 
 echo "Control node: $active_aliases via role '$CONTROL_ROLE'"
 echo "Remote:       $remote"
@@ -325,39 +349,70 @@ echo "Service:      $SERVICE"
 echo "Action:       $ACTION"
 [ -n "$LIMIT" ] && echo "Limit:        $LIMIT"
 [ "$CHECK" = "true" ] && echo "Check:        true"
+if [ "$DETACHED_REMOTE_JOB" = "true" ]; then
+    echo "Mode:         detached remote job"
+else
+    echo "Mode:         direct SSH stream"
+fi
 
 echo "Preparing local service bundle..."
 cp "$SERVICE_RUNNER_SCRIPT" "$staging_dir/service.sh"
 cp -a "$ANSIBLE_DIR" "$staging_dir/ansible"
 tar -czf "$archive_path" -C "$staging_dir" .
-cat > "$run_script_path" <<EOF
+if [ "$DETACHED_REMOTE_JOB" = "true" ]; then
+    cat > "$run_script_path" <<EOF
 #!/usr/bin/env bash
 set +e
-bash -lc $(quote_bash_arg "$install_and_run_command") > $(quote_bash_arg "$remote_job_log") 2>&1
+export PYTHONUNBUFFERED=1
+export ANSIBLE_FORCE_COLOR=0
+export ANSIBLE_DISPLAY_SKIPPED_HOSTS=true
+exec > $(quote_bash_arg "$remote_job_log") 2>&1
+log_stage() { printf '[remote-job] %s %s\n' "\$(date -u '+%H:%M:%S')" "\$*"; }
+run_stage() { label="\$1"; shift; log_stage "\$label"; "\$@"; rc="\$?"; if [ "\$rc" -ne 0 ]; then log_stage "failed: \$label (rc=\$rc)"; return "\$rc"; fi; }
+run_stage $(quote_bash_arg "prepare repo directories") sudo mkdir -p $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services") $(quote_bash_arg "$REMOTE_REPO_DIR/infra")
+run_stage $(quote_bash_arg "install service runner") sudo install -m 700 $(quote_bash_arg "$remote_service_runner_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services/service.sh")
+run_stage $(quote_bash_arg "remove previous Ansible bundle") sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible")
+run_stage $(quote_bash_arg "install Ansible bundle") sudo cp -a $(quote_bash_arg "$remote_ansible_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible")
+log_stage $(quote_bash_arg "running service command: $remote_service_display")
+sudo bash -lc $(quote_bash_arg "$service_command")
 rc=\$?
+log_stage "service command finished with rc=\$rc"
 printf '%s\n' "\$rc" > $(quote_bash_arg "$remote_job_exit_code")
 touch $(quote_bash_arg "$remote_job_done")
 exit "\$rc"
 EOF
+fi
 
-echo "Creating remote temporary bundle and job directories..."
-invoke_retry_transport "remote service bundle and job directory creation" ssh "${ssh_common_args[@]}" "$remote" "mkdir -p $(quote_bash_arg "$remote_bundle_dir") $(quote_bash_arg "$remote_job_dir")"
+if [ "$DETACHED_REMOTE_JOB" = "true" ]; then
+    echo "Creating remote temporary bundle and job directories..."
+    invoke_retry_transport "remote service bundle and job directory creation" ssh "${ssh_common_args[@]}" "$remote" "mkdir -p $(quote_bash_arg "$remote_bundle_dir") $(quote_bash_arg "$remote_job_dir")"
+else
+    echo "Creating remote temporary bundle directory..."
+    invoke_retry_transport "remote service bundle directory creation" ssh "${ssh_common_args[@]}" "$remote" "mkdir -p $(quote_bash_arg "$remote_bundle_dir")"
+fi
 
 echo "Uploading service bundle archive..."
 scp "${scp_common_args[@]}" "$archive_path" "$remote:$remote_bundle_archive"
 
-echo "Uploading remote job runner..."
-scp "${scp_common_args[@]}" "$run_script_path" "$remote:$remote_job_script"
+if [ "$DETACHED_REMOTE_JOB" = "true" ]; then
+    echo "Uploading remote job runner..."
+    scp "${scp_common_args[@]}" "$run_script_path" "$remote:$remote_job_script"
+fi
 
 extract_command="set -e; rm -rf $(quote_bash_arg "$remote_bundle_dir"); mkdir -p $(quote_bash_arg "$remote_bundle_dir"); tar -xzf $(quote_bash_arg "$remote_bundle_archive") -C $(quote_bash_arg "$remote_bundle_dir"); test -f $(quote_bash_arg "$remote_service_runner_temp"); test -d $(quote_bash_arg "$remote_ansible_temp")"
 echo "Extracting service bundle on orchestration node..."
 invoke_retry_transport "remote service bundle extract" ssh "${ssh_common_args[@]}" "$remote" "$extract_command"
 
-start_job_command="set -e; chmod 700 $(quote_bash_arg "$remote_job_script"); rm -f $(quote_bash_arg "$remote_job_log") $(quote_bash_arg "$remote_job_exit_code") $(quote_bash_arg "$remote_job_done") $(quote_bash_arg "$remote_job_pid"); nohup bash $(quote_bash_arg "$remote_job_script") </dev/null >/dev/null 2>&1 & echo \$! > $(quote_bash_arg "$remote_job_pid")"
-echo "Starting remote service job..."
-invoke_retry_transport "remote service job start" ssh "${ssh_common_args[@]}" "$remote" "$start_job_command"
+if [ "$DETACHED_REMOTE_JOB" = "true" ]; then
+    start_job_command="set -e; chmod 700 $(quote_bash_arg "$remote_job_script"); rm -f $(quote_bash_arg "$remote_job_log") $(quote_bash_arg "$remote_job_exit_code") $(quote_bash_arg "$remote_job_done") $(quote_bash_arg "$remote_job_pid"); nohup bash $(quote_bash_arg "$remote_job_script") </dev/null >/dev/null 2>&1 & echo \$! > $(quote_bash_arg "$remote_job_pid")"
+    echo "Starting remote service job..."
+    invoke_retry_transport "remote service job start" ssh "${ssh_common_args[@]}" "$remote" "$start_job_command"
 
-echo "Following remote service job log..."
-wait_remote_service_job
+    echo "Following remote service job log..."
+    wait_remote_service_job
+else
+    echo "Installing service bundle and running remote service command..."
+    ssh "${ssh_common_args[@]}" "$remote" "$install_and_run_command" || fail "remote service command failed with exit code $?"
+fi
 
-echo "Cleaning remote temporary service bundle and job..."
+echo "Cleaning remote temporary service bundle..."
