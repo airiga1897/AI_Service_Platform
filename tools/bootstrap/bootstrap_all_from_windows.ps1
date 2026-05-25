@@ -21,7 +21,7 @@ param(
 
     [switch]$ForceOverwriteKeys,
 
-    [switch]$AutoAcceptHostKey,
+    [switch]$AutoAcceptHostKey = $true,
 
     [switch]$FixKeyAcl,
 

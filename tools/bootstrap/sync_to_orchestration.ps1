@@ -35,7 +35,7 @@ param(
 
     [string]$Include = "",
 
-    [switch]$AutoAcceptHostKey,
+    [switch]$AutoAcceptHostKey = $true,
 
     [switch]$FixKeyAcl,
 

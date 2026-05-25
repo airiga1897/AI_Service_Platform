@@ -68,6 +68,7 @@
     src: "{{ vpn_edge_seed_config }}"
     dest: "{{ vpn_edge_data_dir }}/vpn_server.config"
     mode: "0600"
+  register: vpn_edge_seed_config_copy
   no_log: true
   when: vpn_state == 'present'
 
@@ -76,6 +77,7 @@
     src: "{{ vpn_edge_local_override_dir }}/"
     dest: "{{ vpn_edge_overrides_dir }}/"
     mode: preserve
+  register: vpn_edge_overrides_copy
   no_log: true
   when:
     - vpn_state == 'present'
@@ -87,6 +89,7 @@
     src: docker-compose.vpn-edge.yml.j2
     dest: "{{ vpn_edge_compose_file }}"
     mode: "0640"
+  register: vpn_edge_compose_template
   when: vpn_state == 'present'
 
 - name: Ensure Docker service is running for vpn_edge
@@ -120,12 +123,28 @@
 
 - name: Start vpn_edge container
   ansible.builtin.command:
-    cmd: docker compose -f "{{ vpn_edge_compose_file }}" up -d --force-recreate
+    cmd: docker compose -f "{{ vpn_edge_compose_file }}" up -d
+    chdir: "{{ vpn_edge_root_dir }}"
+  register: vpn_edge_compose_up
+  changed_when: >
+    (vpn_edge_compose_up.stdout ~ vpn_edge_compose_up.stderr)
+    is search('(?i)(creating|created|recreating|recreated|starting|started|pulling|pulled|building|built)')
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+
+- name: Restart vpn_edge when bind-mounted runtime files changed
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ vpn_edge_compose_file }}" restart "{{ vpn_edge_container_name }}"
     chdir: "{{ vpn_edge_root_dir }}"
   changed_when: true
   when:
     - vpn_state == 'present'
     - not ansible_check_mode
+    - not vpn_edge_compose_up.changed
+    - >
+      (vpn_edge_seed_config_copy.changed | default(false))
+      or (vpn_edge_overrides_copy.changed | default(false))
 
 - name: Check vpn_edge compose file
   ansible.builtin.stat:

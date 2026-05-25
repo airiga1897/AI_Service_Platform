@@ -22,7 +22,7 @@ param(
 
     [switch]$Force,
 
-    [switch]$AutoAcceptHostKey,
+    [switch]$AutoAcceptHostKey = $true,
 
     [switch]$RegenerateRemoteKeys
 )
@@ -249,7 +249,7 @@ function Invoke-PlinkCommand($Remote, $Password, $Command, $LogPath, $HostKeyFin
 }
 
 function Invoke-PscpPassword($Password, $Source, $Target, $Label, $HostKeyFingerprint) {
-    $pscpArgs = @("-pw", $Password, $Source, $Target)
+    $pscpArgs = @("-batch", "-pw", $Password, $Source, $Target)
     if ($HostKeyFingerprint) {
         $pscpArgs = @("-hostkey", $HostKeyFingerprint) + $pscpArgs
     }

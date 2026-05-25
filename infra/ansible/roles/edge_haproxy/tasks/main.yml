@@ -214,6 +214,7 @@
     src: "{{ edge_haproxy_operator_vpn_mgmt_ips }}"
     dest: "{{ edge_haproxy_lists_dir }}/vpn_mgmt_ips.lst"
     mode: "0644"
+  register: edge_haproxy_vpn_mgmt_ips_copy
   when:
     - edge_haproxy_state == 'present'
     - edge_haproxy_mgmt_allowlist_stat.stat.exists
@@ -224,6 +225,7 @@
     dest: "{{ edge_haproxy_lists_dir }}/vpn_mgmt_ips.lst"
     content: ""
     mode: "0644"
+  register: edge_haproxy_vpn_mgmt_ips_empty
   when:
     - edge_haproxy_state == 'present'
     - not edge_haproxy_mgmt_allowlist_stat.stat.exists or not edge_haproxy_mgmt_allowlist_stat.stat.isreg
@@ -233,6 +235,7 @@
     src: "{{ edge_haproxy_operator_blocked_ips }}"
     dest: "{{ edge_haproxy_lists_dir }}/blocked_ips.lst"
     mode: "0644"
+  register: edge_haproxy_blocked_ips_copy
   when:
     - edge_haproxy_state == 'present'
     - edge_haproxy_blacklist_stat.stat.exists
@@ -243,6 +246,7 @@
     dest: "{{ edge_haproxy_lists_dir }}/blocked_ips.lst"
     content: ""
     mode: "0644"
+  register: edge_haproxy_blocked_ips_empty
   when:
     - edge_haproxy_state == 'present'
     - not edge_haproxy_blacklist_stat.stat.exists or not edge_haproxy_blacklist_stat.stat.isreg
@@ -252,6 +256,7 @@
     src: haproxy.cfg.j2
     dest: "{{ edge_haproxy_config_dir }}/haproxy.cfg"
     mode: "0644"
+  register: edge_haproxy_config_template
   when: edge_haproxy_state == 'present'
 
 - name: Render edge_haproxy Docker Compose
@@ -259,6 +264,7 @@
     src: docker-compose.edge-haproxy.yml.j2
     dest: "{{ edge_haproxy_compose_file }}"
     mode: "0640"
+  register: edge_haproxy_compose_template
   when: edge_haproxy_state == 'present'
 
 - name: Ensure Docker service is running for edge_haproxy
@@ -300,12 +306,31 @@
 
 - name: Start edge_haproxy container
   ansible.builtin.command:
-    cmd: docker compose -f "{{ edge_haproxy_compose_file }}" up -d --force-recreate
+    cmd: docker compose -f "{{ edge_haproxy_compose_file }}" up -d
+    chdir: "{{ edge_haproxy_root_dir }}"
+  register: edge_haproxy_compose_up
+  changed_when: >
+    (edge_haproxy_compose_up.stdout ~ edge_haproxy_compose_up.stderr)
+    is search('(?i)(creating|created|recreating|recreated|starting|started|pulling|pulled|building|built)')
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+
+- name: Restart edge_haproxy when bind-mounted runtime files changed
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ edge_haproxy_compose_file }}" restart "{{ edge_haproxy_container_name }}"
     chdir: "{{ edge_haproxy_root_dir }}"
   changed_when: true
   when:
     - edge_haproxy_state == 'present'
     - not ansible_check_mode
+    - not edge_haproxy_compose_up.changed
+    - >
+      (edge_haproxy_vpn_mgmt_ips_copy.changed | default(false))
+      or (edge_haproxy_vpn_mgmt_ips_empty.changed | default(false))
+      or (edge_haproxy_blocked_ips_copy.changed | default(false))
+      or (edge_haproxy_blocked_ips_empty.changed | default(false))
+      or (edge_haproxy_config_template.changed | default(false))
 
 - name: Check edge_haproxy compose file
   ansible.builtin.stat:
