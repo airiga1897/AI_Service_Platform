@@ -95,7 +95,7 @@ service_extra_vars() {
             printf '%s\n' "-e" "vpn_state=$state" "-e" "vpn_purge_data=$purge" "-e" "vpn_reseed_config=$reseed"
             ;;
         vpn_cascade)
-            printf '%s\n' "-e" "vpn_cascade_state=$state" "-e" "vpn_cascade_purge_data=$purge"
+            printf '%s\n' "-e" "vpn_cascade_state=$state" "-e" "vpn_cascade_purge_data=$purge" "-e" "vpn_cascade_reseed_config=$reseed"
             ;;
         *)
             return 1
@@ -289,14 +289,14 @@ fi
 if [ "$ACTION" = "purge" ] && [ "$CONFIRM_PURGE" != "true" ]; then
     fail "purge requires --confirm-purge"
 fi
-if [ "$ACTION" = "reseed" ] && [ "$SERVICE" != "vpn_edge" ]; then
-    fail "reseed is supported only for vpn_edge"
+if [ "$ACTION" = "reseed" ] && [ "$SERVICE" != "vpn_edge" ] && [ "$SERVICE" != "vpn_cascade" ]; then
+    fail "reseed is supported only for vpn_edge and vpn_cascade"
 fi
 if [ "$ACTION" = "reseed" ] && [ -z "$LIMIT" ]; then
-    fail "vpn_edge reseed requires --limit ALIAS"
+    fail "$SERVICE reseed requires --limit ALIAS"
 fi
 if [ "$ACTION" = "reseed" ] && [ "$service_row_state" != "present" ]; then
-    fail "vpn_edge reseed requires state=present in $STATE_FILE"
+    fail "$SERVICE reseed requires state=present in $STATE_FILE"
 fi
 if [ "$ACTION" = "apply" ] && [ "$service_row_state" != "present" ]; then
     fail "$SERVICE apply requires state=present in $STATE_FILE"

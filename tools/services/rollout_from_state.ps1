@@ -352,6 +352,122 @@ function Normalize-HaproxyRoutes($RoutesPath, $VpnAliases, $Domain) {
     Write-Host "Added vpn_ingress routes for aliases: $($missing -join ', ')"
 }
 
+function Resolve-EndpointIpAddresses($Endpoint, $Alias) {
+    if (-not $Endpoint) {
+        return @()
+    }
+
+    $endpointValue = [string]$Endpoint
+    $parsedIp = $null
+    if ([System.Net.IPAddress]::TryParse($endpointValue, [ref]$parsedIp)) {
+        if ($parsedIp.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+            return @($parsedIp.IPAddressToString)
+        }
+        return @()
+    }
+
+    try {
+        return @(
+            [System.Net.Dns]::GetHostAddresses($endpointValue) |
+                Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork } |
+                ForEach-Object { $_.IPAddressToString } |
+                Sort-Object -Unique
+        )
+    } catch {
+        Fail "Could not resolve endpoint '$endpointValue' for alias '$Alias' while refreshing VPN management allowlist: $($_.Exception.Message)"
+    }
+}
+
+function Update-VpnManagementAllowlist($AllowlistPath, $NodeRows) {
+    $beginMarker = "# BEGIN AI_SP_NODE_ENDPOINTS"
+    $endMarker = "# END AI_SP_NODE_ENDPOINTS"
+
+    $allowlistDir = Split-Path -Parent $AllowlistPath
+    if ($allowlistDir -and -not (Test-Path -LiteralPath $allowlistDir -PathType Container)) {
+        Invoke-OperatorBackupIfNeeded "create VPN management allowlist directory"
+        New-Item -ItemType Directory -Force -Path $allowlistDir | Out-Null
+    }
+
+    $manualLines = New-Object System.Collections.Generic.List[string]
+    if (Test-Path -LiteralPath $AllowlistPath -PathType Leaf) {
+        $insideGeneratedBlock = $false
+        foreach ($line in (Get-Content -LiteralPath $AllowlistPath)) {
+            $lineText = [string]$line
+            $trimmed = $lineText.Trim()
+            if ($trimmed -eq $beginMarker) {
+                $insideGeneratedBlock = $true
+                continue
+            }
+            if ($trimmed -eq $endMarker) {
+                $insideGeneratedBlock = $false
+                continue
+            }
+            if ($insideGeneratedBlock) {
+                continue
+            }
+            if ($manualLines -notcontains $lineText) {
+                [void]$manualLines.Add($lineText)
+            }
+        }
+    }
+
+    $resolved = New-Object System.Collections.Generic.List[string]
+    foreach ($node in $NodeRows) {
+        foreach ($ip in (Resolve-EndpointIpAddresses $node.endpoint $node.current_alias)) {
+            if ($resolved -notcontains $ip) {
+                [void]$resolved.Add($ip)
+            }
+        }
+    }
+
+    $manualEntries = @(
+        $manualLines |
+            ForEach-Object { ([string]$_).Trim() } |
+            Where-Object { $_ -and -not $_.StartsWith("#") } |
+            Sort-Object -Unique
+    )
+    $generatedEntries = @($resolved | Where-Object { $manualEntries -notcontains $_ } | Sort-Object -Unique)
+
+    while ($manualLines.Count -gt 0 -and -not ([string]$manualLines[$manualLines.Count - 1]).Trim()) {
+        $manualLines.RemoveAt($manualLines.Count - 1)
+    }
+
+    $newLines = New-Object System.Collections.Generic.List[string]
+    foreach ($line in $manualLines) {
+        [void]$newLines.Add($line)
+    }
+    if ($newLines.Count -gt 0) {
+        [void]$newLines.Add("")
+    }
+    [void]$newLines.Add($beginMarker)
+    foreach ($ip in $generatedEntries) {
+        [void]$newLines.Add($ip)
+    }
+    [void]$newLines.Add($endMarker)
+
+    $existingLines = @()
+    if (Test-Path -LiteralPath $AllowlistPath -PathType Leaf) {
+        $existingLines = @(Get-Content -LiteralPath $AllowlistPath)
+    }
+    $changed = ($newLines.Count -ne $existingLines.Count)
+    if (-not $changed) {
+        for ($i = 0; $i -lt $newLines.Count; $i++) {
+            if ($newLines[$i] -ne $existingLines[$i]) {
+                $changed = $true
+                break
+            }
+        }
+    }
+
+    if (-not $changed) {
+        return
+    }
+
+    Invoke-OperatorBackupIfNeeded "refresh VPN management allowlist from nodes.csv"
+    Set-Content -LiteralPath $AllowlistPath -Value $newLines -Encoding ascii
+    Write-Host "Updated VPN management allowlist with node endpoint IPs: $($resolved -join ', ')"
+}
+
 function Invoke-ChildScript($ScriptPath, $Arguments, $Label) {
     & powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath @Arguments
     if ($LASTEXITCODE -ne 0) {
@@ -477,6 +593,7 @@ if ($stateHeader -ne $ExpectedStateHeader) {
 $nodeRows = Import-Csv -LiteralPath $NodesFile
 $stateRows = Import-Csv -LiteralPath $StateFile
 $stateRows = @(Normalize-StateRows $stateRows $nodeRows $StateFile)
+Update-VpnManagementAllowlist (Join-Path (Join-Path (Join-Path $OperatorDir "haproxy") "lists") "vpn_mgmt_ips.lst") $nodeRows
 Normalize-HaproxyRoutes (Join-Path (Join-Path $OperatorDir "haproxy") "routes.yml") (Get-PresentVpnIngressAliases $stateRows) $VpnIngressDomain
 $reseedVpnEdgeAliases = @(Split-OperatorAliasList $ReseedVpnEdge)
 $standbyOrchestrationAliases = @(Get-OrchestrationCandidateAliases $stateRows $ControlRole)

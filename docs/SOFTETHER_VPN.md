@@ -116,11 +116,12 @@ missing. It does not overwrite the live config and does not restart
 
 Retired listeners are handled as explicit one-time migrations, not continuous
 rewrites. The current retired listener is `1194/tcp`: on the first rollout where
-the migration marker is absent, the role backs up the live config, stops
-`softether-edge`, removes that listener block from the live
-`vpn_server.config`, restarts the container, verifies absence, and writes
-`/opt/ai-service-platform/vpn_edge/.retired_tcp_listeners_applied`. Later
-rollouts only verify that the retired listener did not return.
+the migration marker is absent, the role backs up the live config, stops the
+container, removes that listener block from the live `vpn_server.config`,
+restarts the container, verifies absence, and writes a service-local
+`.retired_tcp_listeners_applied` marker. Later rollouts only verify that the
+retired listener did not return. This applies to both `vpn_edge` and
+`vpn_cascade`.
 
 Intentional replacement uses the explicit reseed action and must target one
 alias:
@@ -186,6 +187,7 @@ It contains only the lab link parameters and passwords used by `vpncmd`:
 ```json
 {
   "hub_name": "CascadeLab",
+  "hub_password": "<store outside chat>",
   "cascade_user": "cascade-vps5-vps4",
   "cascade_user_password": "<store outside chat>",
   "server_password": "<store outside chat>",
@@ -197,6 +199,11 @@ It contains only the lab link parameters and passwords used by `vpncmd`:
 }
 ```
 
+The cascade secret passwords must be `vpncmd`-safe strings matching
+`[A-Za-z0-9_-]`, normally 32-48 characters. Avoid base64 passwords containing
+`/`, `+`, or `=` because `vpncmd` command parsing can treat slash-prefixed text
+as command switches.
+
 The operator seed config is per node and optional for the very first clean
 bootstrap:
 
@@ -207,12 +214,27 @@ operator/softether/cascade/<alias>/vpn_server.config
 If the seed exists, normal `vpn_cascade present` copies it only when the remote
 cascade config is missing. If the seed does not exist and the remote config is
 also missing, rollout starts a clean SoftEther cascade container with an empty
-`softether_data` directory, then configures the lab hub, user, and cascade
-connection through `vpncmd` using the JSON above. Password-bearing tasks are
-`no_log`.
+`softether_data` directory, removes the default `DEFAULT` virtual hub, then
+configures only the lab hub, user, and cascade connection using the JSON above.
+`hub_password` is used when creating `CascadeLab`; server-admin automation still
+uses `server_password`. The role sets the hub `NoEnum` option so `CascadeLab` is
+not enumerated to anonymous users. Password-bearing tasks are `no_log`.
 
 After first start, the remote
 `/opt/ai-service-platform/vpn_cascade/softether_data/vpn_server.config` is
 mutable runtime state. `vpn_cascade` does not publish HAProxy routes, does not
 change host routing, and does not enforce egress policy. Controlled routing must
 come later from approved policy, not directly from cascade rollout.
+
+To intentionally replace an installed cascade node config with its operator
+seed, use explicit reseed and a single alias:
+
+```powershell
+.\tools\services\service_remote.ps1 vpn_cascade reseed -Limit vps4
+```
+
+The reseed action requires
+`operator/softether/cascade/<alias>/vpn_server.config`, backs up the live remote
+config to the service backup directory, copies the seed, and restarts only the
+`softether-cascade` container. Normal `apply` does not overwrite installed
+SoftEther runtime config.

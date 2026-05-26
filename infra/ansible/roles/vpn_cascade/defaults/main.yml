@@ -21,3 +21,6 @@ vpn_cascade_host_https_port: 8443
 vpn_cascade_host_alt_port: 8992
 vpn_cascade_host_management_port: 8555
 vpn_cascade_vpncmd_timeout_seconds: 20
+vpn_cascade_retired_tcp_listeners:
+  - 1194
+vpn_cascade_retired_tcp_listeners_marker_file: "{{ vpn_cascade_root_dir }}/.retired_tcp_listeners_applied"

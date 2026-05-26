@@ -3,7 +3,7 @@ param(
     [string]$Service,
 
     [Parameter(Mandatory=$true, Position=1)]
-    [ValidateSet("plan", "apply", "absent", "purge")]
+    [ValidateSet("plan", "apply", "absent", "purge", "reseed")]
     [string]$Action,
 
     [string]$NodesFile = ".\operator\nodes.csv",
@@ -65,16 +65,16 @@ function Get-ServicePlaybook($Name) {
     }
 }
 
-function Get-ServiceExtraVars($Name, $State, $PurgeData) {
+function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false") {
     switch ($Name) {
         "edge_haproxy" {
             return @("-e", "edge_haproxy_state=$State", "-e", "edge_haproxy_purge_data=$PurgeData")
         }
         "vpn_edge" {
-            return @("-e", "vpn_state=$State", "-e", "vpn_purge_data=$PurgeData")
+            return @("-e", "vpn_state=$State", "-e", "vpn_purge_data=$PurgeData", "-e", "vpn_reseed_config=$ReseedConfig")
         }
         "vpn_cascade" {
-            return @("-e", "vpn_cascade_state=$State", "-e", "vpn_cascade_purge_data=$PurgeData")
+            return @("-e", "vpn_cascade_state=$State", "-e", "vpn_cascade_purge_data=$PurgeData", "-e", "vpn_cascade_reseed_config=$ReseedConfig")
         }
         default {
             Fail "Unsupported service '$Name'. Supported now: edge_haproxy, vpn_edge, vpn_cascade."
@@ -156,6 +156,15 @@ if ($Action -eq "apply" -and $desiredNodes.Count -eq 0) {
 if ($Action -eq "purge" -and -not $ConfirmPurge) {
     Fail "purge requires -ConfirmPurge"
 }
+if ($Action -eq "reseed" -and $Service -notin @("vpn_edge", "vpn_cascade")) {
+    Fail "reseed is supported only for vpn_edge and vpn_cascade"
+}
+if ($Action -eq "reseed" -and -not $Limit) {
+    Fail "$Service reseed requires -Limit ALIAS"
+}
+if ($Action -eq "reseed" -and $serviceRow.state -ne "present") {
+    Fail "$Service reseed requires state=present in $StateFile"
+}
 
 $serviceState = "present"
 $servicePurgeData = "false"
@@ -165,12 +174,16 @@ if ($Action -eq "absent" -or $Action -eq "purge") {
 if ($Action -eq "purge") {
     $servicePurgeData = "true"
 }
+$serviceReseedConfig = "false"
+if ($Action -eq "reseed") {
+    $serviceReseedConfig = "true"
+}
 
 $args = @(
     "-i", $Inventory,
     $Playbook
 )
-$args += Get-ServiceExtraVars $Service $serviceState $servicePurgeData
+$args += Get-ServiceExtraVars $Service $serviceState $servicePurgeData $serviceReseedConfig
 
 if ($Limit) {
     $args += @("--limit", $Limit)

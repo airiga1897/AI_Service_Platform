@@ -313,6 +313,105 @@ invoke_postcheck() {
     esac
 }
 
+update_vpn_management_allowlist() {
+    local allowlist_path="$1"
+    local begin_marker="# BEGIN AI_SP_NODE_ENDPOINTS"
+    local end_marker="# END AI_SP_NODE_ENDPOINTS"
+    local allowlist_dir
+    allowlist_dir="$(dirname "$allowlist_path")"
+    if [ ! -d "$allowlist_dir" ]; then
+        invoke_operator_backup_if_needed "create VPN management allowlist directory"
+        mkdir -p "$allowlist_dir"
+    fi
+
+    local tmp_file
+    tmp_file="$(mktemp)"
+    python3 - "$NODES_FILE" "$allowlist_path" "$begin_marker" "$end_marker" > "$tmp_file" <<'PY'
+import csv
+import ipaddress
+import socket
+import sys
+
+nodes_file, allowlist_path, begin_marker, end_marker = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+
+manual_lines = []
+try:
+    with open(allowlist_path, encoding="ascii") as handle:
+        inside_generated = False
+        for raw in handle:
+            line = raw.rstrip("\n")
+            item = line.strip()
+            if item == begin_marker:
+                inside_generated = True
+                continue
+            if item == end_marker:
+                inside_generated = False
+                continue
+            if inside_generated:
+                continue
+            if line not in manual_lines:
+                manual_lines.append(line)
+except FileNotFoundError:
+    pass
+
+resolved = []
+with open(nodes_file, newline="", encoding="ascii") as handle:
+    for row in csv.DictReader(handle):
+        alias = row.get("current_alias", "")
+        endpoint = row.get("endpoint", "")
+        if not endpoint:
+            continue
+        try:
+            ip = ipaddress.ip_address(endpoint)
+            if ip.version == 4 and str(ip) not in resolved:
+                resolved.append(str(ip))
+            continue
+        except ValueError:
+            pass
+        try:
+            infos = socket.getaddrinfo(endpoint, None, socket.AF_INET, socket.SOCK_STREAM)
+        except OSError as exc:
+            raise SystemExit(f"Could not resolve endpoint {endpoint!r} for alias {alias!r}: {exc}")
+        for info in infos:
+            ip = info[4][0]
+            if ip not in resolved:
+                resolved.append(ip)
+
+manual_entries = sorted({item.strip() for item in manual_lines if item.strip() and not item.strip().startswith("#")})
+generated_entries = sorted(item for item in set(resolved) if item not in manual_entries)
+
+while manual_lines and not manual_lines[-1].strip():
+    manual_lines.pop()
+
+for line in manual_lines:
+    print(line)
+if manual_lines:
+    print()
+print(begin_marker)
+for item in generated_entries:
+    print(item)
+print(end_marker)
+PY
+
+    local current_file
+    current_file="$(mktemp)"
+    if [ -f "$allowlist_path" ]; then
+        cat "$allowlist_path" > "$current_file"
+    else
+        : > "$current_file"
+    fi
+
+    if cmp -s "$current_file" "$tmp_file"; then
+        rm -f "$tmp_file" "$current_file"
+        return
+    fi
+
+    invoke_operator_backup_if_needed "refresh VPN management allowlist from nodes.csv"
+    cp "$tmp_file" "$allowlist_path"
+    echo "Updated VPN management allowlist with node endpoint IPs"
+    rm -f "$tmp_file" "$current_file"
+}
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --nodes-file) NODES_FILE="${2:-}"; shift 2 ;;
@@ -350,6 +449,8 @@ first_line="$(head -n 1 "$NODES_FILE" | tr -d '\r')"
 [ "$first_line" = "$EXPECTED_HEADER" ] || fail "nodes.csv header must be exactly: $EXPECTED_HEADER"
 state_first_line="$(head -n 1 "$STATE_FILE" | tr -d '\r')"
 [ "$state_first_line" = "$EXPECTED_STATE_HEADER" ] || fail "state.csv header must be exactly: $EXPECTED_STATE_HEADER"
+
+update_vpn_management_allowlist "$OPERATOR_DIR/haproxy/lists/vpn_mgmt_ips.lst"
 
 node_aliases=""
 while IFS=, read -r current_alias _endpoint _connection _root_password extra || [ -n "${current_alias:-}" ]; do
