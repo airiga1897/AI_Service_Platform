@@ -246,9 +246,6 @@ function Resolve-ControlNodeFromState($NodeRows, $StateRows, $Role, $ExplicitAli
 if ($Service -eq "vpn") {
     Fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 }
-if ($Service -eq "vpn_cascade") {
-    Fail "Service 'vpn_cascade' is reserved for future site-to-site/cascade rollout and is not implemented yet."
-}
 
 Require-File $NodesFile "NodesFile"
 Require-File $StateFile "StateFile"

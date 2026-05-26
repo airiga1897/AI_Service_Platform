@@ -26,6 +26,10 @@ Usage:
   bash tools/services/service.sh vpn_edge absent [options]
   bash tools/services/service.sh vpn_edge purge --confirm-purge [options]
   bash tools/services/service.sh vpn_edge reseed --limit ALIAS [options]
+  bash tools/services/service.sh vpn_cascade plan [options]
+  bash tools/services/service.sh vpn_cascade apply [options]
+  bash tools/services/service.sh vpn_cascade absent [options]
+  bash tools/services/service.sh vpn_cascade purge --confirm-purge [options]
 
 Options:
   --nodes-file PATH      Operator nodes.csv. Default: ./operator/nodes.csv
@@ -73,6 +77,7 @@ service_playbook() {
     case "$1" in
         edge_haproxy) echo "infra/ansible/edge_haproxy.yml" ;;
         vpn_edge) echo "infra/ansible/vpn.yml" ;;
+        vpn_cascade) echo "infra/ansible/vpn_cascade.yml" ;;
         *) return 1 ;;
     esac
 }
@@ -88,6 +93,9 @@ service_extra_vars() {
             ;;
         vpn_edge)
             printf '%s\n' "-e" "vpn_state=$state" "-e" "vpn_purge_data=$purge" "-e" "vpn_reseed_config=$reseed"
+            ;;
+        vpn_cascade)
+            printf '%s\n' "-e" "vpn_cascade_state=$state" "-e" "vpn_cascade_purge_data=$purge"
             ;;
         *)
             return 1
@@ -111,12 +119,9 @@ fi
 if [ "$SERVICE" = "vpn" ]; then
     fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 fi
-if [ "$SERVICE" = "vpn_cascade" ]; then
-    fail "Service 'vpn_cascade' is reserved for future site-to-site/cascade rollout and is not implemented yet."
-fi
 case "$SERVICE" in
-    edge_haproxy|vpn_edge) ;;
-    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge. Reserved: vpn_cascade." ;;
+    edge_haproxy|vpn_edge|vpn_cascade) ;;
+    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade." ;;
 esac
 case "$ACTION" in
     plan|apply|absent|purge|reseed) ;;

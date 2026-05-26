@@ -1,0 +1,18 @@
+services:
+  softether-cascade:
+    image: {{ vpn_cascade_image }}
+    container_name: {{ vpn_cascade_container_name }}
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./softether_data:/mnt
+      - ./softether_logs:/usr/local/bin/server_log
+      - /etc/localtime:/etc/localtime:ro
+    restart: always
+    networks:
+      {{ vpn_cascade_network_name }}:
+        ipv4_address: {{ vpn_cascade_container_ipv4 }}
+
+networks:
+  {{ vpn_cascade_network_name }}:
+    external: true

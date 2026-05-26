@@ -46,6 +46,11 @@
 python3 -m pip install pyyaml jinja2
 ```
 
+Orchestration standby and manual promotion are documented in
+[`docs/ORCHESTRATION_STANDBY.md`](docs/ORCHESTRATION_STANDBY.md).
+Encrypted operator backup preparation is documented in
+[`docs/OPERATOR_BACKUP.md`](docs/OPERATOR_BACKUP.md).
+
 Прогнать тот же набор проверок, что и CI:
 
 ```bash

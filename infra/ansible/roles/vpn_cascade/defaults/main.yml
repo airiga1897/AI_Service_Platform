@@ -1,0 +1,16 @@
+---
+vpn_cascade_root_dir: /opt/ai-service-platform/vpn_cascade
+vpn_cascade_data_dir: "{{ vpn_cascade_root_dir }}/softether_data"
+vpn_cascade_logs_dir: "{{ vpn_cascade_root_dir }}/softether_logs"
+vpn_cascade_backup_dir: "{{ vpn_cascade_root_dir }}/backups"
+vpn_cascade_overrides_dir: "{{ vpn_cascade_root_dir }}/overrides"
+vpn_cascade_compose_file: "{{ vpn_cascade_root_dir }}/docker-compose.yml"
+
+vpn_cascade_seed_config: "{{ playbook_dir }}/../../operator/softether/cascade/{{ inventory_hostname }}/vpn_server.config"
+vpn_cascade_local_override_dir: "{{ playbook_dir }}/../../operator/softether/cascade/{{ inventory_hostname }}/overrides"
+
+vpn_cascade_image: softethervpn/vpnserver:stable
+vpn_cascade_container_name: softether-cascade
+vpn_cascade_network_name: ai_service_cascade
+vpn_cascade_network_subnet: 172.21.0.0/24
+vpn_cascade_container_ipv4: 172.21.0.2

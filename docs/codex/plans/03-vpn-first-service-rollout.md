@@ -9,7 +9,7 @@ Service naming is semantic, not positional:
 
 - `edge_haproxy` - edge proxy implemented with HAProxy.
 - `vpn_edge` - SoftEther user VPN ingress behind the edge proxy.
-- `vpn_cascade` - reserved future SoftEther cascade/site-to-site service.
+- `vpn_cascade` - separate SoftEther cascade/site-to-site service.
 
 Product deploy остаётся позже.
 
@@ -50,7 +50,8 @@ edge_route,minecraft,minecraft_edge,vps1,,,absent
 service,vpn_cascade,vpn_cascades,,,,absent
 ```
 
-`vpn_cascade` reserved/not implemented.
+`vpn_cascade` is separate from user VPN ingress and is not required for the
+VPN edge-first rollout.
 
 ## HAProxy Operator Lists
 

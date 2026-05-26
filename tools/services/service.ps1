@@ -60,6 +60,7 @@ function Get-ServicePlaybook($Name) {
     switch ($Name) {
         "edge_haproxy" { return "infra\ansible\edge_haproxy.yml" }
         "vpn_edge" { return "infra\ansible\vpn.yml" }
+        "vpn_cascade" { return "infra\ansible\vpn_cascade.yml" }
         default { Fail "No default playbook for service: $Name" }
     }
 }
@@ -72,8 +73,11 @@ function Get-ServiceExtraVars($Name, $State, $PurgeData) {
         "vpn_edge" {
             return @("-e", "vpn_state=$State", "-e", "vpn_purge_data=$PurgeData")
         }
+        "vpn_cascade" {
+            return @("-e", "vpn_cascade_state=$State", "-e", "vpn_cascade_purge_data=$PurgeData")
+        }
         default {
-            Fail "Unsupported service '$Name'. Supported now: edge_haproxy, vpn_edge. Reserved: vpn_cascade."
+            Fail "Unsupported service '$Name'. Supported now: edge_haproxy, vpn_edge, vpn_cascade."
         }
     }
 }
@@ -81,11 +85,8 @@ function Get-ServiceExtraVars($Name, $State, $PurgeData) {
 if ($Service -eq "vpn") {
     Fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 }
-if ($Service -eq "vpn_cascade") {
-    Fail "Service 'vpn_cascade' is reserved for future site-to-site/cascade rollout and is not implemented yet."
-}
-if ($Service -notin @("edge_haproxy", "vpn_edge")) {
-    Fail "Unsupported service '$Service'. Supported now: edge_haproxy, vpn_edge. Reserved: vpn_cascade."
+if ($Service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade")) {
+    Fail "Unsupported service '$Service'. Supported now: edge_haproxy, vpn_edge, vpn_cascade."
 }
 
 Require-File $NodesFile "NodesFile"

@@ -18,6 +18,8 @@ param(
 
     [string]$OperatorDir = ".\operator",
 
+    [string]$AdminUser = "useradmin",
+
     [string]$OutputAnsibleAuthorizedKeyFile = ".\operator\ansible_control.managed_nodes.pub",
 
     [switch]$Force,
@@ -97,7 +99,7 @@ function Split-AliasList($Value) {
     return @($Value -split "\+" | Where-Object { $_ })
 }
 
-function Is-ActiveOrchestrationNode($StateRows, $AliasToCheck) {
+function Is-OrchestrationCapableNode($StateRows, $AliasToCheck) {
     $rows = @($StateRows | Where-Object { ($_.kind -eq "platform_role" -or $_.kind -eq "role") -and $_.name -eq "orchestration" -and $_.state -eq "present" })
     if ($rows.Count -eq 0) {
         Fail "No active orchestration platform_role found in state.csv."
@@ -109,7 +111,8 @@ function Is-ActiveOrchestrationNode($StateRows, $AliasToCheck) {
     if ($activeAliases.Count -ne 1) {
         Fail "orchestration must have exactly one active alias in state.csv."
     }
-    return ($activeAliases[0] -eq $AliasToCheck)
+    $candidateAliases = @(Split-AliasList $rows[0].candidate_aliases)
+    return (($activeAliases[0] -eq $AliasToCheck) -or ($candidateAliases -contains $AliasToCheck))
 }
 
 function Get-MarkedBlock($Lines, $BeginMarker, $EndMarker, $Label) {
@@ -147,8 +150,12 @@ function Get-MarkedBlock($Lines, $BeginMarker, $EndMarker, $Label) {
     return $blockLines
 }
 
-function Save-TextFile($Path, $Lines, $AllowOverwrite) {
+function Save-TextFile($Path, $Lines, $AllowOverwrite, $KeepExisting) {
     if ((Test-Path -LiteralPath $Path -PathType Leaf) -and -not $AllowOverwrite) {
+        if ($KeepExisting) {
+            Write-Host "Keeping existing output key file: $Path"
+            return
+        }
         Fail "Output key file already exists: $Path. Use -Force to overwrite it."
     }
 
@@ -159,26 +166,29 @@ function Save-TextFile($Path, $Lines, $AllowOverwrite) {
     Set-Content -LiteralPath $Path -Value $Lines -Encoding ascii
 }
 
-function Assert-OutputKeyPathAvailable($Path, $AllowOverwrite) {
+function Assert-OutputKeyPathAvailable($Path, $AllowOverwrite, $AllowExisting) {
     if ((Test-Path -LiteralPath $Path -PathType Leaf) -and -not $AllowOverwrite) {
+        if ($AllowExisting) {
+            return
+        }
         Fail "Output key file already exists: $Path. Use -Force to overwrite it."
     }
 }
 
-function Assert-BootstrapKeyPathsAvailable($AliasToSave, $IsManagement, $BaseOperatorDir, $PublicKeyPath, $AllowOverwrite) {
+function Assert-BootstrapKeyPathsAvailable($AliasToSave, $IsManagement, $BaseOperatorDir, $PublicKeyPath, $AllowOverwrite, $AllowExisting) {
     $aliasDir = Join-Path $BaseOperatorDir $AliasToSave
 
-    Assert-OutputKeyPathAvailable (Join-Path $aliasDir "deploy_key") $AllowOverwrite
-    Assert-OutputKeyPathAvailable (Join-Path $aliasDir "admin_key") $AllowOverwrite
+    Assert-OutputKeyPathAvailable (Join-Path $aliasDir "deploy_key") $AllowOverwrite $AllowExisting
+    Assert-OutputKeyPathAvailable (Join-Path $aliasDir "admin_key") $AllowOverwrite $AllowExisting
 
     if ($IsManagement) {
-        Assert-OutputKeyPathAvailable (Join-Path $aliasDir "ansible_control_key") $AllowOverwrite
-        Assert-OutputKeyPathAvailable (Join-Path $aliasDir "ansible_control.managed_nodes.pub") $AllowOverwrite
-        Assert-OutputKeyPathAvailable $PublicKeyPath $AllowOverwrite
+        Assert-OutputKeyPathAvailable (Join-Path $aliasDir "ansible_control_key") $AllowOverwrite $AllowExisting
+        Assert-OutputKeyPathAvailable (Join-Path $aliasDir "ansible_control.managed_nodes.pub") $AllowOverwrite $AllowExisting
+        Assert-OutputKeyPathAvailable $PublicKeyPath $AllowOverwrite $AllowExisting
     }
 }
 
-function Save-BootstrapKeys($Lines, $AliasToSave, $IsManagement, $BaseOperatorDir, $PublicKeyPath, $AllowOverwrite) {
+function Save-BootstrapKeys($Lines, $AliasToSave, $IsManagement, $BaseOperatorDir, $PublicKeyPath, $AllowOverwrite, $KeepExisting) {
     $aliasDir = Join-Path $BaseOperatorDir $AliasToSave
     New-Item -ItemType Directory -Force -Path $aliasDir | Out-Null
 
@@ -187,9 +197,9 @@ function Save-BootstrapKeys($Lines, $AliasToSave, $IsManagement, $BaseOperatorDi
 
     $deployKeyPath = Join-Path $aliasDir "deploy_key"
     $adminKeyPath = Join-Path $aliasDir "admin_key"
-    Save-TextFile $deployKeyPath $deployKey $AllowOverwrite
+    Save-TextFile $deployKeyPath $deployKey $AllowOverwrite $KeepExisting
     Ensure-OpenSshPrivateKeyAcl $deployKeyPath
-    Save-TextFile $adminKeyPath $adminKey $AllowOverwrite
+    Save-TextFile $adminKeyPath $adminKey $AllowOverwrite $KeepExisting
     Ensure-OpenSshPrivateKeyAcl $adminKeyPath
     Write-Host "Saved bootstrap keys: $aliasDir"
 
@@ -201,10 +211,10 @@ function Save-BootstrapKeys($Lines, $AliasToSave, $IsManagement, $BaseOperatorDi
         }
 
         $ansibleKeyPath = Join-Path $aliasDir "ansible_control_key"
-        Save-TextFile $ansibleKeyPath $ansibleKey $AllowOverwrite
+        Save-TextFile $ansibleKeyPath $ansibleKey $AllowOverwrite $KeepExisting
         Ensure-OpenSshPrivateKeyAcl $ansibleKeyPath
-        Save-TextFile (Join-Path $aliasDir "ansible_control.managed_nodes.pub") $publicKey $AllowOverwrite
-        Save-TextFile $PublicKeyPath $publicKey $AllowOverwrite
+        Save-TextFile (Join-Path $aliasDir "ansible_control.managed_nodes.pub") $publicKey $AllowOverwrite $KeepExisting
+        Save-TextFile $PublicKeyPath $publicKey $AllowOverwrite $KeepExisting
         Write-Host "Saved Ansible control public key: $PublicKeyPath"
     }
 }
@@ -266,6 +276,101 @@ function Invoke-PscpPassword($Password, $Source, $Target, $Label, $HostKeyFinger
     }
 }
 
+function Quote-BashArg($Value) {
+    $text = [string]$Value
+    return "'" + ($text -replace "'", "'\''") + "'"
+}
+
+function Get-OpenSshCommonArgs($KeyFile) {
+    $args = @(
+        "-i", $KeyFile,
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10",
+        "-o", "IdentitiesOnly=yes"
+    )
+    if ($AutoAcceptHostKey) {
+        $args += @("-o", "StrictHostKeyChecking=accept-new")
+    }
+    return $args
+}
+
+function Invoke-SshKey($KeyFile, $Remote, $Command, $Label, $LogPath = "") {
+    $sshArgs = @("-n") + @(Get-OpenSshCommonArgs $KeyFile) + @($Remote, $Command)
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $script:ErrorActionPreference = "Continue"
+        if ($LogPath) {
+            & ssh @sshArgs 2>&1 | ForEach-Object {
+                $line = [string]$_
+                Add-Content -LiteralPath $LogPath -Value $line -Encoding utf8
+                Write-Host $line
+            }
+        } else {
+            & ssh @sshArgs
+        }
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $script:ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($exitCode -ne 0) {
+        Fail "$Label failed with exit code $exitCode"
+    }
+}
+
+function Invoke-ScpKey($KeyFile, $Source, $Target, $Label) {
+    $scpArgs = @(Get-OpenSshCommonArgs $KeyFile) + @($Source, $Target)
+    & scp @scpArgs
+    if ($LASTEXITCODE -ne 0) {
+        Fail "$Label failed"
+    }
+}
+
+function Test-AdminKeyBootstrapPreflight($KeyFile, $Remote, $IsManagement) {
+    $managementCheck = "true"
+    if ($IsManagement) {
+        $managementCheck = @'
+for pkg in git ansible; do
+    if ! command -v "$pkg" >/dev/null 2>&1; then
+        candidate="$(apt-cache policy "$pkg" | awk '/Candidate:/ {print $2; exit}')"
+        if [ -z "$candidate" ] || [ "$candidate" = "(none)" ]; then
+            echo "[WARN] package $pkg is not currently available through apt; bootstrap will try apt update and Ubuntu universe before installing it." >&2
+        fi
+    fi
+done
+'@
+    }
+
+    $preflight = @"
+set -e
+sudo -n true || { echo "[ERROR] $AdminUser passwordless sudo is not available. Reinstall OS or run fresh bootstrap with root access." >&2; exit 1; }
+for cmd in bash sudo install mkdir rm chmod chown id getent ssh-keygen apt-get apt-cache awk mktemp; do
+    command -v "`$cmd" >/dev/null 2>&1 || { echo "[ERROR] required command missing: `$cmd. Reinstall OS or run fresh bootstrap with root access." >&2; exit 1; }
+done
+tmp="`$(mktemp /tmp/ai-service-platform.bootstrap-preflight.XXXXXX)"
+rm -f "`$tmp"
+. /etc/os-release
+if [ "`${ID:-}" != "ubuntu" ]; then
+    echo "[ERROR] unsupported OS for admin-key re-bootstrap: `${ID:-unknown}. Reinstall with supported Ubuntu image or run fresh bootstrap." >&2
+    exit 1
+fi
+$managementCheck
+echo "[OK] admin-key bootstrap preflight passed"
+"@
+
+    $localPreflight = New-TemporaryFile
+    $remotePreflight = "/tmp/ai-service-platform.bootstrap-preflight.$([guid]::NewGuid().ToString('N')).sh"
+    try {
+        $preflightLf = $preflight -replace "`r`n", "`n" -replace "`r", "`n"
+        [System.IO.File]::WriteAllText($localPreflight.FullName, $preflightLf, [System.Text.ASCIIEncoding]::new())
+        Invoke-ScpKey $KeyFile $localPreflight.FullName "${Remote}:$remotePreflight" "scp admin-key bootstrap preflight"
+        Invoke-SshKey $KeyFile $Remote "sudo -n bash $remotePreflight" "admin-key bootstrap preflight"
+    } finally {
+        Remove-Item -LiteralPath $localPreflight -Force -ErrorAction SilentlyContinue
+        $cleanupArgs = @("-n") + @(Get-OpenSshCommonArgs $KeyFile) + @($Remote, "rm -f $remotePreflight")
+        & ssh @cleanupArgs 2>$null | Out-Null
+    }
+}
+
 function Clear-PuttyHostKeyCache($Endpoint) {
     if (-not $AutoAcceptHostKey) {
         return
@@ -294,13 +399,6 @@ if ($AnsibleAuthorizedKeyFile) {
     Require-File $AnsibleAuthorizedKeyFile "AnsibleAuthorizedKeyFile"
 }
 
-if (-not (Get-Command plink -ErrorAction SilentlyContinue)) {
-    Fail "plink not found in PATH"
-}
-if (-not (Get-Command pscp -ErrorAction SilentlyContinue)) {
-    Fail "pscp not found in PATH"
-}
-
 $firstLine = Get-Content -LiteralPath $NodesFile -TotalCount 1
 if ($firstLine -ne $ExpectedHeader) {
     Fail "nodes.csv header must be exactly: $ExpectedHeader"
@@ -323,11 +421,10 @@ if (-not $row) {
 if ($row.connection -eq "local" -or $row.endpoint -eq "local") {
     Fail "Cannot bootstrap remote VPS with endpoint=local: $Alias. For first bootstrap from Windows, set endpoint to the VPS public DNS/IP and connection=ssh. Use local only later in the Orchestration inventory CSV if needed."
 }
-if (-not $row.root_password) {
-    Fail "root_password is required for first remote bootstrap from Windows runner: $Alias"
-}
 Assert-NoUtf8Bom $SetupScript "SetupScript"
-$isManagementNode = Is-ActiveOrchestrationNode $stateRows $Alias
+$isManagementNode = Is-OrchestrationCapableNode $stateRows $Alias
+$useAdminKeyBootstrap = [string]::IsNullOrWhiteSpace([string]$row.root_password)
+$adminKeyFile = Join-Path (Join-Path $OperatorDir $Alias) "admin_key"
 if (-not $isManagementNode -and -not $AnsibleAuthorizedKeyFile) {
     $AnsibleAuthorizedKeyFile = Join-Path $OperatorDir "ansible_control.managed_nodes.pub"
     Require-File $AnsibleAuthorizedKeyFile "AnsibleAuthorizedKeyFile"
@@ -340,7 +437,27 @@ if ($isManagementNode) {
 if ($RegenerateRemoteKeys -and $isManagementNode -and -not $Force) {
     Fail "RegenerateRemoteKeys for a management node requires -Force so the local Ansible public key file is refreshed explicitly."
 }
-Assert-BootstrapKeyPathsAvailable $Alias $isManagementNode $OperatorDir $OutputAnsibleAuthorizedKeyFile $Force
+if ($useAdminKeyBootstrap) {
+    if ([string]::IsNullOrWhiteSpace($AdminUser)) {
+        Fail "AdminUser must not be empty for admin-key re-bootstrap."
+    }
+    Require-File $adminKeyFile "AdminKeyFile"
+    Ensure-OpenSshPrivateKeyAcl $adminKeyFile
+    if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
+        Fail "ssh not found in PATH. It is required for admin-key re-bootstrap."
+    }
+    if (-not (Get-Command scp -ErrorAction SilentlyContinue)) {
+        Fail "scp not found in PATH. It is required for admin-key re-bootstrap."
+    }
+} else {
+    if (-not (Get-Command plink -ErrorAction SilentlyContinue)) {
+        Fail "plink not found in PATH"
+    }
+    if (-not (Get-Command pscp -ErrorAction SilentlyContinue)) {
+        Fail "pscp not found in PATH"
+    }
+}
+Assert-BootstrapKeyPathsAvailable $Alias $isManagementNode $OperatorDir $OutputAnsibleAuthorizedKeyFile $Force $useAdminKeyBootstrap
 
 $sanitized = New-TemporaryFile
 $remoteLog = New-TemporaryFile
@@ -350,32 +467,60 @@ try {
         Add-Content -LiteralPath $sanitized -Value ("{0},{1},{2}," -f $item.current_alias,$item.endpoint,$item.connection) -Encoding ascii
     }
 
-    $remote = "root@$($row.endpoint)"
-    Write-Host "Bootstrapping $Alias at $($row.endpoint)"
-    Clear-PuttyHostKeyCache $row.endpoint
-    $hostKeyFingerprint = Get-PuttyHostKeyFingerprint $remote $row.root_password
+    if ($useAdminKeyBootstrap) {
+        $remote = "$AdminUser@$($row.endpoint)"
+        Write-Host "Re-bootstrapping $Alias at $($row.endpoint) through admin key"
+        Test-AdminKeyBootstrapPreflight $adminKeyFile $remote $isManagementNode
+    } else {
+        $remote = "root@$($row.endpoint)"
+        Write-Host "Bootstrapping $Alias at $($row.endpoint) through root password"
+        Clear-PuttyHostKeyCache $row.endpoint
+        $hostKeyFingerprint = Get-PuttyHostKeyFingerprint $remote $row.root_password
+    }
 
     Write-Host "Step 1/4: copy setup_vps.sh"
-    Invoke-PscpPassword $row.root_password $SetupScript "${remote}:/tmp/setup_vps.sh" "pscp setup_vps.sh" $hostKeyFingerprint
+    if ($useAdminKeyBootstrap) {
+        Invoke-ScpKey $adminKeyFile $SetupScript "${remote}:/tmp/setup_vps.sh" "scp setup_vps.sh"
+    } else {
+        Invoke-PscpPassword $row.root_password $SetupScript "${remote}:/tmp/setup_vps.sh" "pscp setup_vps.sh" $hostKeyFingerprint
+    }
 
     Write-Host "Step 2/4: copy sanitized nodes.csv"
-    Invoke-PscpPassword $row.root_password $sanitized "${remote}:/tmp/nodes.csv" "pscp sanitized nodes.csv" $hostKeyFingerprint
+    if ($useAdminKeyBootstrap) {
+        Invoke-ScpKey $adminKeyFile $sanitized "${remote}:/tmp/nodes.csv" "scp sanitized nodes.csv"
+    } else {
+        Invoke-PscpPassword $row.root_password $sanitized "${remote}:/tmp/nodes.csv" "pscp sanitized nodes.csv" $hostKeyFingerprint
+    }
 
     if ($StateFile) {
         Write-Host "Step 2a/4: copy state.csv"
-        Invoke-PscpPassword $row.root_password $StateFile "${remote}:/tmp/state.csv" "pscp state.csv" $hostKeyFingerprint
+        if ($useAdminKeyBootstrap) {
+            Invoke-ScpKey $adminKeyFile $StateFile "${remote}:/tmp/state.csv" "scp state.csv"
+        } else {
+            Invoke-PscpPassword $row.root_password $StateFile "${remote}:/tmp/state.csv" "pscp state.csv" $hostKeyFingerprint
+        }
     }
 
     if ($isManagementNode) {
         Write-Host "Step 2b/4: copy control inventory helpers"
-        Invoke-PscpPassword $row.root_password $CreateInventoryScript "${remote}:/tmp/create_inventory.sh" "pscp create_inventory.sh" $hostKeyFingerprint
-        Invoke-PscpPassword $row.root_password $PrepareInventoryScript "${remote}:/tmp/prepare_orchestration_inventory.sh" "pscp prepare_orchestration_inventory.sh" $hostKeyFingerprint
-        Invoke-PscpPassword $row.root_password $VerifyControlScript "${remote}:/tmp/verify_control_node.sh" "pscp verify_control_node.sh" $hostKeyFingerprint
+        if ($useAdminKeyBootstrap) {
+            Invoke-ScpKey $adminKeyFile $CreateInventoryScript "${remote}:/tmp/create_inventory.sh" "scp create_inventory.sh"
+            Invoke-ScpKey $adminKeyFile $PrepareInventoryScript "${remote}:/tmp/prepare_orchestration_inventory.sh" "scp prepare_orchestration_inventory.sh"
+            Invoke-ScpKey $adminKeyFile $VerifyControlScript "${remote}:/tmp/verify_control_node.sh" "scp verify_control_node.sh"
+        } else {
+            Invoke-PscpPassword $row.root_password $CreateInventoryScript "${remote}:/tmp/create_inventory.sh" "pscp create_inventory.sh" $hostKeyFingerprint
+            Invoke-PscpPassword $row.root_password $PrepareInventoryScript "${remote}:/tmp/prepare_orchestration_inventory.sh" "pscp prepare_orchestration_inventory.sh" $hostKeyFingerprint
+            Invoke-PscpPassword $row.root_password $VerifyControlScript "${remote}:/tmp/verify_control_node.sh" "pscp verify_control_node.sh" $hostKeyFingerprint
+        }
     }
 
     if ($AnsibleAuthorizedKeyFile) {
         Write-Host "Step 2c/4: copy Ansible control public key"
-        Invoke-PscpPassword $row.root_password $AnsibleAuthorizedKeyFile "${remote}:/tmp/ansible_control.managed_nodes.pub" "pscp Ansible public key" $hostKeyFingerprint
+        if ($useAdminKeyBootstrap) {
+            Invoke-ScpKey $adminKeyFile $AnsibleAuthorizedKeyFile "${remote}:/tmp/ansible_control.managed_nodes.pub" "scp Ansible public key"
+        } else {
+            Invoke-PscpPassword $row.root_password $AnsibleAuthorizedKeyFile "${remote}:/tmp/ansible_control.managed_nodes.pub" "pscp Ansible public key" $hostKeyFingerprint
+        }
     }
 
     if ($AnsibleAuthorizedKeyFile) {
@@ -399,20 +544,32 @@ try {
         $prepareInventoryCommand = ":"
         $emitKeyCommand = ":"
     }
-    $remoteCommand = "set +e; $setupCommand; rc=`$?; $prepareInventoryCommand; $emitKeyCommand; rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/state.csv /tmp/ansible_control.managed_nodes.pub /tmp/create_inventory.sh /tmp/prepare_orchestration_inventory.sh /tmp/verify_control_node.sh; exit `$rc"
+    if ($useAdminKeyBootstrap) {
+        $remoteScript = "set +e; $setupCommand; rc=`$?; $prepareInventoryCommand; $emitKeyCommand; rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/state.csv /tmp/ansible_control.managed_nodes.pub /tmp/create_inventory.sh /tmp/prepare_orchestration_inventory.sh /tmp/verify_control_node.sh; exit `$rc"
+        $remoteCommand = "sudo -n bash -lc $(Quote-BashArg $remoteScript)"
+    } else {
+        $remoteCommand = "set +e; $setupCommand; rc=`$?; $prepareInventoryCommand; $emitKeyCommand; rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/state.csv /tmp/ansible_control.managed_nodes.pub /tmp/create_inventory.sh /tmp/prepare_orchestration_inventory.sh /tmp/verify_control_node.sh; exit `$rc"
+    }
 
     Write-Host "Step 3/4: run remote bootstrap"
     Write-Host "Expected next output: AI Service Platform VPS bootstrap"
     Write-Host "If this step stays silent for a long time, check PuTTY/plink host key cache, SSH banner prompts, and root password auth."
-    $plinkResult = Invoke-PlinkCommand $remote $row.root_password $remoteCommand $remoteLog $hostKeyFingerprint
+    if ($useAdminKeyBootstrap) {
+        Invoke-SshKey $adminKeyFile $remote $remoteCommand "remote setup_vps.sh" $remoteLog
+        $remoteExitCode = 0
+    } else {
+        $plinkResult = Invoke-PlinkCommand $remote $row.root_password $remoteCommand $remoteLog $hostKeyFingerprint
+        $remoteExitCode = $plinkResult.ExitCode
+    }
     $remoteOutput = Get-Content -LiteralPath $remoteLog -ErrorAction SilentlyContinue
-    $remoteExitCode = $plinkResult.ExitCode
     if ($remoteExitCode -ne 0) { Fail "remote setup_vps.sh failed" }
 
     Write-Host "Step 4/4: save bootstrap keys"
-    Save-BootstrapKeys $remoteOutput $Alias $isManagementNode $OperatorDir $OutputAnsibleAuthorizedKeyFile $Force
+    Save-BootstrapKeys $remoteOutput $Alias $isManagementNode $OperatorDir $OutputAnsibleAuthorizedKeyFile $Force $useAdminKeyBootstrap
 
-    Clear-RootPasswordForAlias $NodesFile $Alias
+    if (-not $useAdminKeyBootstrap) {
+        Clear-RootPasswordForAlias $NodesFile $Alias
+    }
     Write-Host "Bootstrap completed for $Alias"
 } finally {
     Remove-Item -LiteralPath $sanitized -Force -ErrorAction SilentlyContinue

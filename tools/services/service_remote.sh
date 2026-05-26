@@ -194,9 +194,6 @@ esac
 if [ "$SERVICE" = "vpn" ]; then
     fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 fi
-if [ "$SERVICE" = "vpn_cascade" ]; then
-    fail "Service 'vpn_cascade' is reserved for future site-to-site/cascade rollout and is not implemented yet."
-fi
 
 shift 2
 while [ "$#" -gt 0 ]; do

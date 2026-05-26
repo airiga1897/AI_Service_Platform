@@ -117,7 +117,10 @@ resolve_behavior_from_state() {
         if split_aliases_has "$active_aliases" "$NODE_ALIAS" || split_aliases_has "$candidate_aliases" "$NODE_ALIAS" || split_aliases_has "$old_aliases" "$NODE_ALIAS"; then
             mentioned="true"
         fi
-        if { [ "$kind" = "platform_role" ] || [ "$kind" = "role" ]; } && [ "$name" = "orchestration" ] && [ "$state" = "present" ] && split_aliases_has "$active_aliases" "$NODE_ALIAS"; then
+        if { [ "$kind" = "platform_role" ] || [ "$kind" = "role" ]; } &&
+            [ "$name" = "orchestration" ] &&
+            [ "$state" = "present" ] &&
+            { split_aliases_has "$active_aliases" "$NODE_ALIAS" || split_aliases_has "$candidate_aliases" "$NODE_ALIAS"; }; then
             NODE_ROLE="management"
             DEPLOY_DIR="/opt/ai-service-platform"
             RUNTIME_ENV_FILE=""
@@ -579,12 +582,34 @@ lock_user_password() {
     print_success "Password login locked for $user_name"
 }
 
-install_authorized_key() {
+append_ansible_authorized_key_line() {
+    local public_key="$1"
+    public_key="$(printf '%s' "$public_key" | tr -d '\r')"
+
+    if [ -z "$public_key" ]; then
+        return
+    fi
+
+    if ! printf '%s\n' "$public_key" | grep -Eq '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp[0-9]+) '; then
+        print_error "ANSIBLE_AUTHORIZED_KEY does not look like an SSH public key."
+        exit 1
+    fi
+
+    if [ -z "$ANSIBLE_AUTHORIZED_KEYS" ]; then
+        ANSIBLE_AUTHORIZED_KEYS="$public_key"
+    else
+        ANSIBLE_AUTHORIZED_KEYS="$ANSIBLE_AUTHORIZED_KEYS
+$public_key"
+    fi
+}
+
+install_authorized_keys() {
     local user_name="$1"
-    local public_key="$2"
+    local public_keys="$2"
     local home_dir
     local ssh_dir
     local authorized_keys
+    local public_key
 
     home_dir="$(getent passwd "$user_name" | cut -d: -f6)"
     ssh_dir="$home_dir/.ssh"
@@ -592,9 +617,17 @@ install_authorized_key() {
 
     mkdir -p "$ssh_dir"
     touch "$authorized_keys"
-    if ! grep -Fxq "$public_key" "$authorized_keys"; then
-        printf '%s\n' "$public_key" >> "$authorized_keys"
-    fi
+    while IFS= read -r public_key || [ -n "$public_key" ]; do
+        public_key="$(printf '%s' "$public_key" | tr -d '\r')"
+        if [ -z "$public_key" ]; then
+            continue
+        fi
+        if ! grep -Fxq "$public_key" "$authorized_keys"; then
+            printf '%s\n' "$public_key" >> "$authorized_keys"
+        fi
+    done <<EOF
+$public_keys
+EOF
     chown -R "$user_name:$user_name" "$ssh_dir"
     chmod 700 "$ssh_dir"
     chmod 600 "$authorized_keys"
@@ -712,24 +745,31 @@ EOF
 }
 
 resolve_ansible_authorized_key() {
+    local key_line
+    ANSIBLE_AUTHORIZED_KEYS=""
+
     if [ -n "$ANSIBLE_AUTHORIZED_KEY_FILE" ]; then
         if [ ! -f "$ANSIBLE_AUTHORIZED_KEY_FILE" ]; then
             print_error "ANSIBLE_AUTHORIZED_KEY_FILE not found: $ANSIBLE_AUTHORIZED_KEY_FILE"
             exit 1
         fi
-        ANSIBLE_AUTHORIZED_KEY="$(tr -d '\r\n' < "$ANSIBLE_AUTHORIZED_KEY_FILE")"
+        while IFS= read -r key_line || [ -n "$key_line" ]; do
+            append_ansible_authorized_key_line "$key_line"
+        done < "$ANSIBLE_AUTHORIZED_KEY_FILE"
     fi
 
-    if [ -n "$ANSIBLE_AUTHORIZED_KEY" ] &&
-        ! printf '%s\n' "$ANSIBLE_AUTHORIZED_KEY" | grep -Eq '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp[0-9]+) '; then
-        print_error "ANSIBLE_AUTHORIZED_KEY does not look like an SSH public key."
-        exit 1
+    if [ -n "$ANSIBLE_AUTHORIZED_KEY" ]; then
+        while IFS= read -r key_line || [ -n "$key_line" ]; do
+            append_ansible_authorized_key_line "$key_line"
+        done <<EOF
+$ANSIBLE_AUTHORIZED_KEY
+EOF
     fi
 }
 
 resolve_ansible_authorized_key
 
-if [ "$NODE_ROLE" = "managed" ] && [ -z "$ANSIBLE_AUTHORIZED_KEY" ]; then
+if [ "$NODE_ROLE" = "managed" ] && [ -z "$ANSIBLE_AUTHORIZED_KEYS" ]; then
     print_error "Managed target $TARGET requires the orchestration Ansible control public key."
     echo ""
     echo "Copy this public key file from the active orchestration node to the managed VPS:"
@@ -756,6 +796,10 @@ ensure_command sudo sudo
 ensure_command ssh-keygen openssh-client
 ensure_command curl curl
 if [ "$NODE_ROLE" = "management" ]; then
+    print_warning "Preparing Ubuntu apt sources for management packages"
+    run_apt_get update -y
+    enable_universe_if_available
+    run_apt_get update -y
     ensure_command git git
     ensure_command ansible ansible
 fi
@@ -801,6 +845,10 @@ if [ "$NODE_ROLE" = "management" ]; then
     chmod 440 "$ANSIBLE_SUDOERS_FILE"
     visudo -cf "$ANSIBLE_SUDOERS_FILE" >/dev/null
     setup_ssh_key "$ANSIBLE_USER" "$ANSIBLE_KEY_NAME" "ansible-control@$TARGET"
+    if [ -n "$ANSIBLE_AUTHORIZED_KEYS" ]; then
+        install_authorized_keys "$ANSIBLE_USER" "$ANSIBLE_AUTHORIZED_KEYS"
+        print_success "orchestration Ansible trust public keys installed for $ANSIBLE_USER"
+    fi
     lock_user_password "$ANSIBLE_USER"
     print_success "Ansible control user is ready"
 else
@@ -812,9 +860,9 @@ else
     chmod 440 "$ANSIBLE_SUDOERS_FILE"
     visudo -cf "$ANSIBLE_SUDOERS_FILE" >/dev/null
     ANSIBLE_HOME="$(getent passwd "$ANSIBLE_USER" | cut -d: -f6)"
-    if [ -n "$ANSIBLE_AUTHORIZED_KEY" ]; then
-        install_authorized_key "$ANSIBLE_USER" "$ANSIBLE_AUTHORIZED_KEY"
-        print_success "orchestration Ansible control public key installed for $ANSIBLE_USER"
+    if [ -n "$ANSIBLE_AUTHORIZED_KEYS" ]; then
+        install_authorized_keys "$ANSIBLE_USER" "$ANSIBLE_AUTHORIZED_KEYS"
+        print_success "orchestration Ansible control public keys installed for $ANSIBLE_USER"
     else
         mkdir -p "$ANSIBLE_HOME/.ssh"
         touch "$ANSIBLE_HOME/.ssh/authorized_keys"

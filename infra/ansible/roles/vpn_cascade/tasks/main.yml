@@ -1,0 +1,207 @@
+---
+- name: Validate vpn_cascade state
+  ansible.builtin.assert:
+    that:
+      - vpn_cascade_state in ['present', 'absent']
+      - vpn_cascade_purge_data in [true, false, 'true', 'false', 'True', 'False']
+    fail_msg: "vpn_cascade_state must be present|absent and vpn_cascade_purge_data must be boolean-like."
+
+- name: Check vpn_cascade compose file
+  ansible.builtin.stat:
+    path: "{{ vpn_cascade_compose_file }}"
+  register: vpn_cascade_compose_stat
+  when: vpn_cascade_state == 'absent'
+
+- name: Check cascade seed config on control node
+  ansible.builtin.stat:
+    path: "{{ vpn_cascade_seed_config }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_cascade_seed_stat
+  when: vpn_cascade_state == 'present'
+
+- name: Report clean vpn_cascade bootstrap without seed
+  ansible.builtin.debug:
+    msg: "No cascade seed config found on control node; vpn_cascade will bootstrap clean if remote config is also missing: {{ vpn_cascade_seed_config }}"
+  when:
+    - vpn_cascade_state == 'present'
+    - not vpn_cascade_seed_stat.stat.exists
+
+- name: Check node-specific cascade overrides on control node
+  ansible.builtin.stat:
+    path: "{{ vpn_cascade_local_override_dir }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_cascade_override_stat
+  when: vpn_cascade_state == 'present'
+
+- name: Ensure vpn_cascade runtime directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+  loop:
+    - "{{ vpn_cascade_root_dir }}"
+    - "{{ vpn_cascade_data_dir }}"
+    - "{{ vpn_cascade_logs_dir }}"
+    - "{{ vpn_cascade_backup_dir }}"
+    - "{{ vpn_cascade_overrides_dir }}"
+  when: vpn_cascade_state == 'present'
+
+- name: Check existing remote cascade config
+  ansible.builtin.stat:
+    path: "{{ vpn_cascade_data_dir }}/vpn_server.config"
+  register: vpn_cascade_remote_config_stat
+  when: vpn_cascade_state == 'present'
+
+- name: Install opaque SoftEther cascade seed config
+  ansible.builtin.copy:
+    src: "{{ vpn_cascade_seed_config }}"
+    dest: "{{ vpn_cascade_data_dir }}/vpn_server.config"
+    mode: "0600"
+  register: vpn_cascade_seed_config_copy
+  no_log: true
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_seed_stat.stat.exists
+    - vpn_cascade_seed_stat.stat.isreg
+    - not vpn_cascade_remote_config_stat.stat.exists
+
+- name: Stage node-specific cascade overrides when present
+  ansible.builtin.copy:
+    src: "{{ vpn_cascade_local_override_dir }}/"
+    dest: "{{ vpn_cascade_overrides_dir }}/"
+    mode: preserve
+  register: vpn_cascade_overrides_copy
+  no_log: true
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_override_stat.stat.exists
+    - vpn_cascade_override_stat.stat.isdir
+
+- name: Render vpn_cascade Docker Compose
+  ansible.builtin.template:
+    src: docker-compose.vpn-cascade.yml.j2
+    dest: "{{ vpn_cascade_compose_file }}"
+    mode: "0640"
+  register: vpn_cascade_compose_template
+  when: vpn_cascade_state == 'present'
+
+- name: Ensure Docker runtime baseline for vpn_cascade
+  ansible.builtin.include_role:
+    name: docker_runtime_baseline
+  when:
+    - not ansible_check_mode
+    - vpn_cascade_state == 'present' or (vpn_cascade_compose_stat.stat.exists | default(false))
+
+- name: Ensure Docker service is running for vpn_cascade
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify Docker Compose plugin is available for vpn_cascade
+  ansible.builtin.command:
+    cmd: docker compose version
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Ensure cascade Docker network exists
+  ansible.builtin.command:
+    cmd: docker network create --subnet "{{ vpn_cascade_network_subnet }}" "{{ vpn_cascade_network_name }}"
+  register: vpn_cascade_network_create
+  changed_when: vpn_cascade_network_create.rc == 0
+  failed_when:
+    - vpn_cascade_network_create.rc != 0
+    - "'already exists' not in (vpn_cascade_network_create.stderr | default(''))"
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Start vpn_cascade container
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ vpn_cascade_compose_file }}" up -d
+    chdir: "{{ vpn_cascade_root_dir }}"
+  register: vpn_cascade_compose_up
+  changed_when: >
+    (vpn_cascade_compose_up.stdout ~ vpn_cascade_compose_up.stderr)
+    is search('(?i)(creating|created|recreating|recreated|starting|started|pulling|pulled|building|built)')
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Restart vpn_cascade when bind-mounted runtime files changed
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ vpn_cascade_compose_file }}" restart "{{ vpn_cascade_container_name }}"
+    chdir: "{{ vpn_cascade_root_dir }}"
+  changed_when: true
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+    - not vpn_cascade_compose_up.changed
+    - vpn_cascade_overrides_copy.changed | default(false)
+
+- name: Verify running vpn_cascade container network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ vpn_cascade_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ vpn_cascade_network_name }}"
+    EXPECTED_IP: "{{ vpn_cascade_container_ipv4 }}"
+  changed_when: false
+  register: vpn_cascade_container_ready
+  until: vpn_cascade_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Ensure Docker service is running before stopping vpn_cascade
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+  when:
+    - vpn_cascade_state == 'absent'
+    - vpn_cascade_compose_stat.stat.exists | default(false)
+    - not ansible_check_mode
+
+- name: Verify Docker Compose plugin is available before stopping vpn_cascade
+  ansible.builtin.command:
+    cmd: docker compose version
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'absent'
+    - vpn_cascade_compose_stat.stat.exists | default(false)
+    - not ansible_check_mode
+
+- name: Stop vpn_cascade container
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ vpn_cascade_compose_file }}" down
+    chdir: "{{ vpn_cascade_root_dir }}"
+  changed_when: true
+  when:
+    - vpn_cascade_state == 'absent'
+    - vpn_cascade_compose_stat.stat.exists | default(false)
+    - not ansible_check_mode
+
+- name: Purge vpn_cascade runtime data when explicitly requested
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ vpn_cascade_data_dir }}"
+    - "{{ vpn_cascade_logs_dir }}"
+    - "{{ vpn_cascade_overrides_dir }}"
+  when:
+    - vpn_cascade_state == 'absent'
+    - vpn_cascade_purge_data in [true, 'true', 'True']
+    - not ansible_check_mode

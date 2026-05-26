@@ -2,9 +2,8 @@
 
 SoftEther `vpn_edge` is a platform edge/VPN component. Product stacks do not
 own it. The target topology runs one SoftEther edge instance on each VPS node.
-Future `vpn_cascade` site-to-site transport is a separate reserved service and
-must not reuse the edge config, container, or volumes without an explicit
-migration plan.
+`vpn_cascade` site-to-site transport is a separate service and must not reuse
+the edge config, container, or volumes.
 
 The templates in this directory are placeholders for the future renderer:
 

@@ -3,7 +3,7 @@
 #
 # This playbook is intentionally scoped to vpn_edges so the vpn_edge service
 # rollout does not trigger product, backup, or monitoring stacks from site.yml.
-# vpn_cascade remains reserved for future site-to-site/cascade transport.
+# vpn_cascade has a separate playbook and role for site-to-site/cascade transport.
 
 - name: SoftEther vpn_edge service rollout
   hosts: vpn_edges

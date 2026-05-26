@@ -8,6 +8,7 @@
 2. [GitHub Actions deploy access](02-github-actions-deploy-access-ai-retail-dev-preprod.md) - GitHub Environment/secrets/predeploy-check для `ai-retail-dev-preprod`, без product `pull/up`.
 3. [VPN first service rollout](03-vpn-first-service-rollout.md) - `edge_haproxy` как TCP edge и `vpn_edge` как SoftEther user ingress.
 4. [Platform services manual rollout, then GitHub gate](04-platform-services-manual-rollout-then-github-gate.md) - ручная проверка platform services, затем перенос проверенного rollout в GitHub Actions.
+5. [Egress policy, probes, and AI-assisted analysis](05-egress-policy-probes-and-ai-analysis.md) - staged roadmap для egress policy, probes, AI-assisted classification и controlled routing enforcement.
 
 ## Текущая Модель
 

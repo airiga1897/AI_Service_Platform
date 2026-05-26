@@ -50,6 +50,8 @@ Options:
   --prepare-inventory-script PATH    prepare_orchestration_inventory.sh path. Default: tools/bootstrap/prepare_orchestration_inventory.sh
   --verify-control-script PATH       verify_control_node.sh path. Default: tools/bootstrap/verify_control_node.sh
   --ansible-authorized-key-file PATH Orchestration public key for managed nodes.
+  --admin-user USER                  Admin user for re-bootstrap when root_password is empty.
+                                     Default: useradmin
   --operator-dir PATH                Where to save extracted bootstrap keys.
                                      Default: ./operator
   --output-ansible-authorized-key-file PATH
@@ -73,6 +75,7 @@ PREPARE_INVENTORY_SCRIPT="tools/bootstrap/prepare_orchestration_inventory.sh"
 VERIFY_CONTROL_SCRIPT="tools/bootstrap/verify_control_node.sh"
 ANSIBLE_AUTHORIZED_KEY_FILE=""
 OPERATOR_DIR="./operator"
+ADMIN_USER="useradmin"
 OUTPUT_ANSIBLE_AUTHORIZED_KEY_FILE="./operator/ansible_control.managed_nodes.pub"
 FORCE_OVERWRITE="false"
 REGENERATE_REMOTE_KEYS="false"
@@ -113,6 +116,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --operator-dir)
             OPERATOR_DIR="${2:-}"
+            shift 2
+            ;;
+        --admin-user)
+            ADMIN_USER="${2:-}"
             shift 2
             ;;
         --output-ansible-authorized-key-file)
@@ -264,6 +271,10 @@ write_key_file() {
     local output_dir
 
     if [ -f "$path" ] && [ "$FORCE_OVERWRITE" != "true" ]; then
+        if [ "${KEEP_EXISTING_OUTPUT_KEYS:-false}" = "true" ]; then
+            print_success "Keeping existing output key file: $path"
+            return
+        fi
         print_error "Output key file already exists: $path"
         print_error "Use --force to overwrite it."
         exit 1
@@ -278,6 +289,9 @@ write_key_file() {
 assert_output_key_path_available() {
     local path="$1"
     if [ -f "$path" ] && [ "$FORCE_OVERWRITE" != "true" ]; then
+        if [ "${ALLOW_EXISTING_OUTPUT_KEYS:-false}" = "true" ]; then
+            return
+        fi
         print_error "Output key file already exists: $path"
         print_error "Use --force to overwrite it."
         exit 1
@@ -393,15 +407,6 @@ if [ "$connection" = "local" ] || [ "$endpoint" = "local" ]; then
     print_error "Use local only later in the Orchestration inventory CSV if needed."
     exit 1
 fi
-if [ -z "$root_password" ]; then
-    print_error "root_password is required for first remote bootstrap from Unix runner: $NODE_ALIAS"
-    exit 1
-fi
-if ! command -v sshpass >/dev/null 2>&1; then
-    print_error "sshpass is required for password bootstrap. Install sshpass or run bootstrap manually."
-    exit 1
-fi
-
 is_management_node="false"
 state_first_line="$(head -n 1 "$STATE_FILE" | tr -d '\r')"
 [ "$state_first_line" = "$EXPECTED_STATE_CSV_HEADER" ] || {
@@ -409,10 +414,11 @@ state_first_line="$(head -n 1 "$STATE_FILE" | tr -d '\r')"
     exit 1
 }
 orchestration_rows=0
-while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _old_aliases row_state extra || [ -n "${kind:-}" ]; do
+while IFS=, read -r kind name _ansible_group active_aliases candidate_aliases _old_aliases row_state extra || [ -n "${kind:-}" ]; do
     kind="${kind//$'\r'/}"
     name="${name//$'\r'/}"
     active_aliases="${active_aliases//$'\r'/}"
+    candidate_aliases="${candidate_aliases//$'\r'/}"
     row_state="${row_state//$'\r'/}"
     extra="${extra//$'\r'/}"
     [ "$kind" = "$EXPECTED_STATE_CSV_HEADER" ] && continue
@@ -423,7 +429,7 @@ while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _
     }
     if { [ "$kind" = "platform_role" ] || [ "$kind" = "role" ]; } && [ "$name" = "orchestration" ] && [ "$row_state" = "present" ]; then
         orchestration_rows=$((orchestration_rows + 1))
-        if alias_list_has "$active_aliases" "$NODE_ALIAS"; then
+        if alias_list_has "$active_aliases" "$NODE_ALIAS" || alias_list_has "$candidate_aliases" "$NODE_ALIAS"; then
             is_management_node="true"
         fi
     fi
@@ -447,6 +453,28 @@ if [ "$REGENERATE_REMOTE_KEYS" = "true" ] &&
     print_error "--regenerate-remote-keys for a management node requires --force so the local Ansible public key file is refreshed explicitly."
     exit 1
 fi
+
+access_mode="root-password"
+admin_key_file="$OPERATOR_DIR/$NODE_ALIAS/admin_key"
+if [ -z "$root_password" ]; then
+    access_mode="admin-key"
+    if [ -z "$ADMIN_USER" ]; then
+        print_error "--admin-user must not be empty for admin-key re-bootstrap."
+        exit 1
+    fi
+    require_file "$admin_key_file" "admin key for re-bootstrap"
+    chmod 600 "$admin_key_file" 2>/dev/null || true
+    ALLOW_EXISTING_OUTPUT_KEYS="true"
+    KEEP_EXISTING_OUTPUT_KEYS="true"
+else
+    if ! command -v sshpass >/dev/null 2>&1; then
+        print_error "sshpass is required for password bootstrap. Install sshpass or run bootstrap manually."
+        exit 1
+    fi
+    ALLOW_EXISTING_OUTPUT_KEYS="false"
+    KEEP_EXISTING_OUTPUT_KEYS="false"
+fi
+
 assert_bootstrap_key_paths_available "$NODE_ALIAS" "$is_management_node"
 sanitized_nodes="$(mktemp)"
 remote_log="$(mktemp)"
@@ -463,11 +491,53 @@ trap 'rm -f "$sanitized_nodes" "$remote_log"' EXIT
     done
 } > "$sanitized_nodes"
 
-remote="root@$endpoint"
-ssh_base=(sshpass -p "$root_password" ssh -o StrictHostKeyChecking=accept-new "$remote")
-scp_base=(sshpass -p "$root_password" scp -o StrictHostKeyChecking=accept-new)
+if [ "$access_mode" = "admin-key" ]; then
+    remote="$ADMIN_USER@$endpoint"
+    ssh_base=(ssh -i "$admin_key_file" -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$remote")
+    scp_base=(scp -i "$admin_key_file" -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
+else
+    remote="root@$endpoint"
+    ssh_base=(sshpass -p "$root_password" ssh -o StrictHostKeyChecking=accept-new "$remote")
+    scp_base=(sshpass -p "$root_password" scp -o StrictHostKeyChecking=accept-new)
+fi
+
+run_admin_preflight() {
+    local management_check="true"
+    if [ "$is_management_node" = "true" ]; then
+        management_check='for pkg in git ansible; do
+    if ! command -v "$pkg" >/dev/null 2>&1; then
+        candidate="$(apt-cache policy "$pkg" | awk '"'"'/Candidate:/ {print $2; exit}'"'"')"
+        if [ -z "$candidate" ] || [ "$candidate" = "(none)" ]; then
+            echo "[ERROR] package $pkg is not available through apt. Reinstall OS or run fresh bootstrap with root access after fixing package repositories." >&2
+            exit 1
+        fi
+    fi
+done'
+    fi
+
+    "${ssh_base[@]}" "set -e
+sudo -n true || { echo '[ERROR] $ADMIN_USER passwordless sudo is not available. Reinstall OS or run fresh bootstrap with root access.' >&2; exit 1; }
+for cmd in bash sudo install mkdir rm chmod chown id getent ssh-keygen apt-get apt-cache awk mktemp; do
+    command -v \"\$cmd\" >/dev/null 2>&1 || { echo \"[ERROR] required command missing: \$cmd. Reinstall OS or run fresh bootstrap with root access.\" >&2; exit 1; }
+done
+tmp=\"\$(mktemp /tmp/ai-service-platform.bootstrap-preflight.XXXXXX)\"
+rm -f \"\$tmp\"
+. /etc/os-release
+if [ \"\${ID:-}\" != \"ubuntu\" ]; then
+    echo \"[ERROR] unsupported OS for admin-key re-bootstrap: \${ID:-unknown}. Reinstall with supported Ubuntu image or run fresh bootstrap.\" >&2
+    exit 1
+fi
+$management_check
+echo '[OK] admin-key bootstrap preflight passed'"
+}
 
 print_header "Bootstrap $NODE_ALIAS from Unix runner"
+if [ "$access_mode" = "admin-key" ]; then
+    echo "Access mode: admin key re-bootstrap"
+    run_admin_preflight
+else
+    echo "Access mode: root password first bootstrap"
+fi
 echo "Step 1/4: copy setup_vps.sh"
 "${scp_base[@]}" "$SETUP_SCRIPT" "$remote:/tmp/setup_vps.sh"
 echo "Step 2/4: copy sanitized nodes.csv"
@@ -508,7 +578,12 @@ else
     prepare_inventory_command=":"
     emit_key_command=":"
 fi
-remote_command="set +e; $setup_command; rc=\$?; $prepare_inventory_command; $emit_key_command; rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/state.csv /tmp/ansible_control.managed_nodes.pub /tmp/create_inventory.sh /tmp/prepare_orchestration_inventory.sh /tmp/verify_control_node.sh; exit \$rc"
+remote_script="set +e; $setup_command; rc=\$?; $prepare_inventory_command; $emit_key_command; rm -f /tmp/setup_vps.sh /tmp/nodes.csv /tmp/state.csv /tmp/ansible_control.managed_nodes.pub /tmp/create_inventory.sh /tmp/prepare_orchestration_inventory.sh /tmp/verify_control_node.sh; exit \$rc"
+if [ "$access_mode" = "admin-key" ]; then
+    remote_command="sudo -n bash -lc $(printf '%q' "$remote_script")"
+else
+    remote_command="$remote_script"
+fi
 
 echo "Step 3/4: run remote bootstrap"
 echo "Expected next output: AI Service Platform VPS bootstrap"
@@ -524,5 +599,7 @@ fi
 
 echo "Step 4/4: save bootstrap keys"
 save_bootstrap_keys "$NODE_ALIAS" "$is_management_node"
-clear_root_password_for_alias "$NODES_FILE" "$NODE_ALIAS"
+if [ "$access_mode" = "root-password" ]; then
+    clear_root_password_for_alias "$NODES_FILE" "$NODE_ALIAS"
+fi
 print_success "Bootstrap completed for $NODE_ALIAS"

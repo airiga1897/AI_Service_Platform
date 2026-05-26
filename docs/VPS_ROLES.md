@@ -39,6 +39,19 @@ vps3,vps03.example.com,ssh,
 
 В `nodes.csv` больше не пишутся `roles`, `vpn-edge`, `frontend`, `backend` и похожие capability-строки.
 
+### Bootstrap Access Mode
+
+`root_password` is only for fresh bootstrap through `root@host`. When the field
+is empty, wrappers treat the node as already bootstrapped and use
+`operator/<alias>/admin_key` for admin-key re-bootstrap through
+`useradmin@host`.
+
+`platform_role,orchestration` `active_aliases` and `candidate_aliases` are
+management-capable nodes. Other present aliases are managed nodes.
+`bootstrap_all_from_windows.ps1` can converge both categories automatically:
+first orchestration candidates, then the aggregate Ansible trust bundle and
+trust mesh, then managed nodes.
+
 ## state.csv
 
 Real файл хранится вне git:
@@ -83,7 +96,9 @@ Service naming is semantic, not positional:
 - `vpn_edge` - SoftEther user VPN ingress behind the edge proxy.
 - `vpn_ingress` - HAProxy route к `vpn_edge`.
 - `minecraft` - HAProxy route для `mainsrv01.mine-craft.su`, Minecraft game и RCON.
-- `vpn_cascade` - reserved future SoftEther cascade/site-to-site service.
+- `vpn_cascade` - SoftEther cascade/site-to-site lab transport service. It is
+  separate from `vpn_edge`, uses its own runtime data, and does not create an
+  HAProxy public route by itself.
 
 `ansible_group` задаёт inventory-группу. `active_aliases`, `candidate_aliases`, `old_aliases` разделяются через `+`.
 

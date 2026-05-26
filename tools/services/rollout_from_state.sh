@@ -8,10 +8,13 @@ OPERATOR_DIR="./operator"
 CONTROL_ROLE="orchestration"
 CONTROL_ALIAS=""
 SYNC_SCRIPT="tools/bootstrap/sync_to_orchestration.sh"
+STANDBY_PREPARE_SCRIPT="tools/bootstrap/prepare_orchestration_standby.sh"
 SERVICE_REMOTE_SCRIPT="tools/services/service_remote.sh"
 AUTO_ACCEPT_HOST_KEY="false"
 SKIP_SYNC="false"
+SKIP_STANDBY_SYNC="false"
 SKIP_POSTCHECK="false"
+SKIP_DRY_RUN="false"
 RESEED_VPN_EDGE=""
 
 EXPECTED_HEADER="current_alias,endpoint,connection,root_password"
@@ -32,7 +35,9 @@ Options:
   --reseed-vpn-edge ALIASES
                          Explicitly reseed SoftEther config for aliases.
   --skip-sync             Skip sync/verify step.
+  --skip-standby-sync     Skip automatic sync of orchestration candidates.
   --skip-postcheck        Skip service postcheck placeholders.
+  --skip-dry-run          Skip pre-apply Ansible check runs.
   -h, --help              Show help.
 USAGE
 }
@@ -155,6 +160,19 @@ invoke_service_remote() {
     bash "$SERVICE_REMOTE_SCRIPT" "${args[@]}"
 }
 
+invoke_service_apply_dry_run() {
+    local service="$1"
+    local limit="$2"
+    local label="$3"
+    if [ "$SKIP_DRY_RUN" = "true" ]; then
+        echo "$label: dry-run skipped"
+        echo "Dry-run: skipped by operator request"
+        return
+    fi
+    echo "$label: dry-run"
+    invoke_service_remote "$service" apply "$limit" true
+}
+
 invoke_vpn_edge_reseed() {
     local alias="$1"
     if array_contains reseeded_vpn_edge_aliases "$alias"; then
@@ -175,6 +193,30 @@ invoke_sync() {
     [ -n "$CONTROL_ALIAS" ] && args+=("--control-alias" "$CONTROL_ALIAS")
     [ "$AUTO_ACCEPT_HOST_KEY" = "true" ] && args+=("--refresh-known-hosts")
     bash "$SYNC_SCRIPT" "${args[@]}"
+}
+
+invoke_standby_sync() {
+    local aliases="$1"
+    local alias
+    [ -n "$aliases" ] || return
+
+    echo ""
+    echo "Step 1b/3: sync standby orchestration candidate nodes"
+    while IFS= read -r alias; do
+        [ -n "$alias" ] || continue
+        echo "Preparing standby orchestration node $alias"
+        local args=(
+            "--alias" "$alias"
+            "--nodes-file" "$NODES_FILE"
+            "--state-file" "$STATE_FILE"
+            "--operator-dir" "$OPERATOR_DIR"
+            "--control-role" "$CONTROL_ROLE"
+            "--sync-script" "$SYNC_SCRIPT"
+            "--skip-service-plan"
+        )
+        [ "$AUTO_ACCEPT_HOST_KEY" = "true" ] && args+=("--refresh-known-hosts")
+        bash "$STANDBY_PREPARE_SCRIPT" "${args[@]}"
+    done < <(split_aliases_to_lines "$aliases")
 }
 
 invoke_postcheck() {
@@ -210,11 +252,14 @@ while [ "$#" -gt 0 ]; do
         --control-role) CONTROL_ROLE="${2:-}"; shift 2 ;;
         --control-alias) CONTROL_ALIAS="${2:-}"; shift 2 ;;
         --sync-script) SYNC_SCRIPT="${2:-}"; shift 2 ;;
+        --standby-prepare-script) STANDBY_PREPARE_SCRIPT="${2:-}"; shift 2 ;;
         --service-remote-script) SERVICE_REMOTE_SCRIPT="${2:-}"; shift 2 ;;
         --auto-accept-host-key|--refresh-known-hosts) AUTO_ACCEPT_HOST_KEY="true"; shift ;;
         --reseed-vpn-edge) RESEED_VPN_EDGE="${2:-}"; shift 2 ;;
         --skip-sync) SKIP_SYNC="true"; shift ;;
+        --skip-standby-sync) SKIP_STANDBY_SYNC="true"; shift ;;
         --skip-postcheck) SKIP_POSTCHECK="true"; shift ;;
+        --skip-dry-run) SKIP_DRY_RUN="true"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) fail "Unknown option: $1" ;;
     esac
@@ -223,6 +268,9 @@ done
 require_file "$NODES_FILE" "--nodes-file"
 require_file "$STATE_FILE" "--state-file"
 require_file "$SYNC_SCRIPT" "--sync-script"
+if [ "$SKIP_STANDBY_SYNC" = "false" ]; then
+    require_file "$STANDBY_PREPARE_SCRIPT" "--standby-prepare-script"
+fi
 require_file "$SERVICE_REMOTE_SCRIPT" "--service-remote-script"
 
 first_line="$(head -n 1 "$NODES_FILE" | tr -d '\r')"
@@ -243,6 +291,7 @@ edge_haproxy_aliases=""
 vpn_edge_aliases=""
 vpn_ingress_aliases=""
 present_edge_route_aliases=""
+standby_orchestration_aliases=""
 while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _old_aliases row_state extra || [ -n "${kind:-}" ]; do
     kind="${kind//$'\r'/}"
     name="${name//$'\r'/}"
@@ -254,6 +303,9 @@ while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _
     if [ "$kind" = "service" ] && [ "$row_state" = "present" ]; then
         [ "$name" = "edge_haproxy" ] && append_aliases_to_var edge_haproxy_aliases "$active_aliases"
         [ "$name" = "vpn_edge" ] && append_aliases_to_var vpn_edge_aliases "$active_aliases"
+    fi
+    if { [ "$kind" = "platform_role" ] || [ "$kind" = "role" ]; } && [ "$name" = "$CONTROL_ROLE" ] && [ "$row_state" = "present" ]; then
+        append_aliases_to_var standby_orchestration_aliases "$_candidate_aliases"
     fi
 done < <(tail -n +2 "$STATE_FILE")
 
@@ -334,8 +386,14 @@ done < <(tail -n +2 "$STATE_FILE")
 if [ "$SKIP_SYNC" = "false" ]; then
     echo "Step 1/3: sync operator state to active orchestration node"
     invoke_sync
+    if [ "$SKIP_STANDBY_SYNC" = "false" ]; then
+        invoke_standby_sync "$standby_orchestration_aliases"
+    else
+        echo "Step 1b/3: standby orchestration sync skipped by --skip-standby-sync"
+    fi
 else
     echo "Step 1/3: sync skipped by --skip-sync"
+    echo "Step 1b/3: standby orchestration sync skipped because sync is skipped"
 fi
 
 echo ""
@@ -350,8 +408,7 @@ if [ "${#edge_route_removal_aliases[@]}" -gt 0 ]; then
     echo "Step 2a/3: remove absent edge routes through edge_haproxy before stopping backends"
     ensure_service_plan "edge_haproxy"
     for alias in "${edge_route_removal_aliases[@]}"; do
-        echo "edge_haproxy route removal on $alias: dry-run"
-        invoke_service_remote "edge_haproxy" apply "$alias" true
+        invoke_service_apply_dry_run "edge_haproxy" "$alias" "edge_haproxy route removal on $alias"
         echo "edge_haproxy route removal on $alias: apply"
         invoke_service_remote "edge_haproxy" apply "$alias"
         add_unique_to_array processed_service_actions "edge_haproxy|present|$alias"
@@ -383,12 +440,7 @@ process_service_rows() {
         *) fail "$name state must be one of: present, absent, purged" ;;
     esac
     case "$name" in
-        vpn_cascade)
-            echo "$name: reserved/not implemented; skipped"
-            summary+=("$name: skipped reserved")
-            continue
-            ;;
-        edge_haproxy|vpn_edge) ;;
+        edge_haproxy|vpn_edge|vpn_cascade) ;;
         *)
             echo "$name: not implemented yet; skipped"
             summary+=("$name: skipped not implemented")
@@ -422,8 +474,7 @@ process_service_rows() {
         processed_service_actions+=("$action_key")
         case "$row_state" in
             present)
-                echo "$name on $alias: dry-run"
-                invoke_service_remote "$name" apply "$alias" true
+                invoke_service_apply_dry_run "$name" "$alias" "$name on $alias"
                 echo "$name on $alias: apply"
                 invoke_service_remote "$name" apply "$alias"
                 invoke_postcheck "$name" "$row_state" "$alias"
@@ -471,8 +522,7 @@ if [ "${#edge_route_apply_aliases[@]}" -gt 0 ]; then
             echo "edge_haproxy routes on $alias: already applied by edge_haproxy service apply"
             continue
         fi
-        echo "edge_haproxy routes on $alias: dry-run"
-        invoke_service_remote "edge_haproxy" apply "$alias" true
+        invoke_service_apply_dry_run "edge_haproxy" "$alias" "edge_haproxy routes on $alias"
         echo "edge_haproxy routes on $alias: apply"
         invoke_service_remote "edge_haproxy" apply "$alias"
         summary+=("edge_haproxy routes $alias: applied")

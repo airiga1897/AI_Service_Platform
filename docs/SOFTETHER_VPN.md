@@ -139,3 +139,42 @@ The reseed action requires an installed `vpn_edge`, creates a timestamped backup
 of the live config, copies the operator seed, restarts `softether-edge`, verifies
 the container, and prints the backup path. More granular `vpncmd` updates are
 reserved for a later phase.
+
+## SoftEther Cascade Transport
+
+`vpn_cascade` is the separate site-to-site/cascade transport service. It is not
+the user VPN ingress and it does not reuse `/opt/ai-service-platform/vpn_edge`.
+The rollout creates a distinct container, config volume, logs directory, backup
+directory, and Docker network:
+
+```text
+/opt/ai-service-platform/vpn_cascade
+ai_service_cascade 172.21.0.0/24
+softether-cascade  172.21.0.2
+```
+
+To enable it, add or update a `state.csv` service row with explicit aliases:
+
+```csv
+service,vpn_cascade,vpn_cascades,vps4,,,present
+```
+
+The operator seed config is per node and optional for the very first clean
+bootstrap:
+
+```text
+operator/softether/cascade/<alias>/vpn_server.config
+```
+
+If the seed exists, normal `vpn_cascade present` copies it only when the remote
+cascade config is missing. If the seed does not exist and the remote config is
+also missing, rollout starts a clean SoftEther cascade container with an empty
+`softether_data` directory. SoftEther can then be configured manually through
+SSH and `docker compose exec`/`vpncmd`; the resulting
+`vpn_server.config` can be copied back into the operator seed path later.
+
+After first start, the remote
+`/opt/ai-service-platform/vpn_cascade/softether_data/vpn_server.config` is
+mutable runtime state. `vpn_cascade` does not publish HAProxy routes, does not
+change host routing, and does not enforce egress policy. Controlled routing must
+come later from approved policy, not directly from cascade rollout.

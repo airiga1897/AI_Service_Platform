@@ -93,7 +93,7 @@ platform services.
 Future workflow inputs:
 
 ```text
-service=edge_haproxy|vpn_edge|...
+service=edge_haproxy|vpn_edge|vpn_cascade|...
 command=plan|apply|absent|purge
 limit=vps1|vps2|vps3
 check=true|false
@@ -101,7 +101,8 @@ check=true|false
 
 Rules:
 
-- `vpn_cascade` remains reserved/rejected until implemented.
+- `vpn_cascade` follows the same gated command model, but remains separate from
+  public HAProxy routes and controlled routing enforcement.
 - `command=plan` is read-only and may use a lighter gate.
 - `command=apply|absent|purge` must use GitHub Environment approval for
   production-changing targets, for example `vps1-prod`.

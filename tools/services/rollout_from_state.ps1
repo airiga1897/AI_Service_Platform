@@ -5,19 +5,22 @@ param(
     [string]$ControlRole = "orchestration",
     [string]$ControlAlias = "",
     [string]$SyncScript = "tools/bootstrap/sync_to_orchestration.ps1",
+    [string]$StandbyPrepareScript = "tools/bootstrap/prepare_orchestration_standby.ps1",
     [string]$ServiceRemoteScript = "tools/services/service_remote.ps1",
     [string]$VpnIngressDomain = "mine-craft.su",
     [string[]]$ReseedVpnEdge = @(),
     [switch]$AutoAcceptHostKey,
     [switch]$SkipSync,
-    [switch]$SkipPostcheck
+    [switch]$SkipStandbySync,
+    [switch]$SkipPostcheck,
+    [switch]$SkipDryRun
 )
 
 $ErrorActionPreference = "Stop"
 $ExpectedNodesHeader = "current_alias,endpoint,connection,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
-$SupportedServices = @("edge_haproxy", "vpn_edge")
-$ReservedServices = @("vpn_cascade")
+$SupportedServices = @("edge_haproxy", "vpn_edge", "vpn_cascade")
+$ReservedServices = @()
 
 function Fail($Message) {
     Write-Error $Message
@@ -55,6 +58,17 @@ function Get-PresentServiceAliases($Rows, $Name) {
         }
     }
     return @($aliases)
+}
+
+function Get-OrchestrationCandidateAliases($Rows, $Role) {
+    $roleRows = @($Rows | Where-Object { ($_.kind -eq "platform_role" -or $_.kind -eq "role") -and $_.name -eq $Role -and $_.state -eq "present" })
+    if ($roleRows.Count -eq 0) {
+        Fail "state.csv has no present platform_role '$Role'"
+    }
+    if ($roleRows.Count -gt 1) {
+        Fail "state.csv has multiple present platform_role '$Role' rows; keep exactly one"
+    }
+    return @(Split-AliasList $roleRows[0].candidate_aliases)
 }
 
 function Get-EdgeRouteAliasesByState($Rows, $Name, $States) {
@@ -289,6 +303,16 @@ function Invoke-ServiceRemote($Service, $Action, $Limit, [switch]$Check, [switch
     Invoke-ChildScript $ServiceRemoteScript $args "$Service $Action"
 }
 
+function Invoke-ServiceApplyDryRun($Service, $Limit, $Label) {
+    if ($SkipDryRun) {
+        Write-Host "${Label}: dry-run skipped"
+        Write-Host "Dry-run: skipped by operator request"
+        return
+    }
+    Write-Host "${Label}: dry-run"
+    Invoke-ServiceRemote $Service "apply" $Limit -Check
+}
+
 function Invoke-VpnEdgeReseed($Alias, $ReseededAliases, $Summary) {
     if ($ReseededAliases -contains $Alias) {
         return
@@ -309,6 +333,29 @@ function Invoke-Sync() {
     if ($ControlAlias) { $args += @("-ControlAlias", $ControlAlias) }
     if ($AutoAcceptHostKey) { $args += "-AutoAcceptHostKey" }
     Invoke-ChildScript $SyncScript $args "sync to orchestration"
+}
+
+function Invoke-StandbySync($Aliases) {
+    if ($Aliases.Count -eq 0) {
+        return
+    }
+
+    Write-Host ""
+    Write-Host "Step 1b/3: sync standby orchestration candidate nodes"
+    foreach ($alias in $Aliases) {
+        Write-Host "Preparing standby orchestration node ${alias}"
+        $args = @(
+            "-Alias", $alias,
+            "-NodesFile", $NodesFile,
+            "-StateFile", $StateFile,
+            "-OperatorDir", $OperatorDir,
+            "-ControlRole", $ControlRole,
+            "-SyncScript", $SyncScript,
+            "-SkipServicePlan"
+        )
+        if ($AutoAcceptHostKey) { $args += "-AutoAcceptHostKey" }
+        Invoke-ChildScript $StandbyPrepareScript $args "standby orchestration preparation for $alias"
+    }
 }
 
 function Invoke-Postcheck($Service, $State, $Alias) {
@@ -341,6 +388,9 @@ function Invoke-Postcheck($Service, $State, $Alias) {
 Require-File $NodesFile "NodesFile"
 Require-File $StateFile "StateFile"
 Require-File $SyncScript "SyncScript"
+if (-not $SkipStandbySync) {
+    Require-File $StandbyPrepareScript "StandbyPrepareScript"
+}
 Require-File $ServiceRemoteScript "ServiceRemoteScript"
 
 $nodesHeader = Get-Content -LiteralPath $NodesFile -TotalCount 1
@@ -357,6 +407,7 @@ $stateRows = Import-Csv -LiteralPath $StateFile
 $stateRows = @(Normalize-StateRows $stateRows $nodeRows $StateFile)
 Normalize-HaproxyRoutes (Join-Path (Join-Path $OperatorDir "haproxy") "routes.yml") (Get-PresentVpnIngressAliases $stateRows) $VpnIngressDomain
 $reseedVpnEdgeAliases = @(Split-OperatorAliasList $ReseedVpnEdge)
+$standbyOrchestrationAliases = @(Get-OrchestrationCandidateAliases $stateRows $ControlRole)
 
 $serviceRows = @($stateRows | Where-Object { $_.kind -eq "service" })
 if ($serviceRows.Count -eq 0) {
@@ -430,8 +481,14 @@ foreach ($serviceRow in $serviceRows) {
 if (-not $SkipSync) {
     Write-Host "Step 1/3: sync operator state to active orchestration node"
     Invoke-Sync
+    if (-not $SkipStandbySync) {
+        Invoke-StandbySync $standbyOrchestrationAliases
+    } else {
+        Write-Host "Step 1b/3: standby orchestration sync skipped by -SkipStandbySync"
+    }
 } else {
     Write-Host "Step 1/3: sync skipped by -SkipSync"
+    Write-Host "Step 1b/3: standby orchestration sync skipped because sync is skipped"
 }
 
 $summary = New-Object System.Collections.Generic.List[string]
@@ -449,8 +506,7 @@ if ($edgeRouteRemovalAliases.Count -gt 0) {
         Add-UniqueAlias $plannedServices "edge_haproxy"
     }
     foreach ($alias in $edgeRouteRemovalAliases) {
-        Write-Host "edge_haproxy route removal on ${alias}: dry-run"
-        Invoke-ServiceRemote "edge_haproxy" "apply" $alias -Check
+        Invoke-ServiceApplyDryRun "edge_haproxy" $alias "edge_haproxy route removal on ${alias}"
         Write-Host "edge_haproxy route removal on ${alias}: apply"
         Invoke-ServiceRemote "edge_haproxy" "apply" $alias
         Add-UniqueAlias $processedServiceActions "edge_haproxy|present|$alias"
@@ -511,8 +567,7 @@ foreach ($serviceRow in $orderedServiceRows) {
         Add-UniqueAlias $processedServiceActions $actionKey
 
         if ($state -eq "present") {
-            Write-Host "$service on ${alias}: dry-run"
-            Invoke-ServiceRemote $service "apply" $alias -Check
+            Invoke-ServiceApplyDryRun $service $alias "$service on ${alias}"
             Write-Host "$service on ${alias}: apply"
             Invoke-ServiceRemote $service "apply" $alias
             Invoke-Postcheck $service $state $alias
@@ -542,8 +597,7 @@ if ($edgeRouteApplyAliases.Count -gt 0) {
             Write-Host "edge_haproxy routes on ${alias}: already applied by edge_haproxy service apply"
             continue
         }
-        Write-Host "edge_haproxy routes on ${alias}: dry-run"
-        Invoke-ServiceRemote "edge_haproxy" "apply" $alias -Check
+        Invoke-ServiceApplyDryRun "edge_haproxy" $alias "edge_haproxy routes on ${alias}"
         Write-Host "edge_haproxy routes on ${alias}: apply"
         Invoke-ServiceRemote "edge_haproxy" "apply" $alias
         $summary.Add("edge_haproxy routes ${alias}: applied") | Out-Null

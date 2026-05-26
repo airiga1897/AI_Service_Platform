@@ -1,15 +1,34 @@
-# Секреты
+# Secrets
 
-Реальные секреты в этом репозитории не коммитятся.
+Real secrets must not be committed to this repository.
 
-Для секретов используются GitHub Environments, Ansible Vault или SOPS. Примеры env-файлов могут документировать имена переменных, но значения должны оставаться пустыми или содержать только placeholder-ы.
+Use GitHub Environments, Ansible Vault, SOPS, or operator-local ignored files
+for secret values. Example env files may document variable names, but values must
+remain empty or use obvious placeholders.
 
-Категории секретов:
+Secret categories include:
 
-- учётные данные SSH для VPS;
-- registry-токены при необходимости;
-- пароли баз данных;
-- секретные ключи приложений;
-- API-ключи Sentry и провайдеров;
-- TLS/учётные данные account;
-- пользователи SoftEther VPN, server config, management-пароли и приватные ключи.
+- SSH credentials for VPS access;
+- registry tokens when needed;
+- database passwords;
+- application secret keys;
+- Sentry and provider API keys;
+- TLS account credentials;
+- SoftEther VPN users, server config, management passwords, and private keys.
+
+## Operator Backup Encryption
+
+The age private identity for operator backups is also a secret:
+
+- `D:\Secure\AI_Service_Platform\operator-backup-age-identity.txt`
+- any line matching `AGE-SECRET-KEY-*`
+
+Do not commit the private identity, place it under `operator/`, upload it to a
+VPS, or include it in an operator backup archive.
+
+Encrypted `*.age` operator backup artifacts may be stored remotely only when the
+private identity is stored separately and remains unavailable to the remote
+storage target.
+
+See [`OPERATOR_BACKUP.md`](OPERATOR_BACKUP.md) for the operator backup key model
+and smoke-test commands.
