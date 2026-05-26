@@ -6,7 +6,7 @@
 ## Критерии готовности
 - Валидатор по-прежнему запускается одной командой `python3 tools/validate-services-yml/validate_services_yml.py` и завершается с нулевым кодом на текущем `services.yml`.
 - Добавлены проверки (каждая выдаёт понятное сообщение с путём к проблемному узлу YAML):
-  - **Уникальность локальных портов** — `runtime_instances.*.local.backend_port` и `runtime_instances.*.local.frontend_port` уникальны в пределах всего файла; ни один не совпадает с зарезервированными `5000` (Replit web preview) и портами SoftEther (`443`, `992`, `1194`, `5555`) для локального рантайма.
+  - **Уникальность локальных портов** — `runtime_instances.*.local.backend_port` и `runtime_instances.*.local.frontend_port` уникальны в пределах всего файла; ни один не совпадает с зарезервированными `5000` (Replit web preview) и портами SoftEther (`443`, `992`, `5555`) для локального рантайма.
   - **Согласованность env.prefix** — `env.prefix` соответствует имени инстанса (например, `aromaflow-work` ↔ `AROMAFLOW_WORK`); `env.file` и `env.example_file` следуют той же схеме именования.
   - **Healthcheck** — у каждого инстанса есть `healthcheck.path` (начинается с `/`), `expected_status` (целое 100–599) и `timeout_seconds` (положительное число).
   - **Деплой-таргеты** — `deploy.environments.*` указывает только на VPS, объявленные в `platform.vps_layout` (`VPS1`/`VPS2`/`VPS3`).

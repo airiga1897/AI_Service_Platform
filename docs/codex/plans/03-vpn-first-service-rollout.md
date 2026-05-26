@@ -201,7 +201,6 @@ Current TCP ports:
 
 - `443/tcp` - SNI routing, VPN domain to `softether-edge:443`;
 - `992/tcp` - SoftEther through HAProxy;
-- `1194/tcp` - SoftEther through HAProxy;
 - `5555/tcp` - SoftEther management, allowlist only.
 
 UDP и cascade/site-to-site остаются future work.

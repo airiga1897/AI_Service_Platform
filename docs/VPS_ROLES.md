@@ -144,7 +144,7 @@ Example хранится в:
 infra/ansible/haproxy.routes.example.yml
 ```
 
-`vpn_ingress` включает HAProxy routes `443/992/1194/5555` к `softether-edge`. VPN SNI задаётся точно, например `vpn-vps1.mine-craft.su`; `mainsrv01.mine-craft.su` не используется для VPN.
+`vpn_ingress` включает HAProxy routes `443/992/5555` к `softether-edge`. VPN SNI задаётся точно, например `vpn-vps1.mine-craft.su`; `mainsrv01.mine-craft.su` не используется для VPN.
 
 Перед rollout runner нормализует derived VPN route config: если active
 `edge_route,vpn_ingress` содержит новый alias, отсутствующий в

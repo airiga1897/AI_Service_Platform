@@ -88,7 +88,7 @@ Implementation scope:
    - `deploy_state_tag_prefix` is non-empty and starts with
      `deploy/<instance>/<environment>/`;
    - SoftEther still does not appear in product runtime containers;
-   - current SoftEther TCP ports remain `443`, `992`, `1194`, `5555`;
+   - current SoftEther TCP ports remain `443`, `992`, `5555`;
    - `ports.udp` is still forbidden as current state.
 
    Add focused tests and fixtures under `tools/validate-services-yml/tests/`:

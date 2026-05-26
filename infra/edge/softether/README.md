@@ -16,10 +16,9 @@ Current listener contract:
 
 - `443/tcp`: HAProxy separates site and VPN by TLS SNI.
 - `992/tcp`: HAProxy routes by port to SoftEther.
-- `1194/tcp`: HAProxy routes by port to SoftEther.
 - `5555/tcp`: HAProxy routes by port to SoftEther management with an allowlist.
 
-UDP is not part of the current preserved setup. If IPsec, L2TP, or OpenVPN UDP
+UDP is not part of the current preserved setup. If IPsec or L2TP
 is enabled later, route it by port/IP, not by domain name.
 
 The edge ingress seed config is an opaque secret state file:

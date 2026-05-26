@@ -52,7 +52,7 @@ Validates the `services.yml` registry contract for the AI Service Platform.
 
 - A local port equals `5000` (reserved by the Replit web preview).
 - A local port equals one of the SoftEther TCP listener ports
-  (`443`, `992`, `1194`, `5555`).
+  (`443`, `992`, `5555`).
 
 ## Run locally
 

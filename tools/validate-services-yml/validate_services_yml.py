@@ -23,7 +23,7 @@ ENV_PREFIX_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 DB_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 REPLIT_RESERVED_PORT = 5000
-SOFTETHER_TCP_PORTS = (443, 992, 1194, 5555)
+SOFTETHER_TCP_PORTS = (443, 992, 5555)
 RESERVED_LOCAL_PORTS = (REPLIT_RESERVED_PORT,) + SOFTETHER_TCP_PORTS
 
 
@@ -247,7 +247,7 @@ def validate_platform(errors: list[str], data: dict[str, Any]) -> None:
 
     ports = require_mapping(errors, edge_vpn.get("ports"), "platform.edge_vpn.ports")
     tcp_ports = set(require_list(errors, ports.get("tcp"), "platform.edge_vpn.ports.tcp"))
-    for port in (443, 992, 1194, 5555):
+    for port in (443, 992, 5555):
         if port not in tcp_ports:
             fail(errors, f"platform.edge_vpn.ports.tcp must include {port}")
     if "udp" in ports:
@@ -264,7 +264,7 @@ def validate_platform(errors: list[str], data: dict[str, Any]) -> None:
             "platform.edge_vpn.ports.future_optional_udp.ports",
         )
     )
-    for port in (500, 4500, 1701, 1194):
+    for port in (500, 4500, 1701):
         if port not in future_udp_ports:
             fail(errors, f"platform.edge_vpn.ports.future_optional_udp.ports must include {port}")
 
@@ -284,7 +284,7 @@ def validate_platform(errors: list[str], data: dict[str, Any]) -> None:
     routing = require_mapping(
         errors, publish_model.get("routing"), "platform.edge_vpn.publish_model.routing"
     )
-    for route in ("443/tcp", "992/tcp", "1194/tcp", "5555/tcp"):
+    for route in ("443/tcp", "992/tcp", "5555/tcp"):
         if route not in routing:
             fail(errors, f"platform.edge_vpn.publish_model.routing must include {route}")
 

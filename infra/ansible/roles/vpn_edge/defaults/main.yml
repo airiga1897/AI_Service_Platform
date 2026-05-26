@@ -15,3 +15,7 @@ vpn_edge_container_name: softether-edge
 vpn_edge_network_name: ai_service_edge
 vpn_edge_network_subnet: 172.20.0.0/24
 vpn_edge_container_ipv4: 172.20.0.2
+
+vpn_edge_retired_tcp_listeners:
+  - 1194
+vpn_edge_retired_tcp_listeners_marker_file: "{{ vpn_edge_root_dir }}/.retired_tcp_listeners_applied"

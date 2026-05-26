@@ -7,7 +7,6 @@ services:
 {% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
       - "{{ edge_haproxy_route_model.vpn_ingress.ports.sstp }}:{{ edge_haproxy_route_model.vpn_ingress.ports.sstp }}/tcp"
       - "{{ edge_haproxy_route_model.vpn_ingress.ports.softether_alt }}:{{ edge_haproxy_route_model.vpn_ingress.ports.softether_alt }}/tcp"
-      - "{{ edge_haproxy_route_model.vpn_ingress.ports.openvpn_tcp }}:{{ edge_haproxy_route_model.vpn_ingress.ports.openvpn_tcp }}/tcp"
       - "{{ edge_haproxy_route_model.vpn_ingress.ports.management }}:{{ edge_haproxy_route_model.vpn_ingress.ports.management }}/tcp"
 {% endif %}
 {% if edge_haproxy_route_model.minecraft_enabled | default(false) %}

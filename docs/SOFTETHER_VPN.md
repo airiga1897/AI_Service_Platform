@@ -21,8 +21,8 @@ SoftEther, мониторинг и бэкап VPN-конфигурации, но
 
 Обычный сайтовый CDN — не транспорт SoftEther по умолчанию, потому что VPN —
 не обычный HTTP-трафик сайтов. Будущее ускорение можно отдельно тестировать
-через GeoDNS, Anycast или L4 TCP proxy для `443/tcp`, `992/tcp` и
-`1194/tcp`. Управление на `5555/tcp` должно оставаться напрямую и в allowlist.
+через GeoDNS, Anycast или L4 TCP proxy для `443/tcp` и `992/tcp`.
+Управление на `5555/tcp` должно оставаться напрямую и в allowlist.
 
 ## Роль платформы
 
@@ -45,7 +45,6 @@ SoftEther, мониторинг и бэкап VPN-конфигурации, но
 |---|---|---|
 | `443` | TCP | SSTP/SSL VPN через HAProxy SNI routing |
 | `992` | TCP | Альтернативный SSL endpoint SoftEther |
-| `1194` | TCP | OpenVPN-совместимый TCP endpoint |
 | `5555` | TCP | SoftEther Server Manager, IP-фильтрация |
 
 ## Будущие опциональные UDP-порты
@@ -57,7 +56,6 @@ SoftEther, мониторинг и бэкап VPN-конфигурации, но
 | `500` | UDP | IPsec/IKE |
 | `4500` | UDP | IPsec NAT-T |
 | `1701` | UDP | L2TP |
-| `1194` | UDP | OpenVPN-совместимый UDP endpoint |
 
 ## Обязательные тома
 
@@ -82,7 +80,7 @@ SoftEther, мониторинг и бэкап VPN-конфигурации, но
 - контейнер SoftEther не стартанул с восстановленным томом `softether_data`;
 - файлы VPN-сертификатов не присутствуют и не валидны;
 - HAProxy не маршрутизирует VPN SNI на SoftEther;
-- порты `443/tcp`, `992/tcp`, `1194/tcp` и `5555/tcp` не маршрутизированы
+- порты `443/tcp`, `992/tcp` и `5555/tcp` не маршрутизированы
   через HAProxy осознанно;
 - будущие UDP-порты не открыты или не закрыты осознанно согласно набору
   включённых протоколов;
@@ -115,6 +113,14 @@ belongs to SoftEther runtime state and may be changed by SoftEther itself.
 Normal `vpn_edge present` rollout copies the seed only when the remote config is
 missing. It does not overwrite the live config and does not restart
 `softether-edge` because of the seed.
+
+Retired listeners are handled as explicit one-time migrations, not continuous
+rewrites. The current retired listener is `1194/tcp`: on the first rollout where
+the migration marker is absent, the role backs up the live config, stops
+`softether-edge`, removes that listener block from the live
+`vpn_server.config`, restarts the container, verifies absence, and writes
+`/opt/ai-service-platform/vpn_edge/.retired_tcp_listeners_applied`. Later
+rollouts only verify that the retired listener did not return.
 
 Intentional replacement uses the explicit reseed action and must target one
 alias:
@@ -156,7 +162,39 @@ softether-cascade  172.21.0.2
 To enable it, add or update a `state.csv` service row with explicit aliases:
 
 ```csv
-service,vpn_cascade,vpn_cascades,vps4,,,present
+service,vpn_cascade,vpn_cascades,vps5+vps4,,,present
+```
+
+The first lab link uses `vps5` as ingress-side endpoint and `vps4` as egress-side
+peer. It publishes separate cascade-only host ports and does not occupy public
+edge `443/tcp`:
+
+| Host port | Container port | Purpose |
+|---|---|---|
+| `8443/tcp` | `443/tcp` | cascade HTTPS/SSTP-compatible test listener |
+| `8992/tcp` | `992/tcp` | primary SoftEther cascade SSL listener |
+| `8555/tcp` | `5555/tcp` | management, restricted by firewall |
+
+The operator-local link secret is ignored by git:
+
+```text
+operator/softether/cascade/secrets/lab-vps5-vps4.json
+```
+
+It contains only the lab link parameters and passwords used by `vpncmd`:
+
+```json
+{
+  "hub_name": "CascadeLab",
+  "cascade_user": "cascade-vps5-vps4",
+  "cascade_user_password": "<store outside chat>",
+  "server_password": "<store outside chat>",
+  "connection_name": "vps5-to-vps4",
+  "ingress_alias": "vps5",
+  "egress_alias": "vps4",
+  "egress_host": "vps4.mine-craft.su",
+  "egress_port": 8992
+}
 ```
 
 The operator seed config is per node and optional for the very first clean
@@ -169,9 +207,9 @@ operator/softether/cascade/<alias>/vpn_server.config
 If the seed exists, normal `vpn_cascade present` copies it only when the remote
 cascade config is missing. If the seed does not exist and the remote config is
 also missing, rollout starts a clean SoftEther cascade container with an empty
-`softether_data` directory. SoftEther can then be configured manually through
-SSH and `docker compose exec`/`vpncmd`; the resulting
-`vpn_server.config` can be copied back into the operator seed path later.
+`softether_data` directory, then configures the lab hub, user, and cascade
+connection through `vpncmd` using the JSON above. Password-bearing tasks are
+`no_log`.
 
 After first start, the remote
 `/opt/ai-service-platform/vpn_cascade/softether_data/vpn_server.config` is

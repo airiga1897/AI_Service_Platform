@@ -14,7 +14,6 @@ vpn_ingress:
   ports:
     sstp: 443
     softether_alt: 992
-    openvpn_tcp: 1194
     management: 5555
 
 minecraft:

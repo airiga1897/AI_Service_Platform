@@ -146,7 +146,6 @@
         ports = {
             "sstp": 443,
             "softether_alt": 992,
-            "openvpn_tcp": 1194,
             "management": 5555,
         }
         ports.update(cfg.get("ports") or {})
@@ -402,7 +401,6 @@
   failed_when: >
     ('443/tcp' not in edge_haproxy_docker_ports.stdout)
     or ('992/tcp' not in edge_haproxy_docker_ports.stdout)
-    or ('1194/tcp' not in edge_haproxy_docker_ports.stdout)
     or ('5555/tcp' not in edge_haproxy_docker_ports.stdout)
   when:
     - edge_haproxy_state == 'present'

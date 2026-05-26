@@ -189,6 +189,38 @@ function Get-PresentVpnIngressAliases($Rows) {
     return @($aliases)
 }
 
+function Get-VpnCascadeLinkSecretPath() {
+    return (Join-Path (Join-Path (Join-Path (Join-Path $OperatorDir "softether") "cascade") "secrets") "lab-vps5-vps4.json")
+}
+
+function Get-VpnCascadeOrderedAliases($Aliases) {
+    $secretPath = Get-VpnCascadeLinkSecretPath
+    if (-not (Test-Path -LiteralPath $secretPath -PathType Leaf)) {
+        Fail "vpn_cascade requires link secret JSON before rollout: $secretPath"
+    }
+
+    try {
+        $link = Get-Content -Raw -LiteralPath $secretPath | ConvertFrom-Json
+    } catch {
+        Fail "vpn_cascade link secret JSON is not valid: $secretPath"
+    }
+
+    if (-not $link.ingress_alias -or -not $link.egress_alias) {
+        Fail "vpn_cascade link secret must include ingress_alias and egress_alias: $secretPath"
+    }
+
+    $ordered = New-Object System.Collections.Generic.List[string]
+    foreach ($alias in @($link.egress_alias, $link.ingress_alias)) {
+        if ($Aliases -contains $alias) {
+            Add-UniqueAlias $ordered $alias
+        }
+    }
+    foreach ($alias in $Aliases) {
+        Add-UniqueAlias $ordered $alias
+    }
+    return @($ordered)
+}
+
 function New-VpnIngressAliasBlock($Aliases, $Domain) {
     $lines = New-Object System.Collections.Generic.List[string]
     foreach ($alias in $Aliases) {
@@ -211,7 +243,6 @@ function New-VpnIngressRoutesBlock($Aliases, $Domain) {
     $lines.Add("  ports:")
     $lines.Add("    sstp: 443")
     $lines.Add("    softether_alt: 992")
-    $lines.Add("    openvpn_tcp: 1194")
     $lines.Add("    management: 5555")
     return @($lines)
 }
@@ -566,6 +597,9 @@ foreach ($serviceRow in $orderedServiceRows) {
     $service = $serviceRow.name
     $state = $serviceRow.state
     $aliases = @(Split-AliasList $serviceRow.active_aliases)
+    if ($service -eq "vpn_cascade" -and $state -eq "present") {
+        $aliases = @(Get-VpnCascadeOrderedAliases $aliases)
+    }
 
     if ($state -notin @("present", "absent", "purged")) {
         Fail "$service state must be one of: present, absent, purged"

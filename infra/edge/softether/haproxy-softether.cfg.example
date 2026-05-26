@@ -18,12 +18,6 @@ frontend ft_vpn_alt
     option tcplog
     default_backend bk_vpn_alt
 
-frontend ft_vpn_openvpn_tcp
-    bind *:1194
-    mode tcp
-    option tcplog
-    default_backend bk_vpn_openvpn_tcp
-
 frontend ft_vpn_mgmt
     bind *:5555
     mode tcp
@@ -43,11 +37,6 @@ backend bk_vpn_alt
     mode tcp
     option tcp-check
     server softether_alt 172.20.0.2:992 check inter 5s fall 3 rise 2
-
-backend bk_vpn_openvpn_tcp
-    mode tcp
-    option tcp-check
-    server softether_openvpn_tcp 172.20.0.2:1194 check inter 5s fall 3 rise 2
 
 backend bk_vpn_mgmt
     mode tcp

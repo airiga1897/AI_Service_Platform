@@ -13,7 +13,7 @@
 
 * ``infra/edge/haproxy/haproxy.cfg`` — единый файл с HTTP/HTTPS
   frontend'ами с SNI-маршрутизацией по доменам и блок TCP-портов
-  SoftEther (443/992/1194/5555).
+  SoftEther (443/992/5555).
 * ``infra/edge/nginx/sites/<instance>.conf`` — по одному файлу на каждый
   инстанс типа ``site``. Reverse-proxy на backend-контейнер, ACME-локация
   и стандартные ``X-Forwarded-*`` заголовки.

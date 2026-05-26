@@ -65,21 +65,6 @@ backend be_softether_992
     option tcp-check
     server softether {{ edge_haproxy_route_model.vpn_ingress.backend_host }}:{{ edge_haproxy_route_model.vpn_ingress.ports.softether_alt }} check inter 5s fall 3 rise 2
 
-frontend softether_tcp_1194
-    bind *:{{ edge_haproxy_route_model.vpn_ingress.ports.openvpn_tcp }}
-    mode tcp
-    option tcplog
-    tcp-request connection reject if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
-    tcp-request content track-sc0 src table st_tcp_rates
-    tcp-request content reject if { sc0_conn_rate gt {{ edge_haproxy_tcp_rate_limit }} }
-    tcp-request content reject if { sc0_conn_cur gt {{ edge_haproxy_tcp_conn_cur_limit }} }
-    default_backend be_softether_1194
-
-backend be_softether_1194
-    mode tcp
-    option tcp-check
-    server softether {{ edge_haproxy_route_model.vpn_ingress.backend_host }}:{{ edge_haproxy_route_model.vpn_ingress.ports.openvpn_tcp }} check inter 5s fall 3 rise 2
-
 frontend softether_mgmt
     bind *:{{ edge_haproxy_route_model.vpn_ingress.ports.management }}
     mode tcp

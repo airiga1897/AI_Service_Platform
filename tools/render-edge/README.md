@@ -8,7 +8,7 @@
 
 - `infra/edge/haproxy/haproxy.cfg` — единый конфиг HAProxy с
   HTTP/HTTPS frontend'ами, SNI-маршрутизацией на per-site Nginx и
-  TCP-блоком SoftEther (443/992/1194/5555 mgmt).
+  TCP-блоком SoftEther (443/992/5555 mgmt).
 - `infra/edge/nginx/sites/<instance>.conf` — один reverse-proxy
   на каждый рантайм-инстанс типа `site`. Telegram-боты пропускаются.
 

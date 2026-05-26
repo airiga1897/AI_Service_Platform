@@ -4,6 +4,10 @@ services:
     container_name: {{ vpn_cascade_container_name }}
     cap_add:
       - NET_ADMIN
+    ports:
+      - "{{ vpn_cascade_host_https_port }}:443/tcp"
+      - "{{ vpn_cascade_host_alt_port }}:992/tcp"
+      - "{{ vpn_cascade_host_management_port }}:5555/tcp"
     volumes:
       - ./softether_data:/mnt
       - ./softether_logs:/usr/local/bin/server_log

@@ -13,7 +13,7 @@
 
 Edge платформы состоит из трёх компонентов, принадлежащих инфраструктуре:
 
-1. **HAProxy** — единый публичный TCP entrypoint. Выполняет TLS-SNI маршрутизацию на `443/tcp` между сайтами и SoftEther; форвардит `992/tcp`, `1194/tcp` и `5555/tcp` (management, allowlist) на SoftEther.
+1. **HAProxy** — единый публичный TCP entrypoint. Выполняет TLS-SNI маршрутизацию на `443/tcp` между сайтами и SoftEther; форвардит `992/tcp` и `5555/tcp` (management, allowlist) на SoftEther.
 2. **Per-site Nginx** — per-runtime обратный прокси перед каждым web-сервисом. Владеет site-level маршрутизацией, выдачей static/media и Certbot для ACME.
 3. **SoftEther VPN** — обязательный платформенный компонент, присутствует на **каждом** VPS-узле (VPS1, VPS2, VPS3). Контейнер **не** публикует порты напрямую; порты публикует только HAProxy. UDP-listener-ы явно опциональны и относятся к будущему.
 
@@ -35,7 +35,7 @@ Edge платформы состоит из трёх компонентов, п�
 
 ## Рассмотренные альтернативы
 
-- **Один ingress (Traefik / только Nginx).** Отвергнуто — не обрабатывает чисто не-HTTP TCP (SoftEther 992/1194/5555) под единым SNI-entrypoint с per-domain маршрутизацией.
+- **Один ingress (Traefik / только Nginx).** Отвергнуто — не обрабатывает чисто не-HTTP TCP (SoftEther 992/5555) под единым SNI-entrypoint с per-domain маршрутизацией.
 - **Per-runtime ingress-контейнеры.** Отвергнуто — позволило бы продуктовому рантайму случайно конкурировать с edge платформы за порты.
 - **SoftEther, публикующий порты напрямую.** Отвергнуто — конфликтует с HTTPS-сайтами на `443/tcp` и обходит rate limiting и allowlist HAProxy.
 

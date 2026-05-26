@@ -35,6 +35,78 @@
   register: vpn_cascade_override_stat
   when: vpn_cascade_state == 'present'
 
+- name: Check vpn_cascade link secret on control node
+  ansible.builtin.stat:
+    path: "{{ vpn_cascade_link_secret_file }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_cascade_link_secret_stat
+  when: vpn_cascade_state == 'present'
+
+- name: Require vpn_cascade link secret
+  ansible.builtin.assert:
+    that:
+      - vpn_cascade_link_secret_stat.stat.exists
+      - vpn_cascade_link_secret_stat.stat.isreg
+    fail_msg: "Missing vpn_cascade link secret JSON on control node: {{ vpn_cascade_link_secret_file }}"
+  when: vpn_cascade_state == 'present'
+
+- name: Read vpn_cascade link secret
+  ansible.builtin.slurp:
+    src: "{{ vpn_cascade_link_secret_file }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_cascade_link_secret_content
+  no_log: true
+  when: vpn_cascade_state == 'present'
+
+- name: Store vpn_cascade link secret facts
+  ansible.builtin.set_fact:
+    vpn_cascade_link: "{{ vpn_cascade_link_secret_content.content | b64decode | from_json }}"
+  no_log: true
+  when: vpn_cascade_state == 'present'
+
+- name: Validate vpn_cascade link secret facts
+  ansible.builtin.assert:
+    that:
+      - vpn_cascade_link.hub_name is defined
+      - vpn_cascade_link.cascade_user is defined
+      - vpn_cascade_link.cascade_user_password is defined
+      - vpn_cascade_link.server_password is defined
+      - vpn_cascade_link.connection_name is defined
+      - vpn_cascade_link.ingress_alias is defined
+      - vpn_cascade_link.egress_alias is defined
+      - vpn_cascade_link.egress_host is defined
+      - vpn_cascade_link.egress_port is defined
+      - inventory_hostname in [vpn_cascade_link.ingress_alias, vpn_cascade_link.egress_alias]
+    fail_msg: "vpn_cascade link secret must describe this lab pair and all required fields."
+  no_log: true
+  when: vpn_cascade_state == 'present'
+
+- name: Check cascade management allowlist on control node
+  ansible.builtin.stat:
+    path: "{{ vpn_cascade_operator_mgmt_ips }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_cascade_mgmt_allowlist_stat
+  when: vpn_cascade_state == 'present'
+
+- name: Read cascade management allowlist
+  ansible.builtin.slurp:
+    src: "{{ vpn_cascade_operator_mgmt_ips }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_cascade_mgmt_allowlist_content
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_mgmt_allowlist_stat.stat.exists
+    - vpn_cascade_mgmt_allowlist_stat.stat.isreg
+
+- name: Store cascade management allowlist facts
+  ansible.builtin.set_fact:
+    vpn_cascade_mgmt_allowlist: "{{ (vpn_cascade_mgmt_allowlist_content.content | default('') | b64decode).splitlines() | map('trim') | reject('equalto', '') | reject('match', '^#') | list }}"
+  when: vpn_cascade_state == 'present'
+
 - name: Ensure vpn_cascade runtime directories
   ansible.builtin.file:
     path: "{{ item }}"
@@ -162,6 +234,335 @@
   delay: 2
   when:
     - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Resolve vpn_cascade peer address
+  ansible.builtin.shell: |
+    set -euo pipefail
+    getent ahostsv4 "$PEER_HOST" | awk 'NR == 1 { print $1; exit }'
+  args:
+    executable: /bin/bash
+  environment:
+    PEER_HOST: >-
+      {{ hostvars[vpn_cascade_link.egress_alias].ansible_host | default(vpn_cascade_link.egress_alias)
+         if inventory_hostname == vpn_cascade_link.ingress_alias
+         else hostvars[vpn_cascade_link.ingress_alias].ansible_host | default(vpn_cascade_link.ingress_alias) }}
+  register: vpn_cascade_peer_address
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Allow vpn_cascade transport ports from peer only
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ vpn_cascade_peer_address.stdout | default('') | trim }}"
+    to_port: "{{ item }}"
+    comment: "ai-service-platform vpn_cascade peer"
+  loop:
+    - "{{ vpn_cascade_host_https_port }}"
+    - "{{ vpn_cascade_host_alt_port }}"
+    - "{{ vpn_cascade_host_management_port }}"
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_peer_address.stdout | default('') | trim | length > 0
+    - not ansible_check_mode
+
+- name: Allow vpn_cascade management from operator allowlist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    to_port: "{{ vpn_cascade_host_management_port }}"
+    comment: "ai-service-platform vpn_cascade management"
+  loop: "{{ vpn_cascade_mgmt_allowlist | default([]) }}"
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Wait for vpn_cascade management TCP listener
+  ansible.builtin.shell: |
+    set -euo pipefail
+    container_ip="$(docker inspect -f '{{ "{{" }}range.NetworkSettings.Networks{{ "}}" }}{{ "{{" }}.IPAddress{{ "}}" }}{{ "{{" }}end{{ "}}" }}' "$CONTAINER")"
+    [ -n "$container_ip" ] || {
+      echo "Could not resolve vpn_cascade container IP" >&2
+      exit 1
+    }
+    timeout "${VPNCMD_TIMEOUT}s" python3 -c 'import socket, sys; s = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=2); s.close()' "$container_ip" 5555
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  changed_when: false
+  register: vpn_cascade_management_listener_ready
+  until: vpn_cascade_management_listener_ready.rc == 0
+  retries: 6
+  delay: 5
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Initialize vpn_cascade SoftEther server password when missing
+  ansible.builtin.shell: |
+    set -euo pipefail
+    set +e
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD ServerInfoGet < /dev/null >/dev/null 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
+      exit 0
+    fi
+    if [ "$rc" -eq 124 ]; then
+      echo "vpncmd password verification timed out" >&2
+      exit 124
+    fi
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /CMD ServerPasswordSet "$SERVER_PASSWORD" < /dev/null >/dev/null
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_link.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify vpn_cascade SoftEther server password
+  ansible.builtin.shell: |
+    set -euo pipefail
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD ServerInfoGet < /dev/null >/dev/null
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_link.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Ensure vpn_cascade SoftEther listeners
+  ansible.builtin.shell: |
+    set -euo pipefail
+    set +e
+    listener_output="$(timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD ListenerList < /dev/null 2>/dev/null)"
+    rc=$?
+    set -e
+    if [ "$rc" -eq 124 ]; then
+      echo "vpncmd ListenerList timed out" >&2
+      exit 124
+    fi
+    if printf '%s\n' "$listener_output" | grep -Eq "(^|[^0-9])${LISTENER_PORT}([^0-9]|$)"; then
+      exit 0
+    fi
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD ListenerCreate "$LISTENER_PORT" < /dev/null >/dev/null
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_link.server_password }}"
+    LISTENER_PORT: "{{ item }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  loop:
+    - "443"
+    - "992"
+    - "5555"
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Ensure vpn_cascade SoftEther hub exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    set +e
+    hub_output="$(timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD HubList < /dev/null 2>/dev/null)"
+    rc=$?
+    set -e
+    if [ "$rc" -eq 124 ]; then
+      echo "vpncmd HubList timed out" >&2
+      exit 124
+    fi
+    if printf '%s\n' "$hub_output" | grep -Fq "$HUB_NAME"; then
+      exit 0
+    fi
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD HubCreate "$HUB_NAME" /PASSWORD:"$SERVER_PASSWORD" < /dev/null >/dev/null
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_link.hub_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_link.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Ensure egress-side vpn_cascade user exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    set +e
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /HUB:"$HUB_NAME" /CMD UserGet "$CASCADE_USER" < /dev/null >/dev/null 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
+      exit 0
+    fi
+    if [ "$rc" -eq 124 ]; then
+      echo "vpncmd UserGet timed out" >&2
+      exit 124
+    fi
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /HUB:"$HUB_NAME" /CMD UserCreate "$CASCADE_USER" /GROUP:none /REALNAME:none /NOTE:none < /dev/null >/dev/null
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_link.hub_name }}"
+    CASCADE_USER: "{{ vpn_cascade_link.cascade_user }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_link.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - inventory_hostname == vpn_cascade_link.egress_alias
+    - not ansible_check_mode
+
+- name: Set egress-side vpn_cascade user password
+  ansible.builtin.shell: |
+    set -euo pipefail
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /HUB:"$HUB_NAME" /CMD UserPasswordSet "$CASCADE_USER" /PASSWORD:"$CASCADE_USER_PASSWORD" < /dev/null >/dev/null
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_link.hub_name }}"
+    CASCADE_USER: "{{ vpn_cascade_link.cascade_user }}"
+    CASCADE_USER_PASSWORD: "{{ vpn_cascade_link.cascade_user_password }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_link.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - inventory_hostname == vpn_cascade_link.egress_alias
+    - not ansible_check_mode
+
+- name: Ensure ingress-side vpn_cascade connection exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    set +e
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /HUB:"$HUB_NAME" /CMD CascadeGet "$CONNECTION_NAME" < /dev/null >/dev/null 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
+      exit 0
+    fi
+    if [ "$rc" -eq 124 ]; then
+      echo "vpncmd CascadeGet timed out" >&2
+      exit 124
+    fi
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /HUB:"$HUB_NAME" /CMD CascadeCreate "$CONNECTION_NAME" /SERVER:"$EGRESS_HOST:$EGRESS_PORT" /HUB:"$HUB_NAME" /USERNAME:"$CASCADE_USER" /NICNAME:"$CONNECTION_NAME" < /dev/null >/dev/null
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_link.hub_name }}"
+    CONNECTION_NAME: "{{ vpn_cascade_link.connection_name }}"
+    CASCADE_USER: "{{ vpn_cascade_link.cascade_user }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_link.server_password }}"
+    EGRESS_HOST: "{{ vpn_cascade_link.egress_host }}"
+    EGRESS_PORT: "{{ vpn_cascade_link.egress_port }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - inventory_hostname == vpn_cascade_link.ingress_alias
+    - not ansible_check_mode
+
+- name: Set ingress-side vpn_cascade connection password
+  ansible.builtin.shell: |
+    set -euo pipefail
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /HUB:"$HUB_NAME" /CMD CascadePasswordSet "$CONNECTION_NAME" /PASSWORD:"$CASCADE_USER_PASSWORD" /TYPE:standard < /dev/null >/dev/null
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_link.hub_name }}"
+    CONNECTION_NAME: "{{ vpn_cascade_link.connection_name }}"
+    CASCADE_USER_PASSWORD: "{{ vpn_cascade_link.cascade_user_password }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_link.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - inventory_hostname == vpn_cascade_link.ingress_alias
+    - not ansible_check_mode
+
+- name: Bring ingress-side vpn_cascade connection online
+  ansible.builtin.shell: |
+    set -euo pipefail
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /HUB:"$HUB_NAME" /CMD CascadeOnline "$CONNECTION_NAME" < /dev/null >/dev/null
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_link.hub_name }}"
+    CONNECTION_NAME: "{{ vpn_cascade_link.connection_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_link.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - inventory_hostname == vpn_cascade_link.ingress_alias
+    - not ansible_check_mode
+
+- name: Verify vpn_cascade published transport ports
+  ansible.builtin.command:
+    cmd: docker port "{{ vpn_cascade_container_name }}"
+  register: vpn_cascade_docker_ports
+  changed_when: false
+  failed_when: >
+    ('443/tcp' not in vpn_cascade_docker_ports.stdout)
+    or ('992/tcp' not in vpn_cascade_docker_ports.stdout)
+    or ('5555/tcp' not in vpn_cascade_docker_ports.stdout)
+    or ((':' ~ (vpn_cascade_host_https_port | string)) not in vpn_cascade_docker_ports.stdout)
+    or ((':' ~ (vpn_cascade_host_alt_port | string)) not in vpn_cascade_docker_ports.stdout)
+    or ((':' ~ (vpn_cascade_host_management_port | string)) not in vpn_cascade_docker_ports.stdout)
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify ingress-side vpn_cascade connection is online
+  ansible.builtin.shell: |
+    set -euo pipefail
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /HUB:"$HUB_NAME" /CMD CascadeStatusGet "$CONNECTION_NAME" < /dev/null | grep -Ei 'Online|Connected'
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_link.hub_name }}"
+    CONNECTION_NAME: "{{ vpn_cascade_link.connection_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_link.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  register: vpn_cascade_status
+  changed_when: false
+  no_log: true
+  when:
+    - vpn_cascade_state == 'present'
+    - inventory_hostname == vpn_cascade_link.ingress_alias
     - not ansible_check_mode
 
 - name: Ensure Docker service is running before stopping vpn_cascade

@@ -167,6 +167,38 @@ append_aliases_to_var() {
     done < <(split_aliases_to_lines "$aliases")
 }
 
+vpn_cascade_link_secret_path() {
+    printf '%s\n' "$OPERATOR_DIR/softether/cascade/secrets/lab-vps5-vps4.json"
+}
+
+order_vpn_cascade_aliases() {
+    local aliases="$1"
+    local secret_path
+    secret_path="$(vpn_cascade_link_secret_path)"
+    [ -f "$secret_path" ] || fail "vpn_cascade requires link secret JSON before rollout: $secret_path"
+    python3 - "$secret_path" "$aliases" <<'PY'
+import json
+import sys
+
+secret_path, aliases_text = sys.argv[1], sys.argv[2]
+aliases = [item for item in aliases_text.split("+") if item]
+try:
+    with open(secret_path, encoding="utf-8") as handle:
+        link = json.load(handle)
+except Exception as exc:
+    raise SystemExit(f"vpn_cascade link secret JSON is not valid: {secret_path}: {exc}")
+
+ordered = []
+for alias in (link.get("egress_alias"), link.get("ingress_alias")):
+    if alias in aliases and alias not in ordered:
+        ordered.append(alias)
+for alias in aliases:
+    if alias not in ordered:
+        ordered.append(alias)
+print("+".join(ordered))
+PY
+}
+
 ensure_service_plan() {
     local service="$1"
     local planned
@@ -493,6 +525,10 @@ process_service_rows() {
     echo "Service: $name"
     echo "State:   $row_state"
     ensure_service_plan "$name"
+
+    if [ "$name" = "vpn_cascade" ] && [ "$row_state" = "present" ]; then
+        active_aliases="$(order_vpn_cascade_aliases "$active_aliases")"
+    fi
 
     mapfile -t aliases < <(split_aliases_to_lines "$active_aliases")
     if [ "${#aliases[@]}" -eq 0 ]; then

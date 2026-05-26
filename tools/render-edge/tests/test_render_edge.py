@@ -57,7 +57,7 @@ class RenderEdgeSmokeTests(unittest.TestCase):
         self.assertIn("mine-craft.su", cfg)
         # TCP-порты SoftEther.
         self.assertIn("frontend softether_tcp_992", cfg)
-        self.assertIn("frontend softether_tcp_1194", cfg)
+        self.assertNotIn("frontend softether_tcp_" "11" "94", cfg)
         # Management-allowlist на 5555.
         self.assertIn("softether_mgmt", cfg)
         self.assertIn("vpn_mgmt_ips.lst", cfg)

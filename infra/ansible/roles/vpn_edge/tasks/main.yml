@@ -156,6 +156,88 @@
     - vpn_state == 'present'
     - not ansible_check_mode
 
+- name: Check retired SoftEther edge listener migration marker
+  ansible.builtin.stat:
+    path: "{{ vpn_edge_retired_tcp_listeners_marker_file }}"
+  register: vpn_edge_retired_listener_marker_stat
+  when:
+    - vpn_state == 'present'
+    - vpn_edge_retired_tcp_listeners | length > 0
+
+- name: Remove retired SoftEther edge TCP listeners from live config
+  ansible.builtin.shell: |
+    set -euo pipefail
+    config="{{ vpn_edge_data_dir }}/vpn_server.config"
+    ports="{{ vpn_edge_retired_tcp_listeners | join(' ') }}"
+    if [ ! -f "$config" ]; then
+      exit 0
+    fi
+    if ! grep -Eq "uint[[:space:]]+Port[[:space:]]+($(echo "$ports" | tr ' ' '|'))" "$config"; then
+      exit 0
+    fi
+    docker compose -f "{{ vpn_edge_compose_file }}" stop "{{ vpn_edge_container_name }}" >/dev/null 2>&1 || true
+    backup="{{ vpn_edge_backup_dir }}/vpn_server.config.pre-retired-listener-$(date -u +%Y%m%dT%H%M%SZ)"
+    cp "$config" "$backup"
+    chmod 0600 "$backup"
+    CONFIG_PATH="$config" RETIRED_PORTS="$ports" python3 - <<'PY'
+    import os
+    import re
+    from pathlib import Path
+
+    path = Path(os.environ["CONFIG_PATH"])
+    retired = {int(item) for item in os.environ["RETIRED_PORTS"].split() if item.strip()}
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    out = []
+    i = 0
+    removed = False
+    listener_re = re.compile(r"^\s*declare\s+Listener\d+\s*$")
+    port_re = re.compile(r"\buint\s+Port\s+(\d+)\b")
+
+    while i < len(lines):
+        line = lines[i]
+        if not listener_re.match(line):
+            out.append(line)
+            i += 1
+            continue
+
+        block = [line]
+        i += 1
+        depth = 0
+        started = False
+        while i < len(lines):
+            current = lines[i]
+            block.append(current)
+            depth += current.count("{") - current.count("}")
+            started = started or "{" in current
+            i += 1
+            if started and depth <= 0:
+                break
+
+        block_ports = {
+            int(match.group(1))
+            for block_line in block
+            for match in [port_re.search(block_line)]
+            if match
+        }
+        if block_ports & retired:
+            removed = True
+            continue
+        out.extend(block)
+
+    if removed:
+        path.write_text("".join(out), encoding="utf-8")
+        print("removed")
+    PY
+  args:
+    executable: /bin/bash
+  register: vpn_edge_retired_listener_cleanup
+  changed_when: "'removed' in vpn_edge_retired_listener_cleanup.stdout"
+  when:
+    - vpn_state == 'present'
+    - vpn_edge_retired_tcp_listeners | length > 0
+    - not vpn_edge_retired_listener_marker_stat.stat.exists
+    - not ansible_check_mode
+
 - name: Start vpn_edge container
   ansible.builtin.command:
     cmd: docker compose -f "{{ vpn_edge_compose_file }}" up -d
@@ -197,6 +279,37 @@
   delay: 2
   when:
     - vpn_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify retired SoftEther edge TCP listeners are absent from config
+  ansible.builtin.shell: |
+    set -euo pipefail
+    config="{{ vpn_edge_data_dir }}/vpn_server.config"
+    ports="{{ vpn_edge_retired_tcp_listeners | join(' ') }}"
+    [ -f "$config" ] || exit 0
+    if grep -Eq "uint[[:space:]]+Port[[:space:]]+($(echo "$ports" | tr ' ' '|'))" "$config"; then
+      echo "Retired SoftEther TCP listener still exists in live config. Remove it intentionally or clear {{ vpn_edge_retired_tcp_listeners_marker_file }} to re-run one-time migration." >&2
+      exit 1
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - vpn_state == 'present'
+    - vpn_edge_retired_tcp_listeners | length > 0
+    - not ansible_check_mode
+
+- name: Mark retired SoftEther edge listener migration complete
+  ansible.builtin.copy:
+    dest: "{{ vpn_edge_retired_tcp_listeners_marker_file }}"
+    content: |
+      Retired SoftEther TCP listeners have been migrated once.
+      Ports: {{ vpn_edge_retired_tcp_listeners | join(', ') }}
+    mode: "0644"
+  when:
+    - vpn_state == 'present'
+    - vpn_edge_retired_tcp_listeners | length > 0
+    - not vpn_edge_retired_listener_marker_stat.stat.exists
     - not ansible_check_mode
 
 - name: Ensure Docker service is running before stopping vpn_edge
