@@ -10,11 +10,15 @@ CONTROL_ALIAS=""
 SYNC_SCRIPT="tools/bootstrap/sync_to_orchestration.sh"
 STANDBY_PREPARE_SCRIPT="tools/bootstrap/prepare_orchestration_standby.sh"
 SERVICE_REMOTE_SCRIPT="tools/services/service_remote.sh"
+OPERATOR_BACKUP_SCRIPT="tools/operator_backup/backup_operator.sh"
+OPERATOR_BACKUP_DIR="${AI_SP_OPERATOR_BACKUP_DIR:-$HOME/ai-service-platform-backups/operator}"
+OPERATOR_BACKUP_REMOTE_DIR="/opt/backups/ai-service-platform/operator"
 AUTO_ACCEPT_HOST_KEY="false"
 SKIP_SYNC="false"
 SKIP_STANDBY_SYNC="false"
 SKIP_POSTCHECK="false"
 SKIP_DRY_RUN="false"
+SKIP_OPERATOR_BACKUP="false"
 RESEED_VPN_EDGE=""
 
 EXPECTED_HEADER="current_alias,endpoint,connection,root_password"
@@ -31,6 +35,12 @@ Options:
   --operator-dir PATH     Operator directory. Default: ./operator
   --control-role NAME     Platform role to use as orchestration. Default: orchestration
   --control-alias ALIAS   Optional explicit orchestration alias.
+  --operator-backup-script PATH
+                         Operator backup script. Default: tools/operator_backup/backup_operator.sh
+  --operator-backup-dir PATH
+                         Local encrypted operator backup dir.
+  --operator-backup-remote-dir PATH
+                         Remote encrypted operator backup dir.
   --auto-accept-host-key  Refresh known_hosts during sync.
   --reseed-vpn-edge ALIASES
                          Explicitly reseed SoftEther config for aliases.
@@ -38,6 +48,7 @@ Options:
   --skip-standby-sync     Skip automatic sync of orchestration candidates.
   --skip-postcheck        Skip service postcheck placeholders.
   --skip-dry-run          Skip pre-apply Ansible check runs.
+  --skip-operator-backup  Skip mandatory backup before local operator mutations.
   -h, --help              Show help.
 USAGE
 }
@@ -100,6 +111,32 @@ add_unique_to_array() {
         [ "$existing" = "$value" ] && return
     done
     eval "$array_name+=(\"\$value\")"
+}
+
+OPERATOR_BACKUP_COMPLETED="false"
+invoke_operator_backup_if_needed() {
+    local reason="$1"
+    if [ "$OPERATOR_BACKUP_COMPLETED" = "true" ]; then
+        return
+    fi
+    if [ "$SKIP_OPERATOR_BACKUP" = "true" ]; then
+        echo "[WARN] Operator backup skipped before local mutation: $reason" >&2
+        OPERATOR_BACKUP_COMPLETED="true"
+        return
+    fi
+    require_file "$OPERATOR_BACKUP_SCRIPT" "--operator-backup-script"
+    echo "Operator backup before local mutation: $reason"
+    local args=(
+        "--nodes-file" "$NODES_FILE"
+        "--state-file" "$STATE_FILE"
+        "--operator-dir" "$OPERATOR_DIR"
+        "--control-role" "$CONTROL_ROLE"
+        "--backup-dir" "$OPERATOR_BACKUP_DIR"
+        "--remote-backup-dir" "$OPERATOR_BACKUP_REMOTE_DIR"
+    )
+    [ "$AUTO_ACCEPT_HOST_KEY" = "true" ] && args+=("--auto-accept-host-key")
+    bash "$OPERATOR_BACKUP_SCRIPT" "${args[@]}"
+    OPERATOR_BACKUP_COMPLETED="true"
 }
 
 array_contains() {
@@ -254,12 +291,16 @@ while [ "$#" -gt 0 ]; do
         --sync-script) SYNC_SCRIPT="${2:-}"; shift 2 ;;
         --standby-prepare-script) STANDBY_PREPARE_SCRIPT="${2:-}"; shift 2 ;;
         --service-remote-script) SERVICE_REMOTE_SCRIPT="${2:-}"; shift 2 ;;
+        --operator-backup-script) OPERATOR_BACKUP_SCRIPT="${2:-}"; shift 2 ;;
+        --operator-backup-dir) OPERATOR_BACKUP_DIR="${2:-}"; shift 2 ;;
+        --operator-backup-remote-dir) OPERATOR_BACKUP_REMOTE_DIR="${2:-}"; shift 2 ;;
         --auto-accept-host-key|--refresh-known-hosts) AUTO_ACCEPT_HOST_KEY="true"; shift ;;
         --reseed-vpn-edge) RESEED_VPN_EDGE="${2:-}"; shift 2 ;;
         --skip-sync) SKIP_SYNC="true"; shift ;;
         --skip-standby-sync) SKIP_STANDBY_SYNC="true"; shift ;;
         --skip-postcheck) SKIP_POSTCHECK="true"; shift ;;
         --skip-dry-run) SKIP_DRY_RUN="true"; shift ;;
+        --skip-operator-backup) SKIP_OPERATOR_BACKUP="true"; shift ;;
         -h|--help) usage; exit 0 ;;
         *) fail "Unknown option: $1" ;;
     esac

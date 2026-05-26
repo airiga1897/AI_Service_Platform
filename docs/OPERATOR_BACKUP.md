@@ -1,9 +1,7 @@
 # Operator Backup With age
 
-This runbook documents the preparation step for encrypted backups of
-`operator/`. Runtime backup helpers are intentionally out of scope here; this
-page only defines the encryption key model, local storage rules, and smoke
-tests.
+This runbook documents encrypted backups of `operator/`: the age key model,
+local storage rules, remote standby copy, and helper scripts.
 
 `age` is used as the file encryption tool. It uses a public recipient to
 encrypt backup archives and a private identity to decrypt them later.
@@ -111,15 +109,49 @@ backup-test
 After the test, `backup-test.txt.age` should be removed and the private identity
 should still exist only under `D:\Projects\Ai_SP\Secure`.
 
-## Future Backup Helper Boundary
+## Backup Helpers
 
-A future helper may archive `operator/`, encrypt the archive with the public
-recipient, write `.age` and `.sha256` artifacts to the local backup directory,
-delete the raw archive, and copy the encrypted artifacts to the standby
-orchestration candidate.
+Use the helper scripts to archive `operator/`, encrypt the archive with the
+public recipient, write `.age` and `.sha256` artifacts to the local backup
+directory, delete the raw archive, and copy the encrypted artifacts to the
+standby orchestration candidate.
 
-That helper must not include the private identity in the archive and must not
-require the private identity on any VPS.
+PowerShell:
+
+```powershell
+.\tools\operator_backup\backup_operator.ps1
+```
+
+By default this uses `.\operator\nodes.csv`, `.\operator\state.csv`,
+`.\operator`, `D:\Backup\Projects\AI_SP\operator`, and
+`StrictHostKeyChecking=accept-new` for standby upload.
+
+Backup rotation is enabled by default. The helper keeps the newest 30
+timestamped `.age` archives and matching `.sha256` files locally and on the
+standby orchestration candidate. Override it with `-KeepLatest N`, or use
+`-KeepLatest 0` to disable rotation for a run.
+
+WSL/Linux:
+
+```bash
+bash tools/operator_backup/backup_operator.sh \
+  --nodes-file ./operator/nodes.csv \
+  --state-file ./operator/state.csv \
+  --operator-dir ./operator
+```
+
+The helpers must not include the private identity in the archive and must not
+require the private identity on any VPS. Backup-enabled rollout/bootstrap
+scripts call them before local operator mutations unless the operator passes the
+explicit skip flag.
+
+For `rollout_from_state`, the backup happens before local state normalization
+or HAProxy route file changes. For fresh `bootstrap_from_windows` runs through
+`root_password`, the backup happens after the remote bootstrap succeeds and
+before local key files or the real `nodes.csv` are changed. That bootstrap
+backup uses a temporary sanitized snapshot where the successfully bootstrapped
+alias already has `root_password` cleared, so the encrypted archive does not
+retain a root password that should now be retired.
 
 Restore is a separate operator action: download the encrypted archive, verify
 the checksum, decrypt it locally with the private identity, then inspect and

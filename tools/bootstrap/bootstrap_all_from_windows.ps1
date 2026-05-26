@@ -17,6 +17,14 @@ param(
 
     [string]$SyncRunner = "tools/bootstrap/sync_to_orchestration.ps1",
 
+    [string]$OperatorBackupScript = "tools/operator_backup/backup_operator.ps1",
+
+    [string]$OperatorBackupDir = "D:\Backup\Projects\AI_SP\operator",
+
+    [string]$OperatorBackupRemoteDir = "/opt/backups/ai-service-platform/operator",
+
+    [int]$OperatorBackupKeepLatest = 30,
+
     [string]$AnsibleAuthorizedKeyFile = "",
 
     [switch]$ForceManagementKeyRefresh,
@@ -37,7 +45,9 @@ param(
 
     [switch]$SkipManaged,
 
-    [switch]$SkipExistingRebootstrap
+    [switch]$SkipExistingRebootstrap,
+
+    [switch]$SkipOperatorBackup
 )
 
 $ErrorActionPreference = "Stop"
@@ -380,6 +390,10 @@ if ($controlNeedsBootstrap) {
         "-NodesFile", $NodesFile,
         "-Alias", $controlNode.current_alias,
         "-OperatorDir", $OperatorDir,
+        "-OperatorBackupScript", $OperatorBackupScript,
+        "-OperatorBackupDir", $OperatorBackupDir,
+        "-OperatorBackupRemoteDir", $OperatorBackupRemoteDir,
+        "-OperatorBackupKeepLatest", $OperatorBackupKeepLatest,
         "-AdminUser", $AdminUser,
         "-OutputAnsibleAuthorizedKeyFile", $AnsibleAuthorizedKeyFile
     )
@@ -394,6 +408,9 @@ if ($controlNeedsBootstrap) {
     }
     if ($AutoAcceptHostKey) {
         $controlArgs += "-AutoAcceptHostKey"
+    }
+    if ($SkipOperatorBackup) {
+        $controlArgs += "-SkipOperatorBackup"
     }
 
     Write-Host "Step 1/4: bootstrap control node $($controlNode.current_alias)"
@@ -428,6 +445,10 @@ if (-not $SkipManaged) {
             "-NodesFile", $NodesFile,
             "-Alias", $managedAlias,
             "-OperatorDir", $OperatorDir,
+            "-OperatorBackupScript", $OperatorBackupScript,
+            "-OperatorBackupDir", $OperatorBackupDir,
+            "-OperatorBackupRemoteDir", $OperatorBackupRemoteDir,
+            "-OperatorBackupKeepLatest", $OperatorBackupKeepLatest,
             "-AdminUser", $AdminUser
         )
         if ($useStateFile) {
@@ -441,6 +462,9 @@ if (-not $SkipManaged) {
         }
         if ($AutoAcceptHostKey) {
             $managedArgs += "-AutoAcceptHostKey"
+        }
+        if ($SkipOperatorBackup) {
+            $managedArgs += "-SkipOperatorBackup"
         }
 
         if (Has-RootPassword $managedNode) {
@@ -474,6 +498,10 @@ if (-not $SkipManaged) {
                 "-NodesFile", $NodesFile,
                 "-Alias", $managedAlias,
                 "-OperatorDir", $OperatorDir,
+                "-OperatorBackupScript", $OperatorBackupScript,
+                "-OperatorBackupDir", $OperatorBackupDir,
+                "-OperatorBackupRemoteDir", $OperatorBackupRemoteDir,
+                "-OperatorBackupKeepLatest", $OperatorBackupKeepLatest,
                 "-AdminUser", $AdminUser,
                 "-AnsibleAuthorizedKeyFile", $managedAnsibleAuthorizedKeyFile
             )
@@ -482,6 +510,9 @@ if (-not $SkipManaged) {
             }
             if ($AutoAcceptHostKey) {
                 $managedArgs += "-AutoAcceptHostKey"
+            }
+            if ($SkipOperatorBackup) {
+                $managedArgs += "-SkipOperatorBackup"
             }
 
             Write-Host "Step 2c/4: refresh orchestration trust mesh on $managedAlias"
@@ -506,6 +537,10 @@ if (-not $SkipManaged) {
             "-NodesFile", $NodesFile,
             "-Alias", $managedAlias,
             "-OperatorDir", $OperatorDir,
+            "-OperatorBackupScript", $OperatorBackupScript,
+            "-OperatorBackupDir", $OperatorBackupDir,
+            "-OperatorBackupRemoteDir", $OperatorBackupRemoteDir,
+            "-OperatorBackupKeepLatest", $OperatorBackupKeepLatest,
             "-AdminUser", $AdminUser,
             "-AnsibleAuthorizedKeyFile", $managedAnsibleAuthorizedKeyFile
         )
@@ -520,6 +555,9 @@ if (-not $SkipManaged) {
         }
         if ($AutoAcceptHostKey) {
             $managedArgs += "-AutoAcceptHostKey"
+        }
+        if ($SkipOperatorBackup) {
+            $managedArgs += "-SkipOperatorBackup"
         }
 
         if (Has-RootPassword $managedNode) {

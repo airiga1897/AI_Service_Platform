@@ -7,13 +7,18 @@ param(
     [string]$SyncScript = "tools/bootstrap/sync_to_orchestration.ps1",
     [string]$StandbyPrepareScript = "tools/bootstrap/prepare_orchestration_standby.ps1",
     [string]$ServiceRemoteScript = "tools/services/service_remote.ps1",
+    [string]$OperatorBackupScript = "tools/operator_backup/backup_operator.ps1",
+    [string]$OperatorBackupDir = "D:\Backup\Projects\AI_SP\operator",
+    [string]$OperatorBackupRemoteDir = "/opt/backups/ai-service-platform/operator",
+    [int]$OperatorBackupKeepLatest = 30,
     [string]$VpnIngressDomain = "mine-craft.su",
     [string[]]$ReseedVpnEdge = @(),
     [switch]$AutoAcceptHostKey,
     [switch]$SkipSync,
     [switch]$SkipStandbySync,
     [switch]$SkipPostcheck,
-    [switch]$SkipDryRun
+    [switch]$SkipDryRun,
+    [switch]$SkipOperatorBackup
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,6 +26,7 @@ $ExpectedNodesHeader = "current_alias,endpoint,connection,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 $SupportedServices = @("edge_haproxy", "vpn_edge", "vpn_cascade")
 $ReservedServices = @()
+$script:OperatorBackupCompleted = $false
 
 function Fail($Message) {
     Write-Error $Message
@@ -99,6 +105,35 @@ function Add-UniqueAlias($List, $Alias) {
     }
 }
 
+function Invoke-OperatorBackupIfNeeded($Reason) {
+    if ($script:OperatorBackupCompleted) {
+        return
+    }
+    if ($SkipOperatorBackup) {
+        Write-Warning "Operator backup skipped before local mutation: $Reason"
+        $script:OperatorBackupCompleted = $true
+        return
+    }
+
+    Require-File $OperatorBackupScript "OperatorBackupScript"
+    Write-Host "Operator backup before local mutation: $Reason"
+    $args = @(
+        "-NodesFile", $NodesFile,
+        "-StateFile", $StateFile,
+        "-OperatorDir", $OperatorDir,
+        "-ControlRole", $ControlRole,
+        "-LocalBackupDir", $OperatorBackupDir,
+        "-RemoteBackupDir", $OperatorBackupRemoteDir,
+        "-KeepLatest", $OperatorBackupKeepLatest
+    )
+    if ($AutoAcceptHostKey) { $args += "-AutoAcceptHostKey" }
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $OperatorBackupScript @args
+    if ($LASTEXITCODE -ne 0) {
+        Fail "operator backup failed before local mutation: $Reason"
+    }
+    $script:OperatorBackupCompleted = $true
+}
+
 function Write-StateCsv($Path, $Rows) {
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add($ExpectedStateHeader)
@@ -135,6 +170,7 @@ function Normalize-StateRows($Rows, $NodeRows, $StatePath) {
     }
 
     if ($changed) {
+        Invoke-OperatorBackupIfNeeded "normalize state.csv role rows"
         Write-StateCsv $StatePath $Rows
         Write-Host "Normalized state.csv: role -> platform_role"
     }
@@ -196,10 +232,12 @@ function Normalize-HaproxyRoutes($RoutesPath, $VpnAliases, $Domain) {
 
     $routesDir = Split-Path -Parent $RoutesPath
     if ($routesDir -and -not (Test-Path -LiteralPath $routesDir -PathType Container)) {
+        Invoke-OperatorBackupIfNeeded "create HAProxy routes directory"
         New-Item -ItemType Directory -Force -Path $routesDir | Out-Null
     }
 
     if (-not (Test-Path -LiteralPath $RoutesPath -PathType Leaf)) {
+        Invoke-OperatorBackupIfNeeded "create HAProxy routes.yml"
         Set-Content -LiteralPath $RoutesPath -Value (New-VpnIngressRoutesBlock $VpnAliases $Domain) -Encoding ascii
         Write-Host "Created HAProxy routes.yml with vpn_ingress aliases: $($VpnAliases -join ', ')"
         return
@@ -227,6 +265,7 @@ function Normalize-HaproxyRoutes($RoutesPath, $VpnAliases, $Domain) {
         foreach ($line in $lines) {
             $newLines.Add($line)
         }
+        Invoke-OperatorBackupIfNeeded "add vpn_ingress route config"
         Set-Content -LiteralPath $RoutesPath -Value $newLines -Encoding ascii
         Write-Host "Added vpn_ingress route config for aliases: $($VpnAliases -join ', ')"
         return
@@ -249,6 +288,7 @@ function Normalize-HaproxyRoutes($RoutesPath, $VpnAliases, $Domain) {
             $insertLines.Add($line)
         }
         $lines.InsertRange($insertAt, [string[]]$insertLines)
+        Invoke-OperatorBackupIfNeeded "add vpn_ingress.per_alias route config"
         Set-Content -LiteralPath $RoutesPath -Value $lines -Encoding ascii
         Write-Host "Added vpn_ingress.per_alias for aliases: $($VpnAliases -join ', ')"
         return
@@ -276,6 +316,7 @@ function Normalize-HaproxyRoutes($RoutesPath, $VpnAliases, $Domain) {
     }
 
     $lines.InsertRange($perAliasEnd, [string[]](New-VpnIngressAliasBlock $missing $Domain))
+    Invoke-OperatorBackupIfNeeded "add missing vpn_ingress aliases"
     Set-Content -LiteralPath $RoutesPath -Value $lines -Encoding ascii
     Write-Host "Added vpn_ingress routes for aliases: $($missing -join ', ')"
 }

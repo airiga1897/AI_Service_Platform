@@ -20,7 +20,7 @@ Secret categories include:
 
 The age private identity for operator backups is also a secret:
 
-- `D:\Secure\AI_Service_Platform\operator-backup-age-identity.txt`
+- `D:\Projects\Ai_SP\Secure\operator-backup-age-identity.txt`
 - any line matching `AGE-SECRET-KEY-*`
 
 Do not commit the private identity, place it under `operator/`, upload it to a

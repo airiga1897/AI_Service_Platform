@@ -18,6 +18,14 @@ param(
 
     [string]$OperatorDir = ".\operator",
 
+    [string]$OperatorBackupScript = "tools/operator_backup/backup_operator.ps1",
+
+    [string]$OperatorBackupDir = "D:\Backup\Projects\AI_SP\operator",
+
+    [string]$OperatorBackupRemoteDir = "/opt/backups/ai-service-platform/operator",
+
+    [int]$OperatorBackupKeepLatest = 30,
+
     [string]$AdminUser = "useradmin",
 
     [string]$OutputAnsibleAuthorizedKeyFile = ".\operator\ansible_control.managed_nodes.pub",
@@ -26,7 +34,9 @@ param(
 
     [switch]$AutoAcceptHostKey = $true,
 
-    [switch]$RegenerateRemoteKeys
+    [switch]$RegenerateRemoteKeys,
+
+    [switch]$SkipOperatorBackup
 )
 
 $ErrorActionPreference = "Stop"
@@ -185,6 +195,113 @@ function Assert-BootstrapKeyPathsAvailable($AliasToSave, $IsManagement, $BaseOpe
         Assert-OutputKeyPathAvailable (Join-Path $aliasDir "ansible_control_key") $AllowOverwrite $AllowExisting
         Assert-OutputKeyPathAvailable (Join-Path $aliasDir "ansible_control.managed_nodes.pub") $AllowOverwrite $AllowExisting
         Assert-OutputKeyPathAvailable $PublicKeyPath $AllowOverwrite $AllowExisting
+    }
+}
+
+function Test-OutputFileWillChange($Path, $AllowOverwrite, $KeepExisting) {
+    if ($AllowOverwrite) {
+        return $true
+    }
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        return (-not $KeepExisting)
+    }
+    return $true
+}
+
+function Test-BootstrapLocalMutationExpected($AliasToSave, $IsManagement, $BaseOperatorDir, $PublicKeyPath, $AllowOverwrite, $KeepExisting, $WillClearRootPassword) {
+    if ($WillClearRootPassword) {
+        return $true
+    }
+
+    $aliasDir = Join-Path $BaseOperatorDir $AliasToSave
+    foreach ($path in @((Join-Path $aliasDir "deploy_key"), (Join-Path $aliasDir "admin_key"))) {
+        if (Test-OutputFileWillChange $path $AllowOverwrite $KeepExisting) {
+            return $true
+        }
+    }
+
+    if ($IsManagement) {
+        foreach ($path in @(
+            (Join-Path $aliasDir "ansible_control_key"),
+            (Join-Path $aliasDir "ansible_control.managed_nodes.pub"),
+            $PublicKeyPath
+        )) {
+            if (Test-OutputFileWillChange $path $AllowOverwrite $KeepExisting) {
+                return $true
+            }
+        }
+    }
+
+    return $false
+}
+
+function New-OperatorBackupSnapshot($ClearRootPasswordAlias) {
+    if ([string]::IsNullOrWhiteSpace($ClearRootPasswordAlias)) {
+        return $null
+    }
+
+    $snapshotRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-service-platform.operator-backup-snapshot." + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $snapshotRoot | Out-Null
+
+    $resolvedOperatorDir = (Resolve-Path -LiteralPath $OperatorDir).Path
+    $operatorLeaf = Split-Path -Leaf $resolvedOperatorDir
+    Copy-Item -LiteralPath $resolvedOperatorDir -Destination $snapshotRoot -Recurse -Force
+
+    $snapshotOperatorDir = Join-Path $snapshotRoot $operatorLeaf
+    $snapshotNodesFile = Join-Path $snapshotOperatorDir (Split-Path -Leaf $NodesFile)
+    $snapshotStateFile = Join-Path $snapshotOperatorDir (Split-Path -Leaf $StateFile)
+
+    Copy-Item -LiteralPath $NodesFile -Destination $snapshotNodesFile -Force
+    Copy-Item -LiteralPath $StateFile -Destination $snapshotStateFile -Force
+    Clear-RootPasswordForAlias $snapshotNodesFile $ClearRootPasswordAlias
+
+    return [PSCustomObject]@{
+        Root = $snapshotRoot
+        OperatorDir = $snapshotOperatorDir
+        NodesFile = $snapshotNodesFile
+        StateFile = $snapshotStateFile
+    }
+}
+
+function Invoke-OperatorBackupIfNeeded($Reason, $ClearRootPasswordAlias = "") {
+    if ($SkipOperatorBackup) {
+        Write-Warning "Operator backup skipped before local mutation: $Reason"
+        return
+    }
+
+    Require-File $OperatorBackupScript "OperatorBackupScript"
+    Write-Host "Operator backup before local mutation: $Reason"
+    $snapshot = $null
+    try {
+        $backupNodesFile = $NodesFile
+        $backupStateFile = $StateFile
+        $backupOperatorDir = $OperatorDir
+
+        if (-not [string]::IsNullOrWhiteSpace($ClearRootPasswordAlias)) {
+            Write-Host "Using sanitized operator backup snapshot with root_password cleared for $ClearRootPasswordAlias"
+            $snapshot = New-OperatorBackupSnapshot $ClearRootPasswordAlias
+            $backupNodesFile = $snapshot.NodesFile
+            $backupStateFile = $snapshot.StateFile
+            $backupOperatorDir = $snapshot.OperatorDir
+        }
+
+        $args = @(
+            "-NodesFile", $backupNodesFile,
+            "-StateFile", $backupStateFile,
+            "-OperatorDir", $backupOperatorDir,
+            "-LocalBackupDir", $OperatorBackupDir,
+            "-RemoteBackupDir", $OperatorBackupRemoteDir,
+            "-KeepLatest", $OperatorBackupKeepLatest
+        )
+        if ($AutoAcceptHostKey) { $args += "-AutoAcceptHostKey" }
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $OperatorBackupScript @args
+        if ($LASTEXITCODE -ne 0) {
+            Fail "operator backup failed before local mutation: $Reason"
+        }
+    } finally {
+        if ($snapshot -and $snapshot.Root -and (Test-Path -LiteralPath $snapshot.Root -PathType Container)) {
+            Remove-Item -LiteralPath $snapshot.Root -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -563,6 +680,14 @@ try {
     }
     $remoteOutput = Get-Content -LiteralPath $remoteLog -ErrorAction SilentlyContinue
     if ($remoteExitCode -ne 0) { Fail "remote setup_vps.sh failed" }
+
+    if (Test-BootstrapLocalMutationExpected $Alias $isManagementNode $OperatorDir $OutputAnsibleAuthorizedKeyFile $Force $useAdminKeyBootstrap (-not $useAdminKeyBootstrap)) {
+        $sanitizeRootPasswordAlias = ""
+        if (-not $useAdminKeyBootstrap) {
+            $sanitizeRootPasswordAlias = $Alias
+        }
+        Invoke-OperatorBackupIfNeeded "save bootstrap keys or clear root_password for $Alias" $sanitizeRootPasswordAlias
+    }
 
     Write-Host "Step 4/4: save bootstrap keys"
     Save-BootstrapKeys $remoteOutput $Alias $isManagementNode $OperatorDir $OutputAnsibleAuthorizedKeyFile $Force $useAdminKeyBootstrap
