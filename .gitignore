@@ -3,6 +3,9 @@
 *.secret
 *.key
 *.pem
+operator-backup-age-identity.txt
+*age-identity*.txt
+*AGE-SECRET-KEY*
 .venv/
 __pycache__/
 .pytest_cache/
