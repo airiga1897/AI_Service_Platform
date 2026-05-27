@@ -509,15 +509,14 @@ function Invoke-ServiceBatch() {
     }
 
     $batchPlanPath = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-service-platform.rollout-batch." + [guid]::NewGuid().ToString("N") + ".json")
-    $args = @(
+    $serviceRemoteArgs = @(
         "-NodesFile", $NodesFile,
         "-StateFile", $StateFile,
         "-OperatorDir", $OperatorDir,
         "-ControlRole", $ControlRole,
-        "-BatchPlanFile", $batchPlanPath,
-        "-DetachedRemoteJob"
+        "-BatchPlanFile", $batchPlanPath
     )
-    if ($ControlAlias) { $args += @("-ControlAlias", $ControlAlias) }
+    if ($ControlAlias) { $serviceRemoteArgs += @("-ControlAlias", $ControlAlias) }
     try {
         $script:BatchSteps | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $batchPlanPath -Encoding ascii
         Write-Host ""
@@ -527,7 +526,7 @@ function Invoke-ServiceBatch() {
             $stepIndex++
             Write-Host ("  {0}. {1}" -f $stepIndex, $step.label)
         }
-        Invoke-ChildScript $ServiceRemoteScript $args "remote batch rollout"
+        Invoke-ChildScript $ServiceRemoteScript $serviceRemoteArgs "remote batch rollout"
     } finally {
         Remove-Item -LiteralPath $batchPlanPath -Force -ErrorAction SilentlyContinue
     }

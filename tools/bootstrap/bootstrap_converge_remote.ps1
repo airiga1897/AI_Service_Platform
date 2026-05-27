@@ -144,12 +144,25 @@ function Invoke-CleanupSsh($Arguments, $Label) {
     }
 }
 
+function Invoke-RemoteTempCleanup($SshArgs, $Remote) {
+    $cleanupCommand = @(
+        "find /tmp -maxdepth 1 -mindepth 1 -type d \( -name 'ai-service-platform.bootstrap-job.*' -o -name 'ai-service-platform.bootstrap-converge.*' \) -mmin +1440 -exec rm -rf -- {} +",
+        "find /tmp -maxdepth 1 -mindepth 1 -type f -name 'ai-service-platform.bootstrap-converge.*.tar.gz' -mmin +1440 -delete"
+    ) -join "; "
+    Invoke-CleanupSsh ($SshArgs + @($Remote, $cleanupCommand)) "remote old bootstrap temp cleanup"
+}
+
 function Invoke-CaptureExternal($FilePath, $Arguments) {
     $output = & $FilePath @Arguments 2>&1 | ForEach-Object { [string]$_ }
     return @{ ExitCode = $LASTEXITCODE; Output = @($output) }
 }
 
-function Wait-RemoteBootstrapJob($SshArgs, $Remote, $RemoteLog, $RemoteDone, $RemoteExitCode, $PollSeconds, $ReconnectAttempts, $HeartbeatSeconds) {
+function Write-LfScript($Path, $Lines) {
+    $content = (@($Lines) -join "`n") + "`n"
+    [System.IO.File]::WriteAllText($Path, $content, [System.Text.Encoding]::ASCII)
+}
+
+function Wait-RemoteBootstrapJob([string[]]$SshArgs, [string]$Remote, [string]$RemoteLog, [string]$RemoteDone, [string]$RemoteExitCode, [string]$RemotePid, [int]$PollSeconds, [int]$ReconnectAttempts, [int]$HeartbeatSeconds) {
     $printedLines = 0
     $transportFailures = 0
     $lastHeartbeatAt = [DateTime]::UtcNow
@@ -160,7 +173,7 @@ function Wait-RemoteBootstrapJob($SshArgs, $Remote, $RemoteLog, $RemoteDone, $Re
         $pollCommand = @(
             "set +e",
             "if [ -f $(Quote-BashArg $RemoteLog) ]; then tail -n +$($printedLines + 1) $(Quote-BashArg $RemoteLog); fi",
-            "if [ -f $(Quote-BashArg $RemoteDone) ]; then echo __BOOTSTRAP_JOB_DONE__; cat $(Quote-BashArg $RemoteExitCode); fi"
+            "if [ -f $(Quote-BashArg $RemoteDone) ]; then echo __BOOTSTRAP_JOB_DONE__; cat $(Quote-BashArg $RemoteExitCode); elif [ -f $(Quote-BashArg $RemotePid) ] && ! kill -0 ""`$(cat $(Quote-BashArg $RemotePid))"" 2>/dev/null; then echo __BOOTSTRAP_JOB_DEAD__; fi"
         ) -join "; "
 
         $result = Invoke-CaptureExternal "ssh" ($SshArgs + @($Remote, $pollCommand))
@@ -196,6 +209,19 @@ function Wait-RemoteBootstrapJob($SshArgs, $Remote, $RemoteLog, $RemoteDone, $Re
                 Fail "remote bootstrap converge failed with exit code $remoteExitCode; log: $RemoteLog"
             }
             return
+        }
+
+        $deadIndex = [array]::IndexOf($result.Output, "__BOOTSTRAP_JOB_DEAD__")
+        if ($deadIndex -ge 0) {
+            if ($deadIndex -gt 0) {
+                foreach ($line in @($result.Output[0..($deadIndex - 1)])) {
+                    if ($line -ne "__BOOTSTRAP_JOB_DEAD__") {
+                        Write-Host $line
+                        $printedLines++
+                    }
+                }
+            }
+            Fail "remote bootstrap converge process exited without writing done/exit_code; log: $RemoteLog"
         }
 
         $printedThisPoll = 0
@@ -328,7 +354,9 @@ $runScriptLines = @(
 try {
     Write-Host "Preparing local bootstrap converge bundle..."
     $bundle = New-BootstrapConvergeBundle $AnsibleDir $AnsibleAuthorizedKeyFile
-    Set-Content -LiteralPath $runScriptPath -Value $runScriptLines -Encoding ascii
+    Write-LfScript $runScriptPath $runScriptLines
+
+    Invoke-RemoteTempCleanup $sshCommonArgs $remote
 
     Write-Host "Creating remote temporary bundle and job directories..."
     Invoke-ExternalRetryTransport "ssh" ($sshCommonArgs + @(
@@ -369,7 +397,7 @@ try {
     Invoke-ExternalRetryTransport "ssh" ($sshCommonArgs + @($remote, $startJobCommand)) "remote bootstrap converge job start"
 
     Write-Host "Following remote bootstrap converge log..."
-    Wait-RemoteBootstrapJob -SshArgs $sshCommonArgs -Remote $remote -RemoteLog $remoteJobLog -RemoteDone $remoteJobDone -RemoteExitCode $remoteJobExitCode -PollSeconds $RemoteJobPollSeconds -ReconnectAttempts $RemoteJobReconnectAttempts -HeartbeatSeconds $RemoteJobHeartbeatSeconds
+    Wait-RemoteBootstrapJob -SshArgs ([string[]]$sshCommonArgs) -Remote $remote -RemoteLog $remoteJobLog -RemoteDone $remoteJobDone -RemoteExitCode $remoteJobExitCode -RemotePid $remoteJobPid -PollSeconds $RemoteJobPollSeconds -ReconnectAttempts $RemoteJobReconnectAttempts -HeartbeatSeconds $RemoteJobHeartbeatSeconds
     $remoteJobCompletedSuccessfully = $true
 } finally {
     if ($bundle) {

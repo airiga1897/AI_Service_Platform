@@ -241,6 +241,55 @@ Before adding L3 routing or NAT, model every cascade link explicitly:
 - `egress_port` - the receiver host port, currently `8443` for HTTPS-like
   transport.
 
+#### Explicit Egress Profiles
+
+The default egress behavior remains local to the ingress node. Selected traffic
+must leave through the same VPS where it entered unless an explicit egress
+profile says otherwise.
+
+Non-RU to non-RU routing is allowed only as an operator-managed named profile,
+not as automatic any-to-any mesh behavior. For example, a profile may describe a
+Latvia ingress with an Uzbekistan egress when that route is intentionally needed
+for a lab, geo, provider, or troubleshooting scenario.
+
+Every egress profile must record:
+
+- `ingress_alias` - where selected traffic enters the policy;
+- `egress_alias` - where selected traffic exits;
+- `transport_port` - the receiver host port used by the cascade transport;
+- `reason` - why this non-local egress is enabled;
+- `state` - planned, active, paused, or retired;
+- `rollback` - how to return traffic to local/default egress.
+
+Do not enable an any-to-any cascade mesh. Each profile must be individually
+approved, observable, and reversible.
+
+#### Isolated Transit Segments
+
+Some non-RU to non-RU fallback profiles may need a transit path through central
+nodes such as `vps5` and `vps3` when the initial ingress VPS cannot reach the
+target egress directly. That traffic must be modeled as a directed L3 routed
+profile, not as another shared L2 cascade link.
+
+For example:
+
+```text
+profile: non_ru_transit_fallback
+path: ingress_non_ru -> vps5 -> vps3 -> egress_non_ru
+mode: l3_routed
+nat: egress_non_ru only
+trigger: direct_path_unavailable
+```
+
+The `vps5 -> vps3` hop is allowed only as an isolated transit segment for the
+named profile. It must not be bridged into the shared `CascadeLab` fabric, must
+not carry unmarked/default traffic, and must not perform NAT. NAT belongs only
+on the final `egress_alias`.
+
+Every routed profile path must be acyclic. The same alias must not appear twice
+in one path, and an active reverse profile for the same traffic class must not
+be enabled at the same time.
+
 Do not create simultaneous active reverse cascade links between the same hubs.
 For example, `vps5 -> vps4` and `vps4 -> vps5` must not both be online as an L2
 pair. If traffic later needs to enter on `vps4` and leave through `vps5`, add a
@@ -254,8 +303,9 @@ Current cascade role policy:
   from `vps1`, `vps2`, and `vps4`.
 - Other VPS nodes (`vps1`, `vps2`, `vps4`) are transit peers. They may receive
   from `vps5` and may initiate to `vps3` when a routed profile requires it.
-- `vps5` and `vps3` must not be connected by `vpn_cascade` in either
-  direction. Keep orchestration/control-plane trust separate from VPN transit.
+- `vps5` and `vps3` must not be connected by the shared `vpn_cascade` fabric in
+  either direction. If a fallback path needs that hop, use an isolated L3 transit
+  segment bound to one named profile.
 
 Allowed profile pairs:
 
@@ -274,6 +324,10 @@ Forbidden profile pairs:
 vps5 -> vps3
 vps3 -> vps5
 ```
+
+These pairs are forbidden as shared cascade fabric links. They are not a ban on
+future isolated L3 transit segments that are explicit, acyclic, profile-bound,
+and kept separate from `CascadeLab`.
 
 The allowed list is a catalog of possible routed profiles, not a command to make
 all links active. Enable links only when the corresponding L3 route policy,
