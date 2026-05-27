@@ -13,6 +13,8 @@ param(
     [int]$OperatorBackupKeepLatest = 30,
     [string]$VpnIngressDomain = "mine-craft.su",
     [string[]]$ReseedVpnEdge = @(),
+    [ValidateSet("", "edge_haproxy", "vpn_edge", "vpn_cascade")]
+    [string]$OnlyService = "",
     [switch]$AutoAcceptHostKey,
     [switch]$SkipSync,
     [switch]$SkipStandbySync,
@@ -27,6 +29,7 @@ $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases
 $SupportedServices = @("edge_haproxy", "vpn_edge", "vpn_cascade")
 $ReservedServices = @()
 $script:OperatorBackupCompleted = $false
+$script:BatchSteps = New-Object System.Collections.Generic.List[object]
 
 function Fail($Message) {
     Write-Error $Message
@@ -53,6 +56,10 @@ function Split-OperatorAliasList($Value) {
         }
     }
     return @($aliases)
+}
+
+function Join-AnsibleLimit($Aliases) {
+    return (@($Aliases | Where-Object { $_ }) -join ":")
 }
 
 function Get-PresentServiceAliases($Rows, $Name) {
@@ -475,20 +482,55 @@ function Invoke-ChildScript($ScriptPath, $Arguments, $Label) {
     }
 }
 
+function Add-ServiceBatchStep($Service, $Action, $Limit, [switch]$Check, [switch]$ConfirmPurge, [string]$Label = "") {
+    if (-not $Label) {
+        $Label = "$Service $Action"
+        if ($Limit) { $Label += " for $Limit" }
+        if ($Check) { $Label += " check" }
+    }
+    $script:BatchSteps.Add([pscustomobject]@{
+        service = $Service
+        action = $Action
+        limit = $Limit
+        check = [bool]$Check
+        confirm_purge = [bool]$ConfirmPurge
+        label = $Label
+    }) | Out-Null
+}
+
 function Invoke-ServiceRemote($Service, $Action, $Limit, [switch]$Check, [switch]$ConfirmPurge) {
+    Add-ServiceBatchStep $Service $Action $Limit -Check:$Check -ConfirmPurge:$ConfirmPurge
+}
+
+function Invoke-ServiceBatch() {
+    if ($script:BatchSteps.Count -eq 0) {
+        Write-Host "No remote service steps to run."
+        return
+    }
+
+    $batchPlanPath = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-service-platform.rollout-batch." + [guid]::NewGuid().ToString("N") + ".json")
     $args = @(
-        $Service,
-        $Action,
         "-NodesFile", $NodesFile,
         "-StateFile", $StateFile,
         "-OperatorDir", $OperatorDir,
-        "-ControlRole", $ControlRole
+        "-ControlRole", $ControlRole,
+        "-BatchPlanFile", $batchPlanPath,
+        "-DetachedRemoteJob"
     )
     if ($ControlAlias) { $args += @("-ControlAlias", $ControlAlias) }
-    if ($Limit) { $args += @("-Limit", $Limit) }
-    if ($Check) { $args += "-Check" }
-    if ($ConfirmPurge) { $args += "-ConfirmPurge" }
-    Invoke-ChildScript $ServiceRemoteScript $args "$Service $Action"
+    try {
+        $script:BatchSteps | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $batchPlanPath -Encoding ascii
+        Write-Host ""
+        Write-Host "Remote batch rollout plan: $($script:BatchSteps.Count) steps"
+        $stepIndex = 0
+        foreach ($step in $script:BatchSteps) {
+            $stepIndex++
+            Write-Host ("  {0}. {1}" -f $stepIndex, $step.label)
+        }
+        Invoke-ChildScript $ServiceRemoteScript $args "remote batch rollout"
+    } finally {
+        Remove-Item -LiteralPath $batchPlanPath -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Invoke-ServiceApplyDryRun($Service, $Limit, $Label) {
@@ -497,7 +539,7 @@ function Invoke-ServiceApplyDryRun($Service, $Limit, $Label) {
         Write-Host "Dry-run: skipped by operator request"
         return
     }
-    Write-Host "${Label}: dry-run"
+    Write-Host "${Label}: dry-run queued"
     Invoke-ServiceRemote $Service "apply" $Limit -Check
 }
 
@@ -505,7 +547,7 @@ function Invoke-VpnEdgeReseed($Alias, $ReseededAliases, $Summary) {
     if ($ReseededAliases -contains $Alias) {
         return
     }
-    Write-Host "vpn_edge on ${Alias}: reseed"
+    Write-Host "vpn_edge on ${Alias}: reseed queued"
     Invoke-ServiceRemote "vpn_edge" "reseed" $Alias
     Add-UniqueAlias $ReseededAliases $Alias
     $Summary.Add("vpn_edge ${Alias}: reseeded") | Out-Null
@@ -557,18 +599,18 @@ function Invoke-Postcheck($Service, $State, $Alias) {
             switch ($State) {
                 "present" {
                     Invoke-ServiceRemote $Service "plan" $Alias
-                    Write-Host "[OK] edge_haproxy postcheck placeholder completed for $Alias"
+                    Write-Host "edge_haproxy postcheck queued for $Alias"
                 }
                 "absent" {
-                    Write-Host "[OK] edge_haproxy absent requested for $Alias; config/data should remain on target"
+                    Write-Host "Postcheck note: edge_haproxy absent requested for $Alias; config/data should remain on target"
                 }
                 "purged" {
-                    Write-Host "[OK] edge_haproxy purge requested for $Alias; runtime directory removal is handled by the role"
+                    Write-Host "Postcheck note: edge_haproxy purge requested for $Alias; runtime directory removal is handled by the role"
                 }
             }
         }
         default {
-            Write-Host "No postcheck implemented yet for $Service on $Alias"
+            return
         }
     }
 }
@@ -601,6 +643,13 @@ $standbyOrchestrationAliases = @(Get-OrchestrationCandidateAliases $stateRows $C
 $serviceRows = @($stateRows | Where-Object { $_.kind -eq "service" })
 if ($serviceRows.Count -eq 0) {
     Fail "state.csv has no service rows"
+}
+if ($OnlyService) {
+    $onlyServiceRows = @($serviceRows | Where-Object { $_.name -eq $OnlyService })
+    if ($onlyServiceRows.Count -eq 0) {
+        Fail "OnlyService '$OnlyService' was requested, but state.csv has no service row with that name"
+    }
+    Write-Host "OnlyService: $OnlyService"
 }
 $edgeRouteRows = @($stateRows | Where-Object { $_.kind -eq "edge_route" })
 $edgeHaproxyAliases = @(Get-PresentServiceAliases $stateRows "edge_haproxy")
@@ -690,16 +739,21 @@ Write-Host "Step 2/3: rollout services from state.csv"
 if ($edgeRouteRemovalAliases.Count -gt 0) {
     Write-Host ""
     Write-Host "Step 2a/3: remove absent edge routes through edge_haproxy before stopping backends"
-    if ($plannedServices -notcontains "edge_haproxy") {
-        Invoke-ServiceRemote "edge_haproxy" "plan" ""
-        Add-UniqueAlias $plannedServices "edge_haproxy"
-    }
-    foreach ($alias in $edgeRouteRemovalAliases) {
-        Invoke-ServiceApplyDryRun "edge_haproxy" $alias "edge_haproxy route removal on ${alias}"
-        Write-Host "edge_haproxy route removal on ${alias}: apply"
-        Invoke-ServiceRemote "edge_haproxy" "apply" $alias
-        Add-UniqueAlias $processedServiceActions "edge_haproxy|present|$alias"
-        $summary.Add("edge_haproxy routes ${alias}: removed absent routes") | Out-Null
+    if ($OnlyService -and $OnlyService -ne "edge_haproxy") {
+        Write-Host "Skipped edge route removal because -OnlyService $OnlyService was requested"
+    } else {
+        if ($plannedServices -notcontains "edge_haproxy") {
+            Invoke-ServiceRemote "edge_haproxy" "plan" ""
+            Add-UniqueAlias $plannedServices "edge_haproxy"
+        }
+        $limit = Join-AnsibleLimit $edgeRouteRemovalAliases
+        Invoke-ServiceApplyDryRun "edge_haproxy" $limit "edge_haproxy route removal on ${limit}"
+        Write-Host "edge_haproxy route removal on ${limit}: apply queued"
+        Invoke-ServiceRemote "edge_haproxy" "apply" $limit
+        foreach ($alias in $edgeRouteRemovalAliases) {
+            Add-UniqueAlias $processedServiceActions "edge_haproxy|present|$alias"
+        }
+        $summary.Add("edge_haproxy routes ${limit}: removed absent routes") | Out-Null
     }
 }
 
@@ -712,6 +766,9 @@ $orderedServiceRows = @(
 
 foreach ($serviceRow in $orderedServiceRows) {
     $service = $serviceRow.name
+    if ($OnlyService -and $service -ne $OnlyService) {
+        continue
+    }
     $state = $serviceRow.state
     $aliases = @(Split-AliasList $serviceRow.active_aliases)
     if ($service -eq "vpn_cascade" -and $state -eq "present") {
@@ -750,6 +807,42 @@ foreach ($serviceRow in $orderedServiceRows) {
         continue
     }
 
+    if ($service -ne "vpn_cascade" -and $aliases.Count -gt 0) {
+        $limit = Join-AnsibleLimit $aliases
+        foreach ($alias in $aliases) {
+            $actionKey = "$service|$state|$alias"
+            if ($processedServiceActions -contains $actionKey) {
+                Write-Host "$service on ${alias}: duplicate state row for state=$state; skipped"
+                continue
+            }
+            Add-UniqueAlias $processedServiceActions $actionKey
+        }
+
+        if ($state -eq "present") {
+            Invoke-ServiceApplyDryRun $service $limit "$service on $limit"
+            Write-Host "$service on ${limit}: apply queued"
+            Invoke-ServiceRemote $service "apply" $limit
+            Invoke-Postcheck $service $state $limit
+            $summary.Add("$service ${limit}: present") | Out-Null
+            if ($service -eq "vpn_edge") {
+                foreach ($alias in @($aliases | Where-Object { $reseedVpnEdgeAliases -contains $_ })) {
+                    Invoke-VpnEdgeReseed $alias $reseededVpnEdgeAliases $summary
+                }
+            }
+        } elseif ($state -eq "absent") {
+            Write-Host "$service on ${limit}: absent queued"
+            Invoke-ServiceRemote $service "absent" $limit
+            Invoke-Postcheck $service $state $limit
+            $summary.Add("$service ${limit}: absent") | Out-Null
+        } elseif ($state -eq "purged") {
+            Write-Host "$service on ${limit}: purge queued"
+            Invoke-ServiceRemote $service "purge" $limit -ConfirmPurge
+            Invoke-Postcheck $service $state $limit
+            $summary.Add("$service ${limit}: purged") | Out-Null
+        }
+        continue
+    }
+
     foreach ($alias in $aliases) {
         $actionKey = "$service|$state|$alias"
         if ($processedServiceActions -contains $actionKey) {
@@ -760,7 +853,7 @@ foreach ($serviceRow in $orderedServiceRows) {
 
         if ($state -eq "present") {
             Invoke-ServiceApplyDryRun $service $alias "$service on ${alias}"
-            Write-Host "$service on ${alias}: apply"
+            Write-Host "$service on ${alias}: apply queued"
             Invoke-ServiceRemote $service "apply" $alias
             Invoke-Postcheck $service $state $alias
             $summary.Add("$service ${alias}: present") | Out-Null
@@ -768,12 +861,12 @@ foreach ($serviceRow in $orderedServiceRows) {
                 Invoke-VpnEdgeReseed $alias $reseededVpnEdgeAliases $summary
             }
         } elseif ($state -eq "absent") {
-            Write-Host "$service on ${alias}: absent"
+            Write-Host "$service on ${alias}: absent queued"
             Invoke-ServiceRemote $service "absent" $alias
             Invoke-Postcheck $service $state $alias
             $summary.Add("$service ${alias}: absent") | Out-Null
         } elseif ($state -eq "purged") {
-            Write-Host "$service on ${alias}: purge"
+            Write-Host "$service on ${alias}: purge queued"
             Invoke-ServiceRemote $service "purge" $alias -ConfirmPurge
             Invoke-Postcheck $service $state $alias
             $summary.Add("$service ${alias}: purged") | Out-Null
@@ -784,21 +877,31 @@ foreach ($serviceRow in $orderedServiceRows) {
 if ($edgeRouteApplyAliases.Count -gt 0) {
     Write-Host ""
     Write-Host "Step 2b/3: apply edge route rendering through edge_haproxy"
-    foreach ($alias in $edgeRouteApplyAliases) {
-        if ($processedServiceActions -contains "edge_haproxy|present|$alias") {
-            Write-Host "edge_haproxy routes on ${alias}: already applied by edge_haproxy service apply"
-            continue
+    if ($OnlyService -and $OnlyService -ne "edge_haproxy") {
+        Write-Host "Skipped edge route apply because -OnlyService $OnlyService was requested"
+    } else {
+        $routeApplyAliases = @($edgeRouteApplyAliases | Where-Object { $processedServiceActions -notcontains "edge_haproxy|present|$_" })
+        if ($routeApplyAliases.Count -eq 0) {
+            Write-Host "edge_haproxy routes: already applied by edge_haproxy service apply"
+        } else {
+            $limit = Join-AnsibleLimit $routeApplyAliases
+            Invoke-ServiceApplyDryRun "edge_haproxy" $limit "edge_haproxy routes on ${limit}"
+            Write-Host "edge_haproxy routes on ${limit}: apply queued"
+            Invoke-ServiceRemote "edge_haproxy" "apply" $limit
+            $summary.Add("edge_haproxy routes ${limit}: applied") | Out-Null
         }
-        Invoke-ServiceApplyDryRun "edge_haproxy" $alias "edge_haproxy routes on ${alias}"
-        Write-Host "edge_haproxy routes on ${alias}: apply"
-        Invoke-ServiceRemote "edge_haproxy" "apply" $alias
-        $summary.Add("edge_haproxy routes ${alias}: applied") | Out-Null
     }
 }
 
-foreach ($alias in $reseedVpnEdgeAliases) {
-    Invoke-VpnEdgeReseed $alias $reseededVpnEdgeAliases $summary
+if (-not $OnlyService -or $OnlyService -eq "vpn_edge") {
+    foreach ($alias in $reseedVpnEdgeAliases) {
+        Invoke-VpnEdgeReseed $alias $reseededVpnEdgeAliases $summary
+    }
+} elseif ($reseedVpnEdgeAliases.Count -gt 0) {
+    Write-Host "Skipped vpn_edge reseed because -OnlyService $OnlyService was requested"
 }
+
+Invoke-ServiceBatch
 
 Write-Host ""
 Write-Host "Step 3/3: summary"

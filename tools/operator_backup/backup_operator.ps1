@@ -48,7 +48,10 @@ function Get-OpenSshCommonArgs($KeyFile) {
         "-i", $KeyFile,
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=10",
-        "-o", "IdentitiesOnly=yes"
+        "-o", "IdentitiesOnly=yes",
+        "-o", "KbdInteractiveAuthentication=no",
+        "-o", "PasswordAuthentication=no",
+        "-o", "PreferredAuthentications=publickey"
     )
     if ($AutoAcceptHostKey) {
         $args += @("-o", "StrictHostKeyChecking=accept-new")
@@ -57,7 +60,7 @@ function Get-OpenSshCommonArgs($KeyFile) {
 }
 
 function Invoke-SshKey($KeyFile, $Remote, $Command, $Label) {
-    $sshArgs = @("-n") + @(Get-OpenSshCommonArgs $KeyFile) + @($Remote, $Command)
+    $sshArgs = @("-n", "-T") + @(Get-OpenSshCommonArgs $KeyFile) + @("-o", "RequestTTY=no", $Remote, $Command)
     $previousErrorActionPreference = $ErrorActionPreference
     $exitCode = 0
     try {
@@ -73,7 +76,7 @@ function Invoke-SshKey($KeyFile, $Remote, $Command, $Label) {
 }
 
 function Invoke-ScpKey($KeyFile, $Source, $Target, $Label) {
-    $scpArgs = @(Get-OpenSshCommonArgs $KeyFile) + @($Source, $Target)
+    $scpArgs = @("-B") + @(Get-OpenSshCommonArgs $KeyFile) + @($Source, $Target)
     $previousErrorActionPreference = $ErrorActionPreference
     $exitCode = 0
     try {
@@ -239,7 +242,7 @@ try {
             Invoke-SshKey $adminKey $remote $installCommand "remote encrypted operator backup install"
         } finally {
             $cleanupCommand = "rm -rf " + (Quote-BashArg $remoteTempDir)
-            & ssh @(@("-n") + @(Get-OpenSshCommonArgs $adminKey) + @($remote, $cleanupCommand)) 2>$null | Out-Null
+            & ssh @(@("-n", "-T") + @(Get-OpenSshCommonArgs $adminKey) + @("-o", "RequestTTY=no", $remote, $cleanupCommand)) 2>$null | Out-Null
         }
     }
 

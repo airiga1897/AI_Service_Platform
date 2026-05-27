@@ -493,8 +493,8 @@ trap 'rm -f "$sanitized_nodes" "$remote_log"' EXIT
 
 if [ "$access_mode" = "admin-key" ]; then
     remote="$ADMIN_USER@$endpoint"
-    ssh_base=(ssh -i "$admin_key_file" -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$remote")
-    scp_base=(scp -i "$admin_key_file" -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
+    ssh_base=(ssh -n -T -i "$admin_key_file" -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -o RequestTTY=no -o KbdInteractiveAuthentication=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey -o StrictHostKeyChecking=accept-new "$remote")
+    scp_base=(scp -B -i "$admin_key_file" -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -o KbdInteractiveAuthentication=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey -o StrictHostKeyChecking=accept-new)
 else
     remote="root@$endpoint"
     ssh_base=(sshpass -p "$root_password" ssh -o StrictHostKeyChecking=accept-new "$remote")

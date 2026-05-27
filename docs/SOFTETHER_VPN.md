@@ -172,8 +172,8 @@ edge `443/tcp`:
 
 | Host port | Container port | Purpose |
 |---|---|---|
-| `8443/tcp` | `443/tcp` | cascade HTTPS/SSTP-compatible test listener |
-| `8992/tcp` | `992/tcp` | primary SoftEther cascade SSL listener |
+| `8443/tcp` | `443/tcp` | primary cascade HTTPS-like transport listener |
+| `8992/tcp` | `992/tcp` | fallback/test SoftEther cascade SSL listener |
 | `8555/tcp` | `5555/tcp` | management, restricted by firewall |
 
 The operator-local link secret is ignored by git:
@@ -188,14 +188,14 @@ It contains only the lab link parameters and passwords used by `vpncmd`:
 {
   "hub_name": "CascadeLab",
   "hub_password": "<store outside chat>",
-  "cascade_user": "cascade-vps5-vps4",
+  "cascade_user": "cascade-peer",
   "cascade_user_password": "<store outside chat>",
   "server_password": "<store outside chat>",
   "connection_name": "vps5-to-vps4",
   "ingress_alias": "vps5",
   "egress_alias": "vps4",
   "egress_host": "vps4.mine-craft.su",
-  "egress_port": 8992
+  "egress_port": 8443
 }
 ```
 
@@ -225,6 +225,66 @@ After first start, the remote
 mutable runtime state. `vpn_cascade` does not publish HAProxy routes, does not
 change host routing, and does not enforce egress policy. Controlled routing must
 come later from approved policy, not directly from cascade rollout.
+
+### Cascade Roles Before Routing
+
+SoftEther cascade direction is the direction of TCP connection initiation, not a
+complete traffic policy. A cascade link object exists only on the initiator side;
+the receiver sees it as an incoming hub session from `cascade-peer`.
+
+Before adding L3 routing or NAT, model every cascade link explicitly:
+
+- `initiator_alias` - the node that creates the SoftEther Cascade Connection;
+- `receiver_alias` - the node that listens for that connection;
+- `ingress_alias` - where selected client or service traffic enters the policy;
+- `egress_alias` - where selected traffic is allowed to leave;
+- `egress_port` - the receiver host port, currently `8443` for HTTPS-like
+  transport.
+
+Do not create simultaneous active reverse cascade links between the same hubs.
+For example, `vps5 -> vps4` and `vps4 -> vps5` must not both be online as an L2
+pair. If traffic later needs to enter on `vps4` and leave through `vps5`, add a
+separate routed profile and policy instead of a second active L2-style link.
+
+Current cascade role policy:
+
+- `vps5` is the ingress/fanout origin. It may initiate cascade links to
+  `vps1`, `vps2`, and `vps4`.
+- `vps3` is the central RU/control-side receiver. It may receive cascade links
+  from `vps1`, `vps2`, and `vps4`.
+- Other VPS nodes (`vps1`, `vps2`, `vps4`) are transit peers. They may receive
+  from `vps5` and may initiate to `vps3` when a routed profile requires it.
+- `vps5` and `vps3` must not be connected by `vpn_cascade` in either
+  direction. Keep orchestration/control-plane trust separate from VPN transit.
+
+Allowed profile pairs:
+
+```text
+vps5 -> vps1
+vps5 -> vps2
+vps5 -> vps4
+vps1 -> vps3
+vps2 -> vps3
+vps4 -> vps3
+```
+
+Forbidden profile pairs:
+
+```text
+vps5 -> vps3
+vps3 -> vps5
+```
+
+The allowed list is a catalog of possible routed profiles, not a command to make
+all links active. Enable links only when the corresponding L3 route policy,
+firewall rules, NAT behavior, and rollback are explicit.
+
+Implementation order:
+
+1. Make `vpn_cascade` link roles/profile the source of truth.
+2. Keep seed snapshots as backup/debug artifacts, not as the primary workflow.
+3. Add postchecks that verify initiator, receiver, host, port, and status.
+4. Add L3 routing, forwarding, NAT, and rollback only after roles are explicit.
 
 To intentionally replace an installed cascade node config with its operator
 seed, use explicit reseed and a single alias:

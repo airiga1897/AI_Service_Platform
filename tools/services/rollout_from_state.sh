@@ -20,6 +20,7 @@ SKIP_POSTCHECK="false"
 SKIP_DRY_RUN="false"
 SKIP_OPERATOR_BACKUP="false"
 RESEED_VPN_EDGE=""
+ONLY_SERVICE=""
 
 EXPECTED_HEADER="current_alias,endpoint,connection,root_password"
 EXPECTED_STATE_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
@@ -44,6 +45,7 @@ Options:
   --auto-accept-host-key  Refresh known_hosts during sync.
   --reseed-vpn-edge ALIASES
                          Explicitly reseed SoftEther config for aliases.
+  --only-service NAME    Roll out only one service: edge_haproxy, vpn_edge, or vpn_cascade.
   --skip-sync             Skip sync/verify step.
   --skip-standby-sync     Skip automatic sync of orchestration candidates.
   --skip-postcheck        Skip service postcheck placeholders.
@@ -238,7 +240,7 @@ invoke_service_apply_dry_run() {
         echo "Dry-run: skipped by operator request"
         return
     fi
-    echo "$label: dry-run"
+    echo "$label: dry-run queued"
     invoke_service_remote "$service" apply "$limit" true
 }
 
@@ -247,7 +249,7 @@ invoke_vpn_edge_reseed() {
     if array_contains reseeded_vpn_edge_aliases "$alias"; then
         return
     fi
-    echo "vpn_edge on $alias: reseed"
+    echo "vpn_edge on $alias: reseed queued"
     invoke_service_remote "vpn_edge" reseed "$alias"
     reseeded_vpn_edge_aliases+=("$alias")
     summary+=("vpn_edge $alias: reseeded")
@@ -299,16 +301,16 @@ invoke_postcheck() {
     case "$service:$state" in
         edge_haproxy:present)
             invoke_service_remote "$service" plan "$alias"
-            echo "[OK] edge_haproxy postcheck placeholder completed for $alias"
+            echo "edge_haproxy postcheck queued for $alias"
             ;;
         edge_haproxy:absent)
-            echo "[OK] edge_haproxy absent requested for $alias; config/data should remain on target"
+            echo "Postcheck note: edge_haproxy absent requested for $alias; config/data should remain on target"
             ;;
         edge_haproxy:purged)
-            echo "[OK] edge_haproxy purge requested for $alias; runtime directory removal is handled by the role"
+            echo "Postcheck note: edge_haproxy purge requested for $alias; runtime directory removal is handled by the role"
             ;;
         *)
-            echo "No postcheck implemented yet for $service on $alias"
+            return
             ;;
     esac
 }
@@ -427,6 +429,7 @@ while [ "$#" -gt 0 ]; do
         --operator-backup-remote-dir) OPERATOR_BACKUP_REMOTE_DIR="${2:-}"; shift 2 ;;
         --auto-accept-host-key|--refresh-known-hosts) AUTO_ACCEPT_HOST_KEY="true"; shift ;;
         --reseed-vpn-edge) RESEED_VPN_EDGE="${2:-}"; shift 2 ;;
+        --only-service) ONLY_SERVICE="${2:-}"; shift 2 ;;
         --skip-sync) SKIP_SYNC="true"; shift ;;
         --skip-standby-sync) SKIP_STANDBY_SYNC="true"; shift ;;
         --skip-postcheck) SKIP_POSTCHECK="true"; shift ;;
@@ -444,6 +447,11 @@ if [ "$SKIP_STANDBY_SYNC" = "false" ]; then
     require_file "$STANDBY_PREPARE_SCRIPT" "--standby-prepare-script"
 fi
 require_file "$SERVICE_REMOTE_SCRIPT" "--service-remote-script"
+
+case "$ONLY_SERVICE" in
+    ""|edge_haproxy|vpn_edge|vpn_cascade) ;;
+    *) fail "--only-service must be one of: edge_haproxy, vpn_edge, vpn_cascade" ;;
+esac
 
 first_line="$(head -n 1 "$NODES_FILE" | tr -d '\r')"
 [ "$first_line" = "$EXPECTED_HEADER" ] || fail "nodes.csv header must be exactly: $EXPECTED_HEADER"
@@ -482,6 +490,20 @@ while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _
         append_aliases_to_var standby_orchestration_aliases "$_candidate_aliases"
     fi
 done < <(tail -n +2 "$STATE_FILE")
+
+if [ -n "$ONLY_SERVICE" ]; then
+    only_service_found="false"
+    while IFS=, read -r kind name _ansible_group _active_aliases _candidate_aliases _old_aliases _row_state _extra || [ -n "${kind:-}" ]; do
+        kind="${kind//$'\r'/}"
+        name="${name//$'\r'/}"
+        if [ "$kind" = "service" ] && [ "$name" = "$ONLY_SERVICE" ]; then
+            only_service_found="true"
+            break
+        fi
+    done < <(tail -n +2 "$STATE_FILE")
+    [ "$only_service_found" = "true" ] || fail "--only-service $ONLY_SERVICE was requested, but state.csv has no service row with that name"
+    echo "OnlyService: $ONLY_SERVICE"
+fi
 
 reseed_vpn_edge_aliases=()
 while IFS= read -r alias; do
@@ -580,14 +602,18 @@ reseeded_vpn_edge_aliases=()
 if [ "${#edge_route_removal_aliases[@]}" -gt 0 ]; then
     echo ""
     echo "Step 2a/3: remove absent edge routes through edge_haproxy before stopping backends"
-    ensure_service_plan "edge_haproxy"
-    for alias in "${edge_route_removal_aliases[@]}"; do
-        invoke_service_apply_dry_run "edge_haproxy" "$alias" "edge_haproxy route removal on $alias"
-        echo "edge_haproxy route removal on $alias: apply"
-        invoke_service_remote "edge_haproxy" apply "$alias"
-        add_unique_to_array processed_service_actions "edge_haproxy|present|$alias"
-        summary+=("edge_haproxy routes $alias: removed absent routes")
-    done
+    if [ -n "$ONLY_SERVICE" ] && [ "$ONLY_SERVICE" != "edge_haproxy" ]; then
+        echo "Skipped edge route removal because --only-service $ONLY_SERVICE was requested"
+    else
+        ensure_service_plan "edge_haproxy"
+        for alias in "${edge_route_removal_aliases[@]}"; do
+            invoke_service_apply_dry_run "edge_haproxy" "$alias" "edge_haproxy route removal on $alias"
+            echo "edge_haproxy route removal on $alias: apply queued"
+            invoke_service_remote "edge_haproxy" apply "$alias"
+            add_unique_to_array processed_service_actions "edge_haproxy|present|$alias"
+            summary+=("edge_haproxy routes $alias: removed absent routes")
+        done
+    fi
 fi
 
 process_service_rows() {
@@ -601,6 +627,9 @@ process_service_rows() {
     extra="${extra//$'\r'/}"
     [ "$kind" = "service" ] || continue
     [ "$row_state" = "$desired_state" ] || continue
+    if [ -n "$ONLY_SERVICE" ] && [ "$name" != "$ONLY_SERVICE" ]; then
+        continue
+    fi
     case "$service_filter" in
         all) ;;
         non-edge-haproxy) [ "$name" != "edge_haproxy" ] || continue ;;
@@ -653,7 +682,7 @@ process_service_rows() {
         case "$row_state" in
             present)
                 invoke_service_apply_dry_run "$name" "$alias" "$name on $alias"
-                echo "$name on $alias: apply"
+                echo "$name on $alias: apply queued"
                 invoke_service_remote "$name" apply "$alias"
                 invoke_postcheck "$name" "$row_state" "$alias"
                 summary+=("$name $alias: present")
@@ -662,13 +691,13 @@ process_service_rows() {
                 fi
                 ;;
             absent)
-                echo "$name on $alias: absent"
+                echo "$name on $alias: absent queued"
                 invoke_service_remote "$name" absent "$alias"
                 invoke_postcheck "$name" "$row_state" "$alias"
                 summary+=("$name $alias: absent")
                 ;;
             purged)
-                echo "$name on $alias: purge"
+                echo "$name on $alias: purge queued"
                 invoke_service_remote "$name" purge "$alias" false true
                 invoke_postcheck "$name" "$row_state" "$alias"
                 summary+=("$name $alias: purged")
@@ -688,28 +717,36 @@ process_service_rows purged edge-haproxy
 if [ "${#edge_route_apply_aliases[@]}" -gt 0 ]; then
     echo ""
     echo "Step 2b/3: apply edge route rendering through edge_haproxy"
-    for alias in "${edge_route_apply_aliases[@]}"; do
-        already_applied="false"
-        for processed in "${processed_service_actions[@]}"; do
-            if [ "$processed" = "edge_haproxy|present|$alias" ]; then
-                already_applied="true"
-                break
+    if [ -n "$ONLY_SERVICE" ] && [ "$ONLY_SERVICE" != "edge_haproxy" ]; then
+        echo "Skipped edge route apply because --only-service $ONLY_SERVICE was requested"
+    else
+        for alias in "${edge_route_apply_aliases[@]}"; do
+            already_applied="false"
+            for processed in "${processed_service_actions[@]}"; do
+                if [ "$processed" = "edge_haproxy|present|$alias" ]; then
+                    already_applied="true"
+                    break
+                fi
+            done
+            if [ "$already_applied" = "true" ]; then
+                echo "edge_haproxy routes on $alias: already applied by edge_haproxy service apply"
+                continue
             fi
+            invoke_service_apply_dry_run "edge_haproxy" "$alias" "edge_haproxy routes on $alias"
+            echo "edge_haproxy routes on $alias: apply queued"
+            invoke_service_remote "edge_haproxy" apply "$alias"
+            summary+=("edge_haproxy routes $alias: applied")
         done
-        if [ "$already_applied" = "true" ]; then
-            echo "edge_haproxy routes on $alias: already applied by edge_haproxy service apply"
-            continue
-        fi
-        invoke_service_apply_dry_run "edge_haproxy" "$alias" "edge_haproxy routes on $alias"
-        echo "edge_haproxy routes on $alias: apply"
-        invoke_service_remote "edge_haproxy" apply "$alias"
-        summary+=("edge_haproxy routes $alias: applied")
-    done
+    fi
 fi
 
-for alias in "${reseed_vpn_edge_aliases[@]}"; do
-    invoke_vpn_edge_reseed "$alias"
-done
+if [ -z "$ONLY_SERVICE" ] || [ "$ONLY_SERVICE" = "vpn_edge" ]; then
+    for alias in "${reseed_vpn_edge_aliases[@]}"; do
+        invoke_vpn_edge_reseed "$alias"
+    done
+elif [ "${#reseed_vpn_edge_aliases[@]}" -gt 0 ]; then
+    echo "Skipped vpn_edge reseed because --only-service $ONLY_SERVICE was requested"
+fi
 
 echo ""
 echo "Step 3/3: summary"

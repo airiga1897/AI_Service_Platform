@@ -8,6 +8,7 @@
 - name: SoftEther vpn_cascade service rollout
   hosts: vpn_cascades
   become: true
+  gather_facts: false
   vars:
     vpn_cascade_state: present
     vpn_cascade_purge_data: false

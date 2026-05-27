@@ -1,0 +1,7 @@
+---
+- name: AI Service Platform bootstrap baseline converge
+  hosts: all
+  gather_facts: false
+  become: true
+  roles:
+    - bootstrap_converge

@@ -43,6 +43,13 @@ function Split-AliasList($Value) {
     return @($Value -split "\+" | Where-Object { $_ })
 }
 
+function Split-LimitList($Value) {
+    if (-not $Value) {
+        return @()
+    }
+    return @($Value -split "[:+,]" | Where-Object { $_ })
+}
+
 function Require-Command($Name) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
         Fail "$Name not found in PATH"
@@ -103,8 +110,29 @@ if ($stateFirstLine -ne $ExpectedStateHeader) {
 
 $rows = Import-Csv -LiteralPath $NodesFile
 $stateRows = Import-Csv -LiteralPath $StateFile
-$serviceRow = $stateRows | Where-Object { $_.kind -eq "service" -and $_.name -eq $Service } | Select-Object -First 1
+$serviceRows = @($stateRows | Where-Object { $_.kind -eq "service" -and $_.name -eq $Service })
+$serviceRow = $null
+if ($Limit) {
+    $limitAliases = @(Split-LimitList $Limit)
+    $matchingRows = @(
+        $serviceRows | Where-Object {
+            $active = @(Split-AliasList $_.active_aliases)
+            $missing = @($limitAliases | Where-Object { $active -notcontains $_ })
+            $missing.Count -eq 0
+        }
+    )
+    if ($matchingRows.Count -eq 1) {
+        $serviceRow = $matchingRows[0]
+    } elseif ($matchingRows.Count -gt 1) {
+        Fail "state.csv has multiple $Service rows matching -Limit $Limit; keep one target row per alias group"
+    }
+} else {
+    $serviceRow = $serviceRows | Select-Object -First 1
+}
 if (-not $serviceRow) {
+    if ($Limit) {
+        Fail "state.csv must contain a service row for $Service matching -Limit $Limit"
+    }
     Fail "state.csv must contain a service row for $Service"
 }
 if ($serviceRow.state -notin @("present", "absent", "purged")) {

@@ -13,6 +13,12 @@ CHECK="false"
 CONFIRM_PURGE="false"
 EXPECTED_HEADER="current_alias,endpoint,connection,root_password"
 EXPECTED_STATE_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
+DEFAULT_ANSIBLE_SSH_COMMON_ARGS="-o BatchMode=yes -o KbdInteractiveAuthentication=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey -o RequestTTY=no"
+if [ -n "${ANSIBLE_SSH_COMMON_ARGS:-}" ]; then
+    export ANSIBLE_SSH_COMMON_ARGS="$ANSIBLE_SSH_COMMON_ARGS $DEFAULT_ANSIBLE_SSH_COMMON_ARGS"
+else
+    export ANSIBLE_SSH_COMMON_ARGS="$DEFAULT_ANSIBLE_SSH_COMMON_ARGS"
+fi
 
 usage() {
     cat <<'USAGE'
@@ -73,6 +79,43 @@ alias_in_list() {
     return 1
 }
 
+split_limit_to_lines() {
+    local limit="$1"
+    limit="${limit//,/:}"
+    limit="${limit//+/:}"
+    local old_ifs="$IFS"
+    local alias_item
+    IFS=:
+    for alias_item in $limit; do
+        IFS="$old_ifs"
+        if [ -n "$alias_item" ]; then
+            printf '%s\n' "$alias_item"
+        fi
+        IFS=:
+    done
+    IFS="$old_ifs"
+}
+
+limit_matches_aliases() {
+    local limit="$1"
+    local aliases="$2"
+    local alias_item
+    while IFS= read -r alias_item; do
+        [ -n "$alias_item" ] || continue
+        alias_in_list "$alias_item" "$aliases" || return 1
+    done < <(split_limit_to_lines "$limit")
+    return 0
+}
+
+limit_display_for_error() {
+    local limit="$1"
+    if [ -n "$limit" ]; then
+        printf '%s\n' "$limit"
+    else
+        printf '<none>\n'
+    fi
+}
+
 service_playbook() {
     case "$1" in
         edge_haproxy) echo "infra/ansible/edge_haproxy.yml" ;;
@@ -105,7 +148,7 @@ service_extra_vars() {
 
 run_ansible_playbook() {
     if [ "$(id -u)" -eq 0 ]; then
-        sudo -u ansible ansible-playbook "$@"
+        sudo -u ansible env ANSIBLE_SSH_COMMON_ARGS="$ANSIBLE_SSH_COMMON_ARGS" ansible-playbook "$@"
     else
         ansible-playbook "$@"
     fi
@@ -200,7 +243,7 @@ while IFS=, read -r kind name ansible_group active_aliases candidate_aliases old
     service_plan_rows+=("$ansible_group|$active_aliases|$candidate_aliases|$old_aliases|$row_state")
 
     if [ -n "$LIMIT" ]; then
-        alias_in_list "$LIMIT" "$active_aliases" || continue
+        limit_matches_aliases "$LIMIT" "$active_aliases" || continue
     elif [ "$service_total_count" -gt 1 ]; then
         continue
     fi
@@ -245,8 +288,8 @@ if [ "$ACTION" = "plan" ] && [ -z "$LIMIT" ]; then
 fi
 
 [ "$service_total_count" -gt 0 ] || fail "state.csv must contain a service row for $SERVICE"
-[ "$service_found" = "true" ] || fail "state.csv must contain a service row for $SERVICE matching --limit ${LIMIT:-<none>}"
-[ "$service_match_count" -eq 1 ] || fail "state.csv has multiple $SERVICE rows matching --limit ${LIMIT:-<none>}; keep one target row per alias"
+[ "$service_found" = "true" ] || fail "state.csv must contain a service row for $SERVICE matching --limit $(limit_display_for_error "$LIMIT")"
+[ "$service_match_count" -eq 1 ] || fail "state.csv has multiple $SERVICE rows matching --limit $(limit_display_for_error "$LIMIT"); keep one target row per alias group"
 case "$service_row_state" in
     present|absent|purged) ;;
     *) fail "$SERVICE state must be one of: present, absent, purged" ;;

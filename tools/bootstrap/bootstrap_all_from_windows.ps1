@@ -17,6 +17,8 @@ param(
 
     [string]$SyncRunner = "tools/bootstrap/sync_to_orchestration.ps1",
 
+    [string]$BootstrapConvergeRunner = "tools/bootstrap/bootstrap_converge_remote.ps1",
+
     [string]$OperatorBackupScript = "tools/operator_backup/backup_operator.ps1",
 
     [string]$OperatorBackupDir = "D:\Backup\Projects\AI_SP\operator",
@@ -46,6 +48,14 @@ param(
     [switch]$SkipManaged,
 
     [switch]$SkipExistingRebootstrap,
+
+    [switch]$SkipBootstrapConverge,
+
+    [switch]$UseAdminKeyFallback,
+
+    [int]$BootstrapConvergePollSeconds = 2,
+
+    [int]$BootstrapConvergeHeartbeatSeconds = 10,
 
     [switch]$SkipOperatorBackup
 )
@@ -182,6 +192,64 @@ function Invoke-ChildScript($ScriptPath, $Arguments) {
     }
 }
 
+function Invoke-SyncRunner($Label, [switch]$SkipVerifyForSync, [switch]$SkipServicePlanForSync) {
+    $syncArgs = @(
+        "-NodesFile", $NodesFile,
+        "-ControlRole", $ControlRole,
+        "-ControlAlias", $controlNode.current_alias,
+        "-OperatorDir", $OperatorDir
+    )
+    if ($useStateFile) {
+        $syncArgs += @("-StateFile", $StateFile)
+    }
+    if ($AutoAcceptHostKey) {
+        $syncArgs += "-AutoAcceptHostKey"
+    }
+    if ($SkipVerify -or $SkipVerifyForSync) {
+        $syncArgs += "-SkipVerify"
+    }
+    if ($SkipServicePlan -or $SkipServicePlanForSync) {
+        $syncArgs += "-SkipServicePlan"
+    }
+    if ($FixKeyAcl) {
+        Write-Warning "-FixKeyAcl is deprecated. sync_to_orchestration.ps1 now fixes OpenSSH key ACL automatically."
+    }
+
+    Write-Host $Label
+    Invoke-ChildScript $SyncRunner $syncArgs
+}
+
+function Invoke-BootstrapConverge($Aliases, $AuthorizedKeyFile) {
+    if ($Aliases.Count -eq 0) {
+        return
+    }
+    if ($SkipBootstrapConverge) {
+        Write-Host "Step 3b/5: bootstrap converge skipped by -SkipBootstrapConverge for: $($Aliases -join ', ')"
+        return
+    }
+    if ($SkipSync) {
+        Fail "Bootstrap converge requires sync/inventory preparation. Remove -SkipSync or pass -SkipBootstrapConverge."
+    }
+
+    Require-File $BootstrapConvergeRunner "BootstrapConvergeRunner"
+    Require-File $AuthorizedKeyFile "AnsibleAuthorizedKeyFile"
+    $limit = $Aliases -join ":"
+    $args = @(
+        "-NodesFile", $NodesFile,
+        "-StateFile", $StateFile,
+        "-OperatorDir", $OperatorDir,
+        "-ControlRole", $ControlRole,
+        "-ControlAlias", $controlNode.current_alias,
+        "-Limit", $limit,
+        "-AnsibleAuthorizedKeyFile", $AuthorizedKeyFile,
+        "-RemoteJobPollSeconds", $BootstrapConvergePollSeconds,
+        "-RemoteJobHeartbeatSeconds", $BootstrapConvergeHeartbeatSeconds
+    )
+
+    Write-Host "Step 3b/5: bootstrap converge existing managed nodes through Ansible: $($Aliases -join ', ')"
+    Invoke-ChildScript $BootstrapConvergeRunner $args
+}
+
 function Has-RootPassword($Node) {
     return -not [string]::IsNullOrWhiteSpace([string]$Node.root_password)
 }
@@ -286,6 +354,7 @@ $rebootstrapAliases = New-Object System.Collections.Generic.List[string]
 $skippedExistingAliases = New-Object System.Collections.Generic.List[string]
 $orchestrationBootstrapAliases = New-Object System.Collections.Generic.List[string]
 $managedBootstrapAliases = New-Object System.Collections.Generic.List[string]
+$managedConvergeAliases = New-Object System.Collections.Generic.List[string]
 foreach ($managedAlias in $ManagedAliases) {
     $managedNode = $rows | Where-Object { $_.current_alias -eq $managedAlias } | Select-Object -First 1
     if (-not $managedNode) {
@@ -304,7 +373,7 @@ foreach ($managedAlias in $ManagedAliases) {
             $rebootstrapAliases.Add($managedAlias)
         }
     } else {
-        if ($explicitManagedAliases) {
+        if ($explicitManagedAliases -and $UseAdminKeyFallback) {
             Fail "Managed alias $managedAlias has empty root_password and no admin key at $(Join-Path (Join-Path $OperatorDir $managedAlias) 'admin_key'). Reinstall OS/fresh bootstrap or restore the admin key."
         }
         if (-not $skippedExistingAliases.Contains($managedAlias)) {
@@ -319,6 +388,9 @@ foreach ($managedAlias in $ManagedAliases) {
     } else {
         if (-not $managedBootstrapAliases.Contains($managedAlias)) {
             $managedBootstrapAliases.Add($managedAlias)
+        }
+        if (-not (Has-RootPassword $managedNode) -and -not $UseAdminKeyFallback -and -not $managedConvergeAliases.Contains($managedAlias)) {
+            $managedConvergeAliases.Add($managedAlias)
         }
     }
 }
@@ -335,12 +407,15 @@ if ($needsPasswordBootstrap) {
 $needsAnsibleAuthorizedKey = $false
 if (-not $SkipManaged) {
     foreach ($managedAlias in $managedBootstrapAliases) {
-        if ($skippedExistingAliases.Contains($managedAlias)) {
+        if ($UseAdminKeyFallback -and $skippedExistingAliases.Contains($managedAlias)) {
             continue
         }
         $needsAnsibleAuthorizedKey = $true
         break
     }
+}
+if ($managedConvergeAliases.Count -gt 0 -and -not $UseAdminKeyFallback) {
+    $needsAnsibleAuthorizedKey = $true
 }
 $needsAnsibleTrustBundle = (-not $SkipManaged) -and ($needsAnsibleAuthorizedKey -or $orchestrationCapableAliases.Count -gt 1)
 
@@ -365,10 +440,18 @@ if ($SkipManaged) {
         Write-Host "Fresh bootstrap nodes: $($freshBootstrapAliases -join ', ')"
     }
     if ($rebootstrapAliases.Count -gt 0) {
-        Write-Host "Admin-key re-bootstrap nodes: $($rebootstrapAliases -join ', ')"
+        if ($UseAdminKeyFallback) {
+            Write-Host "Admin-key fallback re-bootstrap nodes: $($rebootstrapAliases -join ', ')"
+        } else {
+            Write-Host "Existing nodes selected for Ansible converge: $($rebootstrapAliases -join ', ')"
+        }
     }
     if ($skippedExistingAliases.Count -gt 0) {
-        Write-Host "Existing nodes skipped because admin_key is missing: $($skippedExistingAliases -join ', ')"
+        if ($UseAdminKeyFallback) {
+            Write-Host "Existing nodes skipped because admin_key is missing: $($skippedExistingAliases -join ', ')"
+        } else {
+            Write-Host "Existing nodes without admin_key selected for Ansible converge: $($skippedExistingAliases -join ', ')"
+        }
     }
 }
 
@@ -413,13 +496,13 @@ if ($controlNeedsBootstrap) {
         $controlArgs += "-SkipOperatorBackup"
     }
 
-    Write-Host "Step 1/4: bootstrap control node $($controlNode.current_alias)"
+    Write-Host "Step 1/5: bootstrap control node $($controlNode.current_alias)"
     Invoke-ChildScript $BootstrapRunner $controlArgs
 } else {
-    Write-Host "Step 1/4: control node bootstrap skipped"
+    Write-Host "Step 1/5: control node bootstrap skipped"
 }
 
-if ($controlNeedsBootstrap -or (-not $SkipManaged -and $freshBootstrapAliases.Count -gt 0 -and $needsAnsibleAuthorizedKey)) {
+if ($controlNeedsBootstrap -or (-not $SkipManaged -and $needsAnsibleAuthorizedKey)) {
     Require-File $AnsibleAuthorizedKeyFile "AnsibleAuthorizedKeyFile"
 }
 
@@ -437,7 +520,7 @@ if (-not $SkipManaged) {
             Fail "Managed alias cannot be the same as control alias: $managedAlias"
         }
         if (-not (Has-RootPassword $managedNode) -and -not (Has-AdminKey $managedAlias $OperatorDir)) {
-            Write-Host "Step 2a/4: skip orchestration-capable node $managedAlias; admin_key is missing"
+            Write-Host "Step 2a/5: skip orchestration-capable node $managedAlias; admin_key is missing"
             continue
         }
 
@@ -468,9 +551,9 @@ if (-not $SkipManaged) {
         }
 
         if (Has-RootPassword $managedNode) {
-            Write-Host "Step 2a/4: bootstrap orchestration-capable node $managedAlias"
+            Write-Host "Step 2a/5: bootstrap orchestration-capable node $managedAlias"
         } else {
-            Write-Host "Step 2a/4: re-bootstrap orchestration-capable node $managedAlias through admin key"
+            Write-Host "Step 2a/5: re-bootstrap orchestration-capable node $managedAlias through admin key"
         }
         Invoke-ChildScript $BootstrapRunner $managedArgs
     }
@@ -478,7 +561,7 @@ if (-not $SkipManaged) {
     if ($needsAnsibleTrustBundle) {
         Assert-OrchestrationCandidateKeyFiles $OperatorDir $orchestrationCandidateAliases $controlNode.current_alias
         Require-File $AnsibleAuthorizedKeyFile "AnsibleAuthorizedKeyFile"
-        Write-Host "Step 2b/4: prepare aggregate Ansible trust bundle"
+        Write-Host "Step 2b/5: prepare aggregate Ansible trust bundle"
         $temporaryAnsibleAuthorizedKeyFile = New-AnsibleAuthorizedKeyBundle $AnsibleAuthorizedKeyFile $OperatorDir $orchestrationCapableAliases
         $managedAnsibleAuthorizedKeyFile = $temporaryAnsibleAuthorizedKeyFile
     }
@@ -515,7 +598,7 @@ if (-not $SkipManaged) {
                 $managedArgs += "-SkipOperatorBackup"
             }
 
-            Write-Host "Step 2c/4: refresh orchestration trust mesh on $managedAlias"
+            Write-Host "Step 2c/5: refresh orchestration trust mesh on $managedAlias"
             Invoke-ChildScript $BootstrapRunner $managedArgs
         }
     }
@@ -528,8 +611,12 @@ if (-not $SkipManaged) {
         if ($managedNode.current_alias -eq $controlNode.current_alias) {
             Fail "Managed alias cannot be the same as control alias: $managedAlias"
         }
+        if (-not (Has-RootPassword $managedNode) -and -not $UseAdminKeyFallback) {
+            Write-Host "Step 2d/5: queue existing managed node $managedAlias for Ansible bootstrap converge"
+            continue
+        }
         if (-not (Has-RootPassword $managedNode) -and -not (Has-AdminKey $managedAlias $OperatorDir)) {
-            Write-Host "Step 2d/4: skip existing managed node $managedAlias; admin_key is missing"
+            Write-Host "Step 2d/5: skip existing managed node $managedAlias; admin_key is missing"
             continue
         }
 
@@ -561,12 +648,21 @@ if (-not $SkipManaged) {
         }
 
         if (Has-RootPassword $managedNode) {
-            Write-Host "Step 2d/4: bootstrap managed node $managedAlias"
+            Write-Host "Step 2d/5: bootstrap managed node $managedAlias"
         } else {
-            Write-Host "Step 2d/4: re-bootstrap existing managed node $managedAlias through admin key"
+            Write-Host "Step 2d/5: re-bootstrap existing managed node $managedAlias through admin key fallback"
         }
         Invoke-ChildScript $BootstrapRunner $managedArgs
     }
+}
+
+if ($managedConvergeAliases.Count -gt 0 -and -not $SkipBootstrapConverge) {
+    if (-not $SkipSync) {
+        Invoke-SyncRunner "Step 3a/5: sync sanitized nodes.csv to control node for bootstrap converge" -SkipVerifyForSync -SkipServicePlanForSync
+    }
+    Invoke-BootstrapConverge $managedConvergeAliases $managedAnsibleAuthorizedKeyFile
+} elseif ($managedConvergeAliases.Count -gt 0) {
+    Write-Host "Step 3b/5: bootstrap converge skipped by -SkipBootstrapConverge for: $($managedConvergeAliases -join ', ')"
 }
 } finally {
     if ($temporaryAnsibleAuthorizedKeyFile -and (Test-Path -LiteralPath $temporaryAnsibleAuthorizedKeyFile -PathType Leaf)) {
@@ -575,40 +671,17 @@ if (-not $SkipManaged) {
 }
 
 if (-not $SkipSync) {
-    $syncArgs = @(
-        "-NodesFile", $NodesFile,
-        "-ControlRole", $ControlRole,
-        "-ControlAlias", $controlNode.current_alias,
-        "-OperatorDir", $OperatorDir
-    )
-    if ($useStateFile) {
-        $syncArgs += @("-StateFile", $StateFile)
-    }
-    if ($AutoAcceptHostKey) {
-        $syncArgs += "-AutoAcceptHostKey"
-    }
-    if ($SkipVerify) {
-        $syncArgs += "-SkipVerify"
-    }
-    if ($SkipServicePlan) {
-        $syncArgs += "-SkipServicePlan"
-    }
-    if ($FixKeyAcl) {
-        Write-Warning "-FixKeyAcl is deprecated. sync_to_orchestration.ps1 now fixes OpenSSH key ACL automatically."
-    }
-
-    Write-Host "Step 3/4: sync sanitized nodes.csv to control node"
-    Invoke-ChildScript $SyncRunner $syncArgs
+    Invoke-SyncRunner "Step 4/5: final sync sanitized nodes.csv to control node"
 } else {
-    Write-Host "Step 3/4: sync skipped; verify skipped too"
+    Write-Host "Step 4/5: sync skipped; verify skipped too"
 }
 
 if ($SkipSync) {
-    Write-Host "Step 4/4: verify skipped because sync was skipped"
+    Write-Host "Step 5/5: verify skipped because sync was skipped"
 } elseif ($SkipVerify) {
-    Write-Host "Step 4/4: verify skipped by -SkipVerify"
+    Write-Host "Step 5/5: verify skipped by -SkipVerify"
 } else {
-    Write-Host "Step 4/4: verify control node and managed nodes completed by sync runner"
+    Write-Host "Step 5/5: verify control node and managed nodes completed by sync runner"
 }
 if ($SkipServicePlan) {
     Write-Host "Service plan skipped by -SkipServicePlan"

@@ -1,8 +1,8 @@
 param(
-    [Parameter(Mandatory=$true, Position=0)]
+    [Parameter(Position=0)]
     [string]$Service,
 
-    [Parameter(Mandatory=$true, Position=1)]
+    [Parameter(Position=1)]
     [ValidateSet("plan", "apply", "absent", "purge", "reseed")]
     [string]$Action,
 
@@ -33,6 +33,8 @@ param(
     [string]$AnsibleDir = "infra/ansible",
 
     [string]$Limit = "",
+
+    [string]$BatchPlanFile = "",
 
     [switch]$Check,
 
@@ -137,11 +139,80 @@ function Format-Elapsed($StartedAt) {
     return "{0:00}:{1:00}:{2:00}" -f [int]$elapsed.TotalHours, $elapsed.Minutes, $elapsed.Seconds
 }
 
+function ConvertTo-StepArray($Value) {
+    if ($null -eq $Value) { return @() }
+    if ($Value -is [System.Array]) { return @($Value) }
+    return @($Value)
+}
+
+function Read-BatchPlan($Path) {
+    try {
+        $data = Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json
+    } catch {
+        Fail "BatchPlanFile is not valid JSON: $Path"
+    }
+
+    $steps = @(ConvertTo-StepArray $data)
+    if ($steps.Count -eq 0) {
+        Fail "BatchPlanFile must contain at least one step"
+    }
+
+    $validated = New-Object System.Collections.Generic.List[object]
+    $index = 0
+    foreach ($step in $steps) {
+        $index++
+        if (-not $step.service -or -not $step.action) {
+            Fail "BatchPlanFile step $index must include service and action"
+        }
+        if ($step.service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade")) {
+            Fail "BatchPlanFile step $index has unsupported service: $($step.service)"
+        }
+        if ($step.action -notin @("plan", "apply", "absent", "purge", "reseed")) {
+            Fail "BatchPlanFile step $index has unsupported action: $($step.action)"
+        }
+        $label = [string]$step.label
+        if (-not $label) {
+            $label = "$($step.service) $($step.action)"
+            if ($step.limit) { $label += " for $($step.limit)" }
+        }
+        $validated.Add([pscustomobject]@{
+            Service = [string]$step.service
+            Action = [string]$step.action
+            Limit = [string]$step.limit
+            Check = [bool]$step.check
+            ConfirmPurge = [bool]$step.confirm_purge
+            Label = $label
+        }) | Out-Null
+    }
+    return @($validated)
+}
+
+function New-ServiceCommand($Step, $RemoteRepoDir, $RemoteNodesFile, $RemoteStateFile, $RemoteInventory) {
+    $args = @(
+        (Quote-BashArg $Step.Service),
+        (Quote-BashArg $Step.Action),
+        "--nodes-file", (Quote-BashArg $RemoteNodesFile),
+        "--state-file", (Quote-BashArg $RemoteStateFile),
+        "--inventory", (Quote-BashArg $RemoteInventory)
+    )
+    if ($Step.Limit) { $args += @("--limit", (Quote-BashArg $Step.Limit)) }
+    if ($Step.Check) { $args += "--check" }
+    if ($Step.ConfirmPurge) { $args += "--confirm-purge" }
+
+    return @(
+        "set -e",
+        "cd $(Quote-BashArg $RemoteRepoDir)",
+        "if command -v stdbuf >/dev/null 2>&1; then stdbuf -oL -eL bash tools/services/service.sh $($args -join ' '); else bash tools/services/service.sh $($args -join ' '); fi"
+    ) -join "; "
+}
+
 function Wait-RemoteServiceJob($SshArgs, $Remote, $RemoteLog, $RemoteDone, $RemoteExitCode, $PollSeconds, $ReconnectAttempts, $HeartbeatSeconds) {
     $printedLines = 0
     $transportFailures = 0
     $startedAt = [DateTime]::UtcNow
     $lastHeartbeatAt = $startedAt
+    $currentStep = "remote job"
+    $lastTask = ""
 
     while ($true) {
         $pollCommand = @(
@@ -170,6 +241,11 @@ function Wait-RemoteServiceJob($SshArgs, $Remote, $RemoteLog, $RemoteDone, $Remo
                 foreach ($line in @($result.Output[0..($doneIndex - 1)])) {
                     if ($line -ne "__SERVICE_JOB_DONE__") {
                         Write-Host $line
+                        if ($line -match "^\[batch\] Step \d+/\d+: (.+)$") {
+                            $currentStep = $Matches[1]
+                        } elseif ($line -match "^TASK \[(.+)\]") {
+                            $lastTask = $Matches[1]
+                        }
                         $printedLines++
                     }
                 }
@@ -193,6 +269,13 @@ function Wait-RemoteServiceJob($SshArgs, $Remote, $RemoteLog, $RemoteDone, $Remo
         foreach ($line in $result.Output) {
             if ($line) {
                 Write-Host $line
+                if ($line -match "^\[batch\] Step \d+/\d+: (.+)$") {
+                    $currentStep = $Matches[1]
+                } elseif ($line -match "^TASK \[(.+)\]") {
+                    $lastTask = $Matches[1]
+                } elseif ($line -match "^\[remote-job\].*running service command: (.+)$") {
+                    $currentStep = $Matches[1]
+                }
                 $printedThisPoll++
             } else {
                 Write-Host ""
@@ -202,7 +285,8 @@ function Wait-RemoteServiceJob($SshArgs, $Remote, $RemoteLog, $RemoteDone, $Remo
 
         $now = [DateTime]::UtcNow
         if ($printedThisPoll -eq 0 -and $HeartbeatSeconds -gt 0 -and (($now - $lastHeartbeatAt).TotalSeconds -ge $HeartbeatSeconds)) {
-            Write-Host ("remote job still running... elapsed {0}, polling every {1}s" -f (Format-Elapsed $startedAt), $PollSeconds)
+            $taskText = if ($lastTask) { "; last task: $lastTask" } else { "" }
+            Write-Host ("[WAIT] {0} is still running{1}; remote log: {2}" -f $currentStep, $taskText, $RemoteLog)
             $lastHeartbeatAt = $now
         }
         Start-Sleep -Seconds $PollSeconds
@@ -245,6 +329,12 @@ function Resolve-ControlNodeFromState($NodeRows, $StateRows, $Role, $ExplicitAli
 
 if ($Service -eq "vpn") {
     Fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
+}
+
+if ($BatchPlanFile) {
+    Require-File $BatchPlanFile "BatchPlanFile"
+} elseif (-not $Service -or -not $Action) {
+    Fail "Service and Action are required unless -BatchPlanFile is provided."
 }
 
 Require-File $NodesFile "NodesFile"
@@ -291,28 +381,22 @@ $remoteJobLog = "$remoteJobDir/output.log"
 $remoteJobPid = "$remoteJobDir/pid"
 $remoteJobExitCode = "$remoteJobDir/exit_code"
 $remoteJobDone = "$remoteJobDir/done"
-$remoteArgs = @(
-    (Quote-BashArg $Service),
-    (Quote-BashArg $Action),
-    "--nodes-file", (Quote-BashArg $RemoteNodesFile),
-    "--state-file", (Quote-BashArg $RemoteStateFile),
-    "--inventory", (Quote-BashArg $RemoteInventory)
-)
-if ($Limit) {
-    $remoteArgs += @("--limit", (Quote-BashArg $Limit))
+$isBatch = [bool]$BatchPlanFile
+$batchSteps = @()
+if ($isBatch) {
+    $batchSteps = @(Read-BatchPlan $BatchPlanFile)
+} else {
+    $singleStep = [pscustomobject]@{
+        Service = $Service
+        Action = $Action
+        Limit = $Limit
+        Check = [bool]$Check
+        ConfirmPurge = [bool]$ConfirmPurge
+        Label = if ($Limit) { "$Service $Action for $Limit" } else { "$Service $Action" }
+    }
+    $serviceCommand = New-ServiceCommand $singleStep $RemoteRepoDir $RemoteNodesFile $RemoteStateFile $RemoteInventory
 }
-if ($Check) {
-    $remoteArgs += "--check"
-}
-if ($ConfirmPurge) {
-    $remoteArgs += "--confirm-purge"
-}
-
-$serviceCommand = @(
-    "set -e",
-    "cd $(Quote-BashArg $RemoteRepoDir)",
-    "if command -v stdbuf >/dev/null 2>&1; then stdbuf -oL -eL bash tools/services/service.sh $($remoteArgs -join ' '); else bash tools/services/service.sh $($remoteArgs -join ' '); fi"
-) -join "; "
+$useDetachedRemoteJob = ([bool]$DetachedRemoteJob) -or $isBatch
 $installCommands = @(
     "set -e",
     "sudo mkdir -p $(Quote-BashArg "$RemoteRepoDir/tools/services") $(Quote-BashArg "$RemoteRepoDir/infra")",
@@ -324,15 +408,20 @@ $installCommands = @(
 
 Write-Host "Control node: $($controlNode.current_alias) via role '$ControlRole'"
 Write-Host "Remote:       $remote"
-Write-Host "Service:      $Service"
-Write-Host "Action:       $Action"
-if ($Limit) {
-    Write-Host "Limit:        $Limit"
+if ($isBatch) {
+    Write-Host "Batch:        $BatchPlanFile"
+    Write-Host "Steps:        $($batchSteps.Count)"
+} else {
+    Write-Host "Service:      $Service"
+    Write-Host "Action:       $Action"
+    if ($Limit) {
+        Write-Host "Limit:        $Limit"
+    }
+    if ($Check) {
+        Write-Host "Check:        true"
+    }
 }
-if ($Check) {
-    Write-Host "Check:        true"
-}
-if ($DetachedRemoteJob) {
+if ($useDetachedRemoteJob) {
     Write-Host "Mode:         detached remote job"
 } else {
     Write-Host "Mode:         direct SSH stream"
@@ -346,6 +435,9 @@ $sshCommonArgs = @(
     "-o", "ConnectTimeout=10",
     "-o", "IdentitiesOnly=yes",
     "-o", "RequestTTY=no",
+    "-o", "KbdInteractiveAuthentication=no",
+    "-o", "PasswordAuthentication=no",
+    "-o", "PreferredAuthentications=publickey",
     "-o", "ServerAliveInterval=15",
     "-o", "ServerAliveCountMax=2"
 )
@@ -355,51 +447,90 @@ $scpCommonArgs = @(
     "-o", "BatchMode=yes",
     "-o", "ConnectTimeout=10",
     "-o", "IdentitiesOnly=yes",
+    "-o", "KbdInteractiveAuthentication=no",
+    "-o", "PasswordAuthentication=no",
+    "-o", "PreferredAuthentications=publickey",
     "-o", "ServerAliveInterval=15",
     "-o", "ServerAliveCountMax=2"
 )
 $runScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-service-platform.service-job." + [guid]::NewGuid().ToString("N") + ".sh")
-$remoteServiceDisplayArgs = @($Service, $Action)
-if ($Limit) {
-    $remoteServiceDisplayArgs += @("--limit", $Limit)
+$remoteJobCompletedSuccessfully = $false
+$remoteServiceDisplay = if ($isBatch) { "batch plan: $($batchSteps.Count) steps" } else {
+    $remoteServiceDisplayArgs = @($Service, $Action)
+    if ($Limit) { $remoteServiceDisplayArgs += @("--limit", $Limit) }
+    if ($Check) { $remoteServiceDisplayArgs += "--check" }
+    if ($ConfirmPurge) { $remoteServiceDisplayArgs += "--confirm-purge" }
+    $remoteServiceDisplayArgs -join " "
 }
-if ($Check) {
-    $remoteServiceDisplayArgs += "--check"
-}
-if ($ConfirmPurge) {
-    $remoteServiceDisplayArgs += "--confirm-purge"
-}
-$remoteServiceDisplay = $remoteServiceDisplayArgs -join " "
-$runScriptLines = @(
+$runScriptLines = New-Object System.Collections.Generic.List[string]
+foreach ($line in @(
     "#!/usr/bin/env bash",
     "set +e",
     "export PYTHONUNBUFFERED=1",
     "export ANSIBLE_FORCE_COLOR=0",
     "export ANSIBLE_DISPLAY_SKIPPED_HOSTS=true",
     "exec > $(Quote-BashArg $remoteJobLog) 2>&1",
+    "SUMMARY_FILE=$(Quote-BashArg "$remoteJobDir/summary.jsonl")",
+    "printf '' > ""`$SUMMARY_FILE""",
     "log_stage() { printf '[remote-job] %s %s\n' ""`$(date -u '+%H:%M:%S')"" ""`$*""; }",
     "run_stage() { label=""`$1""; shift; log_stage ""`$label""; ""`$@""; rc=""`$?""; if [ ""`$rc"" -ne 0 ]; then log_stage ""failed: `$label (rc=`$rc)""; return ""`$rc""; fi; }",
     "run_stage $(Quote-BashArg "prepare repo directories") sudo mkdir -p $(Quote-BashArg "$RemoteRepoDir/tools/services") $(Quote-BashArg "$RemoteRepoDir/infra")",
     "run_stage $(Quote-BashArg "install service runner") sudo install -m 700 $(Quote-BashArg $remoteServiceRunnerTemp) $(Quote-BashArg "$RemoteRepoDir/tools/services/service.sh")",
     "run_stage $(Quote-BashArg "remove previous Ansible bundle") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/ansible")",
-    "run_stage $(Quote-BashArg "install Ansible bundle") sudo cp -a $(Quote-BashArg $remoteAnsibleTemp) $(Quote-BashArg "$RemoteRepoDir/infra/ansible")",
-    "log_stage $(Quote-BashArg "running service command: $remoteServiceDisplay")",
-    "sudo bash -lc $(Quote-BashArg $serviceCommand)",
-    "rc=`$?",
-    "log_stage ""service command finished with rc=`$rc""",
-    "printf '%s\n' `$rc > $(Quote-BashArg $remoteJobExitCode)",
-    "touch $(Quote-BashArg $remoteJobDone)",
-    "exit `$rc"
-)
+    "run_stage $(Quote-BashArg "install Ansible bundle") sudo cp -a $(Quote-BashArg $remoteAnsibleTemp) $(Quote-BashArg "$RemoteRepoDir/infra/ansible")"
+)) { $runScriptLines.Add($line) | Out-Null }
+
+if ($isBatch) {
+    $stepCount = $batchSteps.Count
+    $stepNumber = 0
+    foreach ($step in $batchSteps) {
+        $stepNumber++
+        $stepCommand = New-ServiceCommand $step $RemoteRepoDir $RemoteNodesFile $RemoteStateFile $RemoteInventory
+        $stepLabel = "Step ${stepNumber}/${stepCount}: $($step.Label)"
+        foreach ($line in @(
+            "STEP_LABEL=$(Quote-BashArg $stepLabel)",
+            "STEP_SERVICE=$(Quote-BashArg $step.Service)",
+            "STEP_ACTION=$(Quote-BashArg $step.Action)",
+            "STEP_LIMIT=$(Quote-BashArg $step.Limit)",
+            "STEP_STARTED=`$(date +%s)",
+            "printf '[batch] %s\n' ""`$STEP_LABEL""",
+            "sudo bash -lc $(Quote-BashArg $stepCommand)",
+            "rc=`$?",
+            "STEP_FINISHED=`$(date +%s)",
+            "STEP_DURATION=`$((STEP_FINISHED - STEP_STARTED))",
+            "if [ ""`$rc"" -eq 0 ]; then printf '[OK] %s completed in %ss\n' ""`$STEP_LABEL"" ""`$STEP_DURATION""; else printf '[FAIL] %s failed with rc=%s after %ss\n' ""`$STEP_LABEL"" ""`$rc"" ""`$STEP_DURATION""; fi",
+            "printf '%s|%s|%s|%s|%s|%s\n' ""`$STEP_LABEL"" ""`$STEP_SERVICE"" ""`$STEP_ACTION"" ""`$STEP_LIMIT"" ""`$rc"" ""`$STEP_DURATION"" >> ""`$SUMMARY_FILE""",
+            "if [ ""`$rc"" -ne 0 ]; then printf '%s\n' ""`$rc"" > $(Quote-BashArg $remoteJobExitCode); touch $(Quote-BashArg $remoteJobDone); exit ""`$rc""; fi"
+        )) { $runScriptLines.Add($line) | Out-Null }
+    }
+    foreach ($line in @(
+        "printf '\n[batch] Summary\n'",
+        "cat ""`$SUMMARY_FILE""",
+        "rc=0",
+        "printf '%s\n' `$rc > $(Quote-BashArg $remoteJobExitCode)",
+        "touch $(Quote-BashArg $remoteJobDone)",
+        "exit `$rc"
+    )) { $runScriptLines.Add($line) | Out-Null }
+} else {
+    foreach ($line in @(
+        "log_stage $(Quote-BashArg "running service command: $remoteServiceDisplay")",
+        "sudo bash -lc $(Quote-BashArg $serviceCommand)",
+        "rc=`$?",
+        "log_stage ""service command finished with rc=`$rc""",
+        "printf '%s\n' `$rc > $(Quote-BashArg $remoteJobExitCode)",
+        "touch $(Quote-BashArg $remoteJobDone)",
+        "exit `$rc"
+    )) { $runScriptLines.Add($line) | Out-Null }
+}
 
 try {
     Write-Host "Preparing local service bundle..."
     $bundle = New-TarGzBundle $ServiceRunnerScript $AnsibleDir
-    if ($DetachedRemoteJob) {
+    if ($useDetachedRemoteJob) {
         Set-Content -LiteralPath $runScriptPath -Value $runScriptLines -Encoding ascii
     }
 
-    if ($DetachedRemoteJob) {
+    if ($useDetachedRemoteJob) {
         Write-Host "Creating remote temporary bundle and job directories..."
         $mkdirCommand = "mkdir -p $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteJobDir)"
     } else {
@@ -417,7 +548,7 @@ try {
         "${remote}:$remoteBundleArchive"
     )) "service bundle upload"
 
-    if ($DetachedRemoteJob) {
+    if ($useDetachedRemoteJob) {
         Write-Host "Uploading remote job runner..."
         Invoke-External "scp" ($scpCommonArgs + @(
             $runScriptPath,
@@ -440,7 +571,7 @@ try {
         $extractCommand
     )) "remote service bundle extract"
 
-    if ($DetachedRemoteJob) {
+    if ($useDetachedRemoteJob) {
         $startJobCommand = @(
             "set -e",
             "chmod 700 $(Quote-BashArg $remoteJobScript)",
@@ -456,6 +587,7 @@ try {
 
         Write-Host "Following remote service job log..."
         Wait-RemoteServiceJob -SshArgs $sshCommonArgs -Remote $remote -RemoteLog $remoteJobLog -RemoteDone $remoteJobDone -RemoteExitCode $remoteJobExitCode -PollSeconds $RemoteJobPollSeconds -ReconnectAttempts $RemoteJobReconnectAttempts -HeartbeatSeconds $RemoteJobHeartbeatSeconds
+        $remoteJobCompletedSuccessfully = $true
     } else {
         Write-Host "Installing service bundle and running remote service command..."
         Invoke-External "ssh" ($sshCommonArgs + @(
@@ -469,15 +601,20 @@ try {
         Remove-Item -LiteralPath $bundle.StagingDir -Recurse -Force -ErrorAction SilentlyContinue
     }
     Remove-Item -LiteralPath $runScriptPath -Force -ErrorAction SilentlyContinue
-    if ($DetachedRemoteJob) {
+    if ($useDetachedRemoteJob -and $remoteJobCompletedSuccessfully) {
         Write-Host "Cleaning remote temporary service bundle and job..."
+        $cleanupTarget = "rm -rf $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteBundleArchive) $(Quote-BashArg $remoteJobDir)"
+    } elseif ($useDetachedRemoteJob) {
+        Write-Host "Cleaning remote temporary service bundle; preserving failed job log: $remoteJobLog"
+        $cleanupTarget = "rm -rf $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteBundleArchive)"
     } else {
         Write-Host "Cleaning remote temporary service bundle..."
+        $cleanupTarget = "rm -rf $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteBundleArchive) $(Quote-BashArg $remoteJobDir)"
     }
     if ($remote -and $remoteBundleDir -and $remoteBundleArchive -and $remoteJobDir -and $sshCommonArgs) {
         Invoke-CleanupSsh ($sshCommonArgs + @(
             $remote,
-            "rm -rf $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteBundleArchive) $(Quote-BashArg $remoteJobDir)"
+            $cleanupTarget
         )) "remote service bundle and job cleanup"
     }
 }

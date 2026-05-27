@@ -1,0 +1,13 @@
+---
+bootstrap_converge_deploy_user: depuser
+bootstrap_converge_admin_user: useradmin
+bootstrap_converge_ansible_user: ansible
+bootstrap_converge_deploy_dir: /opt/stacks
+bootstrap_converge_authorized_keys_file: ""
+bootstrap_converge_base_packages:
+  - sudo
+  - openssh-client
+  - curl
+  - ca-certificates
+  - gnupg
+  - lsb-release

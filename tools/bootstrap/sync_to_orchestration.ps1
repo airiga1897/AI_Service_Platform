@@ -41,6 +41,12 @@ param(
 
     [switch]$SkipVerify,
 
+    [int]$VerifyRetries = 3,
+
+    [int]$VerifyRetryDelaySeconds = 5,
+
+    [int]$VerifyAnsibleTimeoutSeconds = 20,
+
     [switch]$SkipServicePlan
 )
 
@@ -227,6 +233,15 @@ $stateFirstLine = Get-Content -LiteralPath $StateFile -TotalCount 1
 if ($stateFirstLine -ne $ExpectedStateHeader) {
     Fail "state.csv header must be exactly: $ExpectedStateHeader"
 }
+if ($VerifyRetries -lt 1) {
+    Fail "VerifyRetries must be greater than zero"
+}
+if ($VerifyRetryDelaySeconds -lt 1) {
+    Fail "VerifyRetryDelaySeconds must be greater than zero"
+}
+if ($VerifyAnsibleTimeoutSeconds -lt 1) {
+    Fail "VerifyAnsibleTimeoutSeconds must be greater than zero"
+}
 $stateRows = Import-Csv -LiteralPath $StateFile
 $controlNode = Resolve-ControlNodeFromState $rows $stateRows $ControlRole $ControlAlias
 $useStateFile = $true
@@ -248,16 +263,32 @@ $remotePrepareInventoryTemp = "/tmp/ai-service-platform.prepare_orchestration_in
 $remoteVerifyTemp = "/tmp/ai-service-platform.verify_control_node.sh"
 $remote = "$SshUser@$($controlNode.endpoint)"
 
-function Get-SshCommonArgs($KeyFile) {
-    $args = @("-i", $KeyFile, "-o", "IdentitiesOnly=yes")
+function Get-OpenSshCommonArgs($KeyFile) {
+    $args = @(
+        "-i", $KeyFile,
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10",
+        "-o", "IdentitiesOnly=yes",
+        "-o", "KbdInteractiveAuthentication=no",
+        "-o", "PasswordAuthentication=no",
+        "-o", "PreferredAuthentications=publickey"
+    )
     if ($AutoAcceptHostKey) {
         $args += @("-o", "StrictHostKeyChecking=accept-new")
     }
     return $args
 }
 
+function Get-SshKeyArgs($KeyFile) {
+    return @("-n", "-T") + @(Get-OpenSshCommonArgs $KeyFile) + @("-o", "RequestTTY=no")
+}
+
+function Get-ScpKeyArgs($KeyFile) {
+    return @("-B") + @(Get-OpenSshCommonArgs $KeyFile)
+}
+
 function Invoke-ScpKey($KeyFile, $Source, $Target, $Label) {
-    $scpArgs = @(Get-SshCommonArgs $KeyFile) + @($Source, $Target)
+    $scpArgs = @(Get-ScpKeyArgs $KeyFile) + @($Source, $Target)
     & scp @scpArgs
     if ($LASTEXITCODE -ne 0) {
         Fail "$Label failed"
@@ -265,7 +296,7 @@ function Invoke-ScpKey($KeyFile, $Source, $Target, $Label) {
 }
 
 function Invoke-ScpKeyRecursive($KeyFile, $Source, $Target, $Label) {
-    $scpArgs = @("-r") + @(Get-SshCommonArgs $KeyFile) + @($Source, $Target)
+    $scpArgs = @("-r") + @(Get-ScpKeyArgs $KeyFile) + @($Source, $Target)
     & scp @scpArgs
     if ($LASTEXITCODE -ne 0) {
         Fail "$Label failed"
@@ -273,7 +304,7 @@ function Invoke-ScpKeyRecursive($KeyFile, $Source, $Target, $Label) {
 }
 
 function Invoke-SshKey($KeyFile, $Remote, $Command, $Label) {
-    $sshArgs = @(Get-SshCommonArgs $KeyFile) + @($Remote, $Command)
+    $sshArgs = @(Get-SshKeyArgs $KeyFile) + @($Remote, $Command)
     & ssh @sshArgs
     if ($LASTEXITCODE -ne 0) {
         Fail "$Label failed"
@@ -388,7 +419,7 @@ try {
     }
     $verifyCommand = ""
     if (-not $SkipVerify) {
-        $verifyCommand = "sudo mkdir -p `"`$(dirname '$RemoteVerifyScript')`"; sudo install -m 700 '$remoteVerifyTemp' '$RemoteVerifyScript'; sudo bash '$RemoteVerifyScript';"
+        $verifyCommand = "sudo mkdir -p `"`$(dirname '$RemoteVerifyScript')`"; sudo install -m 700 '$remoteVerifyTemp' '$RemoteVerifyScript'; sudo bash '$RemoteVerifyScript' --retries $VerifyRetries --retry-delay $VerifyRetryDelaySeconds --ansible-timeout $VerifyAnsibleTimeoutSeconds;"
     }
     $helperCommand = "sudo mkdir -p /opt/ai-service-platform/tools/bootstrap; sudo install -m 700 '$remoteCreateInventoryTemp' /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; sudo install -m 700 '$remotePrepareInventoryTemp' '$RemotePrepareScript'; sudo install -m 700 '$remoteVerifyTemp' '$RemoteVerifyScript';"
     $remoteCommand = "set -e; $helperCommand $softetherCommand $haproxyCommand $prepareCommand; $verifyCommand rm -rf '$RemoteSoftetherDir' '$RemoteHaproxyDir'; rm -f '$RemoteNodesFile' '$remoteStateFile' '$remoteCreateInventoryTemp' '$remotePrepareInventoryTemp' '$remoteVerifyTemp'"

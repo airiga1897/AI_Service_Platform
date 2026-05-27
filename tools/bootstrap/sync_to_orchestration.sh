@@ -27,6 +27,12 @@ REMOTE_VERIFY_TEMP="/tmp/ai-service-platform.verify_control_node.sh"
 INCLUDE_ALIASES=""
 RUN_VERIFY="true"
 REFRESH_KNOWN_HOSTS="false"
+VERIFY_RETRIES=3
+VERIFY_RETRY_DELAY=5
+VERIFY_ANSIBLE_TIMEOUT=20
+SSH_COMMON_ARGS=()
+SCP_COMMON_ARGS=()
+RSYNC_SSH_COMMAND=""
 
 usage() {
     cat <<'USAGE'
@@ -60,6 +66,11 @@ Options:
                              Default: tools/bootstrap/verify_control_node.sh
   --remote-verify-script PATH
                              Remote verify script path.
+  --verify-retries N         Attempts for each remote verification stage. Default: 3.
+  --verify-retry-delay SECONDS
+                             Delay between failed verify attempts. Default: 5.
+  --verify-ansible-timeout SECONDS
+                             Ansible SSH/connect timeout for verify. Default: 20.
   --skip-verify              Sync and inventory only; do not run post-bootstrap verify.
   --refresh-known-hosts      Refresh control-node ansible known_hosts for SSH endpoints.
   --include LIST             Optional aliases to include when generating inventory.
@@ -78,10 +89,19 @@ require_file() {
     [ -f "$path" ] || fail "$label not found: $path"
 }
 
+require_positive_int() {
+    local value="$1"
+    local label="$2"
+    case "$value" in
+        ''|*[!0-9]*) fail "$label must be a positive integer" ;;
+        0) fail "$label must be greater than zero" ;;
+    esac
+}
+
 remote_has_command() {
     local remote="$1"
     local command_name="$2"
-    ssh -i "$SSH_KEY_FILE" "$remote" "command -v '$command_name' >/dev/null 2>&1"
+    ssh "${SSH_COMMON_ARGS[@]}" "$remote" "command -v '$command_name' >/dev/null 2>&1"
 }
 
 sync_directory() {
@@ -92,14 +112,14 @@ sync_directory() {
 
     if command -v rsync >/dev/null 2>&1 && remote_has_command "$remote" rsync; then
         echo "Syncing $label to $remote with rsync"
-        ssh -i "$SSH_KEY_FILE" "$remote" "mkdir -p '$remote_dir'"
-        rsync -az --delete -e "ssh -i '$SSH_KEY_FILE'" "$source_dir/" "$remote:$remote_dir/"
+        ssh "${SSH_COMMON_ARGS[@]}" "$remote" "mkdir -p '$remote_dir'"
+        rsync -az --delete -e "$RSYNC_SSH_COMMAND" "$source_dir/" "$remote:$remote_dir/"
         return
     fi
 
     echo "Syncing $label to $remote with scp fallback"
-    ssh -i "$SSH_KEY_FILE" "$remote" "rm -rf '$remote_dir'"
-    scp -r -i "$SSH_KEY_FILE" "$source_dir" "$remote:$remote_dir"
+    ssh "${SSH_COMMON_ARGS[@]}" "$remote" "rm -rf '$remote_dir'"
+    scp -r "${SCP_COMMON_ARGS[@]}" "$source_dir" "$remote:$remote_dir"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -160,6 +180,18 @@ while [ "$#" -gt 0 ]; do
             REMOTE_VERIFY_SCRIPT="${2:-}"
             shift 2
             ;;
+        --verify-retries)
+            VERIFY_RETRIES="${2:-}"
+            shift 2
+            ;;
+        --verify-retry-delay)
+            VERIFY_RETRY_DELAY="${2:-}"
+            shift 2
+            ;;
+        --verify-ansible-timeout)
+            VERIFY_ANSIBLE_TIMEOUT="${2:-}"
+            shift 2
+            ;;
         --skip-verify)
             RUN_VERIFY="false"
             shift
@@ -187,6 +219,9 @@ require_file "$CREATE_INVENTORY_SCRIPT" "--create-inventory-script"
 require_file "$PREPARE_INVENTORY_SCRIPT" "--prepare-inventory-script"
 require_file "$VERIFY_CONTROL_SCRIPT" "--verify-control-script"
 require_file "$STATE_FILE" "--state-file"
+require_positive_int "$VERIFY_RETRIES" "--verify-retries"
+require_positive_int "$VERIFY_RETRY_DELAY" "--verify-retry-delay"
+require_positive_int "$VERIFY_ANSIBLE_TIMEOUT" "--verify-ansible-timeout"
 
 first_line="$(head -n 1 "$NODES_FILE" | tr -d '\r')"
 [ "$first_line" = "$EXPECTED_CSV_HEADER" ] || fail "nodes.csv header must be exactly: $EXPECTED_CSV_HEADER"
@@ -241,6 +276,31 @@ if [ -z "$SSH_KEY_FILE" ]; then
     SSH_KEY_FILE="./operator/$CONTROL_ALIAS/admin_key"
 fi
 require_file "$SSH_KEY_FILE" "--ssh-key-file"
+SSH_COMMON_ARGS=(
+    -n
+    -T
+    -i "$SSH_KEY_FILE"
+    -o BatchMode=yes
+    -o ConnectTimeout=10
+    -o IdentitiesOnly=yes
+    -o RequestTTY=no
+    -o KbdInteractiveAuthentication=no
+    -o PasswordAuthentication=no
+    -o PreferredAuthentications=publickey
+    -o StrictHostKeyChecking=accept-new
+)
+SCP_COMMON_ARGS=(
+    -B
+    -i "$SSH_KEY_FILE"
+    -o BatchMode=yes
+    -o ConnectTimeout=10
+    -o IdentitiesOnly=yes
+    -o KbdInteractiveAuthentication=no
+    -o PasswordAuthentication=no
+    -o PreferredAuthentications=publickey
+    -o StrictHostKeyChecking=accept-new
+)
+RSYNC_SSH_COMMAND="ssh -n -T -i '$SSH_KEY_FILE' -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -o RequestTTY=no -o KbdInteractiveAuthentication=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey -o StrictHostKeyChecking=accept-new"
 
 sanitized_nodes="$(mktemp)"
 trap 'rm -f "$sanitized_nodes"' EXIT
@@ -261,10 +321,10 @@ trap 'rm -f "$sanitized_nodes"' EXIT
 
 remote="$SSH_USER@$control_endpoint"
 echo "Syncing sanitized nodes.csv to $remote"
-scp -i "$SSH_KEY_FILE" "$sanitized_nodes" "$remote:$REMOTE_NODES_FILE"
+scp "${SCP_COMMON_ARGS[@]}" "$sanitized_nodes" "$remote:$REMOTE_NODES_FILE"
 if [ -n "$STATE_FILE" ]; then
     echo "Syncing state.csv to $remote"
-    scp -i "$SSH_KEY_FILE" "$STATE_FILE" "$remote:$REMOTE_STATE_FILE"
+    scp "${SCP_COMMON_ARGS[@]}" "$STATE_FILE" "$remote:$REMOTE_STATE_FILE"
 fi
 if [ -d "$SOFTETHER_DIR" ]; then
     sync_directory "$SOFTETHER_DIR" "$remote" "$REMOTE_SOFTETHER_DIR" "SoftEther operator secret directory"
@@ -276,9 +336,9 @@ if [ "$RUN_VERIFY" = "true" ]; then
     :
 fi
 echo "Syncing bootstrap helper scripts to $remote"
-scp -i "$SSH_KEY_FILE" "$CREATE_INVENTORY_SCRIPT" "$remote:$REMOTE_CREATE_INVENTORY_TEMP"
-scp -i "$SSH_KEY_FILE" "$PREPARE_INVENTORY_SCRIPT" "$remote:$REMOTE_PREPARE_INVENTORY_TEMP"
-scp -i "$SSH_KEY_FILE" "$VERIFY_CONTROL_SCRIPT" "$remote:$REMOTE_VERIFY_TEMP"
+scp "${SCP_COMMON_ARGS[@]}" "$CREATE_INVENTORY_SCRIPT" "$remote:$REMOTE_CREATE_INVENTORY_TEMP"
+scp "${SCP_COMMON_ARGS[@]}" "$PREPARE_INVENTORY_SCRIPT" "$remote:$REMOTE_PREPARE_INVENTORY_TEMP"
+scp "${SCP_COMMON_ARGS[@]}" "$VERIFY_CONTROL_SCRIPT" "$remote:$REMOTE_VERIFY_TEMP"
 
 prepare_command="sudo bash '$REMOTE_PREPARE_SCRIPT' --source-nodes-file '$REMOTE_NODES_FILE' --skip-check"
 if [ "$REFRESH_KNOWN_HOSTS" = "true" ]; then
@@ -302,14 +362,14 @@ if [ -d "$HAPROXY_DIR" ]; then
     remote_command="set -e; $softether_command $haproxy_command $prepare_command; rm -rf '$REMOTE_SOFTETHER_DIR' '$REMOTE_HAPROXY_DIR'; rm -f '$REMOTE_NODES_FILE' '$REMOTE_STATE_FILE'"
 fi
 if [ "$RUN_VERIFY" = "true" ]; then
-    verify_command="sudo mkdir -p \"\$(dirname '$REMOTE_VERIFY_SCRIPT')\"; sudo install -m 700 '$REMOTE_VERIFY_TEMP' '$REMOTE_VERIFY_SCRIPT'; sudo bash '$REMOTE_VERIFY_SCRIPT';"
+    verify_command="sudo mkdir -p \"\$(dirname '$REMOTE_VERIFY_SCRIPT')\"; sudo install -m 700 '$REMOTE_VERIFY_TEMP' '$REMOTE_VERIFY_SCRIPT'; sudo bash '$REMOTE_VERIFY_SCRIPT' --retries '$VERIFY_RETRIES' --retry-delay '$VERIFY_RETRY_DELAY' --ansible-timeout '$VERIFY_ANSIBLE_TIMEOUT';"
     remote_command="set -e; sudo mkdir -p /opt/ai-service-platform/tools/bootstrap; sudo install -m 700 '$REMOTE_CREATE_INVENTORY_TEMP' /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; sudo install -m 700 '$REMOTE_PREPARE_INVENTORY_TEMP' '$REMOTE_PREPARE_SCRIPT'; sudo install -m 700 '$REMOTE_VERIFY_TEMP' '$REMOTE_VERIFY_SCRIPT'; $softether_command $haproxy_command $prepare_command; $verify_command rm -rf '$REMOTE_SOFTETHER_DIR' '$REMOTE_HAPROXY_DIR'; rm -f '$REMOTE_NODES_FILE' '$REMOTE_STATE_FILE' '$REMOTE_CREATE_INVENTORY_TEMP' '$REMOTE_PREPARE_INVENTORY_TEMP' '$REMOTE_VERIFY_TEMP'"
 else
     remote_command="set -e; sudo mkdir -p /opt/ai-service-platform/tools/bootstrap; sudo install -m 700 '$REMOTE_CREATE_INVENTORY_TEMP' /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; sudo install -m 700 '$REMOTE_PREPARE_INVENTORY_TEMP' '$REMOTE_PREPARE_SCRIPT'; sudo install -m 700 '$REMOTE_VERIFY_TEMP' '$REMOTE_VERIFY_SCRIPT'; $softether_command $haproxy_command $prepare_command; rm -rf '$REMOTE_SOFTETHER_DIR' '$REMOTE_HAPROXY_DIR'; rm -f '$REMOTE_NODES_FILE' '$REMOTE_STATE_FILE' '$REMOTE_CREATE_INVENTORY_TEMP' '$REMOTE_PREPARE_INVENTORY_TEMP' '$REMOTE_VERIFY_TEMP'"
 fi
 
 echo "Running orchestration inventory preparation"
-ssh -i "$SSH_KEY_FILE" "$remote" "$remote_command"
+ssh "${SSH_COMMON_ARGS[@]}" "$remote" "$remote_command"
 if [ "$RUN_VERIFY" = "true" ]; then
     echo "[OK] Orchestration node nodes.csv, inventory.ini, and verification are complete"
 else

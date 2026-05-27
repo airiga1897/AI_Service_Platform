@@ -403,7 +403,10 @@ function Get-OpenSshCommonArgs($KeyFile) {
         "-i", $KeyFile,
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=10",
-        "-o", "IdentitiesOnly=yes"
+        "-o", "IdentitiesOnly=yes",
+        "-o", "KbdInteractiveAuthentication=no",
+        "-o", "PasswordAuthentication=no",
+        "-o", "PreferredAuthentications=publickey"
     )
     if ($AutoAcceptHostKey) {
         $args += @("-o", "StrictHostKeyChecking=accept-new")
@@ -412,7 +415,7 @@ function Get-OpenSshCommonArgs($KeyFile) {
 }
 
 function Invoke-SshKey($KeyFile, $Remote, $Command, $Label, $LogPath = "") {
-    $sshArgs = @("-n") + @(Get-OpenSshCommonArgs $KeyFile) + @($Remote, $Command)
+    $sshArgs = @("-n", "-T") + @(Get-OpenSshCommonArgs $KeyFile) + @("-o", "RequestTTY=no", $Remote, $Command)
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $script:ErrorActionPreference = "Continue"
@@ -435,7 +438,7 @@ function Invoke-SshKey($KeyFile, $Remote, $Command, $Label, $LogPath = "") {
 }
 
 function Invoke-ScpKey($KeyFile, $Source, $Target, $Label) {
-    $scpArgs = @(Get-OpenSshCommonArgs $KeyFile) + @($Source, $Target)
+    $scpArgs = @("-B") + @(Get-OpenSshCommonArgs $KeyFile) + @($Source, $Target)
     & scp @scpArgs
     if ($LASTEXITCODE -ne 0) {
         Fail "$Label failed"
@@ -483,7 +486,7 @@ echo "[OK] admin-key bootstrap preflight passed"
         Invoke-SshKey $KeyFile $Remote "sudo -n bash $remotePreflight" "admin-key bootstrap preflight"
     } finally {
         Remove-Item -LiteralPath $localPreflight -Force -ErrorAction SilentlyContinue
-        $cleanupArgs = @("-n") + @(Get-OpenSshCommonArgs $KeyFile) + @($Remote, "rm -f $remotePreflight")
+        $cleanupArgs = @("-n", "-T") + @(Get-OpenSshCommonArgs $KeyFile) + @("-o", "RequestTTY=no", $Remote, "rm -f $remotePreflight")
         & ssh @cleanupArgs 2>$null | Out-Null
     }
 }

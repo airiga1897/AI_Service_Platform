@@ -122,6 +122,8 @@ wait_remote_service_job() {
     local remote_exit_code
     local printed_this_poll
     local now
+    local current_step="remote job"
+    local last_task=""
 
     started_at="$(date +%s)"
     last_heartbeat_at="$started_at"
@@ -159,6 +161,18 @@ wait_remote_service_job() {
                     continue
                 fi
                 printf '%s\n' "$line"
+                case "$line" in
+                    "[batch] Step "*)
+                        current_step="${line#"[batch] "}"
+                        ;;
+                    "TASK ["*)
+                        last_task="${line#TASK [}"
+                        last_task="${last_task%%]*}"
+                        ;;
+                    "[remote-job]"*"running service command: "*)
+                        current_step="${line#*running service command: }"
+                        ;;
+                esac
                 printed_lines=$((printed_lines + 1))
                 printed_this_poll=$((printed_this_poll + 1))
             done <<< "$output"
@@ -176,7 +190,11 @@ wait_remote_service_job() {
 
         now="$(date +%s)"
         if [ "$printed_this_poll" -eq 0 ] && [ "$REMOTE_JOB_HEARTBEAT_SECONDS" -gt 0 ] && [ $((now - last_heartbeat_at)) -ge "$REMOTE_JOB_HEARTBEAT_SECONDS" ]; then
-            printf 'remote job still running... elapsed %02d:%02d:%02d, polling every %ss\n' "$(((now - started_at) / 3600))" "$((((now - started_at) % 3600) / 60))" "$(((now - started_at) % 60))" "$REMOTE_JOB_POLL_SECONDS"
+            if [ -n "$last_task" ]; then
+                printf '[WAIT] %s is still running; last task: %s; remote log: %s\n' "$current_step" "$last_task" "$remote_job_log"
+            else
+                printf '[WAIT] %s is still running; remote log: %s\n' "$current_step" "$remote_job_log"
+            fi
             last_heartbeat_at="$now"
         fi
         sleep "$REMOTE_JOB_POLL_SECONDS"
@@ -306,6 +324,9 @@ ssh_common_args=(
     -o ConnectTimeout=10
     -o IdentitiesOnly=yes
     -o RequestTTY=no
+    -o KbdInteractiveAuthentication=no
+    -o PasswordAuthentication=no
+    -o PreferredAuthentications=publickey
     -o ServerAliveInterval=15
     -o ServerAliveCountMax=2
 )
@@ -315,6 +336,9 @@ scp_common_args=(
     -o BatchMode=yes
     -o ConnectTimeout=10
     -o IdentitiesOnly=yes
+    -o KbdInteractiveAuthentication=no
+    -o PasswordAuthentication=no
+    -o PreferredAuthentications=publickey
     -o ServerAliveInterval=15
     -o ServerAliveCountMax=2
 )

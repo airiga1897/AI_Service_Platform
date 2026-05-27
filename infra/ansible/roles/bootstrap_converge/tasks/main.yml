@@ -1,0 +1,161 @@
+---
+- name: Validate bootstrap converge inputs
+  ansible.builtin.assert:
+    that:
+      - bootstrap_converge_authorized_keys_file | length > 0
+      - lookup('file', bootstrap_converge_authorized_keys_file) | trim | length > 0
+    fail_msg: "bootstrap_converge_authorized_keys_file must point to a non-empty public key bundle on the control node."
+
+- name: Store bootstrap converge authorized key lines
+  ansible.builtin.set_fact:
+    bootstrap_converge_authorized_key_lines: >-
+      {{
+        lookup('file', bootstrap_converge_authorized_keys_file).splitlines()
+        | map('trim')
+        | reject('equalto', '')
+        | unique
+        | list
+      }}
+
+- name: Install bootstrap baseline packages
+  ansible.builtin.apt:
+    name: "{{ bootstrap_converge_base_packages }}"
+    state: present
+    update_cache: true
+
+- name: Ensure docker group exists
+  ansible.builtin.group:
+    name: docker
+    system: true
+    state: present
+
+- name: Ensure bootstrap users exist
+  ansible.builtin.user:
+    name: "{{ item.name }}"
+    shell: /bin/bash
+    create_home: true
+    password_lock: true
+    groups: "{{ item.groups | default(omit) }}"
+    append: true
+    state: present
+  loop:
+    - { name: "{{ bootstrap_converge_admin_user }}", groups: "sudo" }
+    - { name: "{{ bootstrap_converge_deploy_user }}", groups: "docker" }
+    - { name: "{{ bootstrap_converge_ansible_user }}", groups: "sudo" }
+
+- name: Install admin sudoers policy
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/{{ bootstrap_converge_admin_user }}"
+    mode: "0440"
+    validate: "visudo -cf %s"
+    content: |
+      {{ bootstrap_converge_admin_user }} ALL=(ALL) NOPASSWD: ALL
+
+- name: Install ansible sudoers policy
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/{{ bootstrap_converge_ansible_user }}"
+    mode: "0440"
+    validate: "visudo -cf %s"
+    content: |
+      {{ bootstrap_converge_ansible_user }} ALL=(ALL) NOPASSWD: ALL
+
+- name: Install deploy sudoers policy
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/{{ bootstrap_converge_deploy_user }}"
+    mode: "0440"
+    validate: "visudo -cf %s"
+    content: |
+      Cmnd_Alias PLATFORM_DIRS = /bin/mkdir -p *, /usr/bin/mkdir -p *, /bin/chown -R *, /usr/bin/chown -R *
+      Cmnd_Alias PLATFORM_DOCKER = /usr/bin/docker *, /usr/local/bin/docker *
+      Cmnd_Alias PLATFORM_SYSTEMCTL = /usr/bin/systemctl start docker, /usr/bin/systemctl enable docker, /usr/bin/systemctl restart docker
+      {{ bootstrap_converge_deploy_user }} ALL=(ALL) NOPASSWD: PLATFORM_DIRS, PLATFORM_DOCKER, PLATFORM_SYSTEMCTL
+
+- name: Ensure deploy directory exists
+  ansible.builtin.file:
+    path: "{{ bootstrap_converge_deploy_dir }}"
+    state: directory
+    owner: "{{ bootstrap_converge_deploy_user }}"
+    group: "{{ bootstrap_converge_deploy_user }}"
+    mode: "0750"
+
+- name: Install Ansible trust public keys additively
+  ansible.posix.authorized_key:
+    user: "{{ bootstrap_converge_ansible_user }}"
+    key: "{{ item }}"
+    state: present
+    manage_dir: true
+  loop: "{{ bootstrap_converge_authorized_key_lines }}"
+
+- name: Ensure sshd drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/ssh/sshd_config.d
+    state: directory
+    mode: "0755"
+
+- name: Normalize SSH hardening directives in main sshd_config
+  ansible.builtin.replace:
+    path: /etc/ssh/sshd_config
+    regexp: "(?im)^\\s*{{ item.key }}\\s+.*$"
+    replace: "{{ item.key }} {{ item.value }}"
+  loop:
+    - { key: "PermitRootLogin", value: "no" }
+    - { key: "PasswordAuthentication", value: "no" }
+    - { key: "KbdInteractiveAuthentication", value: "no" }
+    - { key: "ChallengeResponseAuthentication", value: "no" }
+    - { key: "PubkeyAuthentication", value: "yes" }
+  notify: restart ssh
+
+- name: Ensure SSH hardening directives exist in main sshd_config
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "(?i)^\\s*{{ item.key }}\\s+"
+    line: "{{ item.key }} {{ item.value }}"
+    insertafter: EOF
+  loop:
+    - { key: "PermitRootLogin", value: "no" }
+    - { key: "PasswordAuthentication", value: "no" }
+    - { key: "KbdInteractiveAuthentication", value: "no" }
+    - { key: "ChallengeResponseAuthentication", value: "no" }
+    - { key: "PubkeyAuthentication", value: "yes" }
+  notify: restart ssh
+
+- name: Remove legacy AI Service Platform SSH hardening drop-in
+  ansible.builtin.file:
+    path: /etc/ssh/sshd_config.d/99-ai-service-platform-hardening.conf
+    state: absent
+  notify: restart ssh
+
+- name: Install AI Service Platform SSH hardening drop-in
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/00-ai-service-platform-hardening.conf
+    mode: "0644"
+    content: |
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      ChallengeResponseAuthentication no
+      PubkeyAuthentication yes
+  notify: restart ssh
+
+- name: Validate sshd config after hardening
+  ansible.builtin.command: sshd -t
+  changed_when: false
+
+- name: Flush SSH hardening handler before effective config check
+  ansible.builtin.meta: flush_handlers
+
+- name: Read effective sshd configuration
+  ansible.builtin.command: sshd -T
+  changed_when: false
+  register: bootstrap_converge_sshd_effective_config
+
+- name: Assert SSH root and password login are disabled
+  ansible.builtin.assert:
+    that:
+      - "'permitrootlogin no' in bootstrap_converge_sshd_effective_config.stdout"
+      - "'passwordauthentication no' in bootstrap_converge_sshd_effective_config.stdout"
+    fail_msg: "SSH hardening did not take effect: expected permitrootlogin no and passwordauthentication no."
+
+- name: Ensure Docker runtime baseline
+  ansible.builtin.include_role:
+    name: docker_runtime_baseline
