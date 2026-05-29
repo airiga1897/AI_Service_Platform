@@ -175,12 +175,12 @@ not enable NAT, forwarding, or non-local egress by itself.
 To enable it, add or update a `state.csv` service row with explicit aliases:
 
 ```csv
-service,vpn_cascade,vpn_cascades,vps5+vps4,,,present
+service,vpn_cascade,vpn_cascades,vps5+vps4+vps3,,,present
 ```
 
-The first lab link uses `vps5` as ingress-side endpoint and `vps4` as egress-side
-peer. It publishes separate cascade-only host ports and does not occupy public
-edge `443/tcp`:
+The current lab cascade fabric uses directed links declared in a shared operator
+secret. Each cascade node publishes separate cascade-only host ports and does
+not occupy public edge `443/tcp`:
 
 | Host port | Container port | Purpose |
 |---|---|---|
@@ -188,26 +188,44 @@ edge `443/tcp`:
 | `8992/tcp` | `992/tcp` | fallback/test SoftEther cascade SSL listener |
 | `8555/tcp` | `5555/tcp` | management, restricted by firewall |
 
-The operator-local link secret is ignored by git:
+The operator-local cascade secret is ignored by git:
 
 ```text
-operator/softether/cascade/secrets/lab-vps5-vps4.json
+operator/softether/cascade/secrets/lab-cascade.json
 ```
 
-It contains only the lab link parameters and passwords used by `vpncmd`:
+It contains shared hub/user/password values plus directed links used by
+`vpncmd`:
 
 ```json
 {
+  "version": 1,
+  "state": "active",
   "hub_name": "CascadeLab",
   "hub_password": "<store outside chat>",
   "cascade_user": "cascade-peer",
   "cascade_user_password": "<store outside chat>",
   "server_password": "<store outside chat>",
-  "connection_name": "vps5-to-vps4",
-  "ingress_alias": "vps5",
-  "egress_alias": "vps4",
-  "egress_host": "vps4.mine-craft.su",
-  "egress_port": 8443
+  "links": [
+    {
+      "state": "active",
+      "connection_name": "vps5-to-vps4",
+      "ingress_alias": "vps5",
+      "ingress_host": "vps5.mine-craft.su",
+      "egress_alias": "vps4",
+      "egress_host": "vps4.mine-craft.su",
+      "egress_port": 8443
+    },
+    {
+      "state": "active",
+      "connection_name": "vps4-to-vps3",
+      "ingress_alias": "vps4",
+      "ingress_host": "vps4.mine-craft.su",
+      "egress_alias": "vps3",
+      "egress_host": "vps3.mine-craft.su",
+      "egress_port": 8443
+    }
+  ]
 }
 ```
 
@@ -227,7 +245,7 @@ If the seed exists, normal `vpn_cascade present` copies it only when the remote
 cascade config is missing. If the seed does not exist and the remote config is
 also missing, rollout starts a clean SoftEther cascade container with an empty
 `softether_data` directory, removes the default `DEFAULT` virtual hub, then
-configures only the lab hub, user, and cascade connection using the JSON above.
+configures only the lab hub, user, and active cascade links using the JSON above.
 `hub_password` is used when creating `CascadeLab`; server-admin automation still
 uses `server_password`. The role sets the hub `NoEnum` option so `CascadeLab` is
 not enumerated to anonymous users. Password-bearing tasks are `no_log`.
@@ -271,9 +289,23 @@ Before adding L3 routing or NAT, model every cascade link explicitly:
 - `initiator_alias` - the node that creates the SoftEther Cascade Connection;
 - `receiver_alias` - the node that listens for that connection;
 - `ingress_alias` - where selected client or service traffic enters the policy;
+- `ingress_host` - the public endpoint used by peers and firewall allow rules
+  when the ingress side is also the active local orchestrator;
 - `egress_alias` - where selected traffic is allowed to leave;
+- `egress_host` - the receiver endpoint used by the SoftEther Cascade
+  Connection;
 - `egress_port` - the receiver host port, currently `8443` for HTTPS-like
   transport.
+
+Each cascade link carries a `state` field:
+
+- `active` or missing - real lab link included in rollout;
+- `probe` - a read-only candidate used by egress probes and reports only;
+- `disabled` - ignored by probe tooling.
+
+Before making `vps3` a cascade receiver, promote the active orchestration role
+away from `vps3` to the standby `vps5`. This keeps control-plane access separate
+from the node being modified as cascade egress.
 
 #### Explicit Egress Profiles
 
@@ -302,9 +334,8 @@ approved, observable, and reversible.
 
 V1 egress profiles are operator-managed config, not database state. Store the
 intended policy in operator-controlled files and keep rollout explicit. This is
-intended for a small number of manually reviewed profiles, such as
-`youtube_non_ru` plus one or two lab/fallback profiles, not for a large dynamic
-rule database.
+intended for a small number of manually reviewed fallback profiles, not for a
+large dynamic rule database.
 
 Do not introduce a database only to store the first static profiles. A database
 becomes useful when probe history, route decisions, health scores, operator
@@ -350,9 +381,23 @@ The first executable policy layer is probe-only. Operator intent lives in:
 operator/egress_policy/profiles.json
 ```
 
-This file is local operator state, not a runtime route table. The first profile
-is `youtube_non_ru`, which measures `youtube.com` across current VPS candidates
-before any future non-RU egress enforcement is approved.
+This file is local operator state, not a runtime route table. It may be empty
+when no active fallback policy is currently needed. New v1 profiles should use
+`fallback_on_ingress_egress_failure`: probe ingress-local egress first and
+consider cascade only when the ingress-local path fails or degrades.
+
+Do not use `avoid_ru_egress` for new profiles. It is a legacy/deprecated label.
+If strict country behavior is ever needed, use a separate future behavior such
+as `require_non_ru_egress` instead of mixing it with fallback routing.
+
+A tracked, secret-free example is available at:
+
+```text
+docs/examples/egress_policy.profiles.example.json
+```
+
+Copy or adapt that example into `operator/egress_policy/profiles.json` on the
+operator machine. Do not treat the example as active policy.
 
 Run a dry plan without touching remote nodes:
 
@@ -366,16 +411,144 @@ Run actual probes over SSH from each selected VPS:
 .\tools\egress_policy\probe_egress_policy.ps1
 ```
 
+If the shell resolves `ssh` to a wrapper instead of OpenSSH, pass the executable
+explicitly:
+
+```powershell
+.\tools\egress_policy\probe_egress_policy.ps1 -SshPath <path-to-ssh>
+```
+
+Run a fast cascade readiness check:
+
+```powershell
+.\tools\egress_policy\probe_egress_policy.ps1 -PreferCascade
+```
+
+Run direct probes plus cascade-aware readiness probes when fallback decisions
+need both ingress-local and cascade evidence:
+
+```powershell
+.\tools\egress_policy\probe_egress_policy.ps1 -IncludeCascade
+```
+
+Run only explicit cascade routes:
+
+```powershell
+.\tools\egress_policy\probe_egress_policy.ps1 -CascadeOnly
+```
+
+When there are no active egress policy profiles, probe commands intentionally
+do nothing. To verify the cascade transport itself, use the dedicated read-only
+health check instead:
+
+```powershell
+.\tools\services\check_vpn_cascade_links.ps1
+.\tools\services\check_vpn_cascade_links.ps1 -Json
+```
+
+This command reads `operator/softether/cascade/secrets/lab-cascade.json`,
+checks each directed link with SSH, verifies TCP reachability to the receiver
+port, and runs read-only `CascadeStatusGet` inside `softether-cascade`. It uses
+non-interactive `vpncmd` with `/IN`, `timeout`, and closed SSH stdin. Do not use
+manual `vpncmd` commands that wait for password input.
+
 Probe results are written as JSONL under:
 
 ```text
 operator/egress_policy/history/
 ```
 
+Archive and clear old active probe history:
+
+```powershell
+.\tools\egress_policy\clear_egress_probe_history.ps1
+```
+
+Render the latest probe history as an operator-readable table:
+
+```powershell
+.\tools\egress_policy\report_egress_probes.ps1
+```
+
+Use `-HistoryFile <path>` to inspect a specific probe run and `-Json` when
+another tool should consume the report output. If active history is empty, the
+report prints a friendly empty-state message; it does not inspect archive files
+unless a specific archived `-HistoryFile` is provided.
+
+Generate operator-visible proposals from probe history:
+
+```powershell
+.\tools\egress_policy\suggest_egress_policy.ps1 -DryRun
+.\tools\egress_policy\suggest_egress_policy.ps1
+```
+
+The proposal inbox is exception-only. Successful green observations such as
+`good_ingress_local` for a target that is already covered by policy are kept in
+probe history, but they do not require operator approval and do not create a
+proposal. A proposal is created only when the operator needs to decide something:
+ingress-local failure with fallback available, fallback unavailable, probe error,
+unstable retries, unknown target, or an inconclusive route.
+
+Review the proposal inbox:
+
+```powershell
+.\tools\egress_policy\report_egress_proposals.ps1
+.\tools\egress_policy\report_egress_proposals.ps1 -Id <proposal-id> -Detail
+```
+
+For a human review loop with Russian status text and simple action keys:
+
+```powershell
+.\tools\egress_policy\review_egress_proposals.ps1
+```
+
+The interactive actions are `A` accept, `R` reject, `I` ignore, `D` details,
+`S` skip, and `Q` quit. These actions update only the proposal JSON decision
+state. They do not apply routing, NAT, firewall, HAProxy, SoftEther, or Docker
+changes.
+
+Accept or reject a proposal decision without changing runtime policy:
+
+```powershell
+.\tools\egress_policy\set_egress_proposal_status.ps1 -Id <proposal-id> -Status accepted -Reason "approved for profile drafting"
+.\tools\egress_policy\set_egress_proposal_status.ps1 -Id <proposal-id> -Status rejected -Reason "not needed"
+```
+
+Proposals are stored under `operator/egress_policy/proposals/` and are not
+active policy. They must be accepted by a separate operator action before any
+future profile or route is changed.
+
+For larger target lists, keep grouped profiles. A profile describes one policy
+intent, not one site. Add separate profiles only when the desired behavior,
+rollback, candidate egress preference, or enforcement meaning is different.
+
 Each record is an observation: profile, target, candidate alias, DNS result,
-TCP/TLS/HTTP status, observed external IP, observed country, and errors. Probe
-runs must not mutate routes, NAT, firewall, HAProxy, SoftEther, Docker networks,
-or user traffic.
+TCP/TLS/HTTP status, response timing, retry count, observed external IP,
+observed country, and errors. Probe runs must not mutate routes, NAT, firewall,
+HAProxy, SoftEther, Docker networks, or user traffic. Reports read existing
+JSONL history only; they do not initiate remote probes and they are not automatic
+enforcement.
+
+There are three probe levels:
+
+- `direct` probe checks `alias -> target`;
+- `cascade` readiness probe checks `ingress_alias -> egress_alias:port`,
+  read-only SoftEther cascade status, then `egress_alias -> target`;
+- future real dataplane probe will check actual user traffic after policy
+  routing/NAT exists.
+
+The cascade-aware probe validates that a named cascade route is usable. It does
+not prove that current VPN client traffic already uses that route.
+
+Probe-only cascade candidates are useful for negative testing. A link with
+`state: "probe"` is read by reports but must not be created by rollout. If
+transport or SoftEther status is down, reports should show
+`fallback_unavailable`; this is evidence for the operator, not a request to
+create the link automatically.
+
+HAProxy logs may produce `missing_ingress_route` proposals for public SNI/routes.
+They must not directly produce egress-policy decisions because HAProxy cannot see
+the encrypted VPN client's destination domains.
 
 #### Isolated Transit Segments
 
@@ -407,6 +580,8 @@ Do not create simultaneous active reverse cascade links between the same hubs.
 For example, `vps5 -> vps4` and `vps4 -> vps5` must not both be online as an L2
 pair. If traffic later needs to enter on `vps4` and leave through `vps5`, add a
 separate routed profile and policy instead of a second active L2-style link.
+Rollout and probe tooling reject active/probe cascade graphs that contain a
+directed cycle, including longer loops such as `vps5 -> vps4 -> vps3 -> vps5`.
 
 Current cascade role policy:
 

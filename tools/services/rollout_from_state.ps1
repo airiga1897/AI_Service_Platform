@@ -197,7 +197,79 @@ function Get-PresentVpnIngressAliases($Rows) {
 }
 
 function Get-VpnCascadeLinkSecretPath() {
-    return (Join-Path (Join-Path (Join-Path (Join-Path $OperatorDir "softether") "cascade") "secrets") "lab-vps5-vps4.json")
+    return (Join-Path (Join-Path (Join-Path (Join-Path $OperatorDir "softether") "cascade") "secrets") "lab-cascade.json")
+}
+
+function Assert-VpnCascadeLinksAreAcyclic($Links) {
+    if ($Links.Count -le 1) {
+        return
+    }
+
+    $nodes = @{}
+    $outgoing = @{}
+    $inDegree = @{}
+    $seenConnections = @{}
+    $seenEdges = @{}
+    $edgeLabels = New-Object System.Collections.ArrayList
+
+    foreach ($link in $Links) {
+        $from = [string]$link.ingress_alias
+        $to = [string]$link.egress_alias
+        $connectionName = [string]$link.connection_name
+        if ([string]::IsNullOrWhiteSpace($from) -or [string]::IsNullOrWhiteSpace($to)) {
+            Fail "vpn_cascade active links must include ingress_alias and egress_alias"
+        }
+        if ($from -eq $to) {
+            Fail "vpn_cascade active link cannot point to itself: $from -> $to"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($connectionName)) {
+            if ($seenConnections.ContainsKey($connectionName)) {
+                Fail "vpn_cascade active links contain duplicate connection_name: $connectionName"
+            }
+            $seenConnections[$connectionName] = $true
+        }
+
+        $edgeKey = "$from->$to"
+        if ($seenEdges.ContainsKey($edgeKey)) {
+            Fail "vpn_cascade active links contain duplicate directed edge: $edgeKey"
+        }
+        $seenEdges[$edgeKey] = $true
+        [void]$edgeLabels.Add($edgeKey)
+
+        foreach ($node in @($from, $to)) {
+            if (-not $nodes.ContainsKey($node)) {
+                $nodes[$node] = $true
+                $outgoing[$node] = New-Object System.Collections.ArrayList
+                $inDegree[$node] = 0
+            }
+        }
+
+        [void]$outgoing[$from].Add($to)
+        $inDegree[$to] = [int]$inDegree[$to] + 1
+    }
+
+    $queue = New-Object System.Collections.ArrayList
+    foreach ($node in $nodes.Keys) {
+        if ([int]$inDegree[$node] -eq 0) {
+            [void]$queue.Add($node)
+        }
+    }
+
+    $visited = 0
+    for ($i = 0; $i -lt $queue.Count; $i++) {
+        $node = [string]$queue[$i]
+        $visited++
+        foreach ($next in @($outgoing[$node])) {
+            $inDegree[$next] = [int]$inDegree[$next] - 1
+            if ([int]$inDegree[$next] -eq 0) {
+                [void]$queue.Add($next)
+            }
+        }
+    }
+
+    if ($visited -lt $nodes.Count) {
+        Fail "vpn_cascade active links contain a directed cycle. Active cascade fabric must be acyclic: $($edgeLabels -join ', ')"
+    }
 }
 
 function Get-VpnCascadeOrderedAliases($Aliases) {
@@ -207,25 +279,87 @@ function Get-VpnCascadeOrderedAliases($Aliases) {
     }
 
     try {
-        $link = Get-Content -Raw -LiteralPath $secretPath | ConvertFrom-Json
+        $secret = Get-Content -Raw -LiteralPath $secretPath | ConvertFrom-Json
     } catch {
         Fail "vpn_cascade link secret JSON is not valid: $secretPath"
     }
 
-    if (-not $link.ingress_alias -or -not $link.egress_alias) {
-        Fail "vpn_cascade link secret must include ingress_alias and egress_alias: $secretPath"
+    $links = @()
+    if ($secret.links) {
+        $links = @($secret.links | Where-Object { (-not $_.state) -or $_.state -eq "active" })
+    } else {
+        $links = @($secret)
     }
+    if ($links.Count -eq 0) {
+        Fail "vpn_cascade secret must include at least one active link: $secretPath"
+    }
+    Assert-VpnCascadeLinksAreAcyclic $links
 
     $ordered = New-Object System.Collections.Generic.List[string]
-    foreach ($alias in @($link.egress_alias, $link.ingress_alias)) {
-        if ($Aliases -contains $alias) {
-            Add-UniqueAlias $ordered $alias
+    foreach ($link in $links) {
+        if (-not $link.ingress_alias -or -not $link.egress_alias) {
+            Fail "each active vpn_cascade link must include ingress_alias and egress_alias: $secretPath"
+        }
+        foreach ($alias in @($link.egress_alias, $link.ingress_alias)) {
+            if ($Aliases -contains $alias) {
+                Add-UniqueAlias $ordered $alias
+            }
         }
     }
     foreach ($alias in $Aliases) {
         Add-UniqueAlias $ordered $alias
     }
     return @($ordered)
+}
+
+function Get-VpnCascadeActiveLinkAliases() {
+    $secretPath = Get-VpnCascadeLinkSecretPath
+    if (-not (Test-Path -LiteralPath $secretPath -PathType Leaf)) {
+        return @()
+    }
+    try {
+        $secret = Get-Content -Raw -LiteralPath $secretPath | ConvertFrom-Json
+    } catch {
+        Fail "vpn_cascade link secret JSON is not valid: $secretPath"
+    }
+
+    $links = if ($secret.links) {
+        @($secret.links | Where-Object { (-not $_.state) -or $_.state -eq "active" })
+    } else {
+        @($secret)
+    }
+    Assert-VpnCascadeLinksAreAcyclic $links
+
+    $aliases = New-Object System.Collections.Generic.List[string]
+    foreach ($link in $links) {
+        foreach ($alias in @($link.ingress_alias, $link.egress_alias)) {
+            if ($alias) {
+                Add-UniqueAlias $aliases $alias
+            }
+        }
+    }
+    return @($aliases)
+}
+
+function Assert-VpnCascadeStateMatchesLinks($Rows) {
+    $cascadeRows = @($Rows | Where-Object { $_.kind -eq "service" -and $_.name -eq "vpn_cascade" -and $_.state -eq "present" })
+    if ($cascadeRows.Count -eq 0) {
+        return
+    }
+    $linkAliases = @(Get-VpnCascadeActiveLinkAliases)
+    if ($linkAliases.Count -eq 0) {
+        return
+    }
+    $stateAliases = New-Object System.Collections.Generic.List[string]
+    foreach ($row in $cascadeRows) {
+        foreach ($alias in (Split-AliasList $row.active_aliases)) {
+            Add-UniqueAlias $stateAliases $alias
+        }
+    }
+    $missing = @($linkAliases | Where-Object { $stateAliases -notcontains $_ })
+    if ($missing.Count -gt 0) {
+        Fail "vpn_cascade active links reference aliases not present in service active_aliases: $($missing -join ', ')"
+    }
 }
 
 function New-VpnIngressAliasBlock($Aliases, $Domain) {
@@ -643,6 +777,7 @@ $serviceRows = @($stateRows | Where-Object { $_.kind -eq "service" })
 if ($serviceRows.Count -eq 0) {
     Fail "state.csv has no service rows"
 }
+Assert-VpnCascadeStateMatchesLinks $stateRows
 if ($OnlyService) {
     $onlyServiceRows = @($serviceRows | Where-Object { $_.name -eq $OnlyService })
     if ($onlyServiceRows.Count -eq 0) {
@@ -806,7 +941,7 @@ foreach ($serviceRow in $orderedServiceRows) {
         continue
     }
 
-    if ($service -ne "vpn_cascade" -and $aliases.Count -gt 0) {
+    if ($aliases.Count -gt 0) {
         $limit = Join-AnsibleLimit $aliases
         foreach ($alias in $aliases) {
             $actionKey = "$service|$state|$alias"

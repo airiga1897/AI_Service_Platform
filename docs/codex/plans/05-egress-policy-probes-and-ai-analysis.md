@@ -23,10 +23,18 @@ The v1 registry is a small operator-managed JSON file:
 operator/egress_policy/profiles.json
 ```
 
+A safe tracked template is stored at:
+
+```text
+docs/examples/egress_policy.profiles.example.json
+```
+
 Profiles are global intent for all VPS nodes. They list candidate aliases, target
-domains or IPs, desired region behavior, reason, state, and rollback. Per-node
+domains or IPs, desired behavior, reason, state, and rollback. Per-node
 differences should come from node capabilities/labels later, not from duplicating
-the same profile per VPS.
+the same profile per VPS. The v1 behavior is
+`fallback_on_ingress_egress_failure`: ingress-local egress first, cascade only
+when that local path fails or degrades.
 
 The probe-only runner is:
 
@@ -37,6 +45,69 @@ The probe-only runner is:
 Use `-DryRun` to validate and list selected profiles without SSH probes. A normal
 run executes read-only SSH probes from each selected VPS and writes JSONL history
 under `operator/egress_policy/history/`.
+
+Use `-SshPath` when the current shell resolves `ssh` to a wrapper instead of the
+real OpenSSH executable:
+
+```powershell
+.\tools\egress_policy\probe_egress_policy.ps1 -SshPath <path-to-ssh>
+```
+
+Use `-IncludeCascade` to add cascade-aware readiness observations. That mode
+loads explicit links from `operator/softether/cascade/secrets/lab-cascade.json`
+when present, with legacy per-pair JSON files used only when the unified file is
+absent. It checks ingress-to-receiver TCP reachability, reads SoftEther cascade
+status, then probes the target from the final egress alias. It is still
+probe-only and does not enable routing/NAT or move user traffic.
+
+Each cascade link has `state`. Missing or `active` means a real lab link,
+`probe` means read-only candidate, and `disabled` is ignored. Probe-only links
+are useful as negative/control routes: the runner records whether transport and
+SoftEther status are usable, but it must not create the cascade connection or
+promote the route.
+
+Use `-PreferCascade` for the normal fast operator workflow: probe explicit
+cascade links first and run direct VPS probes only when no usable cascade result
+exists. Use `-CascadeOnly` when the operator wants to avoid direct probes
+entirely.
+
+Render the latest history for humans with:
+
+```powershell
+.\tools\egress_policy\report_egress_probes.ps1
+```
+
+Generate and review operator-visible proposals with:
+
+```powershell
+.\tools\egress_policy\suggest_egress_policy.ps1 -DryRun
+.\tools\egress_policy\report_egress_proposals.ps1
+.\tools\egress_policy\review_egress_proposals.ps1
+.\tools\egress_policy\set_egress_proposal_status.ps1 -Id <proposal-id> -Status accepted -Reason "operator approved"
+```
+
+Accepted or rejected proposals are still not active routing policy. They only
+record the operator decision and prepare a later explicit profile/route patch.
+
+The proposal inbox is exception-only. A target that is already covered by policy
+and has a clearly good observation, such as `good_ingress_local`, is stored in
+history but does not require approval. Proposals are generated only for decisions
+that need human attention: unknown targets, ingress-local failure with fallback
+available, fallback unavailable, probe errors, unstable retries, or inconclusive
+route evidence. This keeps large target lists manageable for the operator.
+
+`avoid_ru_egress` is deprecated for new profiles. Strict country policy, if
+needed later, must be an explicit behavior such as `require_non_ru_egress`.
+
+Human-facing review output uses Russian status text:
+`Требует решения`, `Принято`, `Отклонено`, `Отложено`, and `Устарело`.
+The interactive review command keeps short action keys: `A`, `R`, `I`, `D`, `S`,
+and `Q`.
+
+The report emits recommendations such as `good_ingress_local`,
+`fallback_available`, `fallback_unavailable`, `probe_error`, or `route_review`
+from observations only. It includes retry count and HTTP response timing, but
+must not apply routing, firewall, NAT, HAProxy, Docker, or SoftEther changes.
 
 ## Stage 1 Inputs Required For AI
 

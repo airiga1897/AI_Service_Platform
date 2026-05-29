@@ -8,7 +8,7 @@ vpn_cascade_compose_file: "{{ vpn_cascade_root_dir }}/docker-compose.yml"
 
 vpn_cascade_seed_config: "{{ playbook_dir }}/../../operator/softether/cascade/{{ inventory_hostname }}/vpn_server.config"
 vpn_cascade_local_override_dir: "{{ playbook_dir }}/../../operator/softether/cascade/{{ inventory_hostname }}/overrides"
-vpn_cascade_link_secret_file: "{{ playbook_dir }}/../../operator/softether/cascade/secrets/lab-vps5-vps4.json"
+vpn_cascade_link_secret_file: "{{ playbook_dir }}/../../operator/softether/cascade/secrets/lab-cascade.json"
 vpn_cascade_operator_mgmt_ips: "{{ playbook_dir }}/../../operator/haproxy/lists/vpn_mgmt_ips.lst"
 
 vpn_cascade_image: softethervpn/vpnserver:stable
