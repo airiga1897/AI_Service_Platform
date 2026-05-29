@@ -156,6 +156,18 @@
     - vpn_state == 'present'
     - not ansible_check_mode
 
+- name: Ensure VPN policy Docker network exists
+  ansible.builtin.command:
+    cmd: docker network create --subnet "{{ vpn_edge_policy_network_subnet }}" "{{ vpn_edge_policy_network_name }}"
+  register: vpn_edge_policy_network_create
+  changed_when: vpn_edge_policy_network_create.rc == 0
+  failed_when:
+    - vpn_edge_policy_network_create.rc != 0
+    - "'already exists' not in (vpn_edge_policy_network_create.stderr | default(''))"
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+
 - name: Check retired SoftEther edge listener migration marker
   ansible.builtin.stat:
     path: "{{ vpn_edge_retired_tcp_listeners_marker_file }}"
@@ -275,6 +287,24 @@
   changed_when: false
   register: vpn_edge_container_ready
   until: vpn_edge_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify running vpn_edge policy network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ vpn_edge_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ vpn_edge_policy_network_name }}"
+    EXPECTED_IP: "{{ vpn_edge_policy_container_ipv4 }}"
+  changed_when: false
+  register: vpn_edge_policy_container_ready
+  until: vpn_edge_policy_container_ready.rc == 0
   retries: 15
   delay: 2
   when:

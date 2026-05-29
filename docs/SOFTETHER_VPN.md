@@ -160,6 +160,18 @@ ai_service_cascade 172.21.0.0/24
 softether-cascade  172.21.0.2
 ```
 
+The user VPN ingress and cascade transport also share a private policy network
+when both services run on the same VPS:
+
+```text
+ai_service_vpn_policy 172.22.0.0/24
+softether-edge        172.22.0.2
+softether-cascade     172.22.0.3
+```
+
+This network is an internal dataplane handoff for future policy routing. It does
+not enable NAT, forwarding, or non-local egress by itself.
+
 To enable it, add or update a `state.csv` service row with explicit aliases:
 
 ```csv
@@ -226,6 +238,28 @@ mutable runtime state. `vpn_cascade` does not publish HAProxy routes, does not
 change host routing, and does not enforce egress policy. Controlled routing must
 come later from approved policy, not directly from cascade rollout.
 
+### Container Connectivity Model
+
+The VPN stack uses separate Docker networks for separate traffic planes:
+
+- `ai_service_edge` - public ingress plane. `edge-haproxy` reaches
+  `softether-edge` here.
+- `ai_service_vpn_policy` - internal policy dataplane. `softether-edge` and
+  `softether-cascade` share this network for future selected traffic handoff.
+- `ai_service_cascade` - cascade service network. `softether-cascade` keeps its
+  own transport runtime separate from user VPN ingress.
+
+Do not use Docker host networking for `vpn_edge` or `vpn_cascade`. It would make
+ports and firewall boundaries harder to audit and rollback.
+
+Do not put HAProxy between `vpn_edge` and `vpn_cascade` for egress traffic.
+HAProxy owns public TCP ingress and management allowlisting; after a user enters
+the VPN, selected egress is IP/dataplane routing, not HAProxy frontend routing.
+
+Do not attach `edge-haproxy` to `ai_service_vpn_policy`. Keeping HAProxy out of
+the policy dataplane prevents cascade/routing experiments from becoming a public
+edge blast-radius problem.
+
 ### Cascade Roles Before Routing
 
 SoftEther cascade direction is the direction of TCP connection initiation, not a
@@ -263,6 +297,85 @@ Every egress profile must record:
 
 Do not enable an any-to-any cascade mesh. Each profile must be individually
 approved, observable, and reversible.
+
+#### Data Storage Boundary
+
+V1 egress profiles are operator-managed config, not database state. Store the
+intended policy in operator-controlled files and keep rollout explicit. This is
+intended for a small number of manually reviewed profiles, such as
+`youtube_non_ru` plus one or two lab/fallback profiles, not for a large dynamic
+rule database.
+
+Do not introduce a database only to store the first static profiles. A database
+becomes useful when probe history, route decisions, health scores, operator
+overrides, and audit events need queryable history.
+
+AI assistance may be used at this stage only as an advisory analysis layer. It
+may summarize probe results, compare candidate egress quality, explain why a
+profile is unhealthy, and propose a route decision for operator review. It must
+not directly apply routes, NAT, firewall, or SoftEther changes.
+
+Design probes and decision output so they can later move into SQLite or Postgres
+without changing the policy concepts:
+
+- profile definitions remain declarative operator intent;
+- probe samples are append-only observations;
+- selected egress decisions record inputs, chosen alias, reason, and expiry;
+- manual overrides record operator, reason, start, end, and rollback.
+- AI recommendations record model/input version, evidence, confidence, and the
+  operator decision that accepted or rejected the recommendation.
+
+Future database storage should be additive. Keep operator intent in reviewed
+files until there is a real need for multi-operator editing or dynamic policy
+generation. Move these records to a database first:
+
+- `probe_runs` - one run per probe batch, with started/finished timestamps and
+  source node;
+- `probe_samples` - per target/egress metrics such as DNS result, TCP latency,
+  HTTP status, external IP, country, and error;
+- `egress_decisions` - profile, candidate set, selected alias, score inputs,
+  expiry, and fail-open/fail-closed outcome;
+- `operator_overrides` - manual decision, reason, owner, expiry, and rollback;
+- `ai_recommendations` - prompt/input hash, model, evidence summary,
+  confidence, recommendation, and final operator disposition.
+
+The first database can be local SQLite for operator-side history. Postgres is
+reserved for a later shared controller or multi-node policy service.
+
+#### Probe-Only Policy Registry
+
+The first executable policy layer is probe-only. Operator intent lives in:
+
+```text
+operator/egress_policy/profiles.json
+```
+
+This file is local operator state, not a runtime route table. The first profile
+is `youtube_non_ru`, which measures `youtube.com` across current VPS candidates
+before any future non-RU egress enforcement is approved.
+
+Run a dry plan without touching remote nodes:
+
+```powershell
+.\tools\egress_policy\probe_egress_policy.ps1 -DryRun
+```
+
+Run actual probes over SSH from each selected VPS:
+
+```powershell
+.\tools\egress_policy\probe_egress_policy.ps1
+```
+
+Probe results are written as JSONL under:
+
+```text
+operator/egress_policy/history/
+```
+
+Each record is an observation: profile, target, candidate alias, DNS result,
+TCP/TLS/HTTP status, observed external IP, observed country, and errors. Probe
+runs must not mutate routes, NAT, firewall, HAProxy, SoftEther, Docker networks,
+or user traffic.
 
 #### Isolated Transit Segments
 

@@ -16,7 +16,11 @@ services:
     networks:
       {{ vpn_cascade_network_name }}:
         ipv4_address: {{ vpn_cascade_container_ipv4 }}
+      {{ vpn_cascade_policy_network_name }}:
+        ipv4_address: {{ vpn_cascade_policy_container_ipv4 }}
 
 networks:
   {{ vpn_cascade_network_name }}:
+    external: true
+  {{ vpn_cascade_policy_network_name }}:
     external: true

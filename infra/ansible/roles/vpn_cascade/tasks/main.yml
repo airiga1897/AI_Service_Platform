@@ -234,6 +234,18 @@
     - vpn_cascade_state == 'present'
     - not ansible_check_mode
 
+- name: Ensure VPN policy Docker network exists
+  ansible.builtin.command:
+    cmd: docker network create --subnet "{{ vpn_cascade_policy_network_subnet }}" "{{ vpn_cascade_policy_network_name }}"
+  register: vpn_cascade_policy_network_create
+  changed_when: vpn_cascade_policy_network_create.rc == 0
+  failed_when:
+    - vpn_cascade_policy_network_create.rc != 0
+    - "'already exists' not in (vpn_cascade_policy_network_create.stderr | default(''))"
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
 - name: Start vpn_cascade container
   ansible.builtin.command:
     cmd: docker compose -f "{{ vpn_cascade_compose_file }}" up -d
@@ -271,6 +283,24 @@
   changed_when: false
   register: vpn_cascade_container_ready
   until: vpn_cascade_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify running vpn_cascade policy network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ vpn_cascade_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ vpn_cascade_policy_network_name }}"
+    EXPECTED_IP: "{{ vpn_cascade_policy_container_ipv4 }}"
+  changed_when: false
+  register: vpn_cascade_policy_container_ready
+  until: vpn_cascade_policy_container_ready.rc == 0
   retries: 15
   delay: 2
   when:
@@ -434,7 +464,7 @@
 - name: Wait for vpn_cascade management TCP listener
   ansible.builtin.shell: |
     set -euo pipefail
-    container_ip="$(docker inspect -f '{{ "{{" }}range.NetworkSettings.Networks{{ "}}" }}{{ "{{" }}.IPAddress{{ "}}" }}{{ "{{" }}end{{ "}}" }}' "$CONTAINER")"
+    container_ip="$(docker inspect "$CONTAINER" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["NETWORK"]; print(data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress", ""))')"
     [ -n "$container_ip" ] || {
       echo "Could not resolve vpn_cascade container IP" >&2
       exit 1
@@ -444,6 +474,7 @@
     executable: /bin/bash
   environment:
     CONTAINER: "{{ vpn_cascade_container_name }}"
+    NETWORK: "{{ vpn_cascade_network_name }}"
     VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
   changed_when: false
   register: vpn_cascade_management_listener_ready
@@ -673,12 +704,13 @@
 - name: Wait for vpn_cascade management TCP listener after hub anonymous enumeration update
   ansible.builtin.shell: |
     set -euo pipefail
-    container_ip="$(docker inspect -f '{% raw %}{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}{% endraw %}' "$CONTAINER")"
+    container_ip="$(docker inspect "$CONTAINER" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["NETWORK"]; print(data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress", ""))')"
     timeout "${VPNCMD_TIMEOUT}s" python3 -c 'import socket, sys; s = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=5); s.close()' "$container_ip" 5555
   args:
     executable: /bin/bash
   environment:
     CONTAINER: "{{ vpn_cascade_container_name }}"
+    NETWORK: "{{ vpn_cascade_network_name }}"
     VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
   register: vpn_cascade_mgmt_tcp_after_noenum
   changed_when: false

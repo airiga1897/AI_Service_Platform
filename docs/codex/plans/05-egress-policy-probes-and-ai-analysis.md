@@ -15,6 +15,29 @@ Stage 1 must come first. It creates the operator-local target registry, probe
 results, and deterministic facts that later AI analysis can consume. Stage 2
 must not be mixed into routing enforcement.
 
+## Stage 1 Current Interface
+
+The v1 registry is a small operator-managed JSON file:
+
+```text
+operator/egress_policy/profiles.json
+```
+
+Profiles are global intent for all VPS nodes. They list candidate aliases, target
+domains or IPs, desired region behavior, reason, state, and rollback. Per-node
+differences should come from node capabilities/labels later, not from duplicating
+the same profile per VPS.
+
+The probe-only runner is:
+
+```powershell
+.\tools\egress_policy\probe_egress_policy.ps1
+```
+
+Use `-DryRun` to validate and list selected profiles without SSH probes. A normal
+run executes read-only SSH probes from each selected VPS and writes JSONL history
+under `operator/egress_policy/history/`.
+
 ## Stage 1 Inputs Required For AI
 
 The probe and log pipeline should collect structured, sanitized facts:

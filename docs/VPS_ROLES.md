@@ -114,6 +114,13 @@ Service naming is semantic, not positional:
 ai_service_edge 172.20.0.0/24
 softether-edge  172.20.0.2
 edge-haproxy    172.20.0.3
+
+ai_service_cascade 172.21.0.0/24
+softether-cascade  172.21.0.2
+
+ai_service_vpn_policy 172.22.0.0/24
+softether-edge        172.22.0.2
+softether-cascade     172.22.0.3
 ```
 
 Этот contract живёт в Ansible defaults edge-ролей. Если позже появятся много edge-сетей или per-node network overrides, для этого можно будет добавить отдельный `operator/networks.csv`.
