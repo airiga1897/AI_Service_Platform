@@ -9,10 +9,14 @@ STATE_FILE="./operator/state.csv"
 INVENTORY="inventory.ini"
 PLAYBOOK=""
 LIMIT=""
+POLICY_ROUTER_IMAGE_REF=""
+BUILD_POLICY_ROUTER_IMAGE="false"
 CHECK="false"
 CONFIRM_PURGE="false"
 EXPECTED_HEADER="current_alias,endpoint,connection,root_password"
 EXPECTED_STATE_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
+EXPECTED_NETWORKS_HEADER="alias,policy_subnet,edge_ip,cascade_ip,cascade_router_ip,policy_gateway_ip"
+NETWORKS_FILE="$(dirname "$STATE_FILE")/networks.csv"
 DEFAULT_ANSIBLE_SSH_COMMON_ARGS="-o BatchMode=yes -o KbdInteractiveAuthentication=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey -o RequestTTY=no"
 if [ -n "${ANSIBLE_SSH_COMMON_ARGS:-}" ]; then
     export ANSIBLE_SSH_COMMON_ARGS="$ANSIBLE_SSH_COMMON_ARGS $DEFAULT_ANSIBLE_SSH_COMMON_ARGS"
@@ -36,6 +40,10 @@ Usage:
   bash tools/services/service.sh vpn_cascade apply [options]
   bash tools/services/service.sh vpn_cascade absent [options]
   bash tools/services/service.sh vpn_cascade purge --confirm-purge [options]
+  bash tools/services/service.sh policy_gateway plan [options]
+  bash tools/services/service.sh policy_gateway apply [options]
+  bash tools/services/service.sh policy_gateway absent [options]
+  bash tools/services/service.sh policy_gateway purge --confirm-purge [options]
 
 Options:
   --nodes-file PATH      Operator nodes.csv. Default: ./operator/nodes.csv
@@ -43,6 +51,10 @@ Options:
   --inventory PATH       Generated Ansible inventory. Default: inventory.ini
   --playbook PATH        Override service playbook.
   --limit VALUE          Ansible --limit. Default: service ansible_group.
+  --policy-router-image-ref REF
+                        vpn_cascade only: override policy-router image.
+  --build-policy-router-image
+                        vpn_cascade only: build and distribute policy-router image on orchestration node.
   --check                Pass --check to ansible-playbook.
   --confirm-purge        Required for purge.
   -h, --help             Show help.
@@ -96,6 +108,21 @@ split_limit_to_lines() {
     IFS="$old_ifs"
 }
 
+ansible_limit_pattern() {
+    local limit="$1"
+    local first="true"
+    local alias_item
+    while IFS= read -r alias_item; do
+        [ -n "$alias_item" ] || continue
+        if [ "$first" = "true" ]; then
+            printf '%s' "$alias_item"
+            first="false"
+        else
+            printf ':%s' "$alias_item"
+        fi
+    done < <(split_limit_to_lines "$limit")
+}
+
 limit_matches_aliases() {
     local limit="$1"
     local aliases="$2"
@@ -121,6 +148,7 @@ service_playbook() {
         edge_haproxy) echo "infra/ansible/edge_haproxy.yml" ;;
         vpn_edge) echo "infra/ansible/vpn.yml" ;;
         vpn_cascade) echo "infra/ansible/vpn_cascade.yml" ;;
+        policy_gateway) echo "infra/ansible/policy_gateway.yml" ;;
         *) return 1 ;;
     esac
 }
@@ -130,6 +158,8 @@ service_extra_vars() {
     local state="$2"
     local purge="$3"
     local reseed="${4:-false}"
+    local policy_router_image_ref="${5:-}"
+    local build_policy_router_image="${6:-false}"
     case "$service" in
         edge_haproxy)
             printf '%s\n' "-e" "edge_haproxy_state=$state" "-e" "edge_haproxy_purge_data=$purge"
@@ -139,6 +169,15 @@ service_extra_vars() {
             ;;
         vpn_cascade)
             printf '%s\n' "-e" "vpn_cascade_state=$state" "-e" "vpn_cascade_purge_data=$purge" "-e" "vpn_cascade_reseed_config=$reseed"
+            if [ -n "$policy_router_image_ref" ]; then
+                printf '%s\n' "-e" "vpn_cascade_policy_router_image=$policy_router_image_ref"
+            fi
+            if [ "$build_policy_router_image" = "true" ]; then
+                printf '%s\n' "-e" "vpn_cascade_build_policy_router_image=true"
+            fi
+            ;;
+        policy_gateway)
+            printf '%s\n' "-e" "policy_gateway_state=$state" "-e" "policy_gateway_purge_data=$purge"
             ;;
         *)
             return 1
@@ -163,8 +202,8 @@ if [ "$SERVICE" = "vpn" ]; then
     fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 fi
 case "$SERVICE" in
-    edge_haproxy|vpn_edge|vpn_cascade) ;;
-    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade." ;;
+    edge_haproxy|vpn_edge|vpn_cascade|policy_gateway) ;;
+    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway." ;;
 esac
 case "$ACTION" in
     plan|apply|absent|purge|reseed) ;;
@@ -180,6 +219,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         --state-file)
             STATE_FILE="${2:-}"
+            NETWORKS_FILE="$(dirname "$STATE_FILE")/networks.csv"
             shift 2
             ;;
         --inventory)
@@ -193,6 +233,14 @@ while [ "$#" -gt 0 ]; do
         --limit)
             LIMIT="${2:-}"
             shift 2
+            ;;
+        --policy-router-image-ref)
+            POLICY_ROUTER_IMAGE_REF="${2:-}"
+            shift 2
+            ;;
+        --build-policy-router-image)
+            BUILD_POLICY_ROUTER_IMAGE="true"
+            shift
             ;;
         --check)
             CHECK="true"
@@ -212,12 +260,27 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+if [ -n "$POLICY_ROUTER_IMAGE_REF" ] && [ "$SERVICE" != "vpn_cascade" ]; then
+    fail "--policy-router-image-ref is supported only for service vpn_cascade"
+fi
+if [ "$BUILD_POLICY_ROUTER_IMAGE" = "true" ] && [ "$SERVICE" != "vpn_cascade" ]; then
+    fail "--build-policy-router-image is supported only for service vpn_cascade"
+fi
+if [ "$BUILD_POLICY_ROUTER_IMAGE" = "true" ] && [ -n "$POLICY_ROUTER_IMAGE_REF" ]; then
+    fail "--build-policy-router-image and --policy-router-image-ref are mutually exclusive"
+fi
+
 [ -f "$NODES_FILE" ] || fail "nodes file not found: $NODES_FILE"
 [ -f "$STATE_FILE" ] || fail "state file not found: $STATE_FILE"
 first_line="$(head -n 1 "$NODES_FILE" | tr -d '\r')"
 [ "$first_line" = "$EXPECTED_HEADER" ] || fail "nodes.csv header must be exactly: $EXPECTED_HEADER"
 state_first_line="$(head -n 1 "$STATE_FILE" | tr -d '\r')"
 [ "$state_first_line" = "$EXPECTED_STATE_HEADER" ] || fail "state.csv header must be exactly: $EXPECTED_STATE_HEADER"
+if [ "$SERVICE" = "vpn_edge" ] || [ "$SERVICE" = "vpn_cascade" ] || [ "$SERVICE" = "policy_gateway" ]; then
+    [ -f "$NETWORKS_FILE" ] || fail "networks.csv not found next to state.csv: $NETWORKS_FILE. Run sync_to_orchestration before $SERVICE $ACTION."
+    networks_first_line="$(head -n 1 "$NETWORKS_FILE" | tr -d '\r')"
+    [ "$networks_first_line" = "$EXPECTED_NETWORKS_HEADER" ] || fail "networks.csv header must be exactly: $EXPECTED_NETWORKS_HEADER. Run sync_to_orchestration before $SERVICE $ACTION."
+fi
 
 service_found="false"
 service_group=""
@@ -294,6 +357,7 @@ case "$service_row_state" in
     present|absent|purged) ;;
     *) fail "$SERVICE state must be one of: present, absent, purged" ;;
 esac
+
 [ -n "$service_group" ] || fail "$SERVICE ansible_group is empty in state.csv"
 
 if [ "$ACTION" = "plan" ]; then
@@ -361,13 +425,17 @@ if [ "$ACTION" = "reseed" ]; then
     service_reseed_config="true"
 fi
 
-limit_args=(--limit "${LIMIT:-$service_group}")
+if [ -n "$LIMIT" ]; then
+    limit_args=(--limit "$(ansible_limit_pattern "$LIMIT")")
+else
+    limit_args=(--limit "$service_group")
+fi
 check_args=()
 if [ "$CHECK" = "true" ]; then
     check_args=(--check)
 fi
 
-mapfile -t extra_vars < <(service_extra_vars "$SERVICE" "$service_state" "$service_purge_data" "$service_reseed_config")
+mapfile -t extra_vars < <(service_extra_vars "$SERVICE" "$service_state" "$service_purge_data" "$service_reseed_config" "$POLICY_ROUTER_IMAGE_REF" "$BUILD_POLICY_ROUTER_IMAGE")
 
 set -x
 run_ansible_playbook \

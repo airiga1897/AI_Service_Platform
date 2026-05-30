@@ -5,7 +5,8 @@
       - vpn_cascade_state in ['present', 'absent']
       - vpn_cascade_purge_data in [true, false, 'true', 'false', 'True', 'False']
       - (vpn_cascade_reseed_config | default(false)) in [true, false, 'true', 'false', 'True', 'False']
-    fail_msg: "vpn_cascade_state must be present|absent and vpn_cascade_purge_data/vpn_cascade_reseed_config must be boolean-like."
+      - (vpn_cascade_build_policy_router_image | default(false)) in [true, false, 'true', 'false', 'True', 'False']
+    fail_msg: "vpn_cascade_state must be present|absent and vpn_cascade boolean flags must be boolean-like."
 
 - name: Check VPN network plan on control node
   ansible.builtin.stat:
@@ -317,6 +318,65 @@
     - vpn_cascade_override_stat.stat.exists
     - vpn_cascade_override_stat.stat.isdir
 
+- name: Plan policy-router image build on orchestration controller
+  ansible.builtin.shell: |
+    set -euo pipefail
+    test -f "$CONTEXT/Dockerfile"
+    dockerfile_hash="$(sha256sum "$CONTEXT/Dockerfile" | awk '{print substr($1, 1, 12)}')"
+    git_ref="$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2>/dev/null || true)"
+    if [ -z "$git_ref" ]; then
+      git_ref="nogit"
+    fi
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    image_ref="${IMAGE_REPOSITORY}:${stamp}-${git_ref}-${dockerfile_hash}"
+    python3 - "$image_ref" "$CONTEXT" "$dockerfile_hash" <<'PY'
+    import json
+    import sys
+    print(json.dumps({
+        "image_ref": sys.argv[1],
+        "context": sys.argv[2],
+        "dockerfile_hash": sys.argv[3],
+    }, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    CONTEXT: "{{ vpn_cascade_policy_router_build_context }}"
+    IMAGE_REPOSITORY: "{{ vpn_cascade_policy_router_image_repository }}"
+    REPO_ROOT: "{{ playbook_dir }}/../.."
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: vpn_cascade_policy_router_build_plan_command
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_build_policy_router_image | bool
+
+- name: Store policy-router image build plan
+  ansible.builtin.set_fact:
+    vpn_cascade_policy_router_build_plan: "{{ vpn_cascade_policy_router_build_plan_command.stdout | from_json }}"
+  run_once: true
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_build_policy_router_image | bool
+
+- name: Use generated policy-router image ref for this rollout
+  ansible.builtin.set_fact:
+    vpn_cascade_policy_router_image: "{{ hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_build_plan.image_ref }}"
+    vpn_cascade_policy_router_remote_archive: "/tmp/ai-sp-policy-router-{{ hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_build_plan.image_ref | hash('sha1') }}.tar"
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_build_policy_router_image | bool
+
+- name: Report policy-router image build plan
+  ansible.builtin.debug:
+    msg: "policy-router image will be built once on orchestration node from {{ vpn_cascade_policy_router_build_plan.context }} as {{ vpn_cascade_policy_router_build_plan.image_ref }}"
+  run_once: true
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_build_policy_router_image | bool
+
 - name: Render vpn_cascade Docker Compose
   ansible.builtin.template:
     src: docker-compose.vpn-cascade.yml.j2
@@ -347,6 +407,102 @@
   changed_when: false
   when:
     - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Build policy-router image on orchestration controller
+  ansible.builtin.shell: |
+    set -euo pipefail
+    archive="$(mktemp /tmp/ai-sp-policy-router.XXXXXX.tar)"
+    build_log="$(mktemp /tmp/ai-sp-policy-router-build.XXXXXX.log)"
+    docker build -t "$IMAGE_REF" -f "$CONTEXT/Dockerfile" "$CONTEXT" >"$build_log" 2>&1
+    image_id="$(docker image inspect --format '{{ "{{" }}.Id{{ "}}" }}' "$IMAGE_REF")"
+    docker save -o "$archive" "$IMAGE_REF"
+    chmod 0644 "$archive"
+    python3 - "$IMAGE_REF" "$image_id" "$archive" "$build_log" <<'PY'
+    import json
+    import sys
+    print(json.dumps({
+        "image_ref": sys.argv[1],
+        "image_id": sys.argv[2],
+        "archive": sys.argv[3],
+        "build_log": sys.argv[4],
+    }, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    CONTEXT: "{{ hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_build_plan.context }}"
+    IMAGE_REF: "{{ hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_build_plan.image_ref }}"
+  delegate_to: localhost
+  become: true
+  run_once: true
+  register: vpn_cascade_policy_router_build_command
+  changed_when: true
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_build_policy_router_image | bool
+    - not ansible_check_mode
+
+- name: Store policy-router image build artifact
+  ansible.builtin.set_fact:
+    vpn_cascade_policy_router_build_artifact: "{{ vpn_cascade_policy_router_build_command.stdout | from_json }}"
+  run_once: true
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_build_policy_router_image | bool
+    - not ansible_check_mode
+
+- name: Copy policy-router image archive to vpn_cascade host
+  ansible.builtin.copy:
+    src: "{{ hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_build_artifact.archive }}"
+    dest: "{{ vpn_cascade_policy_router_remote_archive }}"
+    mode: "0600"
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_build_policy_router_image | bool
+    - not ansible_check_mode
+
+- name: Load policy-router image archive on vpn_cascade host
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker load -i "$ARCHIVE" >/dev/null
+    actual="$(docker image inspect --format '{{ "{{" }}.Id{{ "}}" }}' "$IMAGE_REF")"
+    if [ "$actual" != "$EXPECTED_IMAGE_ID" ]; then
+      echo "policy-router image ID mismatch for $IMAGE_REF: expected $EXPECTED_IMAGE_ID, got $actual" >&2
+      exit 1
+    fi
+    docker run --rm --network none "$IMAGE_REF" sh -c 'ip -V >/dev/null && iptables --version >/dev/null'
+  args:
+    executable: /bin/bash
+  environment:
+    ARCHIVE: "{{ vpn_cascade_policy_router_remote_archive }}"
+    IMAGE_REF: "{{ hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_build_artifact.image_ref }}"
+    EXPECTED_IMAGE_ID: "{{ hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_build_artifact.image_id }}"
+  changed_when: true
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_build_policy_router_image | bool
+    - not ansible_check_mode
+
+- name: Remove staged policy-router image archive from vpn_cascade host
+  ansible.builtin.file:
+    path: "{{ vpn_cascade_policy_router_remote_archive }}"
+    state: absent
+  when:
+    - vpn_cascade_build_policy_router_image | bool
+    - vpn_cascade_policy_router_remote_archive is defined
+    - not ansible_check_mode
+
+- name: Remove policy-router image archive from orchestration controller
+  ansible.builtin.file:
+    path: "{{ hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_build_artifact.archive }}"
+    state: absent
+  delegate_to: localhost
+  become: true
+  run_once: true
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_build_policy_router_image | bool
     - not ansible_check_mode
 
 - name: Inspect existing VPN policy Docker network
@@ -473,6 +629,27 @@
   changed_when: false
   register: vpn_cascade_policy_container_ready
   until: vpn_cascade_policy_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify running vpn_cascade policy-router sidecar namespace
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cascade_pid="$(docker inspect -f '{{ "{{" }}.State.Pid{{ "}}" }}' "$CASCADE_CONTAINER")"
+    router_pid="$(docker inspect -f '{{ "{{" }}.State.Pid{{ "}}" }}' "$POLICY_ROUTER_CONTAINER")"
+    test -n "$cascade_pid" -a -n "$router_pid"
+    test "$(readlink "/proc/$cascade_pid/ns/net")" = "$(readlink "/proc/$router_pid/ns/net")"
+  args:
+    executable: /bin/bash
+  environment:
+    CASCADE_CONTAINER: "{{ vpn_cascade_container_name }}"
+    POLICY_ROUTER_CONTAINER: "{{ vpn_cascade_policy_router_container_name }}"
+  changed_when: false
+  register: vpn_cascade_policy_router_ready
+  until: vpn_cascade_policy_router_ready.rc == 0
   retries: 15
   delay: 2
   when:
@@ -916,25 +1093,91 @@
     - vpn_cascade_state == 'present'
     - not ansible_check_mode
 
+- name: Check vpn_cascade policy TAP interface before bridge restart
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker exec -u 0 -e TAP_IFACE="$TAP_IFACE" "$CONTAINER" sh -c 'ip link show "$TAP_IFACE" >/dev/null 2>&1'
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_policy_router_container_name }}"
+    TAP_IFACE: "{{ vpn_cascade_policy_tap_interface }}"
+  register: vpn_cascade_policy_tap_check
+  changed_when: false
+  failed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Restart vpn_cascade after policy bridge creation
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ vpn_cascade_compose_file }}" up -d --force-recreate softether-cascade policy-router
+    chdir: "{{ vpn_cascade_root_dir }}"
+  changed_when: true
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+    - vpn_cascade_policy_bridge.changed | default(false) or (vpn_cascade_policy_tap_check.rc | default(0)) != 0
+
+- name: Wait for vpn_cascade management TCP listener after policy bridge restart
+  ansible.builtin.wait_for:
+    host: "127.0.0.1"
+    port: "{{ vpn_cascade_host_management_port }}"
+    timeout: "{{ vpn_cascade_startup_timeout_seconds }}"
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+    - vpn_cascade_policy_bridge.changed | default(false) or (vpn_cascade_policy_tap_check.rc | default(0)) != 0
+
+- name: Verify vpn_cascade policy TAP interface exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker exec -u 0 -e TAP_IFACE="$TAP_IFACE" "$CONTAINER" sh -c 'ip link show "$TAP_IFACE" >/dev/null'
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_policy_router_container_name }}"
+    TAP_IFACE: "{{ vpn_cascade_policy_tap_interface }}"
+  changed_when: false
+  register: vpn_cascade_policy_tap_ready
+  until: vpn_cascade_policy_tap_ready.rc == 0
+  retries: 30
+  delay: 2
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
 - name: Configure vpn_cascade policy router interface
   ansible.builtin.shell: |
     set -euo pipefail
-    docker exec "$CONTAINER" sh -c '
+    docker exec -u 0 -e TAP_IFACE="$TAP_IFACE" -e ROUTER_IP="$ROUTER_IP" "$CONTAINER" sh -c '
       set -eu
       ip link set "$TAP_IFACE" up
       ip addr replace "$ROUTER_IP/24" dev "$TAP_IFACE"
-      sysctl -w net.ipv4.ip_forward=1 >/dev/null
     '
   args:
     executable: /bin/bash
   environment:
-    CONTAINER: "{{ vpn_cascade_container_name }}"
+    CONTAINER: "{{ vpn_cascade_policy_router_container_name }}"
     TAP_IFACE: "{{ vpn_cascade_policy_tap_interface }}"
     ROUTER_IP: "{{ vpn_cascade_policy_router_ipv4 }}"
   changed_when: false
   when:
     - vpn_cascade_state == 'present'
     - vpn_cascade_policy_router_ipv4 | length > 0
+    - not ansible_check_mode
+
+- name: Verify vpn_cascade policy-router dataplane tools
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker exec -u 0 "$CONTAINER" sh -c 'ip route >/dev/null && iptables -t nat -S POSTROUTING >/dev/null'
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_policy_router_container_name }}"
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
     - not ansible_check_mode
 
 - name: Check egress-side vpn_cascade user

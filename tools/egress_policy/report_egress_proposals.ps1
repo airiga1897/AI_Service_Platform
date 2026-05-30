@@ -43,6 +43,7 @@ function Get-HumanType($Proposal) {
         "policy_profile_candidate" { return "Новый target вне policy" }
         "fallback_available" { return "Fallback доступен" }
         "fallback_unavailable" { return "Fallback недоступен" }
+        "related_target_missing" { return "Связанный target не в policy" }
         "probe_error" { return "Ошибка проверки" }
         "unstable_probe" { return "Нестабильная проверка" }
         "route_review" { return "Нужно проверить вручную" }
@@ -95,6 +96,7 @@ function Convert-ProposalToRow($Proposal) {
         country = if ($path) { $path.effective_country } else { $null }
         http = if ($path) { $path.http_status } else { $null }
         response_ms = if ($path) { $path.response_ms } else { $null }
+        source = $Proposal.source
         profile = $Proposal.profile
         internal_type = $Proposal.type
         created_at_utc = $Proposal.created_at_utc
@@ -135,6 +137,7 @@ if ($Detail) {
         Write-Host "Статус:  $(Get-HumanStatus $proposal.status)"
         Write-Host "Тип:     $(Get-HumanType $proposal)"
         Write-Host "Профиль: $($proposal.profile)"
+        Write-Host "Source:  $($proposal.source)"
         Write-Host "Цель:    $($proposal.target.protocol)://$($proposal.target.value):$($proposal.target.port)"
         if ($proposal.recommended_path) {
             $path = $proposal.recommended_path

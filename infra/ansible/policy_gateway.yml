@@ -1,0 +1,10 @@
+---
+- name: Policy gateway service rollout
+  hosts: policy_gateways
+  become: true
+  gather_facts: false
+  vars:
+    policy_gateway_state: present
+    policy_gateway_purge_data: false
+  roles:
+    - policy_gateway

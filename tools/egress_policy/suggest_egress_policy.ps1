@@ -69,6 +69,7 @@ function Get-HumanType($Type) {
         "policy_profile_candidate" { return "Новый target вне policy" }
         "fallback_available" { return "Fallback доступен" }
         "fallback_unavailable" { return "Fallback недоступен" }
+        "related_target_missing" { return "Связанный target не в policy" }
         "probe_error" { return "Ошибка проверки" }
         "unstable_probe" { return "Нестабильная проверка" }
         "route_review" { return "Нужно проверить вручную" }
@@ -82,15 +83,73 @@ function Get-TargetKey($Target) {
     "$($Target.protocol)|$($Target.value)|$($Target.port)|$(if ($Target.path) { $Target.path } else { '/' })"
 }
 
+function Get-NormalizedTargetKey($Protocol, $Value, $Port, $Path) {
+    "$Protocol|$Value|$Port|$(if ($Path) { $Path } else { '/' })"
+}
+
+function Get-DefaultPort($Protocol, $Port) {
+    if ($Port -and [int]$Port -gt 0) {
+        return [int]$Port
+    }
+    switch ([string]$Protocol) {
+        "https" { return 443 }
+        "http" { return 80 }
+        "icmp" { return 0 }
+        default { return [int]$Port }
+    }
+}
+
+function Get-Observation($Record) {
+    if ($Record.target_status) {
+        return $Record.target_status
+    }
+    return $Record.observation
+}
+
+function Get-RelatedTargetFromRedirect($Record) {
+    $target = $Record.target
+    if (-not $target -or [string]$target.protocol -notin @("http", "https")) {
+        return $null
+    }
+    $obs = Get-Observation $Record
+    if (-not $obs -or [string]::IsNullOrWhiteSpace([string]$obs.http_final_url)) {
+        return $null
+    }
+    try {
+        $uri = [System.Uri]::new([string]$obs.http_final_url)
+    } catch {
+        return $null
+    }
+    if ([string]::IsNullOrWhiteSpace($uri.Host) -or $uri.Host -eq [string]$target.value) {
+        return $null
+    }
+    $protocol = $uri.Scheme.ToLowerInvariant()
+    if ($protocol -notin @("http", "https")) {
+        return $null
+    }
+    $port = if ($uri.IsDefaultPort) { Get-DefaultPort $protocol 0 } else { [int]$uri.Port }
+    return [pscustomobject]@{
+        type = "domain"
+        value = $uri.Host
+        protocol = $protocol
+        port = $port
+        path = "/"
+        original_target = $target
+        final_url = [string]$obs.http_final_url
+    }
+}
+
 function Get-Recommendation($Record) {
     $mode = Get-RecordPathMode $Record
-    $httpStatus = if ($Record.target_status) { $Record.target_status.http_status } else { $Record.observation.http_status }
+    $obs = if ($Record.target_status) { $Record.target_status } else { $Record.observation }
+    $protocol = if ($Record.target -and $Record.target.protocol) { [string]$Record.target.protocol } else { "" }
+    $httpStatus = if ($obs) { $obs.http_status } else { $null }
     $desired = if ($Record.behavior) { [string]$Record.behavior } else { "fallback_on_ingress_egress_failure" }
 
     if ($mode -eq "cascade") {
         $transportOk = $Record.cascade_transport_status -and $Record.cascade_transport_status.reachable
         $connectionOk = $Record.cascade_connection_status -and $Record.cascade_connection_status.online
-        if (-not $transportOk -or -not $connectionOk) {
+        if (-not $transportOk -and -not $connectionOk) {
             return "fallback_unavailable"
         }
     }
@@ -102,7 +161,18 @@ function Get-Recommendation($Record) {
         return "probe_error"
     }
 
-    if ($httpStatus -ge 200 -and $httpStatus -lt 400) {
+    $targetOk = $false
+    if ($protocol -in @("http", "https")) {
+        $targetOk = ($null -ne $httpStatus -and $httpStatus -ge 200 -and $httpStatus -lt 400)
+    } elseif ($protocol -eq "tcp") {
+        $targetOk = ($obs -and $null -ne $obs.tcp_connect_ms)
+    } elseif ($protocol -eq "icmp") {
+        $targetOk = ($obs -and $null -ne $obs.icmp_ms)
+    } elseif ($protocol -eq "udp") {
+        return "route_review"
+    }
+
+    if ($targetOk) {
         if ($desired -eq "require_non_ru_egress") {
             $country = if ($Record.effective_country) { [string]$Record.effective_country } else { [string]$Record.observation.external_country }
             if ($country -eq "RU") {
@@ -136,6 +206,9 @@ function Get-ResponseMs($Record) {
     if ($null -ne $obs.tcp_connect_ms) {
         return $obs.tcp_connect_ms
     }
+    if ($null -ne $obs.icmp_ms) {
+        return $obs.icmp_ms
+    }
     return $null
 }
 
@@ -149,6 +222,8 @@ function ConvertTo-EvidenceObservation($Record) {
         effective_country = $Record.effective_country
         effective_ip = $Record.effective_ip
         http_status = if ($obs) { $obs.http_status } else { $null }
+        tcp_connect_ms = if ($obs) { $obs.tcp_connect_ms } else { $null }
+        icmp_ms = if ($obs) { $obs.icmp_ms } else { $null }
         response_ms = Get-ResponseMs $Record
         recommendation = Get-Recommendation $Record
         attempts_used = $Record.attempts_used
@@ -163,8 +238,12 @@ function ConvertTo-RecommendedPath($Record) {
         ingress_alias = if ($Record.ingress_alias) { $Record.ingress_alias } else { $Record.candidate_alias }
         egress_alias = if ($Record.egress_alias) { $Record.egress_alias } else { $Record.candidate_alias }
         cascade_connection = $Record.cascade_connection
+        cascade_connections = if ($Record.cascade_connections) { @($Record.cascade_connections) } else { @($Record.cascade_connection | Where-Object { $_ }) }
+        cascade_path = if ($Record.cascade_path) { @($Record.cascade_path) } else { @() }
         effective_country = $Record.effective_country
         http_status = if ($obs) { $obs.http_status } else { $null }
+        tcp_connect_ms = if ($obs) { $obs.tcp_connect_ms } else { $null }
+        icmp_ms = if ($obs) { $obs.icmp_ms } else { $null }
         response_ms = Get-ResponseMs $Record
     }
 }
@@ -192,11 +271,11 @@ function Get-ProfileBehavior($Profile) {
     return ""
 }
 
-function Get-ProfileFallbackLinks($Profile) {
-    if (-not $Profile -or $null -eq $Profile.candidate_fallback_links) {
+function Get-ProfileFallbackEgressAliases($Profile) {
+    if (-not $Profile -or $null -eq $Profile.candidate_fallback_egress_aliases) {
         return @()
     }
-    return @($Profile.candidate_fallback_links | Where-Object { $_ })
+    return @($Profile.candidate_fallback_egress_aliases | Where-Object { $_ })
 }
 
 function Get-RecordHttpStatus($Record) {
@@ -235,6 +314,12 @@ function Test-DirectRecordFailedAfterAttempts($Record) {
         }
         return ($Record.status -eq "probe_error" -or $attemptsUsed -ge $attemptsTotal)
     }
+    if ($target.protocol -eq "icmp") {
+        if ($obs -and $null -ne $obs.icmp_ms) {
+            return $false
+        }
+        return ($Record.status -eq "probe_error" -or $attemptsUsed -ge $attemptsTotal)
+    }
 
     return $false
 }
@@ -247,8 +332,8 @@ function Test-DeterministicFallbackAutoAccept($Profile, $Records, $BestRecord, [
         return $false
     }
 
-    $configuredFallbackLinks = @(Get-ProfileFallbackLinks $Profile)
-    if ($configuredFallbackLinks.Count -ne 1) {
+    $configuredFallbackEgressAliases = @(Get-ProfileFallbackEgressAliases $Profile)
+    if ($configuredFallbackEgressAliases.Count -eq 0) {
         return $false
     }
 
@@ -270,10 +355,10 @@ function Test-DeterministicFallbackAutoAccept($Profile, $Records, $BestRecord, [
     if ($usableCascadeRecords.Count -ne 1) {
         return $false
     }
-    if ([string]$usableCascadeRecords[0].cascade_connection -ne [string]$configuredFallbackLinks[0]) {
+    if ($configuredFallbackEgressAliases -notcontains [string]$usableCascadeRecords[0].egress_alias) {
         return $false
     }
-    if (-not $BestRecord -or [string]$BestRecord.cascade_connection -ne [string]$configuredFallbackLinks[0]) {
+    if (-not $BestRecord -or [string]$BestRecord.egress_alias -ne [string]$usableCascadeRecords[0].egress_alias) {
         return $false
     }
 
@@ -326,6 +411,7 @@ function Get-ProposalReason($Type) {
         "policy_profile_candidate" { return "Observed target is not covered by the active policy registry; operator should decide whether to add it to an existing grouped profile or create a new profile." }
         "fallback_available" { return "Ingress-local egress did not produce a good stable result, and a cascade fallback candidate is available for operator review." }
         "fallback_unavailable" { return "Ingress-local egress did not produce a good stable result, and no usable cascade fallback was confirmed in the selected probe history." }
+        "related_target_missing" { return "HTTP probe followed a redirect to a related host that is not covered by this profile. Add the host explicitly if it should share this fallback intent." }
         "probe_error" { return "Probe failed without a usable successful observation; operator should review the target, network path, or retry later." }
         "unstable_probe" { return "Probe eventually found a usable path, but retries or transient errors were observed; operator should decide whether this is acceptable." }
         "route_review" { return "Probe result was inconclusive; operator should review the evidence before approving any future selective fallback routing." }
@@ -339,6 +425,7 @@ function Get-HumanSummary($Type) {
         "policy_profile_candidate" { return "Цель не покрыта текущей policy. Решите, добавлять ли ее в существующий профиль или создать отдельный." }
         "fallback_available" { return "Локальный egress не дал хорошего результата, но fallback через cascade доступен." }
         "fallback_unavailable" { return "Локальный egress не дал хорошего результата, и рабочий fallback не найден." }
+        "related_target_missing" { return "Проверка увидела редирект на связанный host, которого нет в профиле. Добавьте его явно, если он должен идти тем же fallback." }
         "probe_error" { return "Проверка не дала успешного результата. Лучше повторить или разобрать ошибку." }
         "unstable_probe" { return "Маршрут сработал только после повторов или с ошибками. Нужна оценка стабильности." }
         "route_review" { return "Результат неоднозначный. Нужен ручной просмотр evidence." }
@@ -370,7 +457,8 @@ function New-Proposal($Type, $Profile, $Target, $Records, $BestRecord, $HistoryF
         status = $status
         human_status = Get-HumanStatus $status
         created_at_utc = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
-        source = "suggest_egress_policy.ps1"
+        source = "deterministic_probe"
+        generator = "suggest_egress_policy.ps1"
         profile = $Profile
         target = $Target
         recommended_path = if ($BestRecord) { ConvertTo-RecommendedPath $BestRecord } else { $null }
@@ -408,11 +496,16 @@ if (-not (Test-Path -LiteralPath $PolicyFile -PathType Leaf)) {
 $policy = Read-JsonFile $PolicyFile "egress policy registry"
 $knownProfiles = @{}
 $knownTargets = @{}
+$knownTargetsByProfile = @{}
 foreach ($profile in @($policy.profiles)) {
     $knownProfiles[[string]$profile.name] = $profile
+    $profileTargetKeys = @{}
     foreach ($target in @($profile.targets)) {
-        $knownTargets[(Get-TargetKey $target)] = $true
+        $key = Get-TargetKey $target
+        $knownTargets[$key] = $true
+        $profileTargetKeys[$key] = $true
     }
+    $knownTargetsByProfile[[string]$profile.name] = $profileTargetKeys
 }
 
 if ($knownTargets.Count -eq 0) {
@@ -469,7 +562,31 @@ foreach ($groupKey in $recordsByGroup.Keys) {
             $proposalIds[$proposal.id] = $true
             [void]$proposals.Add($proposal)
         }
-        continue
+    }
+
+    $profileTargetKeys = if ($knownTargetsByProfile.ContainsKey([string]$first.profile)) { $knownTargetsByProfile[[string]$first.profile] } else { @{} }
+    foreach ($record in $records) {
+        $relatedTarget = Get-RelatedTargetFromRedirect $record
+        if (-not $relatedTarget) {
+            continue
+        }
+        $relatedKey = Get-NormalizedTargetKey $relatedTarget.protocol $relatedTarget.value $relatedTarget.port $relatedTarget.path
+        if ($profileTargetKeys.ContainsKey($relatedKey)) {
+            continue
+        }
+        $proposal = New-Proposal "related_target_missing" $first.profile ([pscustomobject]@{
+            type = $relatedTarget.type
+            value = $relatedTarget.value
+            protocol = $relatedTarget.protocol
+            port = $relatedTarget.port
+            path = $relatedTarget.path
+        }) $records $record $first.source_history_file $false
+        $proposal.reason = "HTTP probe for $($first.target.value) followed a redirect to $($relatedTarget.final_url), but $($relatedTarget.value) is not an explicit target in profile $($first.profile)."
+        $proposal.human_summary = "Добавьте $($relatedTarget.value) в targets профиля $($first.profile), если этот host должен использовать тот же fallback."
+        if (-not $proposalIds.ContainsKey($proposal.id)) {
+            $proposalIds[$proposal.id] = $true
+            [void]$proposals.Add($proposal)
+        }
     }
 }
 

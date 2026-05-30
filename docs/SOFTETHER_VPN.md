@@ -272,7 +272,9 @@ The VPN stack uses separate Docker networks for separate traffic planes:
 - `ai_service_edge` - public ingress plane. `edge-haproxy` reaches
   `softether-edge` here.
 - `ai_service_vpn_policy` - internal per-node policy dataplane. `softether-edge`
-  and `softether-cascade` share this network for selected traffic handoff.
+  and `policy-gateway` share this network for selected traffic handoff.
+  `policy-gateway` has a first-class IP from `operator/networks.csv`
+  (`policy_gateway_ip`, normally `.4` in the policy subnet).
 - `ai_service_cascade` - cascade service network. `softether-cascade` keeps its
   own transport runtime separate from user VPN ingress.
 
@@ -288,21 +290,69 @@ the policy dataplane prevents cascade/routing experiments from becoming a public
 edge blast-radius problem.
 
 Selective fallback is L3 routed, not proxied. HAProxy and nginx do not carry VPN
-fallback dataplane traffic; they remain public edge/web infrastructure. The
-fallback path is:
+fallback dataplane traffic; they remain public edge/web infrastructure. Production
+SoftEther `vpn_edge` and `vpn_cascade` stay transport services; Linux route/NAT
+policy belongs to the separate `policy-gateway` container.
+
+Ordinary VPN traffic does not enter the cascade policy path:
 
 ```text
-VPN client -> vpn_edge(vpsN)
+VPN client
+  -> softether-edge SecureNAT
+  -> default route
+  -> ingress VPS internet
+```
+
+Selected fallback traffic is chosen only by exact `/32` routes inside
+`softether-edge`:
+
+```text
+VPN client
+  -> softether-edge selected /32 route
   -> ai_service_vpn_policy 172.22.X.0/24
-  -> vpn_cascade(vpsN)
-  -> CascadeLab routed/tunnel segment
-  -> vpn_cascade(egress VPS)
-  -> egress NAT
+  -> ingress policy-gateway route/SNAT
+  -> ingress softether-cascade
+  -> tap_vpnpolicy / CascadeLab transport
+  -> egress softether-cascade final NAT
   -> target
 ```
 
 Only approved targets from operator policy may be routed this way. Default VPN
-traffic continues to use ingress-local egress.
+traffic continues to use ingress-local egress during the canary stage. After the
+canary is green, the default route inside `softether-edge` may be moved to
+`policy-gateway`; then `policy-gateway` becomes the ordinary VPN egress router
+and only selected exact target routes continue through cascade.
+
+Ownership boundaries are strict:
+
+- `softether-edge`: VPN ingress, SecureNAT, selected exact `/32` routes, and
+  optionally the default route to `policy-gateway` after canary success.
+- `softether-cascade`: stock SoftEther hub/cascade service plus runtime exact
+  selected routes/NAT for the hybrid canary path.
+- `policy-gateway`: ingress Linux route/NAT policy, counters, verification,
+  rollback, and future ordinary default egress.
+- `vpn_server.config`: SoftEther state only; selective fallback routes/NAT are
+  never written there.
+
+The gateway image is intentionally small. The tracked build recipe is
+`infra/docker/policy-gateway/Dockerfile` and includes only `sh`, `iproute2`,
+`iptables`, and `nftables` for v1. Normal rollout treats this image as an
+internal artifact of the `policy_gateway` role: the operator uploads the service
+bundle, and the active orchestration node builds the image once, saves it to an
+archive, loads that same archive onto every target policy gateway VPS, verifies
+matching Docker image IDs, and renders compose with the generated tag.
+
+```powershell
+.\tools\services\service_remote.ps1 policy_gateway apply `
+  -Limit vps5+vps4+vps3 `
+  -DetachedRemoteJob
+```
+
+This avoids requiring Docker Desktop on the operator workstation. The legacy
+`tools/services/publish_policy_router_image.ps1` helper remains only as a manual
+escape hatch for local build/save/load. A future GHCR path should replace only
+the image delivery step by passing a digest reference through
+`-PolicyRouterImageRef`.
 
 ### Cascade Roles Before Routing
 
@@ -411,8 +461,9 @@ This file is local operator state, not a runtime route table. It may be empty
 when no active fallback policy is currently needed. New v1 profiles use
 `behavior: "fallback_on_ingress_egress_failure"`: probe ingress-local egress
 first and consider cascade only when the ingress-local path fails or degrades.
-Targets, domains, IP addresses, ingress aliases, and fallback link names live in
-this operator file, not in code.
+Targets, domains, IP addresses, protocols, ports, ingress aliases, and fallback
+egress aliases live in this operator file, not in code. Cascade link names are
+derived from `lab-cascade.json`.
 
 The canonical v1 profile shape is:
 
@@ -422,19 +473,23 @@ The canonical v1 profile shape is:
   "state": "probe",
   "behavior": "fallback_on_ingress_egress_failure",
   "candidate_ingress_aliases": ["vps5"],
-  "candidate_fallback_links": ["vps5-to-vps4"],
+  "candidate_fallback_egress_aliases": ["vps4"],
   "targets": [
-    { "type": "domain", "value": "example.org", "protocol": "https", "port": 443, "path": "/" }
+    { "type": "domain", "value": "example.org", "protocol": "https", "port": 443, "path": "/" },
+    { "type": "domain", "value": "example.org", "protocol": "tcp", "port": 443, "path": "/" },
+    { "type": "domain", "value": "example.org", "protocol": "udp", "port": 53, "path": "/" },
+    { "type": "ip", "value": "192.0.2.10", "protocol": "icmp", "port": 0, "path": "/" }
   ],
   "reason": "Why this fallback candidate should be checked.",
   "rollback": "How to disable this probe-only intent."
 }
 ```
 
-Do not use old `desired_region_behavior` or `candidate_egress_aliases` fields in
-new policy files. The v1 contract is explicit: `behavior`,
-`candidate_ingress_aliases`, and `candidate_fallback_links`. If strict country
-behavior is ever needed, use a separate future behavior such as
+Do not use old `desired_region_behavior`, `candidate_egress_aliases`, or
+`candidate_fallback_links` fields in new policy files. The v1 contract is
+explicit: `behavior`, `candidate_ingress_aliases`, and
+`candidate_fallback_egress_aliases`. If strict country behavior is ever needed,
+use a separate future behavior such as
 `require_non_ru_egress` instead of mixing it with fallback routing.
 
 A tracked, secret-free example is available at:
@@ -455,9 +510,10 @@ Create or replace a probe-only fallback profile without hand-editing JSON:
 ```powershell
 .\tools\egress_policy\set_egress_policy_profile.ps1 `
   -Name example_service_fallback `
-  -TargetValue example.org `
+  -TargetValue example.org,www.example.org `
+  -Protocol https `
   -IngressAlias vps5 `
-  -FallbackLink vps5-to-vps4 `
+  -FallbackEgressAlias vps4 `
   -Reason "Local ingress path is unreliable for this operator-defined target." `
   -Replace
 ```
@@ -465,6 +521,65 @@ Create or replace a probe-only fallback profile without hand-editing JSON:
 The command only edits `operator/egress_policy/profiles.json`. It does not probe
 remote nodes and does not change routes, NAT, firewall, HAProxy, SoftEther, or
 Docker state.
+
+Selective fallback apply assumes the post-SecureNAT edge source is `172.20.0.2`
+by default. If an edge deployment uses a different source, pass `-EdgeSourceIp`
+to `apply_selective_fallback_routes.ps1`.
+
+Targets stay explicit. The tools do not automatically add wildcard subdomains,
+redirect chains, or CDN networks. If an HTTP/HTTPS probe follows a redirect to a
+host that is not listed in the same profile, reports and proposals show
+`related_target_missing`; the operator then adds that host explicitly if it
+should share the same fallback intent.
+
+AI can contribute proposals as advisory evidence:
+
+```powershell
+.\tools\egress_policy\new_egress_ai_advisory_proposal.ps1 `
+  -TargetValue example.org `
+  -Protocol tcp `
+  -Port 443 `
+  -Summary "AI suggests reviewing this target based on observed failures."
+```
+
+AI advisory proposals are always `suggested` / `Требует решения`; they do not
+modify active profiles or runtime routes.
+
+When an accepted proposal is applied, `softether-edge` installs an exact
+resolved-target `/32` route toward the local cascade IP. The ingress
+`policy-router` installs a supporting return route to the edge source IP, an
+exact route through `tap_vpnpolicy`, and a scoped SNAT rule from the edge source
+IP to the ingress cascade router IP. The egress `policy-router` keeps a scoped
+final MASQUERADE/SNAT rule for the same target IP and protocol/port (or ICMP).
+This avoids broad "all HTTPS" routing and keeps the return path predictable.
+Applied target IPs and NAT comments are persisted as schema v2 state under
+`operator/egress_policy/applied_routes/` so rollback uses the exact state that
+was changed instead of resolving the domain again.
+
+Selective fallback apply is self-auditing. By default `apply` verifies the
+runtime state it just installed: edge exact `/32` route, ingress `policy-router`
+exact route through `tap_vpnpolicy`, ingress return route to the edge source IP,
+ingress SNAT rule and counters, egress `policy-router` return route, egress NAT
+rule and counters, and a network-namespace probe from `softether-edge` for
+protocols that can be checked generically. Use `verify` to repeat that check later, and
+`rollback` to remove only persisted exact route/NAT state:
+
+```powershell
+.\tools\egress_policy\apply_selective_fallback_routes.ps1 -Action plan -Id <proposal-id>
+.\tools\egress_policy\apply_selective_fallback_routes.ps1 -Action apply -Id <proposal-id>
+.\tools\egress_policy\apply_selective_fallback_routes.ps1 -Action verify -Id <proposal-id>
+.\tools\egress_policy\apply_selective_fallback_routes.ps1 -Action rollback -Id <proposal-id>
+.\tools\egress_policy\apply_selective_fallback_routes.ps1 -Action cleanup -Id <proposal-id>
+```
+
+`-SkipVerify` is available only as an operator escape hatch; normal canaries
+should let `apply` verify before they are considered accepted at runtime.
+`rollback` uses persisted schema v2 state. `cleanup` is a failed-canary escape
+path: it recomputes the selected proposal's current exact target IPs and removes
+matching edge routes plus `policy-router` route/NAT comments without touching
+SoftEther config. If a failed canary used a DNS IP that is no longer returned,
+pass it explicitly, for example
+`-Action cleanup -Id <proposal-id> -TargetIp 212.11.151.56`.
 
 Run a dry plan without touching remote nodes:
 
@@ -513,10 +628,13 @@ Check the future selective fallback dataplane shape without switching users:
 
 This read-only check uses the same operator policy and cascade links. For each
 selected profile it verifies that `softether-edge` and `softether-cascade` are
-attached to `ai_service_vpn_policy` on the ingress VPS, that the configured
-cascade transport is reachable, and that the final egress VPS can probe the
-target. It does not create routes, NAT, firewall rules, HAProxy routes, Docker
-networks, or SoftEther config.
+attached to `ai_service_vpn_policy` on the ingress VPS, that `policy-router`
+exists and shares the `softether-cascade` network namespace, that
+`tap_vpnpolicy` exists with the expected router IP, that ingress and egress
+`policy-router` containers can read NAT POSTROUTING rules and counters, that the
+configured cascade transport is reachable, and that the final egress VPS can
+probe the target. It does not create routes, NAT, firewall rules, HAProxy routes,
+Docker networks, or SoftEther config.
 
 When there are no active egress policy profiles, probe commands intentionally
 do nothing. To verify the cascade transport itself, use the dedicated read-only
@@ -642,10 +760,11 @@ the encrypted VPN client's destination domains.
 
 #### Isolated Transit Segments
 
-Some non-RU to non-RU fallback profiles may need a transit path through central
-nodes such as `vps5` and `vps3` when the initial ingress VPS cannot reach the
-target egress directly. That traffic must be modeled as a directed L3 routed
-profile, not as another shared L2 cascade link.
+Some fallback profiles may need a transit path through central nodes such as
+`vps5` and `vps3` when the initial ingress VPS cannot reach the target egress
+directly. The rollout model is a directed vector graph from `lab-cascade.json`:
+v1 apply supports direct `ingress -> egress`, and the next step may distribute
+selected exact `/32` routes across any explicit directed acyclic path.
 
 For example:
 
@@ -657,10 +776,9 @@ nat: egress_non_ru only
 trigger: direct_path_unavailable
 ```
 
-The `vps5 -> vps3` hop is allowed only as an isolated transit segment for the
-named profile. It must not be bridged into the shared `CascadeLab` fabric, must
-not carry unmarked/default traffic, and must not perform NAT. NAT belongs only
-on the final `egress_alias`.
+The `vps5 -> vps3` hop is allowed only as an explicit transit hop for the named
+profile. It must not carry default/any-to-any traffic, and transit nodes must not
+perform final NAT. NAT belongs only on the final `egress_alias`.
 
 Every routed profile path must be acyclic. The same alias must not appear twice
 in one path, and an active reverse profile for the same traffic class must not

@@ -16,6 +16,10 @@ param(
 
     [string]$Limit,
 
+    [string]$PolicyRouterImageRef = "",
+
+    [switch]$BuildPolicyRouterImage,
+
     [switch]$Check,
 
     [switch]$ConfirmPurge
@@ -24,6 +28,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ExpectedHeader = "current_alias,endpoint,connection,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
+$ExpectedNetworksHeader = "alias,policy_subnet,edge_ip,cascade_ip,cascade_router_ip,policy_gateway_ip"
 
 function Fail($Message) {
     Write-Error $Message
@@ -50,6 +55,13 @@ function Split-LimitList($Value) {
     return @($Value -split "[:+,]" | Where-Object { $_ })
 }
 
+function ConvertTo-AnsibleLimit($Value) {
+    if (-not $Value) {
+        return ""
+    }
+    return ((Split-LimitList $Value) -join ":")
+}
+
 function Require-Command($Name) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
         Fail "$Name not found in PATH"
@@ -68,11 +80,12 @@ function Get-ServicePlaybook($Name) {
         "edge_haproxy" { return "infra\ansible\edge_haproxy.yml" }
         "vpn_edge" { return "infra\ansible\vpn.yml" }
         "vpn_cascade" { return "infra\ansible\vpn_cascade.yml" }
+        "policy_gateway" { return "infra\ansible\policy_gateway.yml" }
         default { Fail "No default playbook for service: $Name" }
     }
 }
 
-function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false") {
+function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false", $PolicyRouterImageRef = "", $BuildPolicyRouterImage = $false) {
     switch ($Name) {
         "edge_haproxy" {
             return @("-e", "edge_haproxy_state=$State", "-e", "edge_haproxy_purge_data=$PurgeData")
@@ -81,10 +94,20 @@ function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false"
             return @("-e", "vpn_state=$State", "-e", "vpn_purge_data=$PurgeData", "-e", "vpn_reseed_config=$ReseedConfig")
         }
         "vpn_cascade" {
-            return @("-e", "vpn_cascade_state=$State", "-e", "vpn_cascade_purge_data=$PurgeData", "-e", "vpn_cascade_reseed_config=$ReseedConfig")
+            $vars = @("-e", "vpn_cascade_state=$State", "-e", "vpn_cascade_purge_data=$PurgeData", "-e", "vpn_cascade_reseed_config=$ReseedConfig")
+            if ($PolicyRouterImageRef) {
+                $vars += @("-e", "vpn_cascade_policy_router_image=$PolicyRouterImageRef")
+            }
+            if ($BuildPolicyRouterImage) {
+                $vars += @("-e", "vpn_cascade_build_policy_router_image=true")
+            }
+            return $vars
+        }
+        "policy_gateway" {
+            return @("-e", "policy_gateway_state=$State", "-e", "policy_gateway_purge_data=$PurgeData")
         }
         default {
-            Fail "Unsupported service '$Name'. Supported now: edge_haproxy, vpn_edge, vpn_cascade."
+            Fail "Unsupported service '$Name'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway."
         }
     }
 }
@@ -92,8 +115,17 @@ function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false"
 if ($Service -eq "vpn") {
     Fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 }
-if ($Service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade")) {
-    Fail "Unsupported service '$Service'. Supported now: edge_haproxy, vpn_edge, vpn_cascade."
+if ($Service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway")) {
+    Fail "Unsupported service '$Service'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway."
+}
+if ($PolicyRouterImageRef -and $Service -ne "vpn_cascade") {
+    Fail "-PolicyRouterImageRef is supported only for service vpn_cascade"
+}
+if ($BuildPolicyRouterImage -and $Service -ne "vpn_cascade") {
+    Fail "-BuildPolicyRouterImage is supported only for service vpn_cascade"
+}
+if ($BuildPolicyRouterImage -and $PolicyRouterImageRef) {
+    Fail "-BuildPolicyRouterImage and -PolicyRouterImageRef are mutually exclusive"
 }
 
 Require-File $NodesFile "NodesFile"
@@ -106,6 +138,14 @@ if ($firstLine -ne $ExpectedHeader) {
 $stateFirstLine = Get-Content -LiteralPath $StateFile -TotalCount 1
 if ($stateFirstLine -ne $ExpectedStateHeader) {
     Fail "state.csv header must be exactly: $ExpectedStateHeader"
+}
+if ($Service -in @("vpn_edge", "vpn_cascade", "policy_gateway")) {
+    $networksFile = Join-Path (Split-Path -Parent $StateFile) "networks.csv"
+    Require-File $networksFile "NetworksFile"
+    $networksFirstLine = Get-Content -LiteralPath $networksFile -TotalCount 1
+    if ($networksFirstLine -ne $ExpectedNetworksHeader) {
+        Fail "networks.csv header must be exactly: $ExpectedNetworksHeader. Run sync_to_orchestration before $Service $Action."
+    }
 }
 
 $rows = Import-Csv -LiteralPath $NodesFile
@@ -211,10 +251,10 @@ $args = @(
     "-i", $Inventory,
     $Playbook
 )
-$args += Get-ServiceExtraVars $Service $serviceState $servicePurgeData $serviceReseedConfig
+$args += Get-ServiceExtraVars $Service $serviceState $servicePurgeData $serviceReseedConfig $PolicyRouterImageRef ([bool]$BuildPolicyRouterImage)
 
 if ($Limit) {
-    $args += @("--limit", $Limit)
+    $args += @("--limit", (ConvertTo-AnsibleLimit $Limit))
 } else {
     $args += @("--limit", $serviceRow.ansible_group)
 }

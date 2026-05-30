@@ -17,7 +17,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ExpectedNodesHeader = "current_alias,endpoint,connection,root_password"
-$ExpectedNetworksHeader = "alias,policy_subnet,edge_ip,cascade_ip,cascade_router_ip"
+$ExpectedNetworksHeader = "alias,policy_subnet,edge_ip,cascade_ip,cascade_router_ip,policy_gateway_ip"
+$PolicyGatewayContainer = "policy-gateway"
+$CascadeContainer = "softether-cascade"
+$TapInterface = "tap_vpnpolicy"
 
 function Fail($Message) {
     Write-Error $Message
@@ -61,7 +64,7 @@ function Get-OpenSshCommonArgs($KeyFile) {
     $args = @(
         "-i", $KeyFile,
         "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=10",
+        "-o", "ConnectTimeout=$TimeoutSeconds",
         "-o", "IdentitiesOnly=yes",
         "-o", "KbdInteractiveAuthentication=no",
         "-o", "PasswordAuthentication=no",
@@ -128,11 +131,11 @@ function Get-PolicyIngressAliases($Profile) {
     return @($Profile.candidate_ingress_aliases | Where-Object { $_ })
 }
 
-function Get-PolicyFallbackLinks($Profile) {
-    if ($null -eq $Profile.candidate_fallback_links) {
+function Get-PolicyFallbackEgressAliases($Profile) {
+    if ($null -eq $Profile.candidate_fallback_egress_aliases) {
         return @()
     }
-    return @($Profile.candidate_fallback_links | Where-Object { $_ })
+    return @($Profile.candidate_fallback_egress_aliases | Where-Object { $_ })
 }
 
 function Load-CascadeLinks($Path, $Nodes) {
@@ -178,6 +181,31 @@ function Load-CascadeLinks($Path, $Nodes) {
     return @($links.ToArray())
 }
 
+function Find-CascadePath($Links, $IngressAlias, $EgressAlias) {
+    if ($IngressAlias -eq $EgressAlias) {
+        return @()
+    }
+    $queue = New-Object System.Collections.ArrayList
+    [void]$queue.Add([pscustomobject]@{ alias = [string]$IngressAlias; path = @() })
+    $visited = @{ $IngressAlias = $true }
+    for ($i = 0; $i -lt $queue.Count; $i++) {
+        $item = $queue[$i]
+        foreach ($link in @($Links | Where-Object { $_.ingress_alias -eq $item.alias })) {
+            $nextAlias = [string]$link.egress_alias
+            if ($visited.ContainsKey($nextAlias)) {
+                continue
+            }
+            $nextPath = @($item.path) + @($link)
+            if ($nextAlias -eq $EgressAlias) {
+                return $nextPath
+            }
+            $visited[$nextAlias] = $true
+            [void]$queue.Add([pscustomobject]@{ alias = $nextAlias; path = $nextPath })
+        }
+    }
+    return @()
+}
+
 function Test-TargetFromEgress($AliasName, $Target) {
     $node = $nodes[$AliasName]
     $keyFile = Join-Path (Join-Path $OperatorDir $AliasName) "admin_key"
@@ -185,14 +213,32 @@ function Test-TargetFromEgress($AliasName, $Target) {
     $remote = "${SshUser}@$($node.endpoint)"
     $path = if ($Target.path) { [string]$Target.path } else { "/" }
     $python = @"
-import json, socket, ssl, sys, time, urllib.error, urllib.request
-target = json.loads(sys.argv[1])
+import base64, json, re, socket, ssl, subprocess, sys, time, urllib.error, urllib.request
+target = json.loads(base64.b64decode(sys.argv[1]).decode("utf-8"))
 timeout = float(sys.argv[2])
 host = target["value"]
-port = int(target["port"])
+port = int(target.get("port") or 0)
 protocol = target["protocol"]
 path = target.get("path") or "/"
-result = {"http_status": None, "tcp_connect_ms": None, "http_total_ms": None, "errors": []}
+result = {"http_status": None, "tcp_connect_ms": None, "http_total_ms": None, "icmp_ms": None, "errors": []}
+if protocol == "udp":
+    result["errors"].append({"stage": "udp", "message": "generic UDP readiness requires protocol-specific probe"})
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    raise SystemExit(0)
+if protocol == "icmp":
+    try:
+        start = time.monotonic()
+        proc = subprocess.run(["ping", "-c", "1", "-W", str(max(1, int(timeout))), host], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout + 1)
+        output = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        match = re.search(r"time[=<]([0-9.]+)\s*ms", output)
+        if proc.returncode == 0:
+            result["icmp_ms"] = round(float(match.group(1)), 2) if match else round((time.monotonic() - start) * 1000, 2)
+        else:
+            result["errors"].append({"stage": "icmp", "message": output.strip() or f"ping exited {proc.returncode}"})
+    except Exception as exc:
+        result["errors"].append({"stage": "icmp", "message": str(exc)})
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    raise SystemExit(0)
 try:
     start = time.monotonic()
     sock = socket.create_connection((host, port), timeout=timeout)
@@ -225,8 +271,8 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         path = $path
     } | ConvertTo-Json -Compress
     $scriptB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($python))
-    $payloadArg = Quote-BashArg $targetPayload
-    $command = "python3 -c $(Quote-BashArg "import base64,sys; exec(base64.b64decode('$scriptB64'))") $payloadArg $(Quote-BashArg ([string]$TimeoutSeconds))"
+    $payloadB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($targetPayload))
+    $command = "python3 -c $(Quote-BashArg "import base64,sys; exec(base64.b64decode('$scriptB64'))") $(Quote-BashArg $payloadB64) $(Quote-BashArg ([string]$TimeoutSeconds))"
     $result = Invoke-SshText $keyFile $remote $command
     if (-not $result.ok) {
         return [pscustomobject]@{ ok = $false; error = $result.output }
@@ -251,14 +297,141 @@ function Test-IngressPolicyNetwork($AliasName) {
     $result = Invoke-SshText $keyFile $remote $command
     $text = [string]$result.output
     $edgeExpected = [regex]::Escape([string]$network.edge_ip)
+    $gatewayExpected = [regex]::Escape([string]$network.policy_gateway_ip)
     $cascadeExpected = [regex]::Escape([string]$network.cascade_ip)
     return [pscustomobject]@{
         ok = $result.ok
         edge_attached = $result.ok -and $text -match "softether-edge" -and $text -match $edgeExpected
+        gateway_attached = $result.ok -and $text -match "policy-gateway" -and $text -match $gatewayExpected
         cascade_attached = $result.ok -and $text -match "softether-cascade" -and $text -match $cascadeExpected
         expected_edge_ip = $network.edge_ip
+        expected_gateway_ip = $network.policy_gateway_ip
         expected_cascade_ip = $network.cascade_ip
         error = if ($result.ok) { $null } else { $text }
+    }
+}
+
+function Test-PolicyGateway($AliasName) {
+    $node = $nodes[$AliasName]
+    $keyFile = Join-Path (Join-Path $OperatorDir $AliasName) "admin_key"
+    Require-File $keyFile "admin key for $AliasName"
+    $remote = "${SshUser}@$($node.endpoint)"
+    $network = $networkPlan[$AliasName]
+    if (-not $network) {
+        Fail "networks.csv has no row for alias: $AliasName"
+    }
+    $expectedGatewayIp = [string]$network.policy_gateway_ip
+    $gatewayContainerArg = Quote-BashArg $PolicyGatewayContainer
+    $gatewayIpCheckArg = Quote-BashArg "ip addr 2>/dev/null | grep -q '$expectedGatewayIp/'"
+    $ipForwardCheckArg = Quote-BashArg 'test "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" = 1'
+    $routeCheckArg = Quote-BashArg 'ip route >/dev/null 2>&1'
+    $natCheckArg = Quote-BashArg 'iptables -t nat -S POSTROUTING >/dev/null 2>&1 && iptables -t nat -L POSTROUTING -v -n -x >/dev/null 2>&1'
+    $probe = @"
+set +e
+gateway_pid=`$(sudo docker inspect -f '{{.State.Pid}}' $gatewayContainerArg 2>/dev/null)
+container_present=false
+gateway_ip_present=false
+ip_forward=false
+route_table_available=false
+nat_available=false
+if [ -n "`$gateway_pid" ]; then
+  container_present=true
+fi
+sudo docker exec -u 0 $gatewayContainerArg sh -c $gatewayIpCheckArg && gateway_ip_present=true
+sudo docker exec -u 0 $gatewayContainerArg sh -c $ipForwardCheckArg && ip_forward=true
+sudo docker exec -u 0 $gatewayContainerArg sh -c $routeCheckArg && route_table_available=true
+sudo docker exec -u 0 $gatewayContainerArg sh -c $natCheckArg && nat_available=true
+printf 'container_present=%s\ngateway_ip_present=%s\nip_forward=%s\nroute_table_available=%s\nnat_available=%s\n' "`$container_present" "`$gateway_ip_present" "`$ip_forward" "`$route_table_available" "`$nat_available"
+[ "`$container_present" = true ] && [ "`$gateway_ip_present" = true ] && [ "`$route_table_available" = true ] && [ "`$nat_available" = true ]
+"@
+    $command = "sh -c $(Quote-BashArg $probe)"
+    $result = Invoke-SshText $keyFile $remote $command
+    $flags = @{}
+    foreach ($line in @([string]$result.output -split "`n")) {
+        if ($line -match '^([^=]+)=(true|false)$') {
+            $flags[$Matches[1]] = [bool]::Parse($Matches[2])
+        }
+    }
+    return [pscustomobject]@{
+        ok = $result.ok
+        container_present = [bool]($flags.container_present)
+        gateway_ip_present = [bool]($flags.gateway_ip_present)
+        ip_forward = [bool]($flags.ip_forward)
+        route_table_available = [bool]($flags.route_table_available)
+        nat_available = [bool]($flags.nat_available)
+        container = $PolicyGatewayContainer
+        expected_gateway_ip = $expectedGatewayIp
+        error = if ($result.ok) { $null } else { $result.output }
+    }
+}
+
+function Test-PolicyGatewayNatCapability($AliasName) {
+    $node = $nodes[$AliasName]
+    $keyFile = Join-Path (Join-Path $OperatorDir $AliasName) "admin_key"
+    Require-File $keyFile "admin key for $AliasName"
+    $remote = "${SshUser}@$($node.endpoint)"
+    $command = "sudo docker exec -u 0 $(Quote-BashArg $PolicyGatewayContainer) sh -c $(Quote-BashArg "iptables -t nat -S POSTROUTING >/dev/null && iptables -t nat -L POSTROUTING -v -n -x >/dev/null")"
+    $result = Invoke-SshText $keyFile $remote $command
+    return [pscustomobject]@{
+        ok = $result.ok
+        postrouting_available = $result.ok
+        counters_available = $result.ok
+        error = if ($result.ok) { $null } else { $result.output }
+    }
+}
+
+function Test-CascadeDataplane($AliasName) {
+    $node = $nodes[$AliasName]
+    $keyFile = Join-Path (Join-Path $OperatorDir $AliasName) "admin_key"
+    Require-File $keyFile "admin key for $AliasName"
+    $remote = "${SshUser}@$($node.endpoint)"
+    $network = $networkPlan[$AliasName]
+    if (-not $network) {
+        Fail "networks.csv has no row for alias: $AliasName"
+    }
+    $expectedRouterIp = [string]$network.cascade_router_ip
+    $cascadeContainerArg = Quote-BashArg $CascadeContainer
+    $tapCheckArg = Quote-BashArg "ip link show '$TapInterface' >/dev/null 2>&1"
+    $routerIpCheckArg = Quote-BashArg "ip addr 2>/dev/null | grep -q '$expectedRouterIp/'"
+    $routeCheckArg = Quote-BashArg 'ip route >/dev/null 2>&1'
+    $natCheckArg = Quote-BashArg 'iptables -t nat -S POSTROUTING >/dev/null 2>&1 && iptables -t nat -L POSTROUTING -v -n -x >/dev/null 2>&1'
+    $probe = @"
+set +e
+container_present=false
+tap_present=false
+router_ip_present=false
+route_table_available=false
+nat_available=false
+pid=`$(sudo docker inspect -f '{{.State.Pid}}' $cascadeContainerArg 2>/dev/null)
+if [ -n "`$pid" ]; then
+  container_present=true
+fi
+sudo docker exec -u 0 $cascadeContainerArg sh -c $tapCheckArg && tap_present=true
+sudo docker exec -u 0 $cascadeContainerArg sh -c $routerIpCheckArg && router_ip_present=true
+sudo docker exec -u 0 $cascadeContainerArg sh -c $routeCheckArg && route_table_available=true
+sudo docker exec -u 0 $cascadeContainerArg sh -c $natCheckArg && nat_available=true
+printf 'container_present=%s\ntap_present=%s\nrouter_ip_present=%s\nroute_table_available=%s\nnat_available=%s\n' "`$container_present" "`$tap_present" "`$router_ip_present" "`$route_table_available" "`$nat_available"
+[ "`$container_present" = true ] && [ "`$tap_present" = true ] && [ "`$router_ip_present" = true ] && [ "`$route_table_available" = true ] && [ "`$nat_available" = true ]
+"@
+    $command = "sh -c $(Quote-BashArg $probe)"
+    $result = Invoke-SshText $keyFile $remote $command
+    $flags = @{}
+    foreach ($line in @([string]$result.output -split "`n")) {
+        if ($line -match '^([^=]+)=(true|false)$') {
+            $flags[$Matches[1]] = [bool]::Parse($Matches[2])
+        }
+    }
+    return [pscustomobject]@{
+        ok = $result.ok
+        container_present = [bool]($flags.container_present)
+        tap_present = [bool]($flags.tap_present)
+        router_ip_present = [bool]($flags.router_ip_present)
+        route_table_available = [bool]($flags.route_table_available)
+        nat_available = [bool]($flags.nat_available)
+        container = $CascadeContainer
+        interface = $TapInterface
+        expected_router_ip = $expectedRouterIp
+        error = if ($result.ok) { $null } else { $result.output }
     }
 }
 
@@ -297,19 +470,50 @@ foreach ($profile in $profiles) {
         Fail "profile $($profile.name) behavior is not supported by readiness check: $behavior"
     }
     $ingressAliases = @(Get-PolicyIngressAliases $profile | Where-Object { $aliasFilter.Count -eq 0 -or $aliasFilter -contains $_ })
-    $fallbackLinkNames = @(Get-PolicyFallbackLinks $profile)
+    $fallbackEgressAliases = @(Get-PolicyFallbackEgressAliases $profile)
+    if ($fallbackEgressAliases.Count -eq 0) {
+        Fail "profile $($profile.name) must include candidate_fallback_egress_aliases"
+    }
     foreach ($target in @($profile.targets)) {
-        foreach ($link in @($links | Where-Object {
-            $ingressAliases -contains $_.ingress_alias -and ($fallbackLinkNames.Count -eq 0 -or $fallbackLinkNames -contains $_.connection_name)
-        })) {
-            if ($DryRun) {
-                Write-Host "[dry-run] readiness $($profile.name): $($link.ingress_alias) edge->cascade -> $($link.connection_name) -> $($target.value)"
+        foreach ($ingressAlias in $ingressAliases) {
+            foreach ($egressAlias in $fallbackEgressAliases) {
+            $path = @(Find-CascadePath $links $ingressAlias $egressAlias)
+            if ($path.Count -eq 0) {
+                Write-Host "No cascade path for readiness $($profile.name): $ingressAlias -> $egressAlias"
                 continue
             }
-            $policyNetwork = Test-IngressPolicyNetwork $link.ingress_alias
-            $tcp = Test-CascadeTcp $link
-            $targetStatus = Test-TargetFromEgress $link.egress_alias $target
+            if ($DryRun) {
+                Write-Host "[dry-run] readiness $($profile.name): $ingressAlias edge->policy-gateway -> $($path.connection_name -join '->') -> $($target.value)"
+                continue
+            }
+            $policyNetwork = Test-IngressPolicyNetwork $ingressAlias
+            $ingressGateway = Test-PolicyGateway $ingressAlias
+            $ingressCascade = Test-CascadeDataplane $ingressAlias
+            $egressCascade = Test-CascadeDataplane $egressAlias
+            $ingressNat = Test-PolicyGatewayNatCapability $ingressAlias
+            $egressNat = [pscustomobject]@{
+                ok = $egressCascade.nat_available
+                postrouting_available = $egressCascade.nat_available
+                counters_available = $egressCascade.nat_available
+                error = $egressCascade.error
+            }
+            $tcpResults = @($path | ForEach-Object { Test-CascadeTcp $_ })
+            $tcp = [pscustomobject]@{
+                reachable = @($tcpResults | Where-Object { -not $_.reachable }).Count -eq 0
+                hops = $tcpResults
+            }
+            $targetStatus = Test-TargetFromEgress $egressAlias $target
             $httpStatus = if ($targetStatus.ok -and $targetStatus.result) { $targetStatus.result.http_status } else { $null }
+            $targetOk = $false
+            if ($targetStatus.ok -and $targetStatus.result) {
+                if ($target.protocol -in @("http", "https")) {
+                    $targetOk = ($null -ne $targetStatus.result.http_status -and $targetStatus.result.http_status -ge 200 -and $targetStatus.result.http_status -lt 400)
+                } elseif ($target.protocol -eq "tcp") {
+                    $targetOk = ($null -ne $targetStatus.result.tcp_connect_ms)
+                } elseif ($target.protocol -eq "icmp") {
+                    $targetOk = ($null -ne $targetStatus.result.icmp_ms)
+                }
+            }
             $record = [ordered]@{
                 schema_version = 1
                 run_id = $runId
@@ -317,18 +521,26 @@ foreach ($profile in $profiles) {
                 path_mode = "dataplane_readiness"
                 profile = $profile.name
                 behavior = $behavior
-                ingress_alias = $link.ingress_alias
-                egress_alias = $link.egress_alias
-                cascade_connection = $link.connection_name
+                ingress_alias = $ingressAlias
+                egress_alias = $egressAlias
+                cascade_connection = ($path.connection_name -join "->")
+                cascade_connections = @($path.connection_name)
+                cascade_path = @($path | ForEach-Object { [pscustomobject]@{ connection = $_.connection_name; ingress_alias = $_.ingress_alias; egress_alias = $_.egress_alias } })
                 target = $target
                 policy_network_status = $policyNetwork
+                ingress_gateway_status = $ingressGateway
+                ingress_cascade_status = $ingressCascade
+                egress_cascade_status = $egressCascade
+                ingress_nat_status = $ingressNat
+                egress_nat_status = $egressNat
                 cascade_transport_status = $tcp
                 target_status = if ($targetStatus.ok) { $targetStatus.result } else { $null }
-                status = if ($policyNetwork.edge_attached -and $policyNetwork.cascade_attached -and $tcp.reachable -and $targetStatus.ok) { "observed" } else { "probe_error" }
+                status = if ($policyNetwork.edge_attached -and $policyNetwork.gateway_attached -and $policyNetwork.cascade_attached -and $ingressGateway.ok -and $ingressCascade.ok -and $egressCascade.ok -and $ingressNat.ok -and $egressNat.ok -and $tcp.reachable -and $targetOk) { "observed" } else { "probe_error" }
                 error = if ($targetStatus.ok) { $null } else { $targetStatus.error }
             }
             [void]$records.Add([pscustomobject]$record)
-            Write-Host ("{0}: edge_policy={1}/{2} cascade_tcp={3} target_http={4}" -f $link.connection_name, $policyNetwork.edge_attached, $policyNetwork.cascade_attached, $tcp.reachable, $httpStatus)
+            Write-Host ("{0}->{1}: edge_policy={2}/{3}/{4} gateway={5}/{6} cascade={7}/{8}/{9}/{10} ingress_nat={11} egress_nat={12} cascade_tcp={13} target_http={14}" -f $ingressAlias, $egressAlias, $policyNetwork.edge_attached, $policyNetwork.gateway_attached, $policyNetwork.cascade_attached, $ingressGateway.container_present, $ingressGateway.gateway_ip_present, $ingressCascade.tap_present, $ingressCascade.router_ip_present, $egressCascade.tap_present, $egressCascade.router_ip_present, $ingressNat.ok, $egressNat.ok, $tcp.reachable, $httpStatus)
+            }
         }
     }
 }

@@ -6,13 +6,14 @@ param(
     [string[]]$TargetValue,
     [ValidateSet("domain", "ip")]
     [string]$TargetType = "domain",
-    [ValidateSet("https", "http", "tcp")]
+    [ValidateSet("https", "http", "tcp", "udp", "icmp")]
     [string]$Protocol = "https",
     [int]$Port = 0,
     [string]$Path = "/",
     [Parameter(Mandatory = $true)]
     [string[]]$IngressAlias,
-    [string[]]$FallbackLink = @(),
+    [Parameter(Mandatory = $true)]
+    [string[]]$FallbackEgressAlias,
     [ValidateSet("probe", "disabled")]
     [string]$State = "probe",
     [Parameter(Mandatory = $true)]
@@ -73,7 +74,8 @@ function Get-DefaultPort($Protocol, $Port) {
     switch ($Protocol) {
         "https" { return 443 }
         "http" { return 80 }
-        default { Fail "-Port is required for protocol tcp" }
+        "icmp" { return 0 }
+        default { Fail "-Port is required for protocol $Protocol" }
     }
 }
 
@@ -87,15 +89,15 @@ if ([string]::IsNullOrWhiteSpace($Rollback)) {
 
 $targets = Assert-NonEmptyList $TargetValue "-TargetValue"
 $ingressAliases = Assert-NonEmptyList $IngressAlias "-IngressAlias"
-$fallbackLinks = @($FallbackLink | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+$fallbackEgressAliases = Assert-NonEmptyList $FallbackEgressAlias "-FallbackEgressAlias"
 $portValue = Get-DefaultPort $Protocol $Port
-if ($portValue -le 0 -or $portValue -gt 65535) {
-    Fail "-Port must be in 1..65535"
+if (($Protocol -eq "icmp" -and $portValue -ne 0) -or ($Protocol -ne "icmp" -and ($portValue -le 0 -or $portValue -gt 65535))) {
+    Fail "-Port must be 0 for icmp or in 1..65535 for tcp/udp/http/https"
 }
 if ([string]::IsNullOrWhiteSpace($Path)) {
     $Path = "/"
 }
-if ($Protocol -eq "tcp") {
+if ($Protocol -in @("tcp", "udp", "icmp")) {
     $Path = "/"
 }
 
@@ -133,7 +135,7 @@ $profile = [ordered]@{
     reason = $Reason
     rollback = $Rollback
     candidate_ingress_aliases = @($ingressAliases)
-    candidate_fallback_links = @($fallbackLinks)
+    candidate_fallback_egress_aliases = @($fallbackEgressAliases)
     targets = @($targetObjects)
 }
 
@@ -151,7 +153,7 @@ if ($DryRun) {
         Write-Host "[dry-run] Profile would be written: $Name"
         Write-Host "Targets: $($targets -join ', ')"
         Write-Host "Ingress aliases: $($ingressAliases -join ', ')"
-        Write-Host "Fallback links: $($fallbackLinks -join ', ')"
+        Write-Host "Fallback egress aliases: $($fallbackEgressAliases -join ', ')"
     }
     exit 0
 }

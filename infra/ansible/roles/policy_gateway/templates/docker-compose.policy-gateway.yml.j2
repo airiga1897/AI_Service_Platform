@@ -1,0 +1,19 @@
+services:
+  policy-gateway:
+    image: {{ policy_gateway_image }}
+    container_name: {{ policy_gateway_container_name }}
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    command: ["sh", "-c", "sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true; while true; do sleep 3600; done"]
+    restart: always
+    networks:
+      {{ policy_gateway_policy_network_name }}:
+        ipv4_address: {{ policy_gateway_policy_ipv4 }}
+
+networks:
+  {{ policy_gateway_policy_network_name }}:
+    external: true

@@ -10,8 +10,8 @@
       "candidate_ingress_aliases": [
         "vps5"
       ],
-      "candidate_fallback_links": [
-        "vps5-to-vps4"
+      "candidate_fallback_egress_aliases": [
+        "vps4"
       ],
       "targets": [
         {
@@ -19,6 +19,41 @@
           "value": "example.org",
           "protocol": "https",
           "port": 443,
+          "path": "/"
+        },
+        {
+          "type": "domain",
+          "value": "www.example.org",
+          "protocol": "https",
+          "port": 443,
+          "path": "/"
+        },
+        {
+          "type": "domain",
+          "value": "example.net",
+          "protocol": "http",
+          "port": 80,
+          "path": "/"
+        },
+        {
+          "type": "domain",
+          "value": "example.org",
+          "protocol": "tcp",
+          "port": 443,
+          "path": "/"
+        },
+        {
+          "type": "domain",
+          "value": "example.org",
+          "protocol": "udp",
+          "port": 53,
+          "path": "/"
+        },
+        {
+          "type": "ip",
+          "value": "192.0.2.10",
+          "protocol": "icmp",
+          "port": 0,
           "path": "/"
         }
       ]

@@ -14,6 +14,11 @@ vpn_cascade_operator_networks_file: "{{ playbook_dir }}/../../operator/networks.
 
 vpn_cascade_image: softethervpn/vpnserver:stable
 vpn_cascade_container_name: softether-cascade
+vpn_cascade_build_policy_router_image: false
+vpn_cascade_policy_router_image_repository: ai-service-platform/policy-router
+vpn_cascade_policy_router_build_context: "{{ playbook_dir }}/../docker/policy-router"
+vpn_cascade_policy_router_image: ai-service-platform/policy-router:local
+vpn_cascade_policy_router_container_name: policy-router
 vpn_cascade_network_name: ai_service_cascade
 vpn_cascade_network_subnet: 172.21.0.0/24
 vpn_cascade_container_ipv4: 172.21.0.2
@@ -27,6 +32,7 @@ vpn_cascade_policy_tap_interface: tap_vpnpolicy
 vpn_cascade_host_https_port: 8443
 vpn_cascade_host_alt_port: 8992
 vpn_cascade_host_management_port: 8555
+vpn_cascade_startup_timeout_seconds: 60
 vpn_cascade_vpncmd_timeout_seconds: 20
 vpn_cascade_retired_tcp_listeners:
   - 1194

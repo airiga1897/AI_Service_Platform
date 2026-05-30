@@ -34,12 +34,17 @@ docs/examples/egress_policy.profiles.example.json
 ```
 
 Profiles are global intent for all VPS nodes. They list candidate ingress
-aliases, candidate fallback links, target domains or IPs, behavior, reason,
-state, and rollback. Per-node differences should come from node
+aliases, candidate fallback egress aliases, target domains or IPs, target
+protocol/port, behavior, reason, state, and rollback. Per-node differences should come from node
 capabilities/labels later, not from duplicating the same profile per VPS. The v1
 behavior is `fallback_on_ingress_egress_failure`: ingress-local egress first,
 cascade only when that local path fails or degrades. Real domains and IPs belong
 in `operator/egress_policy/profiles.json`, not in code.
+
+Target protocols are protocol-agnostic at the policy layer: `http`, `https`,
+`tcp`, `udp`, and `icmp`. HTTP/HTTPS/TCP/ICMP have deterministic probes. UDP is
+route-capable, but without an explicit protocol-specific probe it remains
+`route_review` and is not auto-accepted.
 
 The probe-only runner is:
 
@@ -56,12 +61,18 @@ Operators can create or replace a probe-only profile without hand-editing JSON:
 ```powershell
 .\tools\egress_policy\set_egress_policy_profile.ps1 `
   -Name example_service_fallback `
-  -TargetValue example.org `
+  -TargetValue example.org,www.example.org `
+  -Protocol tcp `
+  -Port 443 `
   -IngressAlias vps5 `
-  -FallbackLink vps5-to-vps4 `
+  -FallbackEgressAlias vps4 `
   -Reason "Local ingress path is unreliable for this operator-defined target." `
   -Replace
 ```
+
+Related hosts are explicit, not inferred. If a probe sees a redirect to an
+unlisted host, proposal generation may create `related_target_missing`; the
+operator decides whether to add that host to the profile.
 
 This command changes only `operator/egress_policy/profiles.json`.
 
@@ -105,6 +116,16 @@ Generate and review operator-visible proposals with:
 .\tools\egress_policy\set_egress_proposal_status.ps1 -Id <proposal-id> -Status accepted -Reason "operator approved"
 ```
 
+AI advisory proposals use the same inbox but remain suggestions:
+
+```powershell
+.\tools\egress_policy\new_egress_ai_advisory_proposal.ps1 `
+  -TargetValue example.org `
+  -Protocol tcp `
+  -Port 443 `
+  -Summary "AI suggests reviewing this target based on observed failures."
+```
+
 Accepted or rejected proposals are still not active routing policy. They only
 record the operator decision and prepare a later explicit profile/route patch.
 
@@ -116,13 +137,14 @@ available, fallback unavailable, probe errors, unstable retries, or inconclusive
 route evidence. This keeps large target lists manageable for the operator.
 
 If ingress-local probing fails or degrades after all attempts and exactly one
-configured cascade fallback link succeeds for a target already present in
+configured fallback egress alias succeeds for a target already present in
 `profiles.json`, the `fallback_available` proposal is automatically marked
 `accepted` / `Принято`. This is still proposal state only; routing is not applied.
 
-Old `desired_region_behavior` and `candidate_egress_aliases` fields are not part
-of the v1 contract. Strict country policy, if needed later, must be an explicit
-behavior such as `require_non_ru_egress`.
+Old `desired_region_behavior`, `candidate_egress_aliases`, and
+`candidate_fallback_links` fields are not part of the v1 contract. Strict
+country policy, if needed later, must be an explicit behavior such as
+`require_non_ru_egress`.
 
 Human-facing review output uses Russian status text:
 `Требует решения`, `Принято`, `Отклонено`, `Отложено`, and `Устарело`.
@@ -187,3 +209,10 @@ action: no automatic routing change
 Stage 4 may consume approved policy from Stage 3. It must not consume raw AI
 guesses directly. Controlled selective fallback routing can use only explicit
 fallback rules that were reviewed by an operator and stored as policy.
+
+Stage 4 canaries must be repeatable and self-auditing. A route apply should
+record resolved target IPs under operator state, verify the exact edge route,
+ingress cascade route through `tap_vpnpolicy`, egress return route, scoped NAT,
+and then prove traffic from the `softether-edge` network namespace when the
+protocol supports a generic check. Rollback must use persisted applied state and
+verify the exact route/NAT entries are gone.

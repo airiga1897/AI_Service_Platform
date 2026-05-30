@@ -10,7 +10,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ExpectedNodesHeader = "current_alias,endpoint,connection,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
-$ExpectedNetworkHeader = "alias,policy_subnet,edge_ip,cascade_ip,cascade_router_ip"
+$ExpectedNetworkHeader = "alias,policy_subnet,edge_ip,cascade_ip,cascade_router_ip,policy_gateway_ip"
 
 function Fail($Message) {
     Write-Error $Message
@@ -139,6 +139,7 @@ foreach ($node in ($nodes | Sort-Object current_alias)) {
             edge_ip = "172.22.$networkId.2"
             cascade_ip = "172.22.$networkId.3"
             cascade_router_ip = "172.23.0.$networkId"
+            policy_gateway_ip = "172.22.$networkId.4"
         }
     } else {
         Fail "Alias '$alias' is not vpsN. Add an explicit row to $OverrideFile"
@@ -149,6 +150,7 @@ foreach ($node in ($nodes | Sort-Object current_alias)) {
         edge_ip = [string]$item.edge_ip
         cascade_ip = [string]$item.cascade_ip
         cascade_router_ip = [string]$item.cascade_router_ip
+        policy_gateway_ip = [string]$item.policy_gateway_ip
     }
 }
 
@@ -165,7 +167,7 @@ foreach ($row in $plan) {
         Fail "Duplicate policy_subnet $($row.policy_subnet) for $($row.alias) and $($seenSubnets[$row.policy_subnet])"
     }
     $seenSubnets[$row.policy_subnet] = $row.alias
-    foreach ($field in @("edge_ip", "cascade_ip", "cascade_router_ip")) {
+    foreach ($field in @("edge_ip", "cascade_ip", "cascade_router_ip", "policy_gateway_ip")) {
         $ip = $row.$field
         [void](ConvertTo-IPv4Int $ip)
         if ($seenIps.ContainsKey($ip)) {
@@ -174,7 +176,7 @@ foreach ($row in $plan) {
         $seenIps[$ip] = "$($row.alias).$field"
     }
     $range = Get-CidrRange $row.policy_subnet
-    foreach ($field in @("edge_ip", "cascade_ip")) {
+    foreach ($field in @("edge_ip", "cascade_ip", "policy_gateway_ip")) {
         $ipInt = ConvertTo-IPv4Int $row.$field
         if ($ipInt -lt $range.Start -or $ipInt -gt $range.End) {
             Fail "$($row.alias).$field $($row.$field) is outside $($row.policy_subnet)"
@@ -191,7 +193,7 @@ if ($Check) {
     }
     $lines = @($ExpectedNetworkHeader)
     foreach ($row in $plan) {
-        $lines += ("{0},{1},{2},{3},{4}" -f $row.alias, $row.policy_subnet, $row.edge_ip, $row.cascade_ip, $row.cascade_router_ip)
+        $lines += ("{0},{1},{2},{3},{4},{5}" -f $row.alias, $row.policy_subnet, $row.edge_ip, $row.cascade_ip, $row.cascade_router_ip, $row.policy_gateway_ip)
     }
     Set-Content -LiteralPath $OutputFile -Value $lines -Encoding ascii
     Write-Host "[OK] VPN network plan written: $OutputFile"

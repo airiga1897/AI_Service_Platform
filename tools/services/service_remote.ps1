@@ -32,7 +32,15 @@ param(
 
     [string]$AnsibleDir = "infra/ansible",
 
+    [string]$PolicyRouterDockerDir = "infra/docker/policy-router",
+
+    [string]$PolicyGatewayDockerDir = "infra/docker/policy-gateway",
+
     [string]$Limit = "",
+
+    [string]$PolicyRouterImageRef = "",
+
+    [switch]$BuildPolicyRouterImage,
 
     [string]$BatchPlanFile = "",
 
@@ -46,7 +54,11 @@ param(
 
     [int]$RemoteJobReconnectAttempts = 30,
 
-    [int]$RemoteJobHeartbeatSeconds = 10
+    [int]$RemoteJobHeartbeatSeconds = 10,
+
+    [int]$RemoteTransferAttempts = 6,
+
+    [int]$RemoteTransferRetryDelaySeconds = 5
 )
 
 $ErrorActionPreference = "Stop"
@@ -77,7 +89,7 @@ function Quote-BashArg($Value) {
     return "'" + ($text -replace "'", "'\''") + "'"
 }
 
-function New-TarGzBundle($ServiceRunnerScript, $AnsibleDir) {
+function New-TarGzBundle($ServiceRunnerScript, $AnsibleDir, $PolicyRouterDockerDir, $PolicyGatewayDockerDir) {
     if (-not (Get-Command tar -ErrorAction SilentlyContinue)) {
         Fail "tar not found in PATH. It is required to upload service bundles as a single archive."
     }
@@ -88,6 +100,11 @@ function New-TarGzBundle($ServiceRunnerScript, $AnsibleDir) {
     try {
         Copy-Item -LiteralPath $ServiceRunnerScript -Destination (Join-Path $stagingDir "service.sh")
         Copy-Item -LiteralPath $AnsibleDir -Destination (Join-Path $stagingDir "ansible") -Recurse
+        $dockerStagingDir = Join-Path (Join-Path $stagingDir "docker") "policy-router"
+        New-Item -ItemType Directory -Path (Split-Path -Parent $dockerStagingDir) | Out-Null
+        Copy-Item -LiteralPath $PolicyRouterDockerDir -Destination $dockerStagingDir -Recurse
+        $gatewayDockerStagingDir = Join-Path (Join-Path $stagingDir "docker") "policy-gateway"
+        Copy-Item -LiteralPath $PolicyGatewayDockerDir -Destination $gatewayDockerStagingDir -Recurse
         & tar -czf $archivePath -C $stagingDir .
         if ($LASTEXITCODE -ne 0) {
             Fail "Failed to create service bundle archive"
@@ -122,6 +139,21 @@ function Invoke-ExternalRetryTransport($FilePath, $Arguments, $Label, $Attempts 
     }
 }
 
+function Invoke-ExternalRetrySshTransport($FilePath, $Arguments, $Label, $Attempts, $RetryDelaySeconds) {
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        & $FilePath @Arguments
+        if ($LASTEXITCODE -eq 0) {
+            return
+        }
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 255 -or $attempt -eq $Attempts) {
+            Fail "$Label failed with exit code $exitCode"
+        }
+        Write-Host "$Label hit SSH transport error (exit 255), retrying $attempt/$Attempts..."
+        Start-Sleep -Seconds $RetryDelaySeconds
+    }
+}
+
 function Invoke-CleanupSsh($Arguments, $Label) {
     & ssh @Arguments 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) {
@@ -138,8 +170,37 @@ function Invoke-RemoteTempCleanup($SshArgs, $Remote) {
 }
 
 function Invoke-CaptureExternal($FilePath, $Arguments) {
-    $output = & $FilePath @Arguments 2>&1 | ForEach-Object { [string]$_ }
-    return @{ ExitCode = $LASTEXITCODE; Output = @($output) }
+    function Quote-ProcessArgument($Value) {
+        $text = [string]$Value
+        if ($text -eq "") {
+            return '""'
+        }
+        if ($text -notmatch '[\s"]') {
+            return $text
+        }
+        return '"' + (($text -replace '\\', '\\') -replace '"', '\"') + '"'
+    }
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo.FileName = $FilePath
+    $process.StartInfo.Arguments = (@($Arguments) | ForEach-Object { Quote-ProcessArgument $_ }) -join " "
+    $process.StartInfo.UseShellExecute = $false
+    $process.StartInfo.RedirectStandardOutput = $true
+    $process.StartInfo.RedirectStandardError = $true
+    try {
+        [void]$process.Start()
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        $output = @()
+        if ($stdout) { $output += @($stdout -split "`r?`n" | Where-Object { $_ -ne "" }) }
+        if ($stderr) { $output += @($stderr -split "`r?`n" | Where-Object { $_ -ne "" }) }
+        return @{ ExitCode = $process.ExitCode; Output = @($output) }
+    } catch {
+        return @{ ExitCode = 255; Output = @([string]$_) }
+    } finally {
+        $process.Dispose()
+    }
 }
 
 function Write-LfScript($Path, $Lines) {
@@ -177,7 +238,7 @@ function Read-BatchPlan($Path) {
         if (-not $step.service -or -not $step.action) {
             Fail "BatchPlanFile step $index must include service and action"
         }
-        if ($step.service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade")) {
+        if ($step.service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway")) {
             Fail "BatchPlanFile step $index has unsupported service: $($step.service)"
         }
         if ($step.action -notin @("plan", "apply", "absent", "purge", "reseed")) {
@@ -209,6 +270,8 @@ function New-ServiceCommand($Step, $RemoteRepoDir, $RemoteNodesFile, $RemoteStat
         "--inventory", (Quote-BashArg $RemoteInventory)
     )
     if ($Step.Limit) { $args += @("--limit", (Quote-BashArg $Step.Limit)) }
+    if ($Step.PolicyRouterImageRef) { $args += @("--policy-router-image-ref", (Quote-BashArg $Step.PolicyRouterImageRef)) }
+    if ($Step.BuildPolicyRouterImage) { $args += "--build-policy-router-image" }
     if ($Step.Check) { $args += "--check" }
     if ($Step.ConfirmPurge) { $args += "--confirm-purge" }
 
@@ -356,11 +419,32 @@ function Resolve-ControlNodeFromState($NodeRows, $StateRows, $Role, $ExplicitAli
 if ($Service -eq "vpn") {
     Fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 }
+if ($PolicyRouterImageRef -and $Service -ne "vpn_cascade") {
+    Fail "-PolicyRouterImageRef is supported only for service vpn_cascade"
+}
+if ($BuildPolicyRouterImage -and $Service -ne "vpn_cascade") {
+    Fail "-BuildPolicyRouterImage is supported only for service vpn_cascade"
+}
+if ($BuildPolicyRouterImage -and $PolicyRouterImageRef) {
+    Fail "-BuildPolicyRouterImage and -PolicyRouterImageRef are mutually exclusive"
+}
+if ($PolicyRouterImageRef -and $BatchPlanFile) {
+    Fail "-PolicyRouterImageRef is supported only for a single vpn_cascade command, not BatchPlanFile"
+}
+if ($BuildPolicyRouterImage -and $BatchPlanFile) {
+    Fail "-BuildPolicyRouterImage is supported only for a single vpn_cascade command, not BatchPlanFile"
+}
 
 if ($BatchPlanFile) {
     Require-File $BatchPlanFile "BatchPlanFile"
 } elseif (-not $Service -or -not $Action) {
     Fail "Service and Action are required unless -BatchPlanFile is provided."
+}
+if ($RemoteTransferAttempts -lt 1) {
+    Fail "RemoteTransferAttempts must be greater than zero"
+}
+if ($RemoteTransferRetryDelaySeconds -lt 1) {
+    Fail "RemoteTransferRetryDelaySeconds must be greater than zero"
 }
 
 Require-File $NodesFile "NodesFile"
@@ -395,12 +479,20 @@ Require-File $ServiceRunnerScript "ServiceRunnerScript"
 if (-not (Test-Path -LiteralPath $AnsibleDir -PathType Container)) {
     Fail "AnsibleDir not found: $AnsibleDir"
 }
+if (-not (Test-Path -LiteralPath $PolicyRouterDockerDir -PathType Container)) {
+    Fail "PolicyRouterDockerDir not found: $PolicyRouterDockerDir"
+}
+if (-not (Test-Path -LiteralPath $PolicyGatewayDockerDir -PathType Container)) {
+    Fail "PolicyGatewayDockerDir not found: $PolicyGatewayDockerDir"
+}
 
 $remote = "$SshUser@$($controlNode.endpoint)"
 $remoteBundleDir = "/tmp/ai-service-platform.service-remote.$([guid]::NewGuid().ToString('N'))"
 $remoteBundleArchive = "$remoteBundleDir.tar.gz"
 $remoteServiceRunnerTemp = "$remoteBundleDir/service.sh"
 $remoteAnsibleTemp = "$remoteBundleDir/ansible"
+$remotePolicyRouterDockerTemp = "$remoteBundleDir/docker/policy-router"
+$remotePolicyGatewayDockerTemp = "$remoteBundleDir/docker/policy-gateway"
 $remoteJobDir = "/tmp/ai-service-platform.service-job.$([guid]::NewGuid().ToString('N'))"
 $remoteJobScript = "$remoteJobDir/run.sh"
 $remoteJobLog = "$remoteJobDir/output.log"
@@ -418,6 +510,8 @@ if ($isBatch) {
         Limit = $Limit
         Check = [bool]$Check
         ConfirmPurge = [bool]$ConfirmPurge
+        PolicyRouterImageRef = $PolicyRouterImageRef
+        BuildPolicyRouterImage = [bool]$BuildPolicyRouterImage
         Label = if ($Limit) { "$Service $Action for $Limit" } else { "$Service $Action" }
     }
     $serviceCommand = New-ServiceCommand $singleStep $RemoteRepoDir $RemoteNodesFile $RemoteStateFile $RemoteInventory
@@ -427,10 +521,14 @@ $installCommands = ""
 if (-not $isBatch) {
     $installCommands = @(
         "set -e",
-        "sudo mkdir -p $(Quote-BashArg "$RemoteRepoDir/tools/services") $(Quote-BashArg "$RemoteRepoDir/infra")",
+        "sudo mkdir -p $(Quote-BashArg "$RemoteRepoDir/tools/services") $(Quote-BashArg "$RemoteRepoDir/infra") $(Quote-BashArg "$RemoteRepoDir/infra/docker")",
         "sudo install -m 700 $(Quote-BashArg $remoteServiceRunnerTemp) $(Quote-BashArg "$RemoteRepoDir/tools/services/service.sh")",
         "sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/ansible")",
         "sudo cp -a $(Quote-BashArg $remoteAnsibleTemp) $(Quote-BashArg "$RemoteRepoDir/infra/ansible")",
+        "sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-router")",
+        "sudo cp -a $(Quote-BashArg $remotePolicyRouterDockerTemp) $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-router")",
+        "sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-gateway")",
+        "sudo cp -a $(Quote-BashArg $remotePolicyGatewayDockerTemp) $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-gateway")",
         "sudo bash -lc $(Quote-BashArg $serviceCommand)"
     ) -join "; "
 }
@@ -448,6 +546,12 @@ if ($isBatch) {
     }
     if ($Check) {
         Write-Host "Check:        true"
+    }
+    if ($PolicyRouterImageRef) {
+        Write-Host "Policy image: $PolicyRouterImageRef"
+    }
+    if ($BuildPolicyRouterImage) {
+        Write-Host "Build policy image: true"
     }
 }
 if ($useDetachedRemoteJob) {
@@ -487,6 +591,8 @@ $remoteJobCompletedSuccessfully = $false
 $remoteServiceDisplay = if ($isBatch) { "batch plan: $($batchSteps.Count) steps" } else {
     $remoteServiceDisplayArgs = @($Service, $Action)
     if ($Limit) { $remoteServiceDisplayArgs += @("--limit", $Limit) }
+    if ($PolicyRouterImageRef) { $remoteServiceDisplayArgs += @("--policy-router-image-ref", $PolicyRouterImageRef) }
+    if ($BuildPolicyRouterImage) { $remoteServiceDisplayArgs += "--build-policy-router-image" }
     if ($Check) { $remoteServiceDisplayArgs += "--check" }
     if ($ConfirmPurge) { $remoteServiceDisplayArgs += "--confirm-purge" }
     $remoteServiceDisplayArgs -join " "
@@ -503,10 +609,14 @@ foreach ($line in @(
     "printf '' > ""`$SUMMARY_FILE""",
     "log_stage() { printf '[remote-job] %s %s\n' ""`$(date -u '+%H:%M:%S')"" ""`$*""; }",
     "run_stage() { label=""`$1""; shift; log_stage ""`$label""; ""`$@""; rc=""`$?""; if [ ""`$rc"" -ne 0 ]; then log_stage ""failed: `$label (rc=`$rc)""; return ""`$rc""; fi; }",
-    "run_stage $(Quote-BashArg "prepare repo directories") sudo mkdir -p $(Quote-BashArg "$RemoteRepoDir/tools/services") $(Quote-BashArg "$RemoteRepoDir/infra")",
+    "run_stage $(Quote-BashArg "prepare repo directories") sudo mkdir -p $(Quote-BashArg "$RemoteRepoDir/tools/services") $(Quote-BashArg "$RemoteRepoDir/infra") $(Quote-BashArg "$RemoteRepoDir/infra/docker")",
     "run_stage $(Quote-BashArg "install service runner") sudo install -m 700 $(Quote-BashArg $remoteServiceRunnerTemp) $(Quote-BashArg "$RemoteRepoDir/tools/services/service.sh")",
     "run_stage $(Quote-BashArg "remove previous Ansible bundle") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/ansible")",
-    "run_stage $(Quote-BashArg "install Ansible bundle") sudo cp -a $(Quote-BashArg $remoteAnsibleTemp) $(Quote-BashArg "$RemoteRepoDir/infra/ansible")"
+    "run_stage $(Quote-BashArg "install Ansible bundle") sudo cp -a $(Quote-BashArg $remoteAnsibleTemp) $(Quote-BashArg "$RemoteRepoDir/infra/ansible")",
+    "run_stage $(Quote-BashArg "remove previous policy-router Docker context") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-router")",
+    "run_stage $(Quote-BashArg "install policy-router Docker context") sudo cp -a $(Quote-BashArg $remotePolicyRouterDockerTemp) $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-router")",
+    "run_stage $(Quote-BashArg "remove previous policy-gateway Docker context") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-gateway")",
+    "run_stage $(Quote-BashArg "install policy-gateway Docker context") sudo cp -a $(Quote-BashArg $remotePolicyGatewayDockerTemp) $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-gateway")"
 )) { $runScriptLines.Add($line) | Out-Null }
 
 if ($isBatch) {
@@ -554,7 +664,7 @@ if ($isBatch) {
 
 try {
     Write-Host "Preparing local service bundle..."
-    $bundle = New-TarGzBundle $ServiceRunnerScript $AnsibleDir
+    $bundle = New-TarGzBundle $ServiceRunnerScript $AnsibleDir $PolicyRouterDockerDir $PolicyGatewayDockerDir
     if ($useDetachedRemoteJob) {
         Write-LfScript $runScriptPath $runScriptLines
     }
@@ -571,20 +681,20 @@ try {
     Invoke-ExternalRetryTransport "ssh" ($sshCommonArgs + @(
         $remote,
         $mkdirCommand
-    )) "remote service bundle directory creation"
+    )) "remote service bundle directory creation" $RemoteTransferAttempts
 
     Write-Host "Uploading service bundle archive..."
-    Invoke-External "scp" ($scpCommonArgs + @(
+    Invoke-ExternalRetrySshTransport "scp" ($scpCommonArgs + @(
         $bundle.ArchivePath,
         "${remote}:$remoteBundleArchive"
-    )) "service bundle upload"
+    )) "service bundle upload" $RemoteTransferAttempts $RemoteTransferRetryDelaySeconds
 
     if ($useDetachedRemoteJob) {
         Write-Host "Uploading remote job runner..."
-        Invoke-External "scp" ($scpCommonArgs + @(
+        Invoke-ExternalRetrySshTransport "scp" ($scpCommonArgs + @(
             $runScriptPath,
             "${remote}:$remoteJobScript"
-        )) "remote job runner upload"
+        )) "remote job runner upload" $RemoteTransferAttempts $RemoteTransferRetryDelaySeconds
     }
 
     $extractCommand = @(
@@ -593,14 +703,16 @@ try {
         "mkdir -p $(Quote-BashArg $remoteBundleDir)",
         "tar -xzf $(Quote-BashArg $remoteBundleArchive) -C $(Quote-BashArg $remoteBundleDir)",
         "test -f $(Quote-BashArg $remoteServiceRunnerTemp)",
-        "test -d $(Quote-BashArg $remoteAnsibleTemp)"
+        "test -d $(Quote-BashArg $remoteAnsibleTemp)",
+        "test -d $(Quote-BashArg $remotePolicyRouterDockerTemp)",
+        "test -d $(Quote-BashArg $remotePolicyGatewayDockerTemp)"
     ) -join "; "
 
     Write-Host "Extracting service bundle on orchestration node..."
     Invoke-ExternalRetryTransport "ssh" ($sshCommonArgs + @(
         $remote,
         $extractCommand
-    )) "remote service bundle extract"
+    )) "remote service bundle extract" $RemoteTransferAttempts
 
     if ($useDetachedRemoteJob) {
         $startJobCommand = @(
@@ -614,17 +726,17 @@ try {
         Invoke-ExternalRetryTransport "ssh" ($sshCommonArgs + @(
             $remote,
             $startJobCommand
-        )) "remote service job start"
+        )) "remote service job start" $RemoteTransferAttempts
 
         Write-Host "Following remote service job log..."
         Wait-RemoteServiceJob -SshArgs ([string[]]$sshCommonArgs) -Remote $remote -RemoteLog $remoteJobLog -RemoteDone $remoteJobDone -RemoteExitCode $remoteJobExitCode -RemotePid $remoteJobPid -PollSeconds $RemoteJobPollSeconds -ReconnectAttempts $RemoteJobReconnectAttempts -HeartbeatSeconds $RemoteJobHeartbeatSeconds
         $remoteJobCompletedSuccessfully = $true
     } else {
         Write-Host "Installing service bundle and running remote service command..."
-        Invoke-External "ssh" ($sshCommonArgs + @(
+        Invoke-ExternalRetrySshTransport "ssh" ($sshCommonArgs + @(
             $remote,
             $installCommands
-        )) "remote service command"
+        )) "remote service command" $RemoteTransferAttempts $RemoteTransferRetryDelaySeconds
     }
 } finally {
     if ($bundle) {

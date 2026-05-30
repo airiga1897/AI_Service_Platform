@@ -16,13 +16,15 @@ function Fail($Message) {
 
 function Get-Recommendation($Record) {
     $mode = if ($Record.path_mode) { [string]$Record.path_mode } else { "direct" }
-    $httpStatus = if ($Record.target_status) { $Record.target_status.http_status } else { $Record.observation.http_status }
+    $observation = if ($Record.target_status) { $Record.target_status } else { $Record.observation }
+    $protocol = if ($Record.target -and $Record.target.protocol) { [string]$Record.target.protocol } else { "" }
+    $httpStatus = if ($observation) { $observation.http_status } else { $null }
     $desired = if ($Record.behavior) { [string]$Record.behavior } else { "fallback_on_ingress_egress_failure" }
 
     if ($mode -eq "cascade") {
         $transportOk = $Record.cascade_transport_status -and $Record.cascade_transport_status.reachable
         $connectionOk = $Record.cascade_connection_status -and $Record.cascade_connection_status.online
-        if (-not $transportOk -or -not $connectionOk) {
+        if (-not $transportOk -and -not $connectionOk) {
             return "fallback_unavailable"
         }
     }
@@ -34,7 +36,18 @@ function Get-Recommendation($Record) {
         return "probe_error"
     }
 
-    if ($httpStatus -ge 200 -and $httpStatus -lt 400) {
+    $targetOk = $false
+    if ($protocol -in @("http", "https")) {
+        $targetOk = ($null -ne $httpStatus -and $httpStatus -ge 200 -and $httpStatus -lt 400)
+    } elseif ($protocol -eq "tcp") {
+        $targetOk = ($observation -and $null -ne $observation.tcp_connect_ms)
+    } elseif ($protocol -eq "icmp") {
+        $targetOk = ($observation -and $null -ne $observation.icmp_ms)
+    } elseif ($protocol -eq "udp") {
+        return "route_review"
+    }
+
+    if ($targetOk) {
         if ($desired -eq "require_non_ru_egress") {
             $country = if ($Record.effective_country) { [string]$Record.effective_country } else { [string]$Record.observation.external_country }
             if ($country -eq "RU") {
@@ -48,6 +61,23 @@ function Get-Recommendation($Record) {
     }
 
     return "review"
+}
+
+function Get-RedirectHost($Record) {
+    $target = $Record.target
+    $observation = if ($Record.target_status) { $Record.target_status } else { $Record.observation }
+    if (-not $target -or [string]$target.protocol -notin @("http", "https") -or -not $observation -or [string]::IsNullOrWhiteSpace([string]$observation.http_final_url)) {
+        return $null
+    }
+    try {
+        $uri = [System.Uri]::new([string]$observation.http_final_url)
+    } catch {
+        return $null
+    }
+    if ($uri.Host -and $uri.Host -ne [string]$target.value) {
+        return $uri.Host
+    }
+    return $null
 }
 
 function Convert-RecordToReportRow($Record) {
@@ -70,10 +100,12 @@ function Convert-RecordToReportRow($Record) {
         tls_ms = if ($observation) { $observation.tls_handshake_ms } else { $null }
         http_first_ms = if ($observation) { $observation.http_first_byte_ms } else { $null }
         http_total_ms = if ($observation) { $observation.http_total_ms } else { $null }
+        icmp_ms = if ($observation) { $observation.icmp_ms } else { $null }
         attempts = if ($Record.attempts_used) { "$($Record.attempts_used)/$($Record.attempts_total)" } else { $null }
         cascade_tcp = if ($Record.cascade_transport_status) { $Record.cascade_transport_status.reachable } else { $null }
         cascade_online = if ($Record.cascade_connection_status) { $Record.cascade_connection_status.online } else { $null }
         recommendation = Get-Recommendation $Record
+        redirect_host = Get-RedirectHost $Record
         target = if ($target) { "$($target.protocol)://$($target.value):$($target.port)" } else { $null }
         observed_at_utc = $Record.observed_at_utc
         run_id = $Record.run_id
@@ -169,5 +201,6 @@ $result |
         http,
         @{ Name = "att"; Expression = { $_.attempts } },
         @{ Name = "total_ms"; Expression = { $_.http_total_ms } },
+        @{ Name = "icmp_ms"; Expression = { $_.icmp_ms } },
         @{ Name = "rec"; Expression = { $_.recommendation } } |
     Format-Table -AutoSize -Wrap

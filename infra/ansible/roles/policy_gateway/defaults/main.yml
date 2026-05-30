@@ -1,0 +1,16 @@
+---
+policy_gateway_root_dir: /opt/ai-service-platform/policy_gateway
+policy_gateway_compose_file: "{{ policy_gateway_root_dir }}/docker-compose.yml"
+policy_gateway_operator_networks_file: "{{ playbook_dir }}/../../operator/networks.csv"
+
+policy_gateway_state: present
+policy_gateway_purge_data: false
+policy_gateway_container_name: policy-gateway
+policy_gateway_image_repository: ai-service-platform/policy-gateway
+policy_gateway_image: ai-service-platform/policy-gateway:local
+policy_gateway_build_image: true
+policy_gateway_build_context: "{{ playbook_dir }}/../docker/policy-gateway"
+policy_gateway_policy_network_name: ai_service_vpn_policy
+policy_gateway_policy_network_subnet: ""
+policy_gateway_policy_ipv4: ""
+policy_gateway_remote_archive: ""

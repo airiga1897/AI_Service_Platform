@@ -59,6 +59,10 @@ param(
 
     [int]$VerifyAnsibleTimeoutSeconds = 20,
 
+    [int]$SshTransferRetries = 6,
+
+    [int]$SshTransferRetryDelaySeconds = 5,
+
     [switch]$SkipServicePlan
 )
 
@@ -255,6 +259,12 @@ if ($VerifyRetryDelaySeconds -lt 1) {
 if ($VerifyAnsibleTimeoutSeconds -lt 1) {
     Fail "VerifyAnsibleTimeoutSeconds must be greater than zero"
 }
+if ($SshTransferRetries -lt 1) {
+    Fail "SshTransferRetries must be greater than zero"
+}
+if ($SshTransferRetryDelaySeconds -lt 1) {
+    Fail "SshTransferRetryDelaySeconds must be greater than zero"
+}
 $stateRows = Import-Csv -LiteralPath $StateFile
 $controlNode = Resolve-ControlNodeFromState $rows $stateRows $ControlRole $ControlAlias
 $useStateFile = $true
@@ -278,13 +288,8 @@ $remoteVerifyTemp = "/tmp/ai-service-platform.verify_control_node.sh"
 $remote = "$SshUser@$($controlNode.endpoint)"
 
 Write-Host "Generating VPN network plan from nodes.csv/state.csv"
-$networkPlanArgs = @(
-    "-NodesFile", $NodesFile,
-    "-StateFile", $StateFile,
-    "-OverrideFile", $NetworksOverrideFile,
-    "-OutputFile", $NetworksFile
-)
-& $GenerateNetworkPlanScript @networkPlanArgs
+$generateNetworkPlanPath = (Resolve-Path -LiteralPath $GenerateNetworkPlanScript).Path
+& $generateNetworkPlanPath -NodesFile $NodesFile -StateFile $StateFile -OverrideFile $NetworksOverrideFile -OutputFile $NetworksFile
 if ($LASTEXITCODE -ne 0) {
     Fail "VPN network plan generation failed"
 }
@@ -316,24 +321,51 @@ function Get-ScpKeyArgs($KeyFile) {
 
 function Invoke-ScpKey($KeyFile, $Source, $Target, $Label) {
     $scpArgs = @(Get-ScpKeyArgs $KeyFile) + @($Source, $Target)
-    & scp @scpArgs
-    if ($LASTEXITCODE -ne 0) {
+    for ($attempt = 1; $attempt -le $SshTransferRetries; $attempt++) {
+        & scp @scpArgs
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -eq 0) {
+            return
+        }
+        if ($exitCode -eq 255 -and $attempt -lt $SshTransferRetries) {
+            Write-Warning "$Label hit SSH transport error (exit 255), retrying $attempt/$SshTransferRetries..."
+            Start-Sleep -Seconds $SshTransferRetryDelaySeconds
+            continue
+        }
         Fail "$Label failed"
     }
 }
 
 function Invoke-ScpKeyRecursive($KeyFile, $Source, $Target, $Label) {
     $scpArgs = @("-r") + @(Get-ScpKeyArgs $KeyFile) + @($Source, $Target)
-    & scp @scpArgs
-    if ($LASTEXITCODE -ne 0) {
+    for ($attempt = 1; $attempt -le $SshTransferRetries; $attempt++) {
+        & scp @scpArgs
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -eq 0) {
+            return
+        }
+        if ($exitCode -eq 255 -and $attempt -lt $SshTransferRetries) {
+            Write-Warning "$Label hit SSH transport error (exit 255), retrying $attempt/$SshTransferRetries..."
+            Start-Sleep -Seconds $SshTransferRetryDelaySeconds
+            continue
+        }
         Fail "$Label failed"
     }
 }
 
 function Invoke-SshKey($KeyFile, $Remote, $Command, $Label) {
     $sshArgs = @(Get-SshKeyArgs $KeyFile) + @($Remote, $Command)
-    & ssh @sshArgs
-    if ($LASTEXITCODE -ne 0) {
+    for ($attempt = 1; $attempt -le $SshTransferRetries; $attempt++) {
+        & ssh @sshArgs
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -eq 0) {
+            return
+        }
+        if ($exitCode -eq 255 -and $attempt -lt $SshTransferRetries) {
+            Write-Warning "$Label hit SSH transport error (exit 255), retrying $attempt/$SshTransferRetries..."
+            Start-Sleep -Seconds $SshTransferRetryDelaySeconds
+            continue
+        }
         Fail "$Label failed"
     }
 }

@@ -66,7 +66,7 @@ from pathlib import Path
 nodes_file, state_file, override_file, output_file, check_only = sys.argv[1:]
 expected_nodes = "current_alias,endpoint,connection,root_password"
 expected_state = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
-expected_networks = "alias,policy_subnet,edge_ip,cascade_ip,cascade_router_ip"
+expected_networks = "alias,policy_subnet,edge_ip,cascade_ip,cascade_router_ip,policy_gateway_ip"
 
 
 def fail(message):
@@ -140,8 +140,9 @@ for row in sorted(nodes, key=lambda item: item["current_alias"]):
             "edge_ip": f"172.22.{network_id}.2",
             "cascade_ip": f"172.22.{network_id}.3",
             "cascade_router_ip": f"172.23.0.{network_id}",
+            "policy_gateway_ip": f"172.22.{network_id}.4",
         }
-    plan.append({key: item[key] for key in ("alias", "policy_subnet", "edge_ip", "cascade_ip", "cascade_router_ip")})
+    plan.append({key: item[key] for key in ("alias", "policy_subnet", "edge_ip", "cascade_ip", "cascade_router_ip", "policy_gateway_ip")})
 
 reserved = [ipaddress.ip_network("172.20.0.0/24"), ipaddress.ip_network("172.21.0.0/24")]
 seen_subnets = {}
@@ -154,11 +155,11 @@ for row in plan:
     if str(subnet) in seen_subnets:
         fail(f"Duplicate policy_subnet {subnet} for {row['alias']} and {seen_subnets[str(subnet)]}")
     seen_subnets[str(subnet)] = row["alias"]
-    for field in ("edge_ip", "cascade_ip"):
+    for field in ("edge_ip", "cascade_ip", "policy_gateway_ip"):
         ip = ipaddress.ip_address(row[field])
         if ip not in subnet:
             fail(f"{row['alias']}.{field} {ip} is outside {subnet}")
-    for field in ("edge_ip", "cascade_ip", "cascade_router_ip"):
+    for field in ("edge_ip", "cascade_ip", "cascade_router_ip", "policy_gateway_ip"):
         ip = str(ipaddress.ip_address(row[field]))
         if ip in seen_ips:
             fail(f"Duplicate IP {ip} for {row['alias']}.{field} and {seen_ips[ip]}")

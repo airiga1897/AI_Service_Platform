@@ -192,11 +192,11 @@ function Get-PolicyIngressAliases($Profile) {
     return @($Profile.candidate_ingress_aliases | Where-Object { $_ })
 }
 
-function Get-PolicyFallbackLinks($Profile) {
-    if ($null -eq $Profile.candidate_fallback_links) {
+function Get-PolicyFallbackEgressAliases($Profile) {
+    if ($null -eq $Profile.candidate_fallback_egress_aliases) {
         return @()
     }
-    return @($Profile.candidate_fallback_links | Where-Object { $_ })
+    return @($Profile.candidate_fallback_egress_aliases | Where-Object { $_ })
 }
 
 function Validate-Policy($Policy, $Nodes) {
@@ -252,15 +252,22 @@ function Validate-Policy($Policy, $Nodes) {
             $seenAliases[$alias] = $true
         }
 
-        $seenFallbackLinks = @{}
-        foreach ($linkName in @(Get-PolicyFallbackLinks $profile)) {
-            if ([string]::IsNullOrWhiteSpace([string]$linkName)) {
-                Fail "egress profile $($profile.name) has empty candidate fallback link"
+        $seenFallbackEgressAliases = @{}
+        $fallbackEgressAliases = @(Get-PolicyFallbackEgressAliases $profile)
+        if ($behavior -eq "fallback_on_ingress_egress_failure" -and $fallbackEgressAliases.Count -eq 0) {
+            Fail "egress profile $($profile.name) must include candidate_fallback_egress_aliases"
+        }
+        foreach ($egressAlias in $fallbackEgressAliases) {
+            if ([string]::IsNullOrWhiteSpace([string]$egressAlias)) {
+                Fail "egress profile $($profile.name) has empty candidate fallback egress alias"
             }
-            if ($seenFallbackLinks.ContainsKey($linkName)) {
-                Fail "egress profile $($profile.name) has duplicate candidate fallback link: $linkName"
+            if (-not $Nodes.ContainsKey($egressAlias)) {
+                Fail "egress profile $($profile.name) references unknown fallback egress alias: $egressAlias"
             }
-            $seenFallbackLinks[$linkName] = $true
+            if ($seenFallbackEgressAliases.ContainsKey($egressAlias)) {
+                Fail "egress profile $($profile.name) has duplicate candidate fallback egress alias: $egressAlias"
+            }
+            $seenFallbackEgressAliases[$egressAlias] = $true
         }
 
         foreach ($target in @($profile.targets)) {
@@ -270,12 +277,12 @@ function Validate-Policy($Policy, $Nodes) {
             if ([string]::IsNullOrWhiteSpace([string]$target.value)) {
                 Fail "egress profile $($profile.name) target value must not be empty"
             }
-            if ($target.protocol -notin @("https", "http", "tcp")) {
-                Fail "egress profile $($profile.name) target protocol must be https, http, or tcp"
+            if ($target.protocol -notin @("https", "http", "tcp", "udp", "icmp")) {
+                Fail "egress profile $($profile.name) target protocol must be https, http, tcp, udp, or icmp"
             }
             $port = [int]$target.port
-            if ($port -le 0 -or $port -gt 65535) {
-                Fail "egress profile $($profile.name) target port must be in 1..65535"
+            if (($target.protocol -eq "icmp" -and $port -ne 0) -or ($target.protocol -ne "icmp" -and ($port -le 0 -or $port -gt 65535))) {
+                Fail "egress profile $($profile.name) target port must be 0 for icmp or in 1..65535 for other protocols"
             }
         }
     }
@@ -406,12 +413,60 @@ function Assert-CascadeLinksAreAcyclic($Links) {
     }
 }
 
+function Find-CascadePath($Links, $IngressAlias, $EgressAlias) {
+    if ($IngressAlias -eq $EgressAlias) {
+        return @()
+    }
+
+    $queue = New-Object System.Collections.ArrayList
+    [void]$queue.Add([pscustomobject]@{
+        alias = [string]$IngressAlias
+        path = @()
+    })
+    $visited = @{ $IngressAlias = $true }
+
+    for ($i = 0; $i -lt $queue.Count; $i++) {
+        $item = $queue[$i]
+        foreach ($link in @($Links | Where-Object { $_.ingress_alias -eq $item.alias })) {
+            $nextAlias = [string]$link.egress_alias
+            if ($visited.ContainsKey($nextAlias)) {
+                continue
+            }
+            $nextPath = @($item.path) + @($link)
+            if ($nextAlias -eq $EgressAlias) {
+                return $nextPath
+            }
+            $visited[$nextAlias] = $true
+            [void]$queue.Add([pscustomobject]@{
+                alias = $nextAlias
+                path = $nextPath
+            })
+        }
+    }
+    return @()
+}
+
+function Get-CascadePathLabel($PathLinks) {
+    $links = @($PathLinks)
+    if ($links.Count -eq 0) {
+        return ""
+    }
+    $aliases = New-Object System.Collections.ArrayList
+    [void]$aliases.Add([string]$links[0].ingress_alias)
+    foreach ($link in $links) {
+        [void]$aliases.Add([string]$link.egress_alias)
+    }
+    return ($aliases -join "->")
+}
+
 $remotePython = @'
 import base64
 import datetime as dt
 import json
+import re
 import socket
 import ssl
+import subprocess
 import sys
 import time
 import urllib.error
@@ -422,7 +477,7 @@ target = payload["target"]
 timeout = float(payload["timeout_seconds"])
 
 host = target["value"]
-port = int(target["port"])
+port = int(target.get("port") or 0)
 protocol = target["protocol"]
 path = target.get("path") or "/"
 
@@ -437,6 +492,7 @@ result = {
     "http_final_url": None,
     "http_first_byte_ms": None,
     "http_total_ms": None,
+    "icmp_ms": None,
     "external_ip": None,
     "external_country": None,
     "errors": [],
@@ -445,9 +501,24 @@ result = {
 def record_error(stage, exc):
     result["errors"].append({"stage": stage, "message": str(exc)})
 
+if protocol == "icmp":
+    try:
+        timeout_int = max(1, int(timeout))
+        start = time.monotonic()
+        proc = subprocess.run(["ping", "-c", "1", "-W", str(timeout_int), host], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout + 1)
+        output = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        match = re.search(r"time[=<]([0-9.]+)\s*ms", output)
+        if proc.returncode == 0:
+            result["icmp_ms"] = round(float(match.group(1)), 2) if match else round((time.monotonic() - start) * 1000, 2)
+        else:
+            record_error("icmp", output.strip() or f"ping exited {proc.returncode}")
+    except Exception as exc:
+        record_error("icmp", exc)
+
 try:
     start = time.monotonic()
-    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    lookup_port = port if port > 0 else None
+    infos = socket.getaddrinfo(host, lookup_port, type=socket.SOCK_STREAM)
     result["dns_ms"] = round((time.monotonic() - start) * 1000, 2)
     addresses = []
     for info in infos:
@@ -459,7 +530,7 @@ except Exception as exc:
     infos = []
     record_error("dns", exc)
 
-if infos:
+if infos and protocol not in ("icmp", "udp"):
     family, socktype, proto, _, sockaddr = infos[0]
     sock = None
     try:
@@ -570,6 +641,12 @@ function Test-TargetProbeSuccess($Probe, $Target) {
     if ($Target.protocol -eq "tcp") {
         return ($null -ne $Probe.result.tcp_connect_ms)
     }
+    if ($Target.protocol -eq "icmp") {
+        return ($null -ne $Probe.result.icmp_ms)
+    }
+    if ($Target.protocol -eq "udp") {
+        return $false
+    }
     $status = $Probe.result.http_status
     return ($null -ne $status -and $status -ge 200 -and $status -lt 400)
 }
@@ -584,7 +661,58 @@ function Test-TargetProbeShouldRetry($Probe, $Target) {
     if ($Target.protocol -eq "tcp" -and $null -eq $Probe.result.tcp_connect_ms) {
         return $true
     }
+    if ($Target.protocol -eq "icmp" -and $null -eq $Probe.result.icmp_ms) {
+        return $true
+    }
     return $false
+}
+
+function Test-TargetHasRunnableProbe($Target) {
+    if ($Target.protocol -eq "udp") {
+        return $false
+    }
+    return $true
+}
+
+function Get-TargetKey($Target) {
+    "$($Target.protocol)|$($Target.value)|$($Target.port)|$(if ($Target.path) { $Target.path } else { '/' })"
+}
+
+function Get-ProfileTargetKeyMap($PolicyProfile) {
+    $map = @{}
+    foreach ($target in @($PolicyProfile.targets)) {
+        $map[(Get-TargetKey $target)] = $true
+    }
+    return $map
+}
+
+function Get-RedirectTargetWarning($PolicyProfile, $Target, $Observation) {
+    if (-not $Observation -or [string]$Target.protocol -notin @("http", "https") -or [string]::IsNullOrWhiteSpace([string]$Observation.http_final_url)) {
+        return $null
+    }
+    try {
+        $uri = [System.Uri]::new([string]$Observation.http_final_url)
+    } catch {
+        return $null
+    }
+    if ([string]::IsNullOrWhiteSpace($uri.Host) -or $uri.Host -eq [string]$Target.value) {
+        return $null
+    }
+    $protocol = $uri.Scheme.ToLowerInvariant()
+    if ($protocol -notin @("http", "https")) {
+        return $null
+    }
+    $port = if ($uri.IsDefaultPort) {
+        if ($protocol -eq "https") { 443 } else { 80 }
+    } else {
+        [int]$uri.Port
+    }
+    $key = "$protocol|$($uri.Host)|$port|/"
+    $profileTargets = Get-ProfileTargetKeyMap $PolicyProfile
+    if ($profileTargets.ContainsKey($key)) {
+        return $null
+    }
+    return "redirect target is not covered: $($uri.Host):$port"
 }
 
 function New-RetryObservation($Attempt, $Probe, $Reason) {
@@ -593,6 +721,7 @@ function New-RetryObservation($Attempt, $Probe, $Reason) {
         reason = $Reason
         error = if ($Probe.ok) { $null } else { $Probe.error }
         http_status = if ($Probe.ok -and $Probe.result) { $Probe.result.http_status } else { $null }
+        icmp_ms = if ($Probe.ok -and $Probe.result) { $Probe.result.icmp_ms } else { $null }
         errors = if ($Probe.ok -and $Probe.result) { $Probe.result.errors } else { $null }
     }
 }
@@ -635,15 +764,26 @@ function Test-CascadeRecordUsable($Record) {
     if (-not $Record -or $Record.status -eq "probe_error") {
         return $false
     }
-    if (-not $Record.cascade_transport_status -or -not $Record.cascade_transport_status.reachable) {
+    $transportOk = $Record.cascade_transport_status -and $Record.cascade_transport_status.reachable
+    $connectionOk = $Record.cascade_connection_status -and $Record.cascade_connection_status.online
+    if (-not $transportOk -and -not $connectionOk) {
         return $false
     }
-    if (-not $Record.cascade_connection_status -or -not $Record.cascade_connection_status.online) {
+    if ($Record.target.protocol -eq "tcp") {
+        if (-not $Record.target_status -or $null -eq $Record.target_status.tcp_connect_ms) {
+            return $false
+        }
+    } elseif ($Record.target.protocol -eq "icmp") {
+        if (-not $Record.target_status -or $null -eq $Record.target_status.icmp_ms) {
+            return $false
+        }
+    } elseif ($Record.target.protocol -eq "udp") {
         return $false
-    }
-    $httpStatus = if ($Record.target_status) { $Record.target_status.http_status } else { $null }
-    if ($null -eq $httpStatus -or $httpStatus -lt 200 -or $httpStatus -ge 400) {
-        return $false
+    } else {
+        $httpStatus = if ($Record.target_status) { $Record.target_status.http_status } else { $null }
+        if ($null -eq $httpStatus -or $httpStatus -lt 200 -or $httpStatus -ge 400) {
+            return $false
+        }
     }
     if ($Record.behavior -eq "require_non_ru_egress" -and $Record.effective_country -eq "RU") {
         return $false
@@ -659,6 +799,12 @@ function Test-DirectRecordUsable($Record) {
         if (-not $Record.target_status -or $null -eq $Record.target_status.tcp_connect_ms) {
             return $false
         }
+    } elseif ($Record.target.protocol -eq "icmp") {
+        if (-not $Record.target_status -or $null -eq $Record.target_status.icmp_ms) {
+            return $false
+        }
+    } elseif ($Record.target.protocol -eq "udp") {
+        return $false
     } else {
         $httpStatus = if ($Record.target_status) { $Record.target_status.http_status } else { $null }
         if ($null -eq $httpStatus -or $httpStatus -lt 200 -or $httpStatus -ge 400) {
@@ -683,6 +829,37 @@ function Invoke-DirectEgressProbe($PolicyProfile, $Target, $CandidateAlias, $Mod
     if ($DryRun) {
         Write-Host "    [dry-run] $ModeLabel $CandidateAlias via $remote"
         return $null
+    }
+
+    if (-not (Test-TargetHasRunnableProbe $Target)) {
+        Write-Host "    route-review $ModeLabel $CandidateAlias for $($Target.protocol)/$($Target.port): no generic UDP probe"
+        return [pscustomobject]([ordered]@{
+            schema_version = 1
+            run_id = $runId
+            observed_at_utc = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+            path_mode = "direct"
+            profile = $PolicyProfile.name
+            behavior = Get-PolicyBehavior $PolicyProfile
+            candidate_alias = $CandidateAlias
+            ingress_alias = $CandidateAlias
+            egress_alias = $CandidateAlias
+            cascade_connection = $null
+            cascade_path = @()
+            cascade_transport_status = $null
+            cascade_connection_status = $null
+            endpoint = $node.endpoint
+            target = $Target
+            status = "route_review"
+            observation = $null
+            target_status = $null
+            effective_country = $null
+            effective_ip = $null
+            attempts_used = 0
+            attempts_total = 0
+            retry_errors = @()
+            error = "Generic UDP probe is not deterministic; add a protocol-specific probe block before auto-accept."
+            raw = $null
+        })
     }
 
     Write-Host "    probing $ModeLabel $CandidateAlias..."
@@ -720,6 +897,10 @@ function Invoke-DirectEgressProbe($PolicyProfile, $Target, $CandidateAlias, $Mod
         $ip = $probe.result.external_ip
         $http = $probe.result.http_status
         Write-Host "      observed ip=$ip country=$country http=$http attempts=$($probe.attempts_used)/$($probe.attempts_total)"
+        $redirectWarning = Get-RedirectTargetWarning $PolicyProfile $Target $probe.result
+        if ($redirectWarning) {
+            Write-Host "      [WARN] $redirectWarning"
+        }
     } else {
         Write-Host "      probe failed after $($probe.attempts_used)/$($probe.attempts_total) attempts: $($probe.error)"
     }
@@ -727,57 +908,139 @@ function Invoke-DirectEgressProbe($PolicyProfile, $Target, $CandidateAlias, $Mod
     return [pscustomobject]$record
 }
 
-function Invoke-CascadeEgressProbe($PolicyProfile, $Target, $Link) {
-    if ($aliasFilter.Count -gt 0 -and $aliasFilter -notcontains $Link.ingress_alias -and $aliasFilter -notcontains $Link.egress_alias) {
+function Invoke-CascadeEgressProbe($PolicyProfile, $Target, $PathLinks) {
+    $links = @($PathLinks)
+    if ($links.Count -eq 0) {
         return $null
     }
 
-    $ingressNode = $nodes[$Link.ingress_alias]
-    $egressNode = $nodes[$Link.egress_alias]
-    foreach ($pair in @(@($Link.ingress_alias, $ingressNode), @($Link.egress_alias, $egressNode))) {
-        if ($pair[1].connection -ne "ssh" -or $pair[1].endpoint -eq "local") {
-            Fail "cascade probe alias $($pair[0]) must use connection=ssh and a real endpoint"
-        }
-        Require-File (Join-Path (Join-Path $OperatorDir $pair[0]) "admin_key") "admin key for $($pair[0])"
+    $ingressAlias = [string]$links[0].ingress_alias
+    $egressAlias = [string]$links[$links.Count - 1].egress_alias
+    if ($aliasFilter.Count -gt 0 -and $aliasFilter -notcontains $ingressAlias -and $aliasFilter -notcontains $egressAlias) {
+        return $null
     }
 
-    $ingressKey = Join-Path (Join-Path $OperatorDir $Link.ingress_alias) "admin_key"
-    $egressKey = Join-Path (Join-Path $OperatorDir $Link.egress_alias) "admin_key"
+    $ingressNode = $nodes[$ingressAlias]
+    $egressNode = $nodes[$egressAlias]
+    $pathAliases = @($links | ForEach-Object { $_.ingress_alias; $_.egress_alias } | Select-Object -Unique)
+    foreach ($aliasName in $pathAliases) {
+        $node = $nodes[$aliasName]
+        if (-not $node) {
+            Fail "cascade probe path references unknown alias: $aliasName"
+        }
+        if ($node.connection -ne "ssh" -or $node.endpoint -eq "local") {
+            Fail "cascade probe alias $aliasName must use connection=ssh and a real endpoint"
+        }
+        Require-File (Join-Path (Join-Path $OperatorDir $aliasName) "admin_key") "admin key for $aliasName"
+    }
+
+    $ingressKey = Join-Path (Join-Path $OperatorDir $ingressAlias) "admin_key"
+    $egressKey = Join-Path (Join-Path $OperatorDir $egressAlias) "admin_key"
     $ingressRemote = "${SshUser}@$($ingressNode.endpoint)"
     $egressRemote = "${SshUser}@$($egressNode.endpoint)"
-    $cascadeLabel = "$($Link.ingress_alias)->$($Link.egress_alias):$($Link.egress_port)"
+    $cascadeLabel = Get-CascadePathLabel $links
+    $connectionNames = @($links | ForEach-Object { [string]$_.connection_name })
 
     if ($DryRun) {
-        Write-Host "    [dry-run] cascade $cascadeLabel via $($Link.connection_name) state=$($Link.state)"
+        Write-Host "    [dry-run] cascade $cascadeLabel via $($connectionNames -join ',')"
         return $null
     }
 
-    Write-Host "    probing cascade $cascadeLabel state=$($Link.state)..."
+    Write-Host "    probing cascade $cascadeLabel via $($connectionNames -join ',')..."
 
-    $tcpScriptB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($remoteTcpCheckPython))
-    $tcpCommand = "python3 -c $(Quote-BashArg "import base64,sys; exec(base64.b64decode('$tcpScriptB64'))") $(Quote-BashArg $Link.egress_host) $(Quote-BashArg ([string]$Link.egress_port)) $(Quote-BashArg ([string]$TimeoutSeconds))"
-    $transportProbe = Invoke-SshJsonProbe $ingressKey $ingressRemote $tcpCommand "cascade transport probe $cascadeLabel"
+    $transportHops = New-Object System.Collections.ArrayList
+    $connectionHops = New-Object System.Collections.ArrayList
+    foreach ($link in $links) {
+        $linkIngressNode = $nodes[$link.ingress_alias]
+        $linkIngressKey = Join-Path (Join-Path $OperatorDir $link.ingress_alias) "admin_key"
+        $linkIngressRemote = "${SshUser}@$($linkIngressNode.endpoint)"
+        $linkLabel = "$($link.ingress_alias)->$($link.egress_alias):$($link.egress_port)"
 
-    $dockerStatusScript = 'in_file="/tmp/ai-sp-cascade-status.$$"; cat > "$in_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$in_file"; rc=$?; rm -f "$in_file"; exit "$rc"'
-    $statusCommand = @(
-        "tmp_file=`$(mktemp)",
-        "trap 'rm -f ""`$tmp_file""' EXIT",
-        "printf 'Hub %s\nCascadeStatusGet %s\n' $(Quote-BashArg $Link.hub_name) $(Quote-BashArg $Link.connection_name) > ""`$tmp_file""",
-        "timeout $(Quote-BashArg ([string]$TimeoutSeconds))s sudo docker exec -i -e SERVER_PASSWORD=$(Quote-BashArg $Link.server_password) softether-cascade sh -c $(Quote-BashArg $dockerStatusScript) < ""`$tmp_file"""
-    ) -join "; "
-    $statusProbe = Invoke-SshTextCommand $ingressKey $ingressRemote $statusCommand "cascade status probe $($Link.connection_name)"
-    $statusOutput = [string]$statusProbe.output
-    $statusOnline = $statusProbe.ok -and ($statusOutput -match "Connection Completed|Session Established|Online|Connected")
+        $tcpScriptB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($remoteTcpCheckPython))
+        $tcpCommand = "python3 -c $(Quote-BashArg "import base64,sys; exec(base64.b64decode('$tcpScriptB64'))") $(Quote-BashArg $link.egress_host) $(Quote-BashArg ([string]$link.egress_port)) $(Quote-BashArg ([string]$TimeoutSeconds))"
+        Write-Host "      checking cascade transport $linkLabel..."
+        $transportProbe = Invoke-SshJsonProbe $linkIngressKey $linkIngressRemote $tcpCommand "cascade transport probe $linkLabel"
+        $transportStatus = if ($transportProbe.ok) { $transportProbe.result } else { [pscustomobject]@{ reachable = $false; error = $transportProbe.error; raw = $transportProbe.raw } }
+        if ($transportStatus.reachable) {
+            Write-Host "        [OK] transport reachable"
+        } else {
+            Write-Host "        [FAIL] transport unreachable"
+        }
+        [void]$transportHops.Add([pscustomobject]@{
+            connection = [string]$link.connection_name
+            ingress_alias = [string]$link.ingress_alias
+            egress_alias = [string]$link.egress_alias
+            endpoint = "$($link.egress_host):$($link.egress_port)"
+            reachable = [bool]$transportStatus.reachable
+            tcp_connect_ms = $transportStatus.tcp_connect_ms
+            error = $transportStatus.error
+        })
 
-    $targetProbe = Invoke-TargetProbeWithRetries $egressKey $egressRemote $Target "cascade target probe $($Link.egress_alias)/$($Target.value)"
-
-    $transportStatus = if ($transportProbe.ok) { $transportProbe.result } else { [pscustomobject]@{ reachable = $false; error = $transportProbe.error; raw = $transportProbe.raw } }
-    $connectionStatus = [pscustomobject]@{
-        online = $statusOnline
-        exit_code = $statusProbe.exit_code
-        matched_online_text = $statusOnline
-        output_excerpt = if ($statusOutput.Length -gt 1200) { $statusOutput.Substring(0, 1200) } else { $statusOutput }
+        $dockerStatusScript = 'in_file="/tmp/ai-sp-cascade-status.$$"; cat > "$in_file"; timeout "$VPNCMD_TIMEOUT" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$in_file"; rc=$?; rm -f "$in_file"; exit "$rc"'
+        $remoteStatusTimeout = [Math]::Max(1, $TimeoutSeconds + 5)
+        $statusCommand = @(
+            "set -euo pipefail",
+            "tmp_file=`$(mktemp)",
+            "trap 'rm -f ""`$tmp_file""' EXIT",
+            "printf 'Hub %s\nCascadeStatusGet %s\n' $(Quote-BashArg $link.hub_name) $(Quote-BashArg $link.connection_name) > ""`$tmp_file""",
+            "timeout $(Quote-BashArg ([string]$remoteStatusTimeout))s sudo docker exec -i -e SERVER_PASSWORD=$(Quote-BashArg $link.server_password) -e VPNCMD_TIMEOUT=$(Quote-BashArg ([string]$TimeoutSeconds)) softether-cascade sh -c $(Quote-BashArg $dockerStatusScript) < ""`$tmp_file"""
+        ) -join "; "
+        Write-Host "      checking cascade status $($link.connection_name)..."
+        $statusProbe = Invoke-SshTextCommand $linkIngressKey $linkIngressRemote $statusCommand "cascade status probe $($link.connection_name)"
+        $statusOutput = [string]$statusProbe.output
+        $statusOnline = $statusProbe.ok -and ($statusOutput -match "Connection Completed|Session Established|Online|Connected")
+        if ($statusOnline) {
+            Write-Host "        [OK] cascade status online"
+        } else {
+            Write-Host "        [FAIL] cascade status is not online"
+        }
+        [void]$connectionHops.Add([pscustomobject]@{
+            connection = [string]$link.connection_name
+            ingress_alias = [string]$link.ingress_alias
+            egress_alias = [string]$link.egress_alias
+            online = [bool]$statusOnline
+            exit_code = $statusProbe.exit_code
+            output_excerpt = if ($statusOutput.Length -gt 1200) { $statusOutput.Substring(0, 1200) } else { $statusOutput }
+        })
     }
+
+    $transportOk = @($transportHops.ToArray() | Where-Object { -not $_.reachable }).Count -eq 0
+    $statusOnline = @($connectionHops.ToArray() | Where-Object { -not $_.online }).Count -eq 0
+
+    if (-not (Test-TargetHasRunnableProbe $Target)) {
+        Write-Host "      cascade tcp=$transportOk status_online=$statusOnline target=$($Target.protocol)/$($Target.port) route_review"
+        return [pscustomobject]([ordered]@{
+            schema_version = 1
+            run_id = $runId
+            observed_at_utc = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+            path_mode = "cascade"
+            profile = $PolicyProfile.name
+            behavior = Get-PolicyBehavior $PolicyProfile
+            candidate_alias = $egressAlias
+            ingress_alias = $ingressAlias
+            egress_alias = $egressAlias
+            cascade_connection = ($connectionNames -join "->")
+            cascade_connections = $connectionNames
+            cascade_path = @($links | ForEach-Object { [pscustomobject]@{ connection = $_.connection_name; ingress_alias = $_.ingress_alias; egress_alias = $_.egress_alias } })
+            cascade_link_state = ($links | ForEach-Object { $_.state } | Select-Object -Unique) -join ","
+            cascade_transport_status = [pscustomobject]@{ reachable = $transportOk; hops = @($transportHops.ToArray()) }
+            cascade_connection_status = [pscustomobject]@{ online = $statusOnline; hops = @($connectionHops.ToArray()) }
+            endpoint = $egressNode.endpoint
+            target = $Target
+            status = "route_review"
+            observation = $null
+            target_status = $null
+            effective_country = $null
+            effective_ip = $null
+            attempts_used = 0
+            attempts_total = 0
+            retry_errors = @()
+            error = "Generic UDP probe is not deterministic; add a protocol-specific probe block before auto-accept."
+            raw = $null
+        })
+    }
+
+    $targetProbe = Invoke-TargetProbeWithRetries $egressKey $egressRemote $Target "cascade target probe $egressAlias/$($Target.value)"
 
     $record = [ordered]@{
         schema_version = 1
@@ -786,13 +1049,15 @@ function Invoke-CascadeEgressProbe($PolicyProfile, $Target, $Link) {
         path_mode = "cascade"
         profile = $PolicyProfile.name
         behavior = Get-PolicyBehavior $PolicyProfile
-        candidate_alias = $Link.egress_alias
-        ingress_alias = $Link.ingress_alias
-        egress_alias = $Link.egress_alias
-        cascade_connection = $Link.connection_name
-        cascade_link_state = $Link.state
-        cascade_transport_status = $transportStatus
-        cascade_connection_status = $connectionStatus
+        candidate_alias = $egressAlias
+        ingress_alias = $ingressAlias
+        egress_alias = $egressAlias
+        cascade_connection = ($connectionNames -join "->")
+        cascade_connections = $connectionNames
+        cascade_path = @($links | ForEach-Object { [pscustomobject]@{ connection = $_.connection_name; ingress_alias = $_.ingress_alias; egress_alias = $_.egress_alias } })
+        cascade_link_state = ($links | ForEach-Object { $_.state } | Select-Object -Unique) -join ","
+        cascade_transport_status = [pscustomobject]@{ reachable = $transportOk; hops = @($transportHops.ToArray()) }
+        cascade_connection_status = [pscustomobject]@{ online = $statusOnline; hops = @($connectionHops.ToArray()) }
         endpoint = $egressNode.endpoint
         target = $Target
         status = if ($targetProbe.ok) { "observed" } else { "probe_error" }
@@ -807,11 +1072,17 @@ function Invoke-CascadeEgressProbe($PolicyProfile, $Target, $Link) {
         raw = if ($targetProbe.ok) { $null } else { $targetProbe.raw }
     }
 
-    $transportOk = $transportProbe.ok -and $transportProbe.result.reachable
     $country = if ($targetProbe.ok) { $targetProbe.result.external_country } else { $null }
     $ip = if ($targetProbe.ok) { $targetProbe.result.external_ip } else { $null }
     $http = if ($targetProbe.ok) { $targetProbe.result.http_status } else { $null }
-    Write-Host "      cascade tcp=$transportOk status_online=$statusOnline ip=$ip country=$country http=$http attempts=$($targetProbe.attempts_used)/$($targetProbe.attempts_total)"
+    $icmp = if ($targetProbe.ok) { $targetProbe.result.icmp_ms } else { $null }
+    Write-Host "      cascade tcp=$transportOk status_online=$statusOnline ip=$ip country=$country http=$http icmp_ms=$icmp attempts=$($targetProbe.attempts_used)/$($targetProbe.attempts_total)"
+    if ($targetProbe.ok) {
+        $redirectWarning = Get-RedirectTargetWarning $PolicyProfile $Target $targetProbe.result
+        if ($redirectWarning) {
+            Write-Host "      [WARN] $redirectWarning"
+        }
+    }
 
     return [pscustomobject]$record
 }
@@ -830,11 +1101,10 @@ Validate-Policy $policy $nodes
 $cascadeLinks = @()
 if ($IncludeCascade -or $CascadeOnly -or $PreferCascade) {
     $cascadeLinks = @(Load-CascadeLinks $CascadeSecretDir $nodes)
-    $cascadeLinkNames = @($cascadeLinks | ForEach-Object { $_.connection_name })
     foreach ($profile in @($policy.profiles)) {
-        foreach ($linkName in @(Get-PolicyFallbackLinks $profile)) {
-            if ($cascadeLinkNames -notcontains $linkName) {
-                Fail "egress profile $($profile.name) references unknown candidate fallback link: $linkName"
+        foreach ($egressAlias in @(Get-PolicyFallbackEgressAliases $profile)) {
+            if (-not $nodes.ContainsKey($egressAlias)) {
+                Fail "egress profile $($profile.name) references unknown candidate fallback egress alias: $egressAlias"
             }
         }
     }
@@ -876,7 +1146,7 @@ if ($IncludeCascade -or $CascadeOnly -or $PreferCascade) {
 }
 foreach ($policyProfile in $profiles) {
     $profileIngressAliases = @(Get-PolicyIngressAliases $policyProfile)
-    $profileFallbackLinks = @(Get-PolicyFallbackLinks $policyProfile)
+    $profileFallbackEgressAliases = @(Get-PolicyFallbackEgressAliases $policyProfile)
     $candidateAliases = @($profileIngressAliases | Where-Object {
         $aliasFilter.Count -eq 0 -or $aliasFilter -contains $_
     })
@@ -887,15 +1157,19 @@ foreach ($policyProfile in $profiles) {
     Write-Host "Profile $($policyProfile.name): $($candidateAliases -join ', ')"
     foreach ($target in @($policyProfile.targets)) {
         Write-Host "  Target $($target.protocol)://$($target.value):$($target.port)"
-        $eligibleCascadeLinks = @($cascadeLinks | Where-Object {
-            $profileIngressAliases -contains $_.ingress_alias -and (
-                $profileFallbackLinks.Count -eq 0 -or $profileFallbackLinks -contains $_.connection_name
-            ) -and (
-                $aliasFilter.Count -eq 0 -or
-                $aliasFilter -contains $_.ingress_alias -or
-                $aliasFilter -contains $_.egress_alias
-            )
-        })
+        $eligibleCascadePaths = New-Object System.Collections.ArrayList
+        foreach ($ingressAlias in $profileIngressAliases) {
+            foreach ($egressAlias in $profileFallbackEgressAliases) {
+                $path = @(Find-CascadePath $cascadeLinks $ingressAlias $egressAlias)
+                if ($path.Count -eq 0) {
+                    continue
+                }
+                if ($aliasFilter.Count -gt 0 -and $aliasFilter -notcontains $ingressAlias -and $aliasFilter -notcontains $egressAlias) {
+                    continue
+                }
+                [void]$eligibleCascadePaths.Add($path)
+            }
+        }
 
         $directGoodCount = 0
         $cascadeUsableCount = 0
@@ -926,8 +1200,8 @@ foreach ($policyProfile in $profiles) {
         }
 
         if ($shouldRunCascade) {
-            foreach ($link in $eligibleCascadeLinks) {
-                $record = Invoke-CascadeEgressProbe $policyProfile $target $link
+            foreach ($path in @($eligibleCascadePaths.ToArray())) {
+                $record = Invoke-CascadeEgressProbe $policyProfile $target $path
                 if ($record) {
                     [void]$records.Add($record)
                     if (Test-CascadeRecordUsable $record) {
