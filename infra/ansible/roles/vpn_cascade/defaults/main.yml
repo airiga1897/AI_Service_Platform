@@ -10,6 +10,7 @@ vpn_cascade_seed_config: "{{ playbook_dir }}/../../operator/softether/cascade/{{
 vpn_cascade_local_override_dir: "{{ playbook_dir }}/../../operator/softether/cascade/{{ inventory_hostname }}/overrides"
 vpn_cascade_link_secret_file: "{{ playbook_dir }}/../../operator/softether/cascade/secrets/lab-cascade.json"
 vpn_cascade_operator_mgmt_ips: "{{ playbook_dir }}/../../operator/haproxy/lists/vpn_mgmt_ips.lst"
+vpn_cascade_operator_networks_file: "{{ playbook_dir }}/../../operator/networks.csv"
 
 vpn_cascade_image: softethervpn/vpnserver:stable
 vpn_cascade_container_name: softether-cascade
@@ -17,8 +18,11 @@ vpn_cascade_network_name: ai_service_cascade
 vpn_cascade_network_subnet: 172.21.0.0/24
 vpn_cascade_container_ipv4: 172.21.0.2
 vpn_cascade_policy_network_name: ai_service_vpn_policy
-vpn_cascade_policy_network_subnet: 172.22.0.0/24
-vpn_cascade_policy_container_ipv4: 172.22.0.3
+vpn_cascade_policy_network_subnet: ""
+vpn_cascade_policy_container_ipv4: ""
+vpn_cascade_policy_router_ipv4: ""
+vpn_cascade_policy_tap_device: vpnpolicy
+vpn_cascade_policy_tap_interface: tap_vpnpolicy
 
 vpn_cascade_host_https_port: 8443
 vpn_cascade_host_alt_port: 8992

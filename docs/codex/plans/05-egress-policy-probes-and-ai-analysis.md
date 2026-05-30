@@ -2,18 +2,18 @@
 
 This plan reserves the next egress-policy roadmap after the VPN/HAProxy edge is
 stable. It separates fact collection, AI-assisted interpretation, human approval,
-and eventual routing enforcement.
+and eventual selective fallback routing.
 
 ## Stage Roadmap
 
 1. Stage 1: policy registry + probes.
 2. Stage 2: AI-assisted classification/reporting.
 3. Stage 3: human-approved policy updates.
-4. Stage 4: controlled routing enforcement.
+4. Stage 4: controlled selective fallback routing.
 
 Stage 1 must come first. It creates the operator-local target registry, probe
 results, and deterministic facts that later AI analysis can consume. Stage 2
-must not be mixed into routing enforcement.
+must not be mixed into selective fallback routing.
 
 ## Stage 1 Current Interface
 
@@ -23,18 +23,23 @@ The v1 registry is a small operator-managed JSON file:
 operator/egress_policy/profiles.json
 ```
 
+Only `profiles.json` is synced to the active orchestrator as operator intent.
+Probe history, archives, and proposals remain operator-local evidence and review
+state.
+
 A safe tracked template is stored at:
 
 ```text
 docs/examples/egress_policy.profiles.example.json
 ```
 
-Profiles are global intent for all VPS nodes. They list candidate aliases, target
-domains or IPs, desired behavior, reason, state, and rollback. Per-node
-differences should come from node capabilities/labels later, not from duplicating
-the same profile per VPS. The v1 behavior is
-`fallback_on_ingress_egress_failure`: ingress-local egress first, cascade only
-when that local path fails or degrades.
+Profiles are global intent for all VPS nodes. They list candidate ingress
+aliases, candidate fallback links, target domains or IPs, behavior, reason,
+state, and rollback. Per-node differences should come from node
+capabilities/labels later, not from duplicating the same profile per VPS. The v1
+behavior is `fallback_on_ingress_egress_failure`: ingress-local egress first,
+cascade only when that local path fails or degrades. Real domains and IPs belong
+in `operator/egress_policy/profiles.json`, not in code.
 
 The probe-only runner is:
 
@@ -45,6 +50,20 @@ The probe-only runner is:
 Use `-DryRun` to validate and list selected profiles without SSH probes. A normal
 run executes read-only SSH probes from each selected VPS and writes JSONL history
 under `operator/egress_policy/history/`.
+
+Operators can create or replace a probe-only profile without hand-editing JSON:
+
+```powershell
+.\tools\egress_policy\set_egress_policy_profile.ps1 `
+  -Name example_service_fallback `
+  -TargetValue example.org `
+  -IngressAlias vps5 `
+  -FallbackLink vps5-to-vps4 `
+  -Reason "Local ingress path is unreliable for this operator-defined target." `
+  -Replace
+```
+
+This command changes only `operator/egress_policy/profiles.json`.
 
 Use `-SshPath` when the current shell resolves `ssh` to a wrapper instead of the
 real OpenSSH executable:
@@ -66,10 +85,10 @@ are useful as negative/control routes: the runner records whether transport and
 SoftEther status are usable, but it must not create the cascade connection or
 promote the route.
 
-Use `-PreferCascade` for the normal fast operator workflow: probe explicit
-cascade links first and run direct VPS probes only when no usable cascade result
-exists. Use `-CascadeOnly` when the operator wants to avoid direct probes
-entirely.
+Use `-PreferCascade` for the normal operator workflow: probe ingress-local
+egress first and run explicit cascade fallback links only when the local path
+fails or degrades. Use `-CascadeOnly` when the operator wants to inspect only
+cascade candidates.
 
 Render the latest history for humans with:
 
@@ -96,8 +115,14 @@ that need human attention: unknown targets, ingress-local failure with fallback
 available, fallback unavailable, probe errors, unstable retries, or inconclusive
 route evidence. This keeps large target lists manageable for the operator.
 
-`avoid_ru_egress` is deprecated for new profiles. Strict country policy, if
-needed later, must be an explicit behavior such as `require_non_ru_egress`.
+If ingress-local probing fails or degrades after all attempts and exactly one
+configured cascade fallback link succeeds for a target already present in
+`profiles.json`, the `fallback_available` proposal is automatically marked
+`accepted` / `Принято`. This is still proposal state only; routing is not applied.
+
+Old `desired_region_behavior` and `candidate_egress_aliases` fields are not part
+of the v1 contract. Strict country policy, if needed later, must be an explicit
+behavior such as `require_non_ru_egress`.
 
 Human-facing review output uses Russian status text:
 `Требует решения`, `Принято`, `Отклонено`, `Отложено`, and `Устарело`.
@@ -155,10 +180,10 @@ action: no automatic routing change
 - AI must not apply firewall, HAProxy, routing, rollout, or SoftEther changes.
 - Policy updates are human-approved only.
 - If classification is uncertain, the result stays advisory and must not be used
-  for automatic enforcement.
+  for automatic selective fallback routing.
 
-## Future Enforcement Boundary
+## Future Selective Fallback Boundary
 
 Stage 4 may consume approved policy from Stage 3. It must not consume raw AI
-guesses directly. Controlled routing can use only explicit allow/deny/prefer
-rules that were reviewed by an operator and stored as policy.
+guesses directly. Controlled selective fallback routing can use only explicit
+fallback rules that were reviewed by an operator and stored as policy.

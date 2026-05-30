@@ -17,7 +17,7 @@ function Fail($Message) {
 function Get-Recommendation($Record) {
     $mode = if ($Record.path_mode) { [string]$Record.path_mode } else { "direct" }
     $httpStatus = if ($Record.target_status) { $Record.target_status.http_status } else { $Record.observation.http_status }
-    $desired = if ($Record.desired_region_behavior) { [string]$Record.desired_region_behavior } else { "fallback_on_ingress_egress_failure" }
+    $desired = if ($Record.behavior) { [string]$Record.behavior } else { "fallback_on_ingress_egress_failure" }
 
     if ($mode -eq "cascade") {
         $transportOk = $Record.cascade_transport_status -and $Record.cascade_transport_status.reachable

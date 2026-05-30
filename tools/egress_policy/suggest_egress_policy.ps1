@@ -83,9 +83,9 @@ function Get-TargetKey($Target) {
 }
 
 function Get-Recommendation($Record) {
-    $mode = if ($Record.path_mode) { [string]$Record.path_mode } else { "direct" }
+    $mode = Get-RecordPathMode $Record
     $httpStatus = if ($Record.target_status) { $Record.target_status.http_status } else { $Record.observation.http_status }
-    $desired = if ($Record.desired_region_behavior) { [string]$Record.desired_region_behavior } else { "fallback_on_ingress_egress_failure" }
+    $desired = if ($Record.behavior) { [string]$Record.behavior } else { "fallback_on_ingress_egress_failure" }
 
     if ($mode -eq "cascade") {
         $transportOk = $Record.cascade_transport_status -and $Record.cascade_transport_status.reachable
@@ -116,6 +116,13 @@ function Get-Recommendation($Record) {
     }
 
     return "review"
+}
+
+function Get-RecordPathMode($Record) {
+    if ($Record.path_mode) {
+        return [string]$Record.path_mode
+    }
+    return "direct"
 }
 
 function Get-ResponseMs($Record) {
@@ -178,12 +185,107 @@ function Test-UnstableRecord($Record) {
     return ($attemptsUsed -gt 1 -or $retryErrors.Count -gt 0)
 }
 
+function Get-ProfileBehavior($Profile) {
+    if ($Profile -and $Profile.behavior) {
+        return [string]$Profile.behavior
+    }
+    return ""
+}
+
+function Get-ProfileFallbackLinks($Profile) {
+    if (-not $Profile -or $null -eq $Profile.candidate_fallback_links) {
+        return @()
+    }
+    return @($Profile.candidate_fallback_links | Where-Object { $_ })
+}
+
+function Get-RecordHttpStatus($Record) {
+    $obs = if ($Record.target_status) { $Record.target_status } else { $Record.observation }
+    if (-not $obs) {
+        return $null
+    }
+    return $obs.http_status
+}
+
+function Test-DirectRecordFailedAfterAttempts($Record) {
+    $mode = if ($Record.path_mode) { [string]$Record.path_mode } else { "direct" }
+    if ($mode -ne "direct") {
+        return $false
+    }
+    if ((Get-Recommendation $Record) -eq "good_ingress_local") {
+        return $false
+    }
+
+    $target = $Record.target
+    $obs = if ($Record.target_status) { $Record.target_status } else { $Record.observation }
+    $attemptsUsed = if ($Record.attempts_used) { [int]$Record.attempts_used } elseif ($obs -and $obs.attempts_used) { [int]$obs.attempts_used } else { 1 }
+    $attemptsTotal = if ($Record.attempts_total) { [int]$Record.attempts_total } elseif ($obs -and $obs.attempts_total) { [int]$obs.attempts_total } else { 1 }
+
+    if ($target.protocol -in @("http", "https")) {
+        $httpStatus = Get-RecordHttpStatus $Record
+        if ($null -ne $httpStatus) {
+            return $false
+        }
+        return ($Record.status -eq "probe_error" -or $attemptsUsed -ge $attemptsTotal)
+    }
+
+    if ($target.protocol -eq "tcp") {
+        if ($obs -and $null -ne $obs.tcp_connect_ms) {
+            return $false
+        }
+        return ($Record.status -eq "probe_error" -or $attemptsUsed -ge $attemptsTotal)
+    }
+
+    return $false
+}
+
+function Test-DeterministicFallbackAutoAccept($Profile, $Records, $BestRecord, [bool]$TargetKnown) {
+    if (-not $TargetKnown -or -not $Profile) {
+        return $false
+    }
+    if ((Get-ProfileBehavior $Profile) -ne "fallback_on_ingress_egress_failure") {
+        return $false
+    }
+
+    $configuredFallbackLinks = @(Get-ProfileFallbackLinks $Profile)
+    if ($configuredFallbackLinks.Count -ne 1) {
+        return $false
+    }
+
+    $directRecords = @($Records | Where-Object { (Get-RecordPathMode $_) -eq "direct" })
+    if ($directRecords.Count -eq 0) {
+        return $false
+    }
+    if (@($directRecords | Where-Object { (Get-Recommendation $_) -eq "good_ingress_local" }).Count -gt 0) {
+        return $false
+    }
+    if (@($directRecords | Where-Object { -not (Test-DirectRecordFailedAfterAttempts $_) }).Count -gt 0) {
+        return $false
+    }
+
+    $usableCascadeRecords = @($Records | Where-Object {
+        (Get-RecordPathMode $_) -eq "cascade" -and
+        (Get-Recommendation $_) -eq "fallback_available"
+    })
+    if ($usableCascadeRecords.Count -ne 1) {
+        return $false
+    }
+    if ([string]$usableCascadeRecords[0].cascade_connection -ne [string]$configuredFallbackLinks[0]) {
+        return $false
+    }
+    if (-not $BestRecord -or [string]$BestRecord.cascade_connection -ne [string]$configuredFallbackLinks[0]) {
+        return $false
+    }
+
+    return $true
+}
+
 function Get-IssueType($Records, $BestRecord, [bool]$TargetKnown) {
     if (-not $TargetKnown) {
         return "policy_profile_candidate"
     }
 
-    $directRecords = @($Records | Where-Object { (if ($_.path_mode) { [string]$_.path_mode } else { "direct" }) -eq "direct" })
+    $directRecords = @($Records | Where-Object { (Get-RecordPathMode $_) -eq "direct" })
     $directGoodRecords = @($directRecords | Where-Object { (Get-Recommendation $_) -eq "good_ingress_local" })
     if ($directRecords.Count -eq 0) {
         return $null
@@ -226,9 +328,9 @@ function Get-ProposalReason($Type) {
         "fallback_unavailable" { return "Ingress-local egress did not produce a good stable result, and no usable cascade fallback was confirmed in the selected probe history." }
         "probe_error" { return "Probe failed without a usable successful observation; operator should review the target, network path, or retry later." }
         "unstable_probe" { return "Probe eventually found a usable path, but retries or transient errors were observed; operator should decide whether this is acceptable." }
-        "route_review" { return "Probe result was inconclusive; operator should review the evidence before approving any future enforcement." }
+        "route_review" { return "Probe result was inconclusive; operator should review the evidence before approving any future selective fallback routing." }
         "strict_non_ru_violation" { return "Strict non-RU behavior was requested, but the observed egress country was RU." }
-        default { return "Existing profile has no usable observed path in the latest selected probe history; operator should review route health before enforcement." }
+        default { return "Existing profile has no usable observed path in the latest selected probe history; operator should review route health before selective fallback routing." }
     }
 }
 
@@ -245,7 +347,7 @@ function Get-HumanSummary($Type) {
     }
 }
 
-function New-Proposal($Type, $Profile, $Target, $Records, $BestRecord, $HistoryFilePath) {
+function New-Proposal($Type, $Profile, $Target, $Records, $BestRecord, $HistoryFilePath, [bool]$AutoAccepted = $false) {
     $runId = if ($BestRecord -and $BestRecord.run_id) { $BestRecord.run_id } elseif ($Records.Count -gt 0) { $Records[0].run_id } else { [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ") }
     $targetPart = ConvertTo-SafeIdPart "$($Target.value)-$($Target.port)"
     $profilePart = ConvertTo-SafeIdPart $(if ($Profile) { $Profile } else { "unknown-profile" })
@@ -259,13 +361,14 @@ function New-Proposal($Type, $Profile, $Target, $Records, $BestRecord, $HistoryF
         "No unambiguously good path was found for this target in the selected probe history."
     }
 
-    [ordered]@{
+    $status = if ($AutoAccepted) { "accepted" } else { "suggested" }
+    $proposal = [ordered]@{
         schema_version = 1
         id = $id
         type = $Type
         human_type = Get-HumanType $Type
-        status = "suggested"
-        human_status = Get-HumanStatus "suggested"
+        status = $status
+        human_status = Get-HumanStatus $status
         created_at_utc = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
         source = "suggest_egress_policy.ps1"
         profile = $Profile
@@ -282,6 +385,20 @@ function New-Proposal($Type, $Profile, $Target, $Records, $BestRecord, $HistoryF
         }
         ai_advisory = $null
     }
+
+    if ($AutoAccepted) {
+        $proposal["operator_decision"] = [ordered]@{
+            status = "accepted"
+            human_status = Get-HumanStatus "accepted"
+            previous_status = "suggested"
+            previous_human_status = Get-HumanStatus "suggested"
+            reason = "Deterministic fallback: ingress-local probe failed or degraded after all attempts, and the configured cascade fallback succeeded."
+            operator = "auto:deterministic-fallback"
+            decided_at_utc = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+        }
+    }
+
+    return $proposal
 }
 
 if (-not (Test-Path -LiteralPath $PolicyFile -PathType Leaf)) {
@@ -292,7 +409,7 @@ $policy = Read-JsonFile $PolicyFile "egress policy registry"
 $knownProfiles = @{}
 $knownTargets = @{}
 foreach ($profile in @($policy.profiles)) {
-    $knownProfiles[[string]$profile.name] = $true
+    $knownProfiles[[string]$profile.name] = $profile
     foreach ($target in @($profile.targets)) {
         $knownTargets[(Get-TargetKey $target)] = $true
     }
@@ -336,6 +453,7 @@ foreach ($groupKey in $recordsByGroup.Keys) {
     $first = $records[0]
     $targetKey = Get-TargetKey $first.target
     $targetKnown = $knownTargets.ContainsKey($targetKey)
+    $profileConfig = if ($knownProfiles.ContainsKey([string]$first.profile)) { $knownProfiles[[string]$first.profile] } else { $null }
 
     $bestRecords = @($records |
         Where-Object { Test-GoodRecommendation (Get-Recommendation $_) } |
@@ -345,7 +463,8 @@ foreach ($groupKey in $recordsByGroup.Keys) {
 
     $issueType = Get-IssueType $records $bestRecord $targetKnown
     if ($issueType) {
-        $proposal = New-Proposal $issueType $first.profile $first.target $records $bestRecord $first.source_history_file
+        $autoAccepted = $issueType -eq "fallback_available" -and (Test-DeterministicFallbackAutoAccept $profileConfig $records $bestRecord $targetKnown)
+        $proposal = New-Proposal $issueType $first.profile $first.target $records $bestRecord $first.source_history_file $autoAccepted
         if (-not $proposalIds.ContainsKey($proposal.id)) {
             $proposalIds[$proposal.id] = $true
             [void]$proposals.Add($proposal)
@@ -391,8 +510,16 @@ New-Item -ItemType Directory -Force -Path $ProposalDir | Out-Null
 foreach ($proposal in @($proposals.ToArray())) {
     $path = Join-Path $ProposalDir "$($proposal.id).json"
     if ((Test-Path -LiteralPath $path -PathType Leaf) -and -not $Force) {
-        Write-Host "Skipping existing proposal for the same profile/target/issue: $path"
-        continue
+        $existingProposal = Read-JsonFile $path "existing proposal"
+        if ($existingProposal.status -in @("rejected", "ignored")) {
+            Write-Host "Skipping existing manually decided proposal: $path"
+            continue
+        }
+        if ($existingProposal.status -ne "suggested" -or $proposal.status -ne "accepted") {
+            Write-Host "Skipping existing proposal for the same profile/target/issue: $path"
+            continue
+        }
+        Write-Host "Updating existing suggested proposal to accepted: $path"
     }
     $proposal | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $path -Encoding utf8
     Write-Host "[OK] Proposal written: $path"

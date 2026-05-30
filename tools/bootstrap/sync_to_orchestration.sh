@@ -16,6 +16,12 @@ SOFTETHER_DIR="./operator/softether"
 REMOTE_SOFTETHER_DIR="/tmp/ai-service-platform.softether"
 HAPROXY_DIR="./operator/haproxy"
 REMOTE_HAPROXY_DIR="/tmp/ai-service-platform.haproxy"
+EGRESS_POLICY_DIR="./operator/egress_policy"
+REMOTE_EGRESS_POLICY_DIR="/tmp/ai-service-platform.egress_policy"
+NETWORKS_FILE="./operator/networks.csv"
+NETWORKS_OVERRIDE_FILE="./operator/networks.override.csv"
+GENERATE_NETWORK_PLAN_SCRIPT="tools/network/generate_vpn_network_plan.sh"
+REMOTE_NETWORKS_FILE="/tmp/ai-service-platform.networks.csv"
 REMOTE_PREPARE_SCRIPT="/opt/ai-service-platform/tools/bootstrap/prepare_orchestration_inventory.sh"
 CREATE_INVENTORY_SCRIPT="tools/bootstrap/create_inventory.sh"
 PREPARE_INVENTORY_SCRIPT="tools/bootstrap/prepare_orchestration_inventory.sh"
@@ -53,6 +59,16 @@ Options:
                              Default: ./operator/softether
   --haproxy-dir PATH         Optional operator HAProxy directory.
                              Default: ./operator/haproxy
+  --egress-policy-dir PATH   Optional operator egress policy intent directory.
+                             Only profiles.json is synced; history/proposals are operator-local.
+                             Default: ./operator/egress_policy
+  --networks-file PATH       Generated VPN networks.csv. Default: ./operator/networks.csv
+  --networks-override-file PATH
+                             Optional network overrides for non-vpsN aliases.
+                             Default: ./operator/networks.override.csv
+  --generate-network-plan-script PATH
+                             Local network plan generator.
+                             Default: tools/network/generate_vpn_network_plan.sh
   --remote-prepare-script PATH
                              Remote prepare script path.
   --create-inventory-script PATH
@@ -172,6 +188,22 @@ while [ "$#" -gt 0 ]; do
             HAPROXY_DIR="${2:-}"
             shift 2
             ;;
+        --egress-policy-dir)
+            EGRESS_POLICY_DIR="${2:-}"
+            shift 2
+            ;;
+        --networks-file)
+            NETWORKS_FILE="${2:-}"
+            shift 2
+            ;;
+        --networks-override-file)
+            NETWORKS_OVERRIDE_FILE="${2:-}"
+            shift 2
+            ;;
+        --generate-network-plan-script)
+            GENERATE_NETWORK_PLAN_SCRIPT="${2:-}"
+            shift 2
+            ;;
         --verify-control-script)
             VERIFY_CONTROL_SCRIPT="${2:-}"
             shift 2
@@ -219,6 +251,7 @@ require_file "$CREATE_INVENTORY_SCRIPT" "--create-inventory-script"
 require_file "$PREPARE_INVENTORY_SCRIPT" "--prepare-inventory-script"
 require_file "$VERIFY_CONTROL_SCRIPT" "--verify-control-script"
 require_file "$STATE_FILE" "--state-file"
+require_file "$GENERATE_NETWORK_PLAN_SCRIPT" "--generate-network-plan-script"
 require_positive_int "$VERIFY_RETRIES" "--verify-retries"
 require_positive_int "$VERIFY_RETRY_DELAY" "--verify-retry-delay"
 require_positive_int "$VERIFY_ANSIBLE_TIMEOUT" "--verify-ansible-timeout"
@@ -227,6 +260,14 @@ first_line="$(head -n 1 "$NODES_FILE" | tr -d '\r')"
 [ "$first_line" = "$EXPECTED_CSV_HEADER" ] || fail "nodes.csv header must be exactly: $EXPECTED_CSV_HEADER"
 state_first_line="$(head -n 1 "$STATE_FILE" | tr -d '\r')"
 [ "$state_first_line" = "$EXPECTED_STATE_CSV_HEADER" ] || fail "state.csv header must be exactly: $EXPECTED_STATE_CSV_HEADER"
+
+echo "Generating VPN network plan from nodes.csv/state.csv"
+bash "$GENERATE_NETWORK_PLAN_SCRIPT" \
+    --nodes-file "$NODES_FILE" \
+    --state-file "$STATE_FILE" \
+    --override-file "$NETWORKS_OVERRIDE_FILE" \
+    --output-file "$NETWORKS_FILE"
+require_file "$NETWORKS_FILE" "--networks-file"
 
 if [ -z "$CONTROL_ALIAS" ]; then
     control_rows=0
@@ -303,7 +344,8 @@ SCP_COMMON_ARGS=(
 RSYNC_SSH_COMMAND="ssh -n -T -i '$SSH_KEY_FILE' -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -o RequestTTY=no -o KbdInteractiveAuthentication=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey -o StrictHostKeyChecking=accept-new"
 
 sanitized_nodes="$(mktemp)"
-trap 'rm -f "$sanitized_nodes"' EXIT
+egress_policy_sync_root=""
+trap 'rm -f "$sanitized_nodes"; if [ -n "$egress_policy_sync_root" ]; then rm -rf "$egress_policy_sync_root"; fi' EXIT
 
 {
     echo "$EXPECTED_CSV_HEADER"
@@ -326,11 +368,19 @@ if [ -n "$STATE_FILE" ]; then
     echo "Syncing state.csv to $remote"
     scp "${SCP_COMMON_ARGS[@]}" "$STATE_FILE" "$remote:$REMOTE_STATE_FILE"
 fi
+echo "Syncing networks.csv to $remote"
+scp "${SCP_COMMON_ARGS[@]}" "$NETWORKS_FILE" "$remote:$REMOTE_NETWORKS_FILE"
 if [ -d "$SOFTETHER_DIR" ]; then
     sync_directory "$SOFTETHER_DIR" "$remote" "$REMOTE_SOFTETHER_DIR" "SoftEther operator secret directory"
 fi
 if [ -d "$HAPROXY_DIR" ]; then
     sync_directory "$HAPROXY_DIR" "$remote" "$REMOTE_HAPROXY_DIR" "HAProxy operator directory"
+fi
+if [ -f "$EGRESS_POLICY_DIR/profiles.json" ]; then
+    egress_policy_sync_root="$(mktemp -d)"
+    mkdir -p "$egress_policy_sync_root/egress_policy"
+    cp "$EGRESS_POLICY_DIR/profiles.json" "$egress_policy_sync_root/egress_policy/profiles.json"
+    sync_directory "$egress_policy_sync_root/egress_policy" "$remote" "$REMOTE_EGRESS_POLICY_DIR" "egress policy intent"
 fi
 if [ "$RUN_VERIFY" = "true" ]; then
     :
@@ -361,11 +411,16 @@ if [ -d "$HAPROXY_DIR" ]; then
     haproxy_command="sudo mkdir -p /opt/ai-service-platform/operator; if [ -d '$REMOTE_HAPROXY_DIR/haproxy' ]; then sudo rm -rf /opt/ai-service-platform/operator/haproxy && sudo cp -a '$REMOTE_HAPROXY_DIR/haproxy' /opt/ai-service-platform/operator/haproxy; else sudo rm -rf /opt/ai-service-platform/operator/haproxy && sudo cp -a '$REMOTE_HAPROXY_DIR' /opt/ai-service-platform/operator/haproxy; fi;"
     remote_command="set -e; $softether_command $haproxy_command $prepare_command; rm -rf '$REMOTE_SOFTETHER_DIR' '$REMOTE_HAPROXY_DIR'; rm -f '$REMOTE_NODES_FILE' '$REMOTE_STATE_FILE'"
 fi
+egress_policy_command=""
+if [ -f "$EGRESS_POLICY_DIR/profiles.json" ]; then
+    egress_policy_command="sudo mkdir -p /opt/ai-service-platform/operator; if [ -d '$REMOTE_EGRESS_POLICY_DIR/egress_policy' ]; then sudo rm -rf /opt/ai-service-platform/operator/egress_policy && sudo cp -a '$REMOTE_EGRESS_POLICY_DIR/egress_policy' /opt/ai-service-platform/operator/egress_policy; else sudo rm -rf /opt/ai-service-platform/operator/egress_policy && sudo cp -a '$REMOTE_EGRESS_POLICY_DIR' /opt/ai-service-platform/operator/egress_policy; fi;"
+fi
+networks_command="sudo mkdir -p /opt/ai-service-platform/operator; sudo install -m 600 '$REMOTE_NETWORKS_FILE' /opt/ai-service-platform/operator/networks.csv;"
 if [ "$RUN_VERIFY" = "true" ]; then
     verify_command="sudo mkdir -p \"\$(dirname '$REMOTE_VERIFY_SCRIPT')\"; sudo install -m 700 '$REMOTE_VERIFY_TEMP' '$REMOTE_VERIFY_SCRIPT'; sudo bash '$REMOTE_VERIFY_SCRIPT' --retries '$VERIFY_RETRIES' --retry-delay '$VERIFY_RETRY_DELAY' --ansible-timeout '$VERIFY_ANSIBLE_TIMEOUT';"
-    remote_command="set -e; sudo mkdir -p /opt/ai-service-platform/tools/bootstrap; sudo install -m 700 '$REMOTE_CREATE_INVENTORY_TEMP' /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; sudo install -m 700 '$REMOTE_PREPARE_INVENTORY_TEMP' '$REMOTE_PREPARE_SCRIPT'; sudo install -m 700 '$REMOTE_VERIFY_TEMP' '$REMOTE_VERIFY_SCRIPT'; $softether_command $haproxy_command $prepare_command; $verify_command rm -rf '$REMOTE_SOFTETHER_DIR' '$REMOTE_HAPROXY_DIR'; rm -f '$REMOTE_NODES_FILE' '$REMOTE_STATE_FILE' '$REMOTE_CREATE_INVENTORY_TEMP' '$REMOTE_PREPARE_INVENTORY_TEMP' '$REMOTE_VERIFY_TEMP'"
+    remote_command="set -e; sudo mkdir -p /opt/ai-service-platform/tools/bootstrap; sudo install -m 700 '$REMOTE_CREATE_INVENTORY_TEMP' /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; sudo install -m 700 '$REMOTE_PREPARE_INVENTORY_TEMP' '$REMOTE_PREPARE_SCRIPT'; sudo install -m 700 '$REMOTE_VERIFY_TEMP' '$REMOTE_VERIFY_SCRIPT'; $softether_command $haproxy_command $egress_policy_command $networks_command $prepare_command; $verify_command rm -rf '$REMOTE_SOFTETHER_DIR' '$REMOTE_HAPROXY_DIR' '$REMOTE_EGRESS_POLICY_DIR'; rm -f '$REMOTE_NODES_FILE' '$REMOTE_STATE_FILE' '$REMOTE_NETWORKS_FILE' '$REMOTE_CREATE_INVENTORY_TEMP' '$REMOTE_PREPARE_INVENTORY_TEMP' '$REMOTE_VERIFY_TEMP'"
 else
-    remote_command="set -e; sudo mkdir -p /opt/ai-service-platform/tools/bootstrap; sudo install -m 700 '$REMOTE_CREATE_INVENTORY_TEMP' /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; sudo install -m 700 '$REMOTE_PREPARE_INVENTORY_TEMP' '$REMOTE_PREPARE_SCRIPT'; sudo install -m 700 '$REMOTE_VERIFY_TEMP' '$REMOTE_VERIFY_SCRIPT'; $softether_command $haproxy_command $prepare_command; rm -rf '$REMOTE_SOFTETHER_DIR' '$REMOTE_HAPROXY_DIR'; rm -f '$REMOTE_NODES_FILE' '$REMOTE_STATE_FILE' '$REMOTE_CREATE_INVENTORY_TEMP' '$REMOTE_PREPARE_INVENTORY_TEMP' '$REMOTE_VERIFY_TEMP'"
+    remote_command="set -e; sudo mkdir -p /opt/ai-service-platform/tools/bootstrap; sudo install -m 700 '$REMOTE_CREATE_INVENTORY_TEMP' /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; sudo install -m 700 '$REMOTE_PREPARE_INVENTORY_TEMP' '$REMOTE_PREPARE_SCRIPT'; sudo install -m 700 '$REMOTE_VERIFY_TEMP' '$REMOTE_VERIFY_SCRIPT'; $softether_command $haproxy_command $egress_policy_command $networks_command $prepare_command; rm -rf '$REMOTE_SOFTETHER_DIR' '$REMOTE_HAPROXY_DIR' '$REMOTE_EGRESS_POLICY_DIR'; rm -f '$REMOTE_NODES_FILE' '$REMOTE_STATE_FILE' '$REMOTE_NETWORKS_FILE' '$REMOTE_CREATE_INVENTORY_TEMP' '$REMOTE_PREPARE_INVENTORY_TEMP' '$REMOTE_VERIFY_TEMP'"
 fi
 
 echo "Running orchestration inventory preparation"

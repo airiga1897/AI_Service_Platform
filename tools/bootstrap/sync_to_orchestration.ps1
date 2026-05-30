@@ -23,6 +23,18 @@ param(
 
     [string]$RemoteHaproxyDir = "/tmp/ai-service-platform.haproxy",
 
+    [string]$EgressPolicyDir = ".\operator\egress_policy",
+
+    [string]$RemoteEgressPolicyDir = "/tmp/ai-service-platform.egress_policy",
+
+    [string]$NetworksFile = ".\operator\networks.csv",
+
+    [string]$NetworksOverrideFile = ".\operator\networks.override.csv",
+
+    [string]$GenerateNetworkPlanScript = "tools/network/generate_vpn_network_plan.ps1",
+
+    [string]$RemoteNetworksFile = "/tmp/ai-service-platform.networks.csv",
+
     [string]$RemotePrepareScript = "/opt/ai-service-platform/tools/bootstrap/prepare_orchestration_inventory.sh",
 
     [string]$CreateInventoryScript = "tools/bootstrap/create_inventory.sh",
@@ -197,6 +209,7 @@ Require-File $NodesFile "NodesFile"
 Require-File $CreateInventoryScript "CreateInventoryScript"
 Require-File $PrepareInventoryScript "PrepareInventoryScript"
 Require-File $VerifyControlScript "VerifyControlScript"
+Require-File $GenerateNetworkPlanScript "GenerateNetworkPlanScript"
 
 if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
     Fail "ssh not found in PATH. Install Windows OpenSSH Client or fix PATH."
@@ -258,10 +271,24 @@ if (-not $Include) {
 }
 
 $sanitized = New-SanitizedNodesFile $NodesFile
+$egressPolicySyncDir = $null
 $remoteCreateInventoryTemp = "/tmp/ai-service-platform.create_inventory.sh"
 $remotePrepareInventoryTemp = "/tmp/ai-service-platform.prepare_orchestration_inventory.sh"
 $remoteVerifyTemp = "/tmp/ai-service-platform.verify_control_node.sh"
 $remote = "$SshUser@$($controlNode.endpoint)"
+
+Write-Host "Generating VPN network plan from nodes.csv/state.csv"
+$networkPlanArgs = @(
+    "-NodesFile", $NodesFile,
+    "-StateFile", $StateFile,
+    "-OverrideFile", $NetworksOverrideFile,
+    "-OutputFile", $NetworksFile
+)
+& $GenerateNetworkPlanScript @networkPlanArgs
+if ($LASTEXITCODE -ne 0) {
+    Fail "VPN network plan generation failed"
+}
+Require-File $NetworksFile "NetworksFile"
 
 function Get-OpenSshCommonArgs($KeyFile) {
     $args = @(
@@ -335,6 +362,19 @@ function New-TarGzDirectoryArchive($SourceDir) {
     return @{ ArchivePath = $archivePath; SourceLeaf = $sourceLeaf }
 }
 
+function New-EgressPolicySyncDirectory($SourceDir) {
+    $profilesPath = Join-Path $SourceDir "profiles.json"
+    if (-not (Test-Path -LiteralPath $profilesPath -PathType Leaf)) {
+        return $null
+    }
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-service-platform.egress-policy." + [guid]::NewGuid().ToString("N"))
+    $tempDir = Join-Path $tempRoot "egress_policy"
+    New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+    Copy-Item -LiteralPath $profilesPath -Destination (Join-Path $tempDir "profiles.json")
+    return $tempDir
+}
+
 function Invoke-TarDirectoryUpload($KeyFile, $SourceDir, $Remote, $RemoteDir, $Label) {
     $bundle = $null
     $remoteArchive = "/tmp/ai-service-platform.sync.$([guid]::NewGuid().ToString('N')).tar.gz"
@@ -383,6 +423,8 @@ try {
         Write-Host "Syncing state.csv to control node $($controlNode.current_alias)"
         Invoke-ScpKey $SshKeyFile $StateFile "${remote}:$remoteStateFile" "scp state.csv"
     }
+    Write-Host "Syncing networks.csv to control node $($controlNode.current_alias)"
+    Invoke-ScpKey $SshKeyFile $NetworksFile "${remote}:$RemoteNetworksFile" "scp networks.csv"
 
     $syncSoftether = Test-Path -LiteralPath $SoftetherDir -PathType Container
     if ($syncSoftether) {
@@ -393,6 +435,12 @@ try {
     if ($syncHaproxy) {
         Write-Host "Syncing HAProxy operator directory to control node $($controlNode.current_alias)"
         Invoke-TarDirectoryUpload $SshKeyFile $HaproxyDir $remote $RemoteHaproxyDir "HAProxy operator directory"
+    }
+    $egressPolicySyncDir = New-EgressPolicySyncDirectory $EgressPolicyDir
+    $syncEgressPolicy = $null -ne $egressPolicySyncDir
+    if ($syncEgressPolicy) {
+        Write-Host "Syncing egress policy intent to control node $($controlNode.current_alias)"
+        Invoke-TarDirectoryUpload $SshKeyFile $egressPolicySyncDir $remote $RemoteEgressPolicyDir "Egress policy operator directory"
     }
     Write-Host "Syncing bootstrap helper scripts to control node $($controlNode.current_alias)"
     Invoke-ScpKey $SshKeyFile $CreateInventoryScript "${remote}:$remoteCreateInventoryTemp" "scp create_inventory.sh"
@@ -417,12 +465,17 @@ try {
     if ($syncHaproxy) {
         $haproxyCommand = "sudo mkdir -p /opt/ai-service-platform/operator; if [ -d '$RemoteHaproxyDir/haproxy' ]; then sudo rm -rf /opt/ai-service-platform/operator/haproxy && sudo cp -a '$RemoteHaproxyDir/haproxy' /opt/ai-service-platform/operator/haproxy; else sudo rm -rf /opt/ai-service-platform/operator/haproxy && sudo cp -a '$RemoteHaproxyDir' /opt/ai-service-platform/operator/haproxy; fi;"
     }
+    $egressPolicyCommand = ""
+    if ($syncEgressPolicy) {
+        $egressPolicyCommand = "sudo mkdir -p /opt/ai-service-platform/operator; if [ -d '$RemoteEgressPolicyDir/egress_policy' ]; then sudo rm -rf /opt/ai-service-platform/operator/egress_policy && sudo cp -a '$RemoteEgressPolicyDir/egress_policy' /opt/ai-service-platform/operator/egress_policy; else sudo rm -rf /opt/ai-service-platform/operator/egress_policy && sudo cp -a '$RemoteEgressPolicyDir' /opt/ai-service-platform/operator/egress_policy; fi;"
+    }
     $verifyCommand = ""
     if (-not $SkipVerify) {
         $verifyCommand = "sudo mkdir -p `"`$(dirname '$RemoteVerifyScript')`"; sudo install -m 700 '$remoteVerifyTemp' '$RemoteVerifyScript'; sudo bash '$RemoteVerifyScript' --retries $VerifyRetries --retry-delay $VerifyRetryDelaySeconds --ansible-timeout $VerifyAnsibleTimeoutSeconds;"
     }
+    $networksCommand = "sudo mkdir -p /opt/ai-service-platform/operator; sudo install -m 600 '$RemoteNetworksFile' /opt/ai-service-platform/operator/networks.csv;"
     $helperCommand = "sudo mkdir -p /opt/ai-service-platform/tools/bootstrap; sudo install -m 700 '$remoteCreateInventoryTemp' /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; sudo install -m 700 '$remotePrepareInventoryTemp' '$RemotePrepareScript'; sudo install -m 700 '$remoteVerifyTemp' '$RemoteVerifyScript';"
-    $remoteCommand = "set -e; $helperCommand $softetherCommand $haproxyCommand $prepareCommand; $verifyCommand rm -rf '$RemoteSoftetherDir' '$RemoteHaproxyDir'; rm -f '$RemoteNodesFile' '$remoteStateFile' '$remoteCreateInventoryTemp' '$remotePrepareInventoryTemp' '$remoteVerifyTemp'"
+    $remoteCommand = "set -e; $helperCommand $softetherCommand $haproxyCommand $egressPolicyCommand $networksCommand $prepareCommand; $verifyCommand rm -rf '$RemoteSoftetherDir' '$RemoteHaproxyDir' '$RemoteEgressPolicyDir'; rm -f '$RemoteNodesFile' '$remoteStateFile' '$RemoteNetworksFile' '$remoteCreateInventoryTemp' '$remotePrepareInventoryTemp' '$remoteVerifyTemp'"
 
     Write-Host "Running control node inventory preparation"
     Invoke-SshKey $SshKeyFile $remote $remoteCommand "remote prepare inventory"
@@ -440,4 +493,8 @@ try {
     }
 } finally {
     Remove-Item -LiteralPath $sanitized -Force -ErrorAction SilentlyContinue
+    if ($egressPolicySyncDir) {
+        $egressPolicySyncRoot = Split-Path -Parent $egressPolicySyncDir
+        Remove-Item -LiteralPath $egressPolicySyncRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }

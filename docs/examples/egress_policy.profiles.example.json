@@ -4,15 +4,14 @@
     {
       "name": "example_service_fallback",
       "state": "probe",
-      "desired_region_behavior": "fallback_on_ingress_egress_failure",
+      "behavior": "fallback_on_ingress_egress_failure",
       "reason": "Probe a restricted or unreliable service with ingress-local egress first; consider cascade only when the ingress-local path fails or degrades.",
       "rollback": "Probe-only stage has no runtime effect; disable this profile or remove future approved fallback rules to return to ingress-local egress.",
-      "candidate_egress_aliases": [
-        "vps1",
-        "vps2",
-        "vps3",
-        "vps4",
+      "candidate_ingress_aliases": [
         "vps5"
+      ],
+      "candidate_fallback_links": [
+        "vps5-to-vps4"
       ],
       "targets": [
         {

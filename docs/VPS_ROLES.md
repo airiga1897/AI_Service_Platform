@@ -118,12 +118,16 @@ edge-haproxy    172.20.0.3
 ai_service_cascade 172.21.0.0/24
 softether-cascade  172.21.0.2
 
-ai_service_vpn_policy 172.22.0.0/24
-softether-edge        172.22.0.2
-softether-cascade     172.22.0.3
+ai_service_vpn_policy 172.22.X.0/24
+softether-edge        172.22.X.2
+softether-cascade     172.22.X.3
+cascade-router        172.23.0.X
 ```
 
-Этот contract живёт в Ansible defaults edge-ролей. Если позже появятся много edge-сетей или per-node network overrides, для этого можно будет добавить отдельный `operator/networks.csv`.
+`ai_service_vpn_policy` генерируется в `operator/networks.csv`. Для обычных
+алиасов `vpsN` используется `X = 255 - N`: например, `vps1` получает
+`172.22.254.0/24`, а `vps5` получает `172.22.250.0/24`. Алиасы не вида `vpsN`
+должны быть явно описаны в `operator/networks.override.csv`.
 
 Будущие `frontend`, `backend`, `postgres`, `redis`, `monitoring`, `semaphore` и product runtimes должны использовать Docker DNS names и network aliases. Static IP для них допускается только если сервис становится реальным L3/L4 contract endpoint.
 

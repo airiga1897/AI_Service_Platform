@@ -7,6 +7,67 @@
       - (vpn_reseed_config | default(false)) in [true, false, 'true', 'false', 'True', 'False']
     fail_msg: "vpn_state must be present|absent and vpn_purge_data/vpn_reseed_config must be boolean-like."
 
+- name: Check VPN network plan on control node
+  ansible.builtin.stat:
+    path: "{{ vpn_edge_operator_networks_file }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_edge_networks_file_stat
+  when: vpn_state == 'present'
+
+- name: Require VPN network plan for vpn_edge
+  ansible.builtin.assert:
+    that:
+      - vpn_edge_networks_file_stat.stat.exists
+      - vpn_edge_networks_file_stat.stat.isreg
+    fail_msg: "Missing generated VPN network plan on control node: {{ vpn_edge_operator_networks_file }}. Run sync/generate network plan before vpn_edge rollout."
+  when: vpn_state == 'present'
+
+- name: Resolve vpn_edge policy network assignment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    NETWORKS_FILE="{{ vpn_edge_operator_networks_file }}"
+    ALIAS="{{ inventory_hostname }}"
+    python3 - <<'PY'
+    import csv
+    import json
+    import os
+    import sys
+
+    path = os.environ["NETWORKS_FILE"]
+    alias = os.environ["ALIAS"]
+    with open(path, newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    for row in rows:
+        if row.get("alias") == alias:
+            required = ["policy_subnet", "edge_ip", "cascade_ip", "cascade_router_ip"]
+            missing = [key for key in required if not row.get(key)]
+            if missing:
+                print(f"network plan row for {alias} is missing: {', '.join(missing)}", file=sys.stderr)
+                raise SystemExit(1)
+            print(json.dumps(row, sort_keys=True))
+            raise SystemExit(0)
+    print(f"network plan has no row for alias: {alias}", file=sys.stderr)
+    raise SystemExit(1)
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    NETWORKS_FILE: "{{ vpn_edge_operator_networks_file }}"
+    ALIAS: "{{ inventory_hostname }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_edge_network_plan_command
+  changed_when: false
+  when: vpn_state == 'present'
+
+- name: Store vpn_edge policy network assignment
+  ansible.builtin.set_fact:
+    vpn_edge_policy_network_subnet: "{{ (vpn_edge_network_plan_command.stdout | from_json).policy_subnet }}"
+    vpn_edge_policy_container_ipv4: "{{ (vpn_edge_network_plan_command.stdout | from_json).edge_ip }}"
+    vpn_edge_policy_gateway_ipv4: "{{ (vpn_edge_network_plan_command.stdout | from_json).cascade_ip }}"
+  when: vpn_state == 'present'
+
 - name: Check vpn_edge compose file
   ansible.builtin.stat:
     path: "{{ vpn_edge_compose_file }}"
@@ -140,6 +201,51 @@
   ansible.builtin.command:
     cmd: docker compose version
   changed_when: false
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+
+- name: Inspect existing VPN policy Docker network
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker network inspect "{{ vpn_edge_policy_network_name }}" --format '{{ "{{" }}json (index .IPAM.Config 0){{ "}}" }}' 2>/dev/null || true
+  args:
+    executable: /bin/bash
+  register: vpn_edge_policy_network_inspect
+  changed_when: false
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+
+- name: Recreate stale VPN policy Docker network for vpn_edge
+  ansible.builtin.shell: |
+    set -euo pipefail
+    expected="{{ vpn_edge_policy_network_subnet }}"
+    current_json='{{ vpn_edge_policy_network_inspect.stdout | default("") }}'
+    current="$(CURRENT_JSON="$current_json" python3 - <<'PY'
+    import json
+    import os
+    raw = os.environ.get("CURRENT_JSON", "").strip()
+    if not raw:
+        print("")
+    else:
+        print(json.loads(raw).get("Subnet", ""))
+    PY
+    )"
+    if [ -z "$current" ] || [ "$current" = "$expected" ]; then
+      exit 0
+    fi
+    docker ps -a --filter "network={{ vpn_edge_policy_network_name }}" --format '{{ "{{" }}.Names{{ "}}" }}' | while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      docker stop "$name" >/dev/null 2>&1 || true
+      docker network disconnect -f "{{ vpn_edge_policy_network_name }}" "$name" >/dev/null 2>&1 || true
+    done
+    docker network rm "{{ vpn_edge_policy_network_name }}"
+    echo "recreated"
+  args:
+    executable: /bin/bash
+  register: vpn_edge_policy_network_recreate
+  changed_when: "'recreated' in vpn_edge_policy_network_recreate.stdout"
   when:
     - vpn_state == 'present'
     - not ansible_check_mode

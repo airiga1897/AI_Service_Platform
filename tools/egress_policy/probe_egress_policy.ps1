@@ -184,6 +184,21 @@ function Load-Nodes($Path) {
     return $map
 }
 
+function Get-PolicyBehavior($Profile) {
+    return [string]$Profile.behavior
+}
+
+function Get-PolicyIngressAliases($Profile) {
+    return @($Profile.candidate_ingress_aliases | Where-Object { $_ })
+}
+
+function Get-PolicyFallbackLinks($Profile) {
+    if ($null -eq $Profile.candidate_fallback_links) {
+        return @()
+    }
+    return @($Profile.candidate_fallback_links | Where-Object { $_ })
+}
+
 function Validate-Policy($Policy, $Nodes) {
     if ($Policy.version -ne 1) {
         Fail "egress policy registry version must be 1"
@@ -211,28 +226,41 @@ function Validate-Policy($Policy, $Nodes) {
         if ([string]::IsNullOrWhiteSpace([string]$profile.rollback)) {
             Fail "egress profile $($profile.name) must include rollback"
         }
-        if ([string]::IsNullOrWhiteSpace([string]$profile.desired_region_behavior)) {
-            Fail "egress profile $($profile.name) must include desired_region_behavior"
+        $behavior = Get-PolicyBehavior $profile
+        if ([string]::IsNullOrWhiteSpace($behavior)) {
+            Fail "egress profile $($profile.name) must include behavior"
         }
-        if ($profile.desired_region_behavior -notin @("fallback_on_ingress_egress_failure", "avoid_ru_egress", "require_non_ru_egress")) {
-            Fail "egress profile $($profile.name) desired_region_behavior must be one of: fallback_on_ingress_egress_failure, avoid_ru_egress, require_non_ru_egress"
+        if ($behavior -notin @("fallback_on_ingress_egress_failure", "require_non_ru_egress")) {
+            Fail "egress profile $($profile.name) behavior must be one of: fallback_on_ingress_egress_failure, require_non_ru_egress"
         }
         if (-not $profile.targets -or $profile.targets.Count -eq 0) {
             Fail "egress profile $($profile.name) must include at least one target"
         }
-        if (-not $profile.candidate_egress_aliases -or $profile.candidate_egress_aliases.Count -eq 0) {
-            Fail "egress profile $($profile.name) must include candidate_egress_aliases"
+        $ingressAliases = @(Get-PolicyIngressAliases $profile)
+        if ($ingressAliases.Count -eq 0) {
+            Fail "egress profile $($profile.name) must include candidate_ingress_aliases"
         }
 
         $seenAliases = @{}
-        foreach ($alias in @($profile.candidate_egress_aliases)) {
+        foreach ($alias in $ingressAliases) {
             if (-not $Nodes.ContainsKey($alias)) {
                 Fail "egress profile $($profile.name) references unknown alias: $alias"
             }
             if ($seenAliases.ContainsKey($alias)) {
-                Fail "egress profile $($profile.name) has duplicate candidate alias: $alias"
+                Fail "egress profile $($profile.name) has duplicate candidate ingress alias: $alias"
             }
             $seenAliases[$alias] = $true
+        }
+
+        $seenFallbackLinks = @{}
+        foreach ($linkName in @(Get-PolicyFallbackLinks $profile)) {
+            if ([string]::IsNullOrWhiteSpace([string]$linkName)) {
+                Fail "egress profile $($profile.name) has empty candidate fallback link"
+            }
+            if ($seenFallbackLinks.ContainsKey($linkName)) {
+                Fail "egress profile $($profile.name) has duplicate candidate fallback link: $linkName"
+            }
+            $seenFallbackLinks[$linkName] = $true
         }
 
         foreach ($target in @($profile.targets)) {
@@ -617,7 +645,27 @@ function Test-CascadeRecordUsable($Record) {
     if ($null -eq $httpStatus -or $httpStatus -lt 200 -or $httpStatus -ge 400) {
         return $false
     }
-    if ($Record.desired_region_behavior -eq "require_non_ru_egress" -and $Record.effective_country -eq "RU") {
+    if ($Record.behavior -eq "require_non_ru_egress" -and $Record.effective_country -eq "RU") {
+        return $false
+    }
+    return $true
+}
+
+function Test-DirectRecordUsable($Record) {
+    if (-not $Record -or $Record.status -eq "probe_error") {
+        return $false
+    }
+    if ($Record.target.protocol -eq "tcp") {
+        if (-not $Record.target_status -or $null -eq $Record.target_status.tcp_connect_ms) {
+            return $false
+        }
+    } else {
+        $httpStatus = if ($Record.target_status) { $Record.target_status.http_status } else { $null }
+        if ($null -eq $httpStatus -or $httpStatus -lt 200 -or $httpStatus -ge 400) {
+            return $false
+        }
+    }
+    if ($Record.behavior -eq "require_non_ru_egress" -and $Record.effective_country -eq "RU") {
         return $false
     }
     return $true
@@ -646,7 +694,7 @@ function Invoke-DirectEgressProbe($PolicyProfile, $Target, $CandidateAlias, $Mod
         observed_at_utc = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
         path_mode = "direct"
         profile = $PolicyProfile.name
-        desired_region_behavior = $PolicyProfile.desired_region_behavior
+        behavior = Get-PolicyBehavior $PolicyProfile
         candidate_alias = $CandidateAlias
         ingress_alias = $CandidateAlias
         egress_alias = $CandidateAlias
@@ -737,7 +785,7 @@ function Invoke-CascadeEgressProbe($PolicyProfile, $Target, $Link) {
         observed_at_utc = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
         path_mode = "cascade"
         profile = $PolicyProfile.name
-        desired_region_behavior = $PolicyProfile.desired_region_behavior
+        behavior = Get-PolicyBehavior $PolicyProfile
         candidate_alias = $Link.egress_alias
         ingress_alias = $Link.ingress_alias
         egress_alias = $Link.egress_alias
@@ -782,6 +830,14 @@ Validate-Policy $policy $nodes
 $cascadeLinks = @()
 if ($IncludeCascade -or $CascadeOnly -or $PreferCascade) {
     $cascadeLinks = @(Load-CascadeLinks $CascadeSecretDir $nodes)
+    $cascadeLinkNames = @($cascadeLinks | ForEach-Object { $_.connection_name })
+    foreach ($profile in @($policy.profiles)) {
+        foreach ($linkName in @(Get-PolicyFallbackLinks $profile)) {
+            if ($cascadeLinkNames -notcontains $linkName) {
+                Fail "egress profile $($profile.name) references unknown candidate fallback link: $linkName"
+            }
+        }
+    }
 }
 
 $profileFilter = @($ProfileName | Where-Object { $_ })
@@ -819,8 +875,9 @@ if ($IncludeCascade -or $CascadeOnly -or $PreferCascade) {
     Write-Host "Cascade probe links: $($cascadeLinks.Count)"
 }
 foreach ($policyProfile in $profiles) {
-    $profileCandidateAliases = @($policyProfile.candidate_egress_aliases)
-    $candidateAliases = @($profileCandidateAliases | Where-Object {
+    $profileIngressAliases = @(Get-PolicyIngressAliases $policyProfile)
+    $profileFallbackLinks = @(Get-PolicyFallbackLinks $policyProfile)
+    $candidateAliases = @($profileIngressAliases | Where-Object {
         $aliasFilter.Count -eq 0 -or $aliasFilter -contains $_
     })
     if ($candidateAliases.Count -eq 0) {
@@ -831,16 +888,42 @@ foreach ($policyProfile in $profiles) {
     foreach ($target in @($policyProfile.targets)) {
         Write-Host "  Target $($target.protocol)://$($target.value):$($target.port)"
         $eligibleCascadeLinks = @($cascadeLinks | Where-Object {
-            $profileCandidateAliases -contains $_.egress_alias -and (
+            $profileIngressAliases -contains $_.ingress_alias -and (
+                $profileFallbackLinks.Count -eq 0 -or $profileFallbackLinks -contains $_.connection_name
+            ) -and (
                 $aliasFilter.Count -eq 0 -or
                 $aliasFilter -contains $_.ingress_alias -or
                 $aliasFilter -contains $_.egress_alias
             )
         })
 
+        $directGoodCount = 0
         $cascadeUsableCount = 0
-        $shouldRunCascade = $IncludeCascade -or $CascadeOnly -or $PreferCascade
-        $shouldRunDirectAudit = -not $CascadeOnly -and -not $PreferCascade
+        $shouldRunDirectFirst = -not $CascadeOnly
+
+        if ($shouldRunDirectFirst) {
+            $directLabel = if ($PreferCascade) { "ingress-local" } else { "direct" }
+            foreach ($candidateAlias in $candidateAliases) {
+                $record = Invoke-DirectEgressProbe $policyProfile $target $candidateAlias $directLabel
+                if ($record) {
+                    [void]$records.Add($record)
+                    if (Test-DirectRecordUsable $record) {
+                        $directGoodCount += 1
+                    }
+                }
+            }
+        }
+
+        $shouldRunCascade = $IncludeCascade -or $CascadeOnly -or ($PreferCascade -and $directGoodCount -eq 0)
+        if ($DryRun -and $PreferCascade -and -not $CascadeOnly) {
+            Write-Host "    [dry-run] cascade fallback would run only if ingress-local probes fail or degrade"
+        }
+        if ($PreferCascade -and -not $DryRun -and $directGoodCount -eq 0 -and -not $CascadeOnly) {
+            Write-Host "    No good ingress-local path found; running cascade fallback probes"
+        }
+        if ($PreferCascade -and -not $DryRun -and $directGoodCount -gt 0 -and -not $IncludeCascade) {
+            Write-Host "    Ingress-local path is good; cascade fallback probe skipped"
+        }
 
         if ($shouldRunCascade) {
             foreach ($link in $eligibleCascadeLinks) {
@@ -850,25 +933,6 @@ foreach ($policyProfile in $profiles) {
                     if (Test-CascadeRecordUsable $record) {
                         $cascadeUsableCount += 1
                     }
-                }
-            }
-
-            if ($DryRun -and $PreferCascade) {
-                Write-Host "    [dry-run] direct fallback would run only if no usable cascade path is found"
-            }
-        }
-
-        if ($PreferCascade -and -not $DryRun -and $cascadeUsableCount -eq 0) {
-            Write-Host "    No usable cascade path found; running direct fallback probes"
-        }
-
-        $shouldRunDirectFallback = $PreferCascade -and (-not $DryRun) -and $cascadeUsableCount -eq 0
-        if ($shouldRunDirectAudit -or $shouldRunDirectFallback) {
-            $directLabel = if ($shouldRunDirectFallback) { "direct fallback" } else { "direct" }
-            foreach ($candidateAlias in $candidateAliases) {
-                $record = Invoke-DirectEgressProbe $policyProfile $target $candidateAlias $directLabel
-                if ($record) {
-                    [void]$records.Add($record)
                 }
             }
         }

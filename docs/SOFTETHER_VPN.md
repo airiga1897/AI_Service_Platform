@@ -164,13 +164,22 @@ The user VPN ingress and cascade transport also share a private policy network
 when both services run on the same VPS:
 
 ```text
-ai_service_vpn_policy 172.22.0.0/24
-softether-edge        172.22.0.2
-softether-cascade     172.22.0.3
+ai_service_vpn_policy 172.22.X.0/24
+softether-edge        172.22.X.2
+softether-cascade     172.22.X.3
+cascade-router        172.23.0.X
 ```
 
-This network is an internal dataplane handoff for future policy routing. It does
-not enable NAT, forwarding, or non-local egress by itself.
+`X` is generated from the numeric part of the VPS alias as `255 - N`
+(`vps4` -> `172.22.251.0/24`, `vps5` -> `172.22.250.0/24`). The plan is
+generated from operator state into `operator/networks.csv` by
+`tools/network/generate_vpn_network_plan.ps1` or `.sh`, then synced to the
+active orchestrator. Aliases that are not `vpsN` require explicit rows in
+`operator/networks.override.csv`.
+
+This network is the internal L3 dataplane handoff for selected fallback routing.
+It does not enable NAT, forwarding, or non-local egress by itself; routes are
+added later only from active policy profiles and accepted proposals.
 
 To enable it, add or update a `state.csv` service row with explicit aliases:
 
@@ -253,8 +262,8 @@ not enumerated to anonymous users. Password-bearing tasks are `no_log`.
 After first start, the remote
 `/opt/ai-service-platform/vpn_cascade/softether_data/vpn_server.config` is
 mutable runtime state. `vpn_cascade` does not publish HAProxy routes, does not
-change host routing, and does not enforce egress policy. Controlled routing must
-come later from approved policy, not directly from cascade rollout.
+change host routing, and does not apply selective fallback routing. Controlled
+routing must come later from approved policy, not directly from cascade rollout.
 
 ### Container Connectivity Model
 
@@ -262,8 +271,8 @@ The VPN stack uses separate Docker networks for separate traffic planes:
 
 - `ai_service_edge` - public ingress plane. `edge-haproxy` reaches
   `softether-edge` here.
-- `ai_service_vpn_policy` - internal policy dataplane. `softether-edge` and
-  `softether-cascade` share this network for future selected traffic handoff.
+- `ai_service_vpn_policy` - internal per-node policy dataplane. `softether-edge`
+  and `softether-cascade` share this network for selected traffic handoff.
 - `ai_service_cascade` - cascade service network. `softether-cascade` keeps its
   own transport runtime separate from user VPN ingress.
 
@@ -277,6 +286,23 @@ the VPN, selected egress is IP/dataplane routing, not HAProxy frontend routing.
 Do not attach `edge-haproxy` to `ai_service_vpn_policy`. Keeping HAProxy out of
 the policy dataplane prevents cascade/routing experiments from becoming a public
 edge blast-radius problem.
+
+Selective fallback is L3 routed, not proxied. HAProxy and nginx do not carry VPN
+fallback dataplane traffic; they remain public edge/web infrastructure. The
+fallback path is:
+
+```text
+VPN client -> vpn_edge(vpsN)
+  -> ai_service_vpn_policy 172.22.X.0/24
+  -> vpn_cascade(vpsN)
+  -> CascadeLab routed/tunnel segment
+  -> vpn_cascade(egress VPS)
+  -> egress NAT
+  -> target
+```
+
+Only approved targets from operator policy may be routed this way. Default VPN
+traffic continues to use ingress-local egress.
 
 ### Cascade Roles Before Routing
 
@@ -382,13 +408,34 @@ operator/egress_policy/profiles.json
 ```
 
 This file is local operator state, not a runtime route table. It may be empty
-when no active fallback policy is currently needed. New v1 profiles should use
-`fallback_on_ingress_egress_failure`: probe ingress-local egress first and
-consider cascade only when the ingress-local path fails or degrades.
+when no active fallback policy is currently needed. New v1 profiles use
+`behavior: "fallback_on_ingress_egress_failure"`: probe ingress-local egress
+first and consider cascade only when the ingress-local path fails or degrades.
+Targets, domains, IP addresses, ingress aliases, and fallback link names live in
+this operator file, not in code.
 
-Do not use `avoid_ru_egress` for new profiles. It is a legacy/deprecated label.
-If strict country behavior is ever needed, use a separate future behavior such
-as `require_non_ru_egress` instead of mixing it with fallback routing.
+The canonical v1 profile shape is:
+
+```json
+{
+  "name": "example_service_fallback",
+  "state": "probe",
+  "behavior": "fallback_on_ingress_egress_failure",
+  "candidate_ingress_aliases": ["vps5"],
+  "candidate_fallback_links": ["vps5-to-vps4"],
+  "targets": [
+    { "type": "domain", "value": "example.org", "protocol": "https", "port": 443, "path": "/" }
+  ],
+  "reason": "Why this fallback candidate should be checked.",
+  "rollback": "How to disable this probe-only intent."
+}
+```
+
+Do not use old `desired_region_behavior` or `candidate_egress_aliases` fields in
+new policy files. The v1 contract is explicit: `behavior`,
+`candidate_ingress_aliases`, and `candidate_fallback_links`. If strict country
+behavior is ever needed, use a separate future behavior such as
+`require_non_ru_egress` instead of mixing it with fallback routing.
 
 A tracked, secret-free example is available at:
 
@@ -398,6 +445,26 @@ docs/examples/egress_policy.profiles.example.json
 
 Copy or adapt that example into `operator/egress_policy/profiles.json` on the
 operator machine. Do not treat the example as active policy.
+
+`operator/egress_policy/profiles.json` is synced to the active orchestrator with
+the rest of operator intent. Probe history archives and proposal inbox files stay
+operator-local and are not runtime input.
+
+Create or replace a probe-only fallback profile without hand-editing JSON:
+
+```powershell
+.\tools\egress_policy\set_egress_policy_profile.ps1 `
+  -Name example_service_fallback `
+  -TargetValue example.org `
+  -IngressAlias vps5 `
+  -FallbackLink vps5-to-vps4 `
+  -Reason "Local ingress path is unreliable for this operator-defined target." `
+  -Replace
+```
+
+The command only edits `operator/egress_policy/profiles.json`. It does not probe
+remote nodes and does not change routes, NAT, firewall, HAProxy, SoftEther, or
+Docker state.
 
 Run a dry plan without touching remote nodes:
 
@@ -418,14 +485,15 @@ explicitly:
 .\tools\egress_policy\probe_egress_policy.ps1 -SshPath <path-to-ssh>
 ```
 
-Run a fast cascade readiness check:
+Run ingress-local probes first, then cascade fallback probes only when the
+ingress-local path fails or degrades:
 
 ```powershell
 .\tools\egress_policy\probe_egress_policy.ps1 -PreferCascade
 ```
 
-Run direct probes plus cascade-aware readiness probes when fallback decisions
-need both ingress-local and cascade evidence:
+Run direct probes plus cascade-aware readiness probes when a full audit needs
+both ingress-local and cascade evidence:
 
 ```powershell
 .\tools\egress_policy\probe_egress_policy.ps1 -IncludeCascade
@@ -436,6 +504,19 @@ Run only explicit cascade routes:
 ```powershell
 .\tools\egress_policy\probe_egress_policy.ps1 -CascadeOnly
 ```
+
+Check the future selective fallback dataplane shape without switching users:
+
+```powershell
+.\tools\egress_policy\check_selective_fallback_readiness.ps1
+```
+
+This read-only check uses the same operator policy and cascade links. For each
+selected profile it verifies that `softether-edge` and `softether-cascade` are
+attached to `ai_service_vpn_policy` on the ingress VPS, that the configured
+cascade transport is reachable, and that the final egress VPS can probe the
+target. It does not create routes, NAT, firewall rules, HAProxy routes, Docker
+networks, or SoftEther config.
 
 When there are no active egress policy profiles, probe commands intentionally
 do nothing. To verify the cascade transport itself, use the dedicated read-only
@@ -489,6 +570,12 @@ proposal. A proposal is created only when the operator needs to decide something
 ingress-local failure with fallback available, fallback unavailable, probe error,
 unstable retries, unknown target, or an inconclusive route.
 
+Deterministic fallback proposals are auto-accepted when the target is already in
+`profiles.json`, the ingress-local probe fails or degrades after all attempts,
+and exactly one configured cascade fallback link succeeds. Auto-accept updates
+only the proposal JSON status to `accepted` / `Принято`; it still does not apply
+selective fallback routing or change runtime state.
+
 Review the proposal inbox:
 
 ```powershell
@@ -515,27 +602,30 @@ Accept or reject a proposal decision without changing runtime policy:
 ```
 
 Proposals are stored under `operator/egress_policy/proposals/` and are not
-active policy. They must be accepted by a separate operator action before any
-future profile or route is changed.
+active policy. Suggested proposals need operator action; deterministic fallback
+proposals may already be accepted automatically. In both cases, a separate
+future apply-stage is required before any route is changed.
 
 For larger target lists, keep grouped profiles. A profile describes one policy
 intent, not one site. Add separate profiles only when the desired behavior,
-rollback, candidate egress preference, or enforcement meaning is different.
+rollback, candidate fallback links, or selective fallback routing meaning is
+different.
 
 Each record is an observation: profile, target, candidate alias, DNS result,
 TCP/TLS/HTTP status, response timing, retry count, observed external IP,
 observed country, and errors. Probe runs must not mutate routes, NAT, firewall,
 HAProxy, SoftEther, Docker networks, or user traffic. Reports read existing
 JSONL history only; they do not initiate remote probes and they are not automatic
-enforcement.
+selective fallback routing.
 
 There are three probe levels:
 
 - `direct` probe checks `alias -> target`;
 - `cascade` readiness probe checks `ingress_alias -> egress_alias:port`,
   read-only SoftEther cascade status, then `egress_alias -> target`;
-- future real dataplane probe will check actual user traffic after policy
-  routing/NAT exists.
+- controlled dataplane readiness probe checks the planned
+  `vpn_edge -> ai_service_vpn_policy -> vpn_cascade -> cascade link -> target`
+  shape before switching users.
 
 The cascade-aware probe validates that a named cascade route is usable. It does
 not prove that current VPN client traffic already uses that route.
