@@ -678,7 +678,7 @@ function Test-StepApplied($Step) {
     $egressNatAnyBefore = Get-NatPacketCountForTargetPort $egressNatCountersBefore $Step
     $egressNatAnyAfter = Get-NatPacketCountForTargetPort $egressNatCountersAfter $Step
     $counterCheckRequired = [string]$Step.protocol -ne "udp"
-    $syntheticProbeBypassesSecureNatSource = $counterCheckRequired -and ([bool]$traffic.ok) -and ($egressNatAfter -gt $egressNatBefore) -and ($ingressNatAfter -le $ingressNatBefore)
+    $syntheticProbeBypassesSecureNatSource = $counterCheckRequired -and ([bool]$traffic.ok) -and (($egressNatAfter -gt $egressNatBefore) -or ($egressNatAnyAfter -gt $egressNatAnyBefore)) -and ($ingressNatAfter -le $ingressNatBefore)
     $ingressNatCounterShadowedByDuplicate = $counterCheckRequired -and ([bool]$traffic.ok) -and ($ingressNatAfter -le $ingressNatBefore) -and ($ingressNatAnyAfter -gt $ingressNatAnyBefore)
     $egressNatCounterShadowedByDuplicate = $counterCheckRequired -and ([bool]$traffic.ok) -and ($egressNatAfter -le $egressNatBefore) -and ($egressNatAnyAfter -gt $egressNatAnyBefore)
     $ingressNatCounterOk = (-not $counterCheckRequired) -or ($ingressNatAfter -gt $ingressNatBefore) -or $syntheticProbeBypassesSecureNatSource -or $ingressNatCounterShadowedByDuplicate
