@@ -117,7 +117,7 @@ function Invoke-SshText($AliasName, $Command) {
             break
         }
         $text = @($output) -join "`n"
-        $isTransportTimeout = $exitCode -eq 255 -and $text -match 'timed out|banner exchange|Connection to .* port 22 timed out|ssh: connect to host .* port 22: Connection timed out|Connection closed'
+        $isTransportTimeout = $exitCode -eq 255 -and $text -match 'timed out|banner exchange|Connection to .* port 22 timed out|ssh: connect to host .* port 22: Connection timed out|Connection closed|Connection reset by'
         if (-not $isTransportTimeout -or $attempt -eq 3) {
             break
         }
@@ -152,7 +152,7 @@ function Test-RemoteCommand($AliasName, $Command) {
             $script:ErrorActionPreference = $previousErrorActionPreference
         }
         $text = @($output) -join "`n"
-        $transport_error = $exitCode -eq 255 -and $text -match 'timed out|banner exchange|Connection to .* port 22 timed out|ssh: connect to host .* port 22: Connection timed out|Connection closed'
+        $transport_error = $exitCode -eq 255 -and $text -match 'timed out|banner exchange|Connection to .* port 22 timed out|ssh: connect to host .* port 22: Connection timed out|Connection closed|Connection reset by'
         if ($exitCode -eq 0 -or -not $transport_error -or $attempt -eq 6) {
             break
         }

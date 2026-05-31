@@ -354,6 +354,88 @@ escape hatch for local build/save/load. A future GHCR path should replace only
 the image delivery step by passing a digest reference through
 `-PolicyRouterImageRef`.
 
+### Selective Fallback Target Onboarding
+
+Use semi-automatic onboarding when a new browser target is known to need the
+fallback path. The operator still decides which domain is allowed; tooling
+creates accepted proposals for the requested ports, refreshes exact `/32`
+runtime routes/NAT, and verifies the persisted state.
+
+The default path is selected from `operator/egress_policy/profiles.json` using
+`vps4_test_fallback`, then validated against the active SoftEther cascade graph
+in `operator/softether/cascade/secrets/lab-cascade.json`. Today that resolves to
+`vps4 -> vps3`. Pass `-IngressAlias` and `-EgressAlias` only for an explicit
+override.
+
+Do not infer the fallback path by inspecting live SoftEther objects on the
+receiver side. An incoming cascade session is not the same thing as a local
+Cascade Connection in that node's config. The onboarding command uses the
+operator-declared directed graph and then relies on runtime `verify` to prove
+that route, SNAT/NAT counters, and the selected target probe work.
+
+```powershell
+.\tools\egress_policy\enable_selective_fallback_target.ps1 `
+  -Domain school.mos.ru `
+  -Ports 80,443 `
+  -Apply `
+  -Verify
+```
+
+The generated proposal ids are stable:
+
+```text
+fallback-available-vps4-test-fallback-school-mos-ru-80
+fallback-available-vps4-test-fallback-school-mos-ru-443
+```
+
+Port `80` is created as `http`; port `443` is created as `https`. Rerunning the
+same command is safe: existing equivalent proposals are reused, and `refresh`
+updates the currently resolved target IPs. If DNS changes after onboarding,
+rerun the same command to replace stale `/32` routes with the current A-records.
+
+Rollback remains per generated proposal:
+
+```powershell
+.\tools\egress_policy\apply_selective_fallback_routes.ps1 `
+  -Action rollback `
+  -Id fallback-available-vps4-test-fallback-school-mos-ru-443
+```
+
+This is not full wildcard policy. `www.<domain>` and related subdomains remain
+separate operator decisions in v1; run the onboarding command for each domain
+that should be routed through fallback.
+
+### Selective Fallback DNS-Set Refresh
+
+Approved domain targets are maintained automatically with DNS-set refresh. This
+is full-auto maintenance for domains that already have accepted proposals; it is
+not auto-discovery for new domains.
+
+```powershell
+.\tools\egress_policy\refresh_selective_fallback_dns_sets.ps1 `
+  -Apply `
+  -Verify
+```
+
+For one domain:
+
+```powershell
+.\tools\egress_policy\refresh_selective_fallback_dns_sets.ps1 `
+  -Domain mos.ru `
+  -Apply `
+  -Verify
+```
+
+The refresh command resolves each approved domain from the operator workstation
+and the ingress VPS, compares the observed A-record set with applied `/32`
+state, and calls `apply_selective_fallback_routes.ps1 -Action refresh` with an
+explicit target IP list. New IPs are added immediately. Old IPs stay during a
+short grace period, default `30` minutes, to avoid route churn when DNS answers
+rotate.
+
+DNS-set state lives under `operator/egress_policy/dns_sets/`. Refresh history is
+written as JSONL under `operator/egress_policy/history/`.
+
 ### Cascade Roles Before Routing
 
 SoftEther cascade direction is the direction of TCP connection initiation, not a
