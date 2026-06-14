@@ -136,6 +136,40 @@ that need human attention: unknown targets, ingress-local failure with fallback
 available, fallback unavailable, probe errors, unstable retries, or inconclusive
 route evidence. This keeps large target lists manageable for the operator.
 
+Per-VPS candidate collection is handled by the standalone
+`edge_candidate_collector` service:
+
+```csv
+service,edge_candidate_collector,edge_candidate_collectors,vps1+vps2+vps3+vps4+vps5,,,present
+```
+
+Each selected VPS runs its own local collector timer. The collector reads only
+sanitized HAProxy, policy-gateway, and vpn-cascade symptoms and writes JSONL
+under `/var/lib/ai-service-platform/edge_candidate_collector/candidates/`.
+Operator-side aggregation pulls those JSONL records and creates safe proposals:
+
+```powershell
+.\tools\egress_policy\collect_egress_candidates.ps1 -AllAliases
+.\tools\egress_policy\collect_egress_candidates.ps1 -IngressAlias vps4
+```
+
+After a successful fetch and proposal generation, the operator may archive
+remote evidence without deleting it immediately:
+
+```powershell
+.\tools\egress_policy\collect_egress_candidates.ps1 `
+  -IngressAlias vps4 `
+  -ArchiveRemoteAfterFetch
+```
+
+That mode moves remote `candidates/*.jsonl` into the collector `processed/`
+directory. Both `candidates/` and `processed/` are TTL-cleaned by the collector
+runner; raw docker logs remain separate and are not exposed to operator fetch.
+
+These proposals use `source=edge_candidate_collector` and `status=suggested`.
+The collector and aggregator never apply selective fallback, routes, NAT,
+firewall, HAProxy config, Docker config, or SoftEther changes.
+
 If ingress-local probing fails or degrades after all attempts and exactly one
 configured fallback egress alias succeeds for a target already present in
 `profiles.json`, the `fallback_available` proposal is automatically marked

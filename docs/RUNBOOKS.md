@@ -213,6 +213,28 @@ CLI читает `services.yml`, формирует URL по `healthcheck.path`,
 
 ---
 
+## Windows/Codex Render-Edge Test Temp ACL
+
+If `python -m unittest discover -s tools\render-edge\tests -t .` fails on
+Windows with `PermissionError` under `%TEMP%` or `.tmp\pytest-temp`, treat it as
+an environment ACL issue first. The tests create subdirectories with
+`tempfile.mkdtemp()` and then write files such as `haproxy.cfg`, `bad.yml`, and
+`sites\*.conf`.
+
+Recommended retry:
+
+```powershell
+$tmp = Join-Path $PWD ".tmp\pytest-temp"
+New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+$env:TEMP = $tmp
+$env:TMP = $tmp
+python -m unittest discover -s tools\render-edge\tests -t .
+```
+
+If the same `PermissionError` persists inside Codex sandbox, rerun the check
+outside the sandbox/ACL restriction before treating it as a `render-edge`
+regression.
+
 ## Запланированные runbook'и
 
 Эти процедуры будут добавлены, когда появится соответствующий код или

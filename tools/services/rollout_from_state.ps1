@@ -13,9 +13,9 @@ param(
     [int]$OperatorBackupKeepLatest = 30,
     [string]$VpnIngressDomain = "mine-craft.su",
     [string[]]$ReseedVpnEdge = @(),
-    [ValidateSet("", "edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway")]
+    [ValidateSet("", "edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector")]
     [string]$OnlyService = "",
-    [switch]$AutoAcceptHostKey,
+    [switch]$AutoAcceptHostKey = $true,
     [switch]$SkipSync,
     [switch]$SkipStandbySync,
     [switch]$SkipPostcheck,
@@ -26,7 +26,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ExpectedNodesHeader = "current_alias,endpoint,connection,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
-$SupportedServices = @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway")
+$SupportedServices = @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector")
 $ReservedServices = @()
 $script:OperatorBackupCompleted = $false
 $script:BatchSteps = New-Object System.Collections.Generic.List[object]
@@ -651,6 +651,7 @@ function Invoke-ServiceBatch() {
         "-BatchPlanFile", $batchPlanPath
     )
     if ($ControlAlias) { $serviceRemoteArgs += @("-ControlAlias", $ControlAlias) }
+    if ($AutoAcceptHostKey) { $serviceRemoteArgs += "-AutoAcceptHostKey" }
     try {
         $script:BatchSteps | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $batchPlanPath -Encoding ascii
         Write-Host ""

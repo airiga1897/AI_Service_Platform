@@ -82,6 +82,7 @@ service,aromaflow_backend,backend,vps1,,,present
 service,ai_retail_frontend,frontend,vps2,,,absent
 service,ai_retail_backend,backend,vps2,,,absent
 service,vpn_cascade,vpn_cascades,,,,absent
+service,edge_candidate_collector,edge_candidate_collectors,vps1+vps2+vps3+vps4+vps5,,,present
 ```
 
 `kind=platform_role` - ответственность узла: `orchestration`, `monitoring`, `backup`, `production`, `preprod`, `hot_standby`.
@@ -99,6 +100,20 @@ Service naming is semantic, not positional:
 - `vpn_cascade` - SoftEther cascade/site-to-site lab transport service. It is
   separate from `vpn_edge`, uses its own runtime data, and does not create an
   HAProxy public route by itself.
+- `edge_candidate_collector` - per-VPS timer service that gathers sanitized
+  HAProxy/policy/cascade candidate facts and writes local JSONL evidence. It
+  does not apply routes, NAT, firewall, HAProxy, Docker, or SoftEther changes.
+
+`edge_candidate_collector` lifecycle is controlled only by `state.csv`. Its
+output is pulled into the operator proposal inbox with:
+
+```powershell
+.\tools\egress_policy\collect_egress_candidates.ps1 -AllAliases
+.\tools\egress_policy\collect_egress_candidates.ps1 -IngressAlias vps4
+```
+
+Generated proposals remain `suggested` until the operator accepts or rejects
+them through the normal egress proposal review tools.
 
 `ansible_group` задаёт inventory-группу. `active_aliases`, `candidate_aliases`, `old_aliases` разделяются через `+`.
 
@@ -143,7 +158,7 @@ cascade-router        172.23.0.X
 
 ## Edge Routes
 
-Route lifecycle живёт в `state.csv`, а route-настройки живут в operator-only файле:
+Route lifecycle живёт в `state.csv`, а route defaults/overrides живут в operator-only файле:
 
 ```text
 operator/haproxy/routes.yml
@@ -162,7 +177,13 @@ infra/ansible/haproxy.routes.example.yml
 `operator/haproxy/routes.yml`, он добавляет default SNI
 `vpn-<alias>.mine-craft.su`. Existing custom SNI не перезаписывается.
 
-`minecraft` включает `25565/tcp` для Minecraft game и `25575/tcp` для RCON. В первом rollout target - `vps1`; `vps3` может стать candidate позже после проверки ресурсов.
+`minecraft` включает `25565/tcp` для Minecraft game и `25575/tcp` для RCON. Alias включается только через `state.csv`, например:
+
+```csv
+edge_route,minecraft,minecraft_edge,vps4,,,present
+```
+
+Если `operator/haproxy/routes.yml` содержит `minecraft.defaults.backends`, alias может наследовать Minecraft upstream без `minecraft.per_alias.<alias>`. `per_alias` нужен только для override конкретного узла. Текущий managed target - `vps4`; `vps1` не должен держать active Minecraft route.
 
 ## Inventory Generation
 

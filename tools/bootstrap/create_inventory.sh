@@ -62,6 +62,7 @@ State CSV example:
   platform_role,orchestration,orchestration,vps3,vps4,,present
   service,vpn_edge,vpn_edges,vps1+vps2+vps3,,,present
   service,vpn_cascade,vpn_cascades,,,,absent
+  service,edge_candidate_collector,edge_candidate_collectors,vps1+vps2+vps3+vps4+vps5,,,present
 
 Fallback without CSV:
   --active ROLE:NODE=ENDPOINT

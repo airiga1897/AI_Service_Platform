@@ -1,0 +1,10 @@
+---
+- name: Edge candidate collector service rollout
+  hosts: edge_candidate_collectors
+  become: true
+  gather_facts: false
+  vars:
+    edge_candidate_collector_state: present
+    edge_candidate_collector_purge_data: false
+  roles:
+    - edge_candidate_collector

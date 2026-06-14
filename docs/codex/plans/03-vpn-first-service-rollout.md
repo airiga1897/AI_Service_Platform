@@ -46,7 +46,7 @@ platform_role,orchestration,orchestration,vps3,,,present
 service,edge_haproxy,edge_haproxy,vps1,,,present
 service,vpn_edge,vpn_edges,vps1+vps2+vps3,,,present
 edge_route,vpn_ingress,vpn_ingress,vps1,,,present
-edge_route,minecraft,minecraft_edge,vps1,,,absent
+edge_route,minecraft,minecraft_edge,vps4,,,present
 service,vpn_cascade,vpn_cascades,,,,absent
 ```
 
@@ -190,10 +190,10 @@ vpn-vps3.mine-craft.su -> vps3
 `mainsrv01.mine-craft.su` относится только к Minecraft route:
 
 ```csv
-edge_route,minecraft,minecraft_edge,vps1,,,absent
+edge_route,minecraft,minecraft_edge,vps4,,,present
 ```
 
-Когда route будет включён, HAProxy публикует `25565/tcp` и `25575/tcp`; `newnout01` используется как primary backend, `mainserv01.netcraze.pro` как fallback backend.
+Когда route включён, HAProxy публикует `25565/tcp` и `25575/tcp`; `newnout01` используется как primary backend, `mainserv01.netcraze.pro` как fallback backend. Minecraft upstream может наследоваться из `minecraft.defaults.backends` в `operator/haproxy/routes.yml`; `per_alias` нужен только для override конкретного edge alias.
 
 ## TCP Contract
 

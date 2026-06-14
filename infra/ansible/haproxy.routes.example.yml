@@ -17,17 +17,15 @@ vpn_ingress:
     management: 5555
 
 minecraft:
-  per_alias:
-    vps1:
-      public_names:
-        - mainsrv01.mine-craft.su
-      backends:
-        game:
-          primary: newnout01:25565
-          fallback: mainserv01.netcraze.pro:25565
-        rcon:
-          primary: newnout01:25575
-          fallback: mainserv01.netcraze.pro:25575
+  defaults:
+    backends:
+      game:
+        primary: newnout01:25565
+        fallback: mainserv01.netcraze.pro:25565
+      rcon:
+        primary: newnout01:25575
+        fallback: mainserv01.netcraze.pro:25575
+  per_alias: {}
   ports:
     game: 25565
     rcon: 25575

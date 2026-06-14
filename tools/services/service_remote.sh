@@ -19,6 +19,7 @@ SERVICE_RUNNER_SCRIPT="tools/services/service.sh"
 ANSIBLE_DIR="infra/ansible"
 POLICY_ROUTER_DOCKER_DIR="infra/docker/policy-router"
 POLICY_GATEWAY_DOCKER_DIR="infra/docker/policy-gateway"
+EGRESS_POLICY_TOOLS_DIR="tools/egress_policy"
 LIMIT=""
 BUILD_POLICY_ROUTER_IMAGE="false"
 CHECK="false"
@@ -247,6 +248,7 @@ require_file "$STATE_FILE" "--state-file"
 require_file "$SERVICE_RUNNER_SCRIPT" "--service-runner-script"
 [ -d "$ANSIBLE_DIR" ] || fail "Ansible directory not found: $ANSIBLE_DIR"
 [ -d "$POLICY_ROUTER_DOCKER_DIR" ] || fail "Policy-router Docker context not found: $POLICY_ROUTER_DOCKER_DIR"
+[ -d "$EGRESS_POLICY_TOOLS_DIR" ] || fail "Egress policy tools directory not found: $EGRESS_POLICY_TOOLS_DIR"
 if [ "$BUILD_POLICY_ROUTER_IMAGE" = "true" ] && [ "$SERVICE" != "vpn_cascade" ]; then
     fail "--build-policy-router-image is supported only for service vpn_cascade"
 fi
@@ -319,6 +321,7 @@ remote_service_runner_temp="$remote_bundle_dir/service.sh"
 remote_ansible_temp="$remote_bundle_dir/ansible"
 remote_policy_router_docker_temp="$remote_bundle_dir/docker/policy-router"
 remote_policy_gateway_docker_temp="$remote_bundle_dir/docker/policy-gateway"
+remote_egress_policy_tools_temp="$remote_bundle_dir/tools/egress_policy"
 remote_job_dir="/tmp/ai-service-platform.service-job.$(date +%s).$$"
 remote_job_script="$remote_job_dir/run.sh"
 remote_job_log="$remote_job_dir/output.log"
@@ -374,7 +377,7 @@ remote_args=(
 [ "$CONFIRM_PURGE" = "true" ] && remote_args+=("--confirm-purge")
 
 service_command="set -e; cd $(quote_bash_arg "$REMOTE_REPO_DIR"); if command -v stdbuf >/dev/null 2>&1; then stdbuf -oL -eL bash tools/services/service.sh ${remote_args[*]}; else bash tools/services/service.sh ${remote_args[*]}; fi"
-install_and_run_command="set -e; sudo mkdir -p $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services") $(quote_bash_arg "$REMOTE_REPO_DIR/infra") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker"); sudo install -m 700 $(quote_bash_arg "$remote_service_runner_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services/service.sh"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible"); sudo cp -a $(quote_bash_arg "$remote_ansible_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-router"); sudo cp -a $(quote_bash_arg "$remote_policy_router_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-router"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-gateway"); sudo cp -a $(quote_bash_arg "$remote_policy_gateway_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-gateway"); sudo bash -lc $(quote_bash_arg "$service_command")"
+install_and_run_command="set -e; sudo mkdir -p $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services") $(quote_bash_arg "$REMOTE_REPO_DIR/tools") $(quote_bash_arg "$REMOTE_REPO_DIR/infra") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker"); sudo install -m 700 $(quote_bash_arg "$remote_service_runner_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services/service.sh"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/tools/egress_policy"); sudo cp -a $(quote_bash_arg "$remote_egress_policy_tools_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/egress_policy"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible"); sudo cp -a $(quote_bash_arg "$remote_ansible_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-router"); sudo cp -a $(quote_bash_arg "$remote_policy_router_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-router"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-gateway"); sudo cp -a $(quote_bash_arg "$remote_policy_gateway_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-gateway"); sudo bash -lc $(quote_bash_arg "$service_command")"
 remote_service_display="${remote_args[*]}"
 
 echo "Control node: $active_aliases via role '$CONTROL_ROLE'"
@@ -393,6 +396,8 @@ fi
 echo "Preparing local service bundle..."
 cp "$SERVICE_RUNNER_SCRIPT" "$staging_dir/service.sh"
 cp -a "$ANSIBLE_DIR" "$staging_dir/ansible"
+mkdir -p "$staging_dir/tools"
+cp -a "$EGRESS_POLICY_TOOLS_DIR" "$staging_dir/tools/egress_policy"
 mkdir -p "$staging_dir/docker"
 cp -a "$POLICY_ROUTER_DOCKER_DIR" "$staging_dir/docker/policy-router"
 cp -a "$POLICY_GATEWAY_DOCKER_DIR" "$staging_dir/docker/policy-gateway"
@@ -407,8 +412,10 @@ export ANSIBLE_DISPLAY_SKIPPED_HOSTS=true
 exec > $(quote_bash_arg "$remote_job_log") 2>&1
 log_stage() { printf '[remote-job] %s %s\n' "\$(date -u '+%H:%M:%S')" "\$*"; }
 run_stage() { label="\$1"; shift; log_stage "\$label"; "\$@"; rc="\$?"; if [ "\$rc" -ne 0 ]; then log_stage "failed: \$label (rc=\$rc)"; return "\$rc"; fi; }
-run_stage $(quote_bash_arg "prepare repo directories") sudo mkdir -p $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services") $(quote_bash_arg "$REMOTE_REPO_DIR/infra") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker")
+run_stage $(quote_bash_arg "prepare repo directories") sudo mkdir -p $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services") $(quote_bash_arg "$REMOTE_REPO_DIR/tools") $(quote_bash_arg "$REMOTE_REPO_DIR/infra") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker")
 run_stage $(quote_bash_arg "install service runner") sudo install -m 700 $(quote_bash_arg "$remote_service_runner_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services/service.sh")
+run_stage $(quote_bash_arg "remove previous egress policy tools") sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/tools/egress_policy")
+run_stage $(quote_bash_arg "install egress policy tools") sudo cp -a $(quote_bash_arg "$remote_egress_policy_tools_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/egress_policy")
 run_stage $(quote_bash_arg "remove previous Ansible bundle") sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible")
 run_stage $(quote_bash_arg "install Ansible bundle") sudo cp -a $(quote_bash_arg "$remote_ansible_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible")
 run_stage $(quote_bash_arg "remove previous policy-router Docker context") sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-router")
@@ -441,7 +448,7 @@ if [ "$DETACHED_REMOTE_JOB" = "true" ]; then
     scp "${scp_common_args[@]}" "$run_script_path" "$remote:$remote_job_script"
 fi
 
-extract_command="set -e; rm -rf $(quote_bash_arg "$remote_bundle_dir"); mkdir -p $(quote_bash_arg "$remote_bundle_dir"); tar -xzf $(quote_bash_arg "$remote_bundle_archive") -C $(quote_bash_arg "$remote_bundle_dir"); test -f $(quote_bash_arg "$remote_service_runner_temp"); test -d $(quote_bash_arg "$remote_ansible_temp"); test -d $(quote_bash_arg "$remote_policy_router_docker_temp"); test -d $(quote_bash_arg "$remote_policy_gateway_docker_temp")"
+extract_command="set -e; rm -rf $(quote_bash_arg "$remote_bundle_dir"); mkdir -p $(quote_bash_arg "$remote_bundle_dir"); tar -xzf $(quote_bash_arg "$remote_bundle_archive") -C $(quote_bash_arg "$remote_bundle_dir"); test -f $(quote_bash_arg "$remote_service_runner_temp"); test -d $(quote_bash_arg "$remote_egress_policy_tools_temp"); test -d $(quote_bash_arg "$remote_ansible_temp"); test -d $(quote_bash_arg "$remote_policy_router_docker_temp"); test -d $(quote_bash_arg "$remote_policy_gateway_docker_temp")"
 echo "Extracting service bundle on orchestration node..."
 invoke_retry_transport "remote service bundle extract" ssh "${ssh_common_args[@]}" "$remote" "$extract_command"
 

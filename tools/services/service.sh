@@ -44,6 +44,10 @@ Usage:
   bash tools/services/service.sh policy_gateway apply [options]
   bash tools/services/service.sh policy_gateway absent [options]
   bash tools/services/service.sh policy_gateway purge --confirm-purge [options]
+  bash tools/services/service.sh edge_candidate_collector plan [options]
+  bash tools/services/service.sh edge_candidate_collector apply [options]
+  bash tools/services/service.sh edge_candidate_collector absent [options]
+  bash tools/services/service.sh edge_candidate_collector purge --confirm-purge [options]
 
 Options:
   --nodes-file PATH      Operator nodes.csv. Default: ./operator/nodes.csv
@@ -149,6 +153,7 @@ service_playbook() {
         vpn_edge) echo "infra/ansible/vpn.yml" ;;
         vpn_cascade) echo "infra/ansible/vpn_cascade.yml" ;;
         policy_gateway) echo "infra/ansible/policy_gateway.yml" ;;
+        edge_candidate_collector) echo "infra/ansible/edge_candidate_collector.yml" ;;
         *) return 1 ;;
     esac
 }
@@ -179,6 +184,9 @@ service_extra_vars() {
         policy_gateway)
             printf '%s\n' "-e" "policy_gateway_state=$state" "-e" "policy_gateway_purge_data=$purge"
             ;;
+        edge_candidate_collector)
+            printf '%s\n' "-e" "edge_candidate_collector_state=$state" "-e" "edge_candidate_collector_purge_data=$purge"
+            ;;
         *)
             return 1
             ;;
@@ -202,8 +210,8 @@ if [ "$SERVICE" = "vpn" ]; then
     fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 fi
 case "$SERVICE" in
-    edge_haproxy|vpn_edge|vpn_cascade|policy_gateway) ;;
-    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway." ;;
+    edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector) ;;
+    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector." ;;
 esac
 case "$ACTION" in
     plan|apply|absent|purge|reseed) ;;

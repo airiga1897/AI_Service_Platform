@@ -162,13 +162,12 @@
     if "minecraft" in present_routes:
         cfg = route_config.get("minecraft") or {}
         per_alias = (cfg.get("per_alias") or {}).get(alias) or {}
-        if not per_alias:
-            fail(f"routes.yml minecraft.per_alias.{alias} is required when minecraft route is present on {alias}")
-        backends = per_alias.get("backends") or {}
+        defaults = cfg.get("defaults") or {}
+        backends = per_alias.get("backends") or defaults.get("backends") or {}
         game = backends.get("game") or {}
         rcon = backends.get("rcon") or {}
         if not game.get("primary") or not game.get("fallback"):
-            fail(f"routes.yml minecraft.per_alias.{alias}.backends.game primary and fallback are required")
+            fail(f"routes.yml minecraft.per_alias.{alias}.backends.game or minecraft.defaults.backends.game primary and fallback are required")
         ports = {"game": 25565, "rcon": 25575}
         ports.update(cfg.get("ports") or {})
         policy = {
@@ -180,7 +179,7 @@
         }
         policy.update(cfg.get("policy") or {})
         if policy.get("rcon_public", True) and (not rcon.get("primary") or not rcon.get("fallback")):
-            fail(f"routes.yml minecraft.per_alias.{alias}.backends.rcon primary and fallback are required when rcon_public=true")
+            fail(f"routes.yml minecraft.per_alias.{alias}.backends.rcon or minecraft.defaults.backends.rcon primary and fallback are required when rcon_public=true")
         model.update({
             "minecraft_enabled": True,
             "minecraft": {

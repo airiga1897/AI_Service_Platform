@@ -7,9 +7,10 @@ platform_role,monitoring,monitoring,vps3,,,present
 service,edge_haproxy,edge_haproxy,vps1,,,present
 service,vpn_edge,vpn_edges,vps1+vps2+vps3,,,present
 edge_route,vpn_ingress,vpn_ingress,vps1,,,present
-edge_route,minecraft,minecraft_edge,vps1,,,absent
+edge_route,minecraft,minecraft_edge,vps4,,,present
 service,aromaflow_frontend,frontend,vps1,,,present
 service,aromaflow_backend,backend,vps1,,,present
 service,ai_retail_frontend,frontend,vps2,,,absent
 service,ai_retail_backend,backend,vps2,,,absent
 service,vpn_cascade,vpn_cascades,,,,absent
+service,edge_candidate_collector,edge_candidate_collectors,vps1+vps2+vps3+vps4+vps5,,,present

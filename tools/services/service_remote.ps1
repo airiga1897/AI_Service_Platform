@@ -36,6 +36,8 @@ param(
 
     [string]$PolicyGatewayDockerDir = "infra/docker/policy-gateway",
 
+    [string]$EgressPolicyToolsDir = "tools/egress_policy",
+
     [string]$Limit = "",
 
     [string]$PolicyRouterImageRef = "",
@@ -49,6 +51,8 @@ param(
     [switch]$ConfirmPurge,
 
     [switch]$DetachedRemoteJob,
+
+    [switch]$AutoAcceptHostKey = $true,
 
     [int]$RemoteJobPollSeconds = 2,
 
@@ -89,7 +93,7 @@ function Quote-BashArg($Value) {
     return "'" + ($text -replace "'", "'\''") + "'"
 }
 
-function New-TarGzBundle($ServiceRunnerScript, $AnsibleDir, $PolicyRouterDockerDir, $PolicyGatewayDockerDir) {
+function New-TarGzBundle($ServiceRunnerScript, $AnsibleDir, $PolicyRouterDockerDir, $PolicyGatewayDockerDir, $EgressPolicyToolsDir) {
     if (-not (Get-Command tar -ErrorAction SilentlyContinue)) {
         Fail "tar not found in PATH. It is required to upload service bundles as a single archive."
     }
@@ -105,6 +109,9 @@ function New-TarGzBundle($ServiceRunnerScript, $AnsibleDir, $PolicyRouterDockerD
         Copy-Item -LiteralPath $PolicyRouterDockerDir -Destination $dockerStagingDir -Recurse
         $gatewayDockerStagingDir = Join-Path (Join-Path $stagingDir "docker") "policy-gateway"
         Copy-Item -LiteralPath $PolicyGatewayDockerDir -Destination $gatewayDockerStagingDir -Recurse
+        $toolsStagingDir = Join-Path (Join-Path $stagingDir "tools") "egress_policy"
+        New-Item -ItemType Directory -Path (Split-Path -Parent $toolsStagingDir) | Out-Null
+        Copy-Item -LiteralPath $EgressPolicyToolsDir -Destination $toolsStagingDir -Recurse
         & tar -czf $archivePath -C $stagingDir .
         if ($LASTEXITCODE -ne 0) {
             Fail "Failed to create service bundle archive"
@@ -155,9 +162,17 @@ function Invoke-ExternalRetrySshTransport($FilePath, $Arguments, $Label, $Attemp
 }
 
 function Invoke-CleanupSsh($Arguments, $Label) {
-    & ssh @Arguments 2>$null | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "$Label failed with exit code $LASTEXITCODE; continuing because cleanup is best-effort"
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & ssh @Arguments *> $null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "$Label failed with exit code $LASTEXITCODE; continuing because cleanup is best-effort"
+        }
+    } catch {
+        Write-Warning "$Label failed: $($_.Exception.Message); continuing because cleanup is best-effort"
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
     }
 }
 
@@ -238,7 +253,7 @@ function Read-BatchPlan($Path) {
         if (-not $step.service -or -not $step.action) {
             Fail "BatchPlanFile step $index must include service and action"
         }
-        if ($step.service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway")) {
+        if ($step.service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector")) {
             Fail "BatchPlanFile step $index has unsupported service: $($step.service)"
         }
         if ($step.action -notin @("plan", "apply", "absent", "purge", "reseed")) {
@@ -485,6 +500,9 @@ if (-not (Test-Path -LiteralPath $PolicyRouterDockerDir -PathType Container)) {
 if (-not (Test-Path -LiteralPath $PolicyGatewayDockerDir -PathType Container)) {
     Fail "PolicyGatewayDockerDir not found: $PolicyGatewayDockerDir"
 }
+if (-not (Test-Path -LiteralPath $EgressPolicyToolsDir -PathType Container)) {
+    Fail "EgressPolicyToolsDir not found: $EgressPolicyToolsDir"
+}
 
 $remote = "$SshUser@$($controlNode.endpoint)"
 $remoteBundleDir = "/tmp/ai-service-platform.service-remote.$([guid]::NewGuid().ToString('N'))"
@@ -493,6 +511,7 @@ $remoteServiceRunnerTemp = "$remoteBundleDir/service.sh"
 $remoteAnsibleTemp = "$remoteBundleDir/ansible"
 $remotePolicyRouterDockerTemp = "$remoteBundleDir/docker/policy-router"
 $remotePolicyGatewayDockerTemp = "$remoteBundleDir/docker/policy-gateway"
+$remoteEgressPolicyToolsTemp = "$remoteBundleDir/tools/egress_policy"
 $remoteJobDir = "/tmp/ai-service-platform.service-job.$([guid]::NewGuid().ToString('N'))"
 $remoteJobScript = "$remoteJobDir/run.sh"
 $remoteJobLog = "$remoteJobDir/output.log"
@@ -521,8 +540,10 @@ $installCommands = ""
 if (-not $isBatch) {
     $installCommands = @(
         "set -e",
-        "sudo mkdir -p $(Quote-BashArg "$RemoteRepoDir/tools/services") $(Quote-BashArg "$RemoteRepoDir/infra") $(Quote-BashArg "$RemoteRepoDir/infra/docker")",
+        "sudo mkdir -p $(Quote-BashArg "$RemoteRepoDir/tools/services") $(Quote-BashArg "$RemoteRepoDir/tools") $(Quote-BashArg "$RemoteRepoDir/infra") $(Quote-BashArg "$RemoteRepoDir/infra/docker")",
         "sudo install -m 700 $(Quote-BashArg $remoteServiceRunnerTemp) $(Quote-BashArg "$RemoteRepoDir/tools/services/service.sh")",
+        "sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/tools/egress_policy")",
+        "sudo cp -a $(Quote-BashArg $remoteEgressPolicyToolsTemp) $(Quote-BashArg "$RemoteRepoDir/tools/egress_policy")",
         "sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/ansible")",
         "sudo cp -a $(Quote-BashArg $remoteAnsibleTemp) $(Quote-BashArg "$RemoteRepoDir/infra/ansible")",
         "sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-router")",
@@ -574,6 +595,9 @@ $sshCommonArgs = @(
     "-o", "ServerAliveInterval=15",
     "-o", "ServerAliveCountMax=2"
 )
+if ($AutoAcceptHostKey) {
+    $sshCommonArgs += @("-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR")
+}
 $scpCommonArgs = @(
     "-B",
     "-i", $SshKeyFile,
@@ -586,6 +610,9 @@ $scpCommonArgs = @(
     "-o", "ServerAliveInterval=15",
     "-o", "ServerAliveCountMax=2"
 )
+if ($AutoAcceptHostKey) {
+    $scpCommonArgs += @("-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR")
+}
 $runScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-service-platform.service-job." + [guid]::NewGuid().ToString("N") + ".sh")
 $remoteJobCompletedSuccessfully = $false
 $remoteServiceDisplay = if ($isBatch) { "batch plan: $($batchSteps.Count) steps" } else {
@@ -609,8 +636,10 @@ foreach ($line in @(
     "printf '' > ""`$SUMMARY_FILE""",
     "log_stage() { printf '[remote-job] %s %s\n' ""`$(date -u '+%H:%M:%S')"" ""`$*""; }",
     "run_stage() { label=""`$1""; shift; log_stage ""`$label""; ""`$@""; rc=""`$?""; if [ ""`$rc"" -ne 0 ]; then log_stage ""failed: `$label (rc=`$rc)""; return ""`$rc""; fi; }",
-    "run_stage $(Quote-BashArg "prepare repo directories") sudo mkdir -p $(Quote-BashArg "$RemoteRepoDir/tools/services") $(Quote-BashArg "$RemoteRepoDir/infra") $(Quote-BashArg "$RemoteRepoDir/infra/docker")",
+    "run_stage $(Quote-BashArg "prepare repo directories") sudo mkdir -p $(Quote-BashArg "$RemoteRepoDir/tools/services") $(Quote-BashArg "$RemoteRepoDir/tools") $(Quote-BashArg "$RemoteRepoDir/infra") $(Quote-BashArg "$RemoteRepoDir/infra/docker")",
     "run_stage $(Quote-BashArg "install service runner") sudo install -m 700 $(Quote-BashArg $remoteServiceRunnerTemp) $(Quote-BashArg "$RemoteRepoDir/tools/services/service.sh")",
+    "run_stage $(Quote-BashArg "remove previous egress policy tools") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/tools/egress_policy")",
+    "run_stage $(Quote-BashArg "install egress policy tools") sudo cp -a $(Quote-BashArg $remoteEgressPolicyToolsTemp) $(Quote-BashArg "$RemoteRepoDir/tools/egress_policy")",
     "run_stage $(Quote-BashArg "remove previous Ansible bundle") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/ansible")",
     "run_stage $(Quote-BashArg "install Ansible bundle") sudo cp -a $(Quote-BashArg $remoteAnsibleTemp) $(Quote-BashArg "$RemoteRepoDir/infra/ansible")",
     "run_stage $(Quote-BashArg "remove previous policy-router Docker context") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-router")",
@@ -664,7 +693,7 @@ if ($isBatch) {
 
 try {
     Write-Host "Preparing local service bundle..."
-    $bundle = New-TarGzBundle $ServiceRunnerScript $AnsibleDir $PolicyRouterDockerDir $PolicyGatewayDockerDir
+    $bundle = New-TarGzBundle $ServiceRunnerScript $AnsibleDir $PolicyRouterDockerDir $PolicyGatewayDockerDir $EgressPolicyToolsDir
     if ($useDetachedRemoteJob) {
         Write-LfScript $runScriptPath $runScriptLines
     }
@@ -703,6 +732,7 @@ try {
         "mkdir -p $(Quote-BashArg $remoteBundleDir)",
         "tar -xzf $(Quote-BashArg $remoteBundleArchive) -C $(Quote-BashArg $remoteBundleDir)",
         "test -f $(Quote-BashArg $remoteServiceRunnerTemp)",
+        "test -d $(Quote-BashArg $remoteEgressPolicyToolsTemp)",
         "test -d $(Quote-BashArg $remoteAnsibleTemp)",
         "test -d $(Quote-BashArg $remotePolicyRouterDockerTemp)",
         "test -d $(Quote-BashArg $remotePolicyGatewayDockerTemp)"

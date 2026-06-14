@@ -436,8 +436,19 @@ function Clear-OpenSshHostKey($Endpoint) {
         return
     }
 
+    $sshDir = Join-Path $env:USERPROFILE ".ssh"
+    $knownHosts = Join-Path $sshDir "known_hosts"
+    New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
+    New-Item -ItemType File -Force -Path $knownHosts | Out-Null
+
     Write-Host "Removing old OpenSSH known_hosts entries for $Endpoint"
-    & ssh-keygen -R $Endpoint | Out-Host
+    & ssh-keygen -F $Endpoint -f $knownHosts *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "No existing OpenSSH known_hosts entry for $Endpoint; continuing."
+        return
+    }
+
+    & ssh-keygen -R $Endpoint -f $knownHosts | Out-Host
     if ($LASTEXITCODE -ne 0) {
         Fail "ssh-keygen -R failed for $Endpoint"
     }

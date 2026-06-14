@@ -45,7 +45,7 @@ Options:
   --auto-accept-host-key  Refresh known_hosts during sync.
   --reseed-vpn-edge ALIASES
                          Explicitly reseed SoftEther config for aliases.
-  --only-service NAME    Roll out only one service: edge_haproxy, vpn_edge, vpn_cascade, or policy_gateway.
+  --only-service NAME    Roll out only one service: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, or edge_candidate_collector.
   --skip-sync             Skip sync/verify step.
   --skip-standby-sync     Skip automatic sync of orchestration candidates.
   --skip-postcheck        Skip service postcheck placeholders.
@@ -449,8 +449,8 @@ fi
 require_file "$SERVICE_REMOTE_SCRIPT" "--service-remote-script"
 
 case "$ONLY_SERVICE" in
-    ""|edge_haproxy|vpn_edge|vpn_cascade|policy_gateway) ;;
-    *) fail "--only-service must be one of: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway" ;;
+    ""|edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector) ;;
+    *) fail "--only-service must be one of: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector" ;;
 esac
 
 first_line="$(head -n 1 "$NODES_FILE" | tr -d '\r')"
@@ -643,7 +643,7 @@ process_service_rows() {
         *) fail "$name state must be one of: present, absent, purged" ;;
     esac
     case "$name" in
-        edge_haproxy|vpn_edge|vpn_cascade|policy_gateway) ;;
+        edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector) ;;
         *)
             echo "$name: not implemented yet; skipped"
             summary+=("$name: skipped not implemented")

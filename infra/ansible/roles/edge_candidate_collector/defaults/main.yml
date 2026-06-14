@@ -1,0 +1,24 @@
+---
+edge_candidate_collector_root_dir: /opt/ai-service-platform/edge_candidate_collector
+edge_candidate_collector_state_dir: /var/lib/ai-service-platform/edge_candidate_collector
+edge_candidate_collector_log_dir: "{{ edge_candidate_collector_state_dir }}/logs"
+edge_candidate_collector_candidate_dir: "{{ edge_candidate_collector_state_dir }}/candidates"
+edge_candidate_collector_processed_dir: "{{ edge_candidate_collector_state_dir }}/processed"
+edge_candidate_collector_script: "{{ edge_candidate_collector_root_dir }}/edge_candidate_collector.py"
+edge_candidate_collector_runner: "{{ edge_candidate_collector_root_dir }}/run_edge_candidate_collector.sh"
+edge_candidate_collector_local_script: "{{ playbook_dir }}/../../tools/egress_policy/edge_candidate_collector.py"
+
+edge_candidate_collector_state: present
+edge_candidate_collector_purge_data: false
+edge_candidate_collector_interval: "15min"
+edge_candidate_collector_randomized_delay: "2min"
+edge_candidate_collector_docker_since: "30m"
+edge_candidate_collector_max_lines: 5000
+edge_candidate_collector_candidate_retention_days: 30
+edge_candidate_collector_processed_retention_days: 30
+
+edge_candidate_collector_haproxy_container: edge-haproxy
+edge_candidate_collector_policy_gateway_container: policy-gateway
+edge_candidate_collector_vpn_cascade_container: softether-cascade
+edge_candidate_collector_systemd_service: edge-candidate-collector.service
+edge_candidate_collector_systemd_timer: edge-candidate-collector.timer
