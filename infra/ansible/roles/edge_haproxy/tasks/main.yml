@@ -137,10 +137,21 @@
         "minecraft_enabled": False,
     }
 
+    def unique_strings(values):
+        result = []
+        seen = set()
+        for value in values or []:
+            text = str(value).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+        return result
+
     if "vpn_ingress" in present_routes:
         cfg = route_config.get("vpn_ingress") or {}
         per_alias = (cfg.get("per_alias") or {}).get(alias) or {}
-        sni = per_alias.get("sni") or []
+        sni = unique_strings(per_alias.get("sni") or [])
         if not sni:
             fail(f"routes.yml vpn_ingress.per_alias.{alias}.sni must contain at least one SNI")
         ports = {
@@ -164,6 +175,7 @@
         per_alias = (cfg.get("per_alias") or {}).get(alias) or {}
         defaults = cfg.get("defaults") or {}
         backends = per_alias.get("backends") or defaults.get("backends") or {}
+        vpn_sni = unique_strings(per_alias.get("vpn_sni") or defaults.get("vpn_sni") or [])
         game = backends.get("game") or {}
         rcon = backends.get("rcon") or {}
         if not game.get("primary") or not game.get("fallback"):
@@ -180,10 +192,13 @@
         policy.update(cfg.get("policy") or {})
         if policy.get("rcon_public", True) and (not rcon.get("primary") or not rcon.get("fallback")):
             fail(f"routes.yml minecraft.per_alias.{alias}.backends.rcon or minecraft.defaults.backends.rcon primary and fallback are required when rcon_public=true")
+        if vpn_sni and model.get("vpn_ingress_enabled"):
+            model["vpn_ingress"]["sni"] = unique_strings(model["vpn_ingress"]["sni"] + vpn_sni)
         model.update({
             "minecraft_enabled": True,
             "minecraft": {
                 "public_names": per_alias.get("public_names") or [],
+                "vpn_sni": vpn_sni,
                 "ports": ports,
                 "policy": policy,
                 "game": {

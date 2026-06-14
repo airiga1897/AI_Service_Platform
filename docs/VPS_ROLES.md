@@ -170,7 +170,7 @@ Example хранится в:
 infra/ansible/haproxy.routes.example.yml
 ```
 
-`vpn_ingress` включает HAProxy routes `443/992/5555` к `softether-edge`. VPN SNI задаётся точно, например `vpn-vps1.mine-craft.su`; `mainsrv01.mine-craft.su` не используется для VPN.
+`vpn_ingress` включает HAProxy routes `443/992/5555` к `softether-edge`. Базовый VPN SNI задаётся точно, например `vpn-vps1.mine-craft.su`; дополнительные SNI для конкретного alias могут приходить из route-specific overrides, например `minecraft.per_alias.<alias>.vpn_sni`.
 
 Перед rollout runner нормализует derived VPN route config: если active
 `edge_route,vpn_ingress` содержит новый alias, отсутствующий в
@@ -184,6 +184,16 @@ edge_route,minecraft,minecraft_edge,vps4,,,present
 ```
 
 Если `operator/haproxy/routes.yml` содержит `minecraft.defaults.backends`, alias может наследовать Minecraft upstream без `minecraft.per_alias.<alias>`. `per_alias` нужен только для override конкретного узла. Текущий managed target - `vps4`; `vps1` не должен держать active Minecraft route.
+
+`minecraft.per_alias.<alias>.vpn_sni` добавляет дополнительные VPN SNI names для того же alias, если на нём также включён `edge_route,vpn_ingress`. Это не включает `443/tcp` само по себе; lifecycle VPN route всё равно живёт в `state.csv`. Пример для `vps4`:
+
+```yaml
+minecraft:
+  per_alias:
+    vps4:
+      vpn_sni:
+        - mainsrv01.mine-craft.su
+```
 
 ## Inventory Generation
 

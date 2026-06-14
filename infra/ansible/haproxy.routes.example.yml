@@ -25,7 +25,11 @@ minecraft:
       rcon:
         primary: newnout01:25575
         fallback: mainserv01.netcraze.pro:25575
-  per_alias: {}
+    vpn_sni: []
+  per_alias:
+    vps4:
+      vpn_sni:
+        - mainsrv01.mine-craft.su
   ports:
     game: 25565
     rcon: 25575

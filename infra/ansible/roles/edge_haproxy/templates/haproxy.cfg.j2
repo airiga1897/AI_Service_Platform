@@ -41,7 +41,7 @@ frontend https_in
     tcp-request content reject if { sc0_conn_rate gt {{ edge_haproxy_tcp_rate_limit }} }
     tcp-request content reject if { sc0_conn_cur gt {{ edge_haproxy_tcp_conn_cur_limit }} }
 
-    acl is_softether req_ssl_sni -i{% for sni in edge_haproxy_route_model.vpn_ingress.sni %} {{ sni }}{% endfor %}
+    acl is_softether req_ssl_sni -i {{ edge_haproxy_route_model.vpn_ingress.sni | join(' ') }}
     tcp-request content reject unless is_softether
     use_backend be_softether_https if is_softether
 

@@ -187,13 +187,23 @@ vpn-vps2.mine-craft.su -> vps2
 vpn-vps3.mine-craft.su -> vps3
 ```
 
-`mainsrv01.mine-craft.su` относится только к Minecraft route:
+`mainsrv01.mine-craft.su` управляется через Minecraft route:
 
 ```csv
 edge_route,minecraft,minecraft_edge,vps4,,,present
 ```
 
 Когда route включён, HAProxy публикует `25565/tcp` и `25575/tcp`; `newnout01` используется как primary backend, `mainserv01.netcraze.pro` как fallback backend. Minecraft upstream может наследоваться из `minecraft.defaults.backends` в `operator/haproxy/routes.yml`; `per_alias` нужен только для override конкретного edge alias.
+
+Если для alias также включён `edge_route,vpn_ingress`, `minecraft.per_alias.<alias>.vpn_sni` может добавить публичное Minecraft имя в VPN SNI allowlist на `443/tcp`. Для текущего managed alias:
+
+```yaml
+minecraft:
+  per_alias:
+    vps4:
+      vpn_sni:
+        - mainsrv01.mine-craft.su
+```
 
 ## TCP Contract
 
