@@ -417,6 +417,17 @@ not auto-discovery for new domains.
   -Verify
 ```
 
+For continuous maintenance, run the same refresh from an operator-side scheduler
+about once per hour:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\egress_policy\refresh_selective_fallback_dns_sets.ps1 -Apply -Verify
+```
+
+Schedule this on the operator host only. It refreshes accepted/applied domain
+routes from proposal and applied-route state; it does not add new domains,
+change `profiles.json`, or approve redirect/CDN hosts.
+
 For one domain:
 
 ```powershell
@@ -434,7 +445,8 @@ short grace period, default `30` minutes, to avoid route churn when DNS answers
 rotate.
 
 DNS-set state lives under `operator/egress_policy/dns_sets/`. Refresh history is
-written as JSONL under `operator/egress_policy/history/`.
+written as JSONL under
+`operator/egress_policy/history/selective-fallback-dns-refresh-*.jsonl`.
 
 ### Cascade Roles Before Routing
 
@@ -460,6 +472,58 @@ Each cascade link carries a `state` field:
 - `active` or missing - real lab link included in rollout;
 - `probe` - a read-only candidate used by egress probes and reports only;
 - `disabled` - ignored by probe tooling.
+
+#### Planned Cascade Link Management Tool
+
+Current link lifecycle is still managed by editing
+`operator/softether/cascade/secrets/lab-cascade.json` and then running the normal
+`vpn_cascade` rollout. Add a small operator-side wrapper so link state changes
+are made consistently and validated before rollout:
+
+```powershell
+.\tools\services\vpn_cascade_link.ps1 set-state vps5-to-vps4 disabled
+.\tools\services\vpn_cascade_link.ps1 set-state vps5-to-vps4 active
+.\tools\services\vpn_cascade_link.ps1 upsert vps4-to-vps5 `
+  -IngressAlias vps4 `
+  -IngressHost vps4.mine-craft.su `
+  -EgressAlias vps5 `
+  -EgressHost vps5.mine-craft.su `
+  -EgressPort 8443 `
+  -State probe
+.\tools\services\vpn_cascade_link.ps1 list
+```
+
+The tool should only change desired operator state. It must not run rollout,
+call Ansible, connect to VPS nodes, edit live SoftEther config, or apply route,
+NAT, firewall, HAProxy, or Docker changes. Rollout remains explicit:
+
+```powershell
+.\tools\services\rollout_from_state.ps1 `
+  -NodesFile .\operator\nodes.csv `
+  -StateFile .\operator\state.csv `
+  -OnlyService vpn_cascade
+```
+
+Implementation requirements:
+
+- read and write only `operator/softether/cascade/secrets/lab-cascade.json`;
+- validate `version`, `state`, `links`, required link fields, aliases from
+  `operator/nodes.csv`, `egress_port`, and allowed states
+  `active|probe|disabled`;
+- reject duplicate `connection_name`, duplicate directed edges, self-links, and
+  active/probe directed cycles before writing;
+- reject simultaneous active reverse links, such as `vps5 -> vps4` and
+  `vps4 -> vps5`, unless a future isolated transit mode explicitly allows it;
+- keep disabled links in the file for audit/history and make repeated commands
+  idempotent;
+- support `-WhatIf`/dry-run output showing old state, new state, and graph
+  changes without writing;
+- preserve unrelated JSON fields and write readable JSON with stable ordering.
+
+Test the tool with active, probe, disabled, missing-link, duplicate-link,
+reverse-link, self-link, and cycle scenarios. After a successful desired-state
+change, use `check_vpn_cascade_links.ps1` for read-only status and the normal
+`vpn_cascade` rollout for runtime changes.
 
 Before making `vps3` a cascade receiver, promote the active orchestration role
 away from `vps3` to the standby `vps5`. This keeps control-plane access separate

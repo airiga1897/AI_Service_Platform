@@ -34,12 +34,23 @@
     - "{{ edge_candidate_collector_processed_dir }}"
   when: edge_candidate_collector_state == 'present'
 
-- name: Ensure edge candidate collector raw log directory
+- name: Ensure edge candidate collector private state directories
   ansible.builtin.file:
-    path: "{{ edge_candidate_collector_log_dir }}"
+    path: "{{ item }}"
     state: directory
     mode: "0750"
+  loop:
+    - "{{ edge_candidate_collector_log_dir }}"
+    - "{{ edge_candidate_collector_observation_dir }}"
   when: edge_candidate_collector_state == 'present'
+
+- name: Install tcpdump for edge candidate collector sampler
+  ansible.builtin.package:
+    name: tcpdump
+    state: present
+  when:
+    - edge_candidate_collector_state == 'present'
+    - edge_candidate_collector_tcpdump_enabled | bool
 
 - name: Find existing edge candidate collector candidate files
   ansible.builtin.find:

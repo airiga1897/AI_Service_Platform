@@ -250,3 +250,14 @@ ingress cascade route through `tap_vpnpolicy`, egress return route, scoped NAT,
 and then prove traffic from the `softether-edge` network namespace when the
 protocol supports a generic check. Rollback must use persisted applied state and
 verify the exact route/NAT entries are gone.
+
+Scheduled DNS-set refresh is a maintenance layer for Stage 4 after selective
+fallback has been explicitly accepted and applied. An operator-side scheduled
+task may run `refresh_selective_fallback_dns_sets.ps1 -Apply -Verify` once per
+hour to detect DNS drift for accepted/applied domain fallback routes and refresh
+their exact `/32` route/NAT state. The source of truth remains accepted proposals
+plus `operator/egress_policy/applied_routes/`; the scheduler must not discover
+or approve new domains, edit `profiles.json`, run on VPS nodes, or promote
+redirect/CDN hosts automatically. DNS rotation keeps the existing graceful
+window through `-GraceMinutes 30`. Refresh and verify failures should be written
+to operator history/logs for review without accepting new targets.

@@ -56,6 +56,7 @@
     ALIAS: "{{ inventory_hostname }}"
   delegate_to: localhost
   become: false
+  check_mode: false
   register: vpn_cascade_network_plan_command
   changed_when: false
   when: vpn_cascade_state == 'present'
@@ -888,9 +889,9 @@
   changed_when: false
   when:
     - vpn_cascade_state == 'present'
-    - vpn_cascade_configured_password_check.rc != 0
-    - vpn_cascade_blank_password_check.rc == 0
     - not ansible_check_mode
+    - (vpn_cascade_configured_password_check.rc | default(0)) != 0
+    - (vpn_cascade_blank_password_check.rc | default(1)) == 0
 
 - name: Verify vpn_cascade SoftEther server password
   ansible.builtin.shell: |
@@ -1226,8 +1227,8 @@
   when:
     - vpn_cascade_state == 'present'
     - inventory_hostname in vpn_cascade_egress_aliases
-    - vpn_cascade_egress_user_get.rc != 0
     - not ansible_check_mode
+    - (vpn_cascade_egress_user_get.rc | default(0)) != 0
 
 - name: Fail on egress-side vpn_cascade user create failure
   ansible.builtin.fail:
@@ -1236,8 +1237,8 @@
     - vpn_cascade_state == 'present'
     - inventory_hostname in vpn_cascade_egress_aliases
     - not ansible_check_mode
-    - vpn_cascade_egress_user_get.rc != 0
-    - vpn_cascade_egress_user_create.rc | default(1) != 0
+    - (vpn_cascade_egress_user_get.rc | default(0)) != 0
+    - (vpn_cascade_egress_user_create.rc | default(1)) != 0
 
 - name: Set egress-side vpn_cascade user password
   ansible.builtin.shell: |

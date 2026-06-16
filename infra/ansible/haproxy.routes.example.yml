@@ -20,11 +20,9 @@ minecraft:
   defaults:
     backends:
       game:
-        primary: newnout01:25565
-        fallback: mainserv01.netcraze.pro:25565
+        primary: mainserv01.netcraze.pro:25565
       rcon:
-        primary: newnout01:25575
-        fallback: mainserv01.netcraze.pro:25575
+        primary: mainserv01.netcraze.pro:25575
     vpn_sni: []
   per_alias:
     vps4:

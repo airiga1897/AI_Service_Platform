@@ -178,8 +178,8 @@
         vpn_sni = unique_strings(per_alias.get("vpn_sni") or defaults.get("vpn_sni") or [])
         game = backends.get("game") or {}
         rcon = backends.get("rcon") or {}
-        if not game.get("primary") or not game.get("fallback"):
-            fail(f"routes.yml minecraft.per_alias.{alias}.backends.game or minecraft.defaults.backends.game primary and fallback are required")
+        if not game.get("primary"):
+            fail(f"routes.yml minecraft.per_alias.{alias}.backends.game or minecraft.defaults.backends.game primary is required")
         ports = {"game": 25565, "rcon": 25575}
         ports.update(cfg.get("ports") or {})
         policy = {
@@ -190,8 +190,8 @@
             "geoip": "disabled",
         }
         policy.update(cfg.get("policy") or {})
-        if policy.get("rcon_public", True) and (not rcon.get("primary") or not rcon.get("fallback")):
-            fail(f"routes.yml minecraft.per_alias.{alias}.backends.rcon or minecraft.defaults.backends.rcon primary and fallback are required when rcon_public=true")
+        if policy.get("rcon_public", True) and not rcon.get("primary"):
+            fail(f"routes.yml minecraft.per_alias.{alias}.backends.rcon or minecraft.defaults.backends.rcon primary is required when rcon_public=true")
         if vpn_sni and model.get("vpn_ingress_enabled"):
             model["vpn_ingress"]["sni"] = unique_strings(model["vpn_ingress"]["sni"] + vpn_sni)
         model.update({
@@ -203,7 +203,7 @@
                 "policy": policy,
                 "game": {
                     "primary": game["primary"],
-                    "fallback": game["fallback"],
+                    "fallback": game.get("fallback"),
                     "rate_limit": default_game_rate,
                 },
                 "rcon": {

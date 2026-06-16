@@ -61,6 +61,7 @@
     ALIAS: "{{ inventory_hostname }}"
   delegate_to: localhost
   become: false
+  check_mode: false
   register: policy_gateway_network_plan_command
   changed_when: false
   when: policy_gateway_state == 'present'
@@ -95,6 +96,7 @@
     REPO_ROOT: "{{ playbook_dir }}/../.."
   delegate_to: localhost
   become: false
+  check_mode: false
   run_once: true
   register: policy_gateway_build_plan_command
   changed_when: false

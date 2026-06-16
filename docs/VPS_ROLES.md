@@ -183,7 +183,7 @@ infra/ansible/haproxy.routes.example.yml
 edge_route,minecraft,minecraft_edge,vps4,,,present
 ```
 
-Если `operator/haproxy/routes.yml` содержит `minecraft.defaults.backends`, alias может наследовать Minecraft upstream без `minecraft.per_alias.<alias>`. `per_alias` нужен только для override конкретного узла. Текущий managed target - `vps4`; `vps1` не должен держать active Minecraft route.
+Если `operator/haproxy/routes.yml` содержит `minecraft.defaults.backends`, alias может наследовать Minecraft upstream без `minecraft.per_alias.<alias>`. Текущий managed primary backend - `mainserv01.netcraze.pro`; отдельный `fallback` опционален и задаётся только когда есть реальный резервный backend. `per_alias` нужен только для override конкретного узла. Текущий managed target - `vps4`; `vps1` не должен держать active Minecraft route.
 
 `minecraft.per_alias.<alias>.vpn_sni` добавляет дополнительные VPN SNI names для того же alias, если на нём также включён `edge_route,vpn_ingress`. Это не включает `443/tcp` само по себе; lifecycle VPN route всё равно живёт в `state.csv`. Пример для `vps4`:
 

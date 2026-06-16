@@ -93,7 +93,9 @@ backend be_minecraft_game
     mode tcp
     option tcp-check
     server primary {{ edge_haproxy_route_model.minecraft.game.primary }} check inter 5s fall 3 rise 2 init-addr last,libc,none
+{% if edge_haproxy_route_model.minecraft.game.fallback %}
     server fallback {{ edge_haproxy_route_model.minecraft.game.fallback }} check backup inter 5s fall 3 rise 2 init-addr last,libc,none
+{% endif %}
 
 {% if edge_haproxy_route_model.minecraft.policy.rcon_public | default(true) %}
 frontend minecraft_rcon
@@ -109,7 +111,9 @@ backend be_minecraft_rcon
     mode tcp
     option tcp-check
     server primary {{ edge_haproxy_route_model.minecraft.rcon.primary }} check inter 5s fall 3 rise 2 init-addr last,libc,none
+{% if edge_haproxy_route_model.minecraft.rcon.fallback %}
     server fallback {{ edge_haproxy_route_model.minecraft.rcon.fallback }} check backup inter 5s fall 3 rise 2 init-addr last,libc,none
+{% endif %}
 {% endif %}
 {% endif %}
 
