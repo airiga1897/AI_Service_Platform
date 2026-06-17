@@ -244,17 +244,27 @@ function Fetch-RemoteCandidates($Alias, $Node) {
     New-Item -ItemType Directory -Force -Path $aliasDir | Out-Null
     $dirs = Get-RemoteCollectorDirs
     $candidatePath = Quote-BashArg $dirs.Candidate
-    $probeCommand = "test -d $candidatePath && test -n `"$(find $candidatePath -maxdepth 1 -type f -name '*.jsonl' -readable -print -quit)`""
+    $probeCommand = "sudo find $candidatePath -maxdepth 1 -type f -name '*.jsonl' -size +0c -print -quit | grep -q ."
     $remoteHasFiles = Invoke-SshBestEffort $Alias $Node $probeCommand "remote candidate probe"
     if (-not $remoteHasFiles) {
         Write-Host "No remote candidate files found for ${Alias}; continuing with local candidate cache."
         return
     }
-    $remote = "{0}@{1}:{2}/*.jsonl" -f $AdminUser, $Node.endpoint, $dirs.Candidate
-    $args = @("-i", $keyPath, "-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR", $remote, $aliasDir)
-    & scp @args
-    if ($LASTEXITCODE -ne 0) {
+    $remote = "{0}@{1}" -f $AdminUser, $Node.endpoint
+    $localPath = Join-Path $aliasDir ("{0}-remote-candidates.jsonl" -f $Alias)
+    $fetchInner = "find $candidatePath -maxdepth 1 -type f -name '*.jsonl' -size +0c -print0 | sort -z | xargs -0 -r cat"
+    $fetchCommand = "sudo bash -lc $(Quote-BashArg $fetchInner)"
+    $args = @("-i", $keyPath, "-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR", $remote, $fetchCommand)
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & ssh @args | Set-Content -LiteralPath $localPath -Encoding utf8
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $localPath -PathType Leaf) -or (Get-Item -LiteralPath $localPath).Length -eq 0) {
         Write-Host "Remote candidate fetch for ${Alias} returned exit code $LASTEXITCODE; continuing with local candidate cache."
+        Remove-Item -LiteralPath $localPath -Force -ErrorAction SilentlyContinue
         return
     }
     [void]$script:FetchedRemoteAliases.Add([string]$Alias)
