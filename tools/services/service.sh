@@ -138,6 +138,41 @@ limit_matches_aliases() {
     return 0
 }
 
+append_aliases_unique() {
+    local current="$1"
+    local aliases="$2"
+    local alias_item
+    while IFS= read -r alias_item; do
+        [ -n "$alias_item" ] || continue
+        if ! alias_in_list "$alias_item" "$current"; then
+            if [ -n "$current" ]; then
+                current="$current+$alias_item"
+            else
+                current="$alias_item"
+            fi
+        fi
+    done < <(split_aliases_to_lines "$aliases")
+    printf '%s\n' "$current"
+}
+
+limit_aliases_in_row() {
+    local limit="$1"
+    local aliases="$2"
+    local selected=""
+    local alias_item
+    while IFS= read -r alias_item; do
+        [ -n "$alias_item" ] || continue
+        if alias_in_list "$alias_item" "$aliases"; then
+            if [ -n "$selected" ]; then
+                selected="$selected+$alias_item"
+            else
+                selected="$alias_item"
+            fi
+        fi
+    done < <(split_limit_to_lines "$limit")
+    printf '%s\n' "$selected"
+}
+
 limit_display_for_error() {
     local limit="$1"
     if [ -n "$limit" ]; then
@@ -314,7 +349,31 @@ while IFS=, read -r kind name ansible_group active_aliases candidate_aliases old
     service_plan_rows+=("$ansible_group|$active_aliases|$candidate_aliases|$old_aliases|$row_state")
 
     if [ -n "$LIMIT" ]; then
-        limit_matches_aliases "$LIMIT" "$active_aliases" || continue
+        selected_aliases="$(limit_aliases_in_row "$LIMIT" "$active_aliases")"
+        [ -n "$selected_aliases" ] || continue
+
+        while IFS= read -r selected_alias; do
+            [ -n "$selected_alias" ] || continue
+            if alias_in_list "$selected_alias" "$service_active_aliases"; then
+                fail "state.csv has multiple $SERVICE rows covering alias $selected_alias for --limit $(limit_display_for_error "$LIMIT")"
+            fi
+        done < <(split_aliases_to_lines "$selected_aliases")
+
+        if [ -n "$service_group" ] && [ "$service_group" != "$ansible_group" ]; then
+            fail "state.csv has multiple ansible groups for $SERVICE matching --limit $(limit_display_for_error "$LIMIT")"
+        fi
+        if [ -n "$service_row_state" ] && [ "$service_row_state" != "$row_state" ]; then
+            fail "state.csv has mixed states for $SERVICE matching --limit $(limit_display_for_error "$LIMIT")"
+        fi
+
+        service_found="true"
+        service_match_count=$((service_match_count + 1))
+        service_group="$ansible_group"
+        service_active_aliases="$(append_aliases_unique "$service_active_aliases" "$selected_aliases")"
+        service_candidate_aliases="$(append_aliases_unique "$service_candidate_aliases" "$candidate_aliases")"
+        service_old_aliases="$(append_aliases_unique "$service_old_aliases" "$old_aliases")"
+        service_row_state="$row_state"
+        continue
     elif [ "$service_total_count" -gt 1 ]; then
         continue
     fi
@@ -360,7 +419,14 @@ fi
 
 [ "$service_total_count" -gt 0 ] || fail "state.csv must contain a service row for $SERVICE"
 [ "$service_found" = "true" ] || fail "state.csv must contain a service row for $SERVICE matching --limit $(limit_display_for_error "$LIMIT")"
-[ "$service_match_count" -eq 1 ] || fail "state.csv has multiple $SERVICE rows matching --limit $(limit_display_for_error "$LIMIT"); keep one target row per alias group"
+if [ -n "$LIMIT" ]; then
+    while IFS= read -r limit_alias; do
+        [ -n "$limit_alias" ] || continue
+        alias_in_list "$limit_alias" "$service_active_aliases" || fail "state.csv must contain a service row for $SERVICE alias $limit_alias matching --limit $(limit_display_for_error "$LIMIT")"
+    done < <(split_limit_to_lines "$LIMIT")
+else
+    [ "$service_match_count" -eq 1 ] || fail "state.csv has multiple $SERVICE rows matching --limit $(limit_display_for_error "$LIMIT"); keep one target row per alias group"
+fi
 case "$service_row_state" in
     present|absent|purged) ;;
     *) fail "$SERVICE state must be one of: present, absent, purged" ;;

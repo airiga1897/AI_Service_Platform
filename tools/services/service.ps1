@@ -158,17 +158,58 @@ $serviceRows = @($stateRows | Where-Object { $_.kind -eq "service" -and $_.name 
 $serviceRow = $null
 if ($Limit) {
     $limitAliases = @(Split-LimitList $Limit)
-    $matchingRows = @(
-        $serviceRows | Where-Object {
-            $active = @(Split-AliasList $_.active_aliases)
-            $missing = @($limitAliases | Where-Object { $active -notcontains $_ })
-            $missing.Count -eq 0
+    $coveredAliases = @{}
+    $selectedRows = @()
+    $selectedActiveAliases = @()
+    $selectedCandidateAliases = @()
+    $selectedOldAliases = @()
+    $selectedGroup = $null
+    $selectedState = $null
+
+    foreach ($row in $serviceRows) {
+        $active = @(Split-AliasList $row.active_aliases)
+        $rowSelectedAliases = @($limitAliases | Where-Object { $active -contains $_ })
+        if ($rowSelectedAliases.Count -eq 0) {
+            continue
         }
-    )
-    if ($matchingRows.Count -eq 1) {
-        $serviceRow = $matchingRows[0]
-    } elseif ($matchingRows.Count -gt 1) {
-        Fail "state.csv has multiple $Service rows matching -Limit $Limit; keep one target row per alias group"
+
+        foreach ($alias in $rowSelectedAliases) {
+            if ($coveredAliases.ContainsKey($alias)) {
+                Fail "state.csv has multiple $Service rows covering alias $alias for -Limit $Limit"
+            }
+            $coveredAliases[$alias] = $true
+        }
+        if ($selectedGroup -and $selectedGroup -ne $row.ansible_group) {
+            Fail "state.csv has multiple ansible groups for $Service matching -Limit $Limit"
+        }
+        if ($selectedState -and $selectedState -ne $row.state) {
+            Fail "state.csv has mixed states for $Service matching -Limit $Limit"
+        }
+
+        $selectedRows += $row
+        $selectedGroup = $row.ansible_group
+        $selectedState = $row.state
+        $selectedActiveAliases += $rowSelectedAliases
+        $selectedCandidateAliases += @(Split-AliasList $row.candidate_aliases)
+        $selectedOldAliases += @(Split-AliasList $row.old_aliases)
+    }
+
+    foreach ($alias in $limitAliases) {
+        if (-not $coveredAliases.ContainsKey($alias)) {
+            Fail "state.csv must contain a service row for $Service alias $alias matching -Limit $Limit"
+        }
+    }
+
+    if ($selectedRows.Count -gt 0) {
+        $serviceRow = [pscustomobject]@{
+            kind = "service"
+            name = $Service
+            ansible_group = $selectedGroup
+            active_aliases = (($selectedActiveAliases | Select-Object -Unique) -join "+")
+            candidate_aliases = (($selectedCandidateAliases | Where-Object { $_ } | Select-Object -Unique) -join "+")
+            old_aliases = (($selectedOldAliases | Where-Object { $_ } | Select-Object -Unique) -join "+")
+            state = $selectedState
+        }
     }
 } else {
     $serviceRow = $serviceRows | Select-Object -First 1

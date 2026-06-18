@@ -19,6 +19,10 @@ param(
     [int]$ResolveDelayMilliseconds = 250,
     [int]$GraceMinutes = 30,
     [int]$TimeoutSeconds = 10,
+    [int]$SshRetries = 3,
+    [int]$ApplyTimeoutSeconds = 5,
+    [int]$ApplySshRetries = 2,
+    [int]$ApplyPreflightRetries = 2,
     [switch]$Apply,
     [switch]$Verify,
     [switch]$AutoAcceptHostKey = $true,
@@ -100,7 +104,7 @@ function Invoke-SshText($AliasName, $Command) {
     $sshArgs = @("-n", "-T") + @(Get-OpenSshCommonArgs $keyFile) + @($remote, $Command)
     $output = @()
     $exitCode = 0
-    for ($attempt = 1; $attempt -le 3; $attempt++) {
+    for ($attempt = 1; $attempt -le $SshRetries; $attempt++) {
         $previousErrorActionPreference = $ErrorActionPreference
         try {
             $script:ErrorActionPreference = "Continue"
@@ -114,10 +118,10 @@ function Invoke-SshText($AliasName, $Command) {
         }
         $text = @($output) -join "`n"
         $isTransportTimeout = $exitCode -eq 255 -and $text -match 'timed out|banner exchange|Connection to .* port 22 timed out|ssh: connect to host .* port 22: Connection timed out|Connection closed|Connection reset by'
-        if (-not $isTransportTimeout -or $attempt -eq 3) {
+        if (-not $isTransportTimeout -or $attempt -eq $SshRetries) {
             break
         }
-        Write-Host "[WARN] SSH transport timeout on ${AliasName}; retrying $attempt/3..."
+        Write-Host "[WARN] SSH transport timeout on ${AliasName}; retrying $attempt/$SshRetries..."
         Start-Sleep -Seconds 2
     }
     if ($exitCode -ne 0) {
@@ -418,7 +422,14 @@ function Read-DnsSetState($ProposalId) {
 function Write-DnsSetState($State) {
     New-Item -ItemType Directory -Force -Path $DnsSetDir | Out-Null
     $path = Get-DnsSetStatePath ([string]$State.proposal_id)
-    $State | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $path -Encoding utf8
+    $tmpPath = "$path.tmp.$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $State | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tmpPath -Encoding utf8
+        Move-Item -LiteralPath $tmpPath -Destination $path -Force
+    } catch {
+        Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
+        Fail "failed to write DNS-set state via temp file: $path; env may have file locking or access restrictions. Error: $($_.Exception.Message)"
+    }
 }
 
 function Update-DnsSetState($Existing, $Proposal, $ObservedIps, $AppliedIps, $NowUtc) {
@@ -485,9 +496,34 @@ function Get-LastSeenUtc($State, $Ip) {
     }
 }
 
+function Get-RecentDnsSetIps($State, $Now) {
+    if (-not $State -or -not $State.ip_records) {
+        return @()
+    }
+    $ips = New-Object System.Collections.ArrayList
+    $cutoff = $Now.AddMinutes(-1 * $GraceMinutes)
+    foreach ($record in @($State.ip_records)) {
+        $ip = [string]$record.ip
+        if (-not (Test-IPv4 $ip)) {
+            continue
+        }
+        $lastSeen = Get-LastSeenUtc $State $ip
+        if ($null -eq $lastSeen) {
+            $lastSeen = $Now
+        }
+        if ($lastSeen -ge $cutoff) {
+            [void]$ips.Add($ip)
+        }
+    }
+    return Get-UniqueIPv4 $ips.ToArray()
+}
+
 function Get-DesiredIps($ObservedIps, $AppliedIps, $State, $Now) {
     $desired = New-Object System.Collections.ArrayList
     foreach ($ip in @($ObservedIps)) {
+        [void]$desired.Add($ip)
+    }
+    foreach ($ip in @(Get-RecentDnsSetIps $State $Now)) {
         [void]$desired.Add($ip)
     }
     $cutoff = $Now.AddMinutes(-1 * $GraceMinutes)
@@ -520,7 +556,17 @@ function Compare-StringSets($Old, $New) {
 function Invoke-RouteRefresh($ProposalId, $TargetIps) {
     $scriptPath = (Resolve-Path -LiteralPath $ApplyScript).Path
     Write-Host "[INFO] refreshing $ProposalId with DNS-set: $($TargetIps -join ',')"
-    & $scriptPath -Action refresh -Id $ProposalId -TargetIp $TargetIps -SkipVerify
+    & $scriptPath `
+        -Action refresh `
+        -Id $ProposalId `
+        -TargetIp $TargetIps `
+        -SshUser $SshUser `
+        -SshPath $SshPath `
+        -OperatorDir $OperatorDir `
+        -TimeoutSeconds $ApplyTimeoutSeconds `
+        -SshRetries $ApplySshRetries `
+        -PreflightRetries $ApplyPreflightRetries `
+        -SkipVerify
     if ($LASTEXITCODE -ne 0) {
         Fail "route refresh failed for $ProposalId"
     }
@@ -529,7 +575,15 @@ function Invoke-RouteRefresh($ProposalId, $TargetIps) {
 function Invoke-RouteVerify($ProposalId) {
     $scriptPath = (Resolve-Path -LiteralPath $ApplyScript).Path
     Write-Host "[INFO] verifying $ProposalId"
-    & $scriptPath -Action verify -Id $ProposalId
+    & $scriptPath `
+        -Action verify `
+        -Id $ProposalId `
+        -SshUser $SshUser `
+        -SshPath $SshPath `
+        -OperatorDir $OperatorDir `
+        -TimeoutSeconds $ApplyTimeoutSeconds `
+        -SshRetries $ApplySshRetries `
+        -PreflightRetries $ApplyPreflightRetries
     if ($LASTEXITCODE -ne 0) {
         Fail "route verify failed for $ProposalId"
     }
@@ -550,6 +604,18 @@ if ($ResolveDelayMilliseconds -lt 0) {
 }
 if ($GraceMinutes -lt 0) {
     Fail "-GraceMinutes must be 0 or greater"
+}
+if ($SshRetries -lt 1) {
+    Fail "-SshRetries must be at least 1"
+}
+if ($ApplyTimeoutSeconds -lt 1) {
+    Fail "-ApplyTimeoutSeconds must be at least 1"
+}
+if ($ApplySshRetries -lt 1) {
+    Fail "-ApplySshRetries must be at least 1"
+}
+if ($ApplyPreflightRetries -lt 1) {
+    Fail "-ApplyPreflightRetries must be at least 1"
 }
 foreach ($portValue in @($Port)) {
     if ($portValue -le 0 -or $portValue -gt 65535) {

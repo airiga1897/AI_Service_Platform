@@ -14,6 +14,8 @@ param(
     [string]$SshPath = "ssh",
     [string]$EdgeSourceIp = "172.20.0.2",
     [int]$TimeoutSeconds = 10,
+    [int]$SshRetries = 3,
+    [int]$PreflightRetries = 6,
     [switch]$AutoAcceptHostKey = $true,
     [switch]$SkipVerify,
     [switch]$Json
@@ -107,7 +109,7 @@ function Invoke-SshText($AliasName, $Command) {
     $sshArgs = @("-n", "-T") + @(Get-OpenSshCommonArgs $keyFile) + @($remote, $Command)
     $output = @()
     $exitCode = 0
-    for ($attempt = 1; $attempt -le 3; $attempt++) {
+    for ($attempt = 1; $attempt -le $SshRetries; $attempt++) {
         $previousErrorActionPreference = $ErrorActionPreference
         try {
             $script:ErrorActionPreference = "Continue"
@@ -121,10 +123,10 @@ function Invoke-SshText($AliasName, $Command) {
         }
         $text = @($output) -join "`n"
         $isTransportTimeout = $exitCode -eq 255 -and $text -match 'timed out|banner exchange|Connection to .* port 22 timed out|ssh: connect to host .* port 22: Connection timed out|Connection closed|Connection reset by'
-        if (-not $isTransportTimeout -or $attempt -eq 3) {
+        if (-not $isTransportTimeout -or $attempt -eq $SshRetries) {
             break
         }
-        Write-Host "[WARN] SSH transport timeout on ${AliasName}; retrying $attempt/3..."
+        Write-Host "[WARN] SSH transport timeout on ${AliasName}; retrying $attempt/$SshRetries..."
         Start-Sleep -Seconds 2
     }
     if ($exitCode -ne 0) {
@@ -145,7 +147,7 @@ function Test-RemoteCommand($AliasName, $Command) {
     $output = @()
     $exitCode = 0
     $transport_error = $false
-    for ($attempt = 1; $attempt -le 6; $attempt++) {
+    for ($attempt = 1; $attempt -le $PreflightRetries; $attempt++) {
         $previousErrorActionPreference = $ErrorActionPreference
         try {
             $script:ErrorActionPreference = "Continue"
@@ -156,10 +158,10 @@ function Test-RemoteCommand($AliasName, $Command) {
         }
         $text = @($output) -join "`n"
         $transport_error = $exitCode -eq 255 -and $text -match 'timed out|banner exchange|Connection to .* port 22 timed out|ssh: connect to host .* port 22: Connection timed out|Connection closed|Connection reset by'
-        if ($exitCode -eq 0 -or -not $transport_error -or $attempt -eq 6) {
+        if ($exitCode -eq 0 -or -not $transport_error -or $attempt -eq $PreflightRetries) {
             break
         }
-        Write-Host "[WARN] SSH transport timeout on ${AliasName}; retrying preflight $attempt/6..."
+        Write-Host "[WARN] SSH transport timeout on ${AliasName}; retrying preflight $attempt/$PreflightRetries..."
         Start-Sleep -Seconds 2
     }
     return [pscustomobject]@{
@@ -676,6 +678,7 @@ function Write-AppliedRouteStates($Steps) {
     New-Item -ItemType Directory -Force -Path $AppliedRoutesDir | Out-Null
     foreach ($group in @($Steps | Group-Object id)) {
         $statePath = Join-Path $AppliedRoutesDir "$($group.Name).json"
+        $tmpPath = "$statePath.tmp.$([Guid]::NewGuid().ToString('N'))"
         $state = [ordered]@{
             schema_version = 4
             mode = $RouteMode
@@ -683,7 +686,13 @@ function Write-AppliedRouteStates($Steps) {
             applied_at_utc = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
             steps = @($group.Group)
         }
-        $state | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $statePath -Encoding utf8
+        try {
+            $state | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tmpPath -Encoding utf8
+            Move-Item -LiteralPath $tmpPath -Destination $statePath -Force
+        } catch {
+            Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
+            Fail "failed to write applied route state via temp file: $statePath; runtime route changes may already be applied. Check file locks/access and rerun refresh. Error: $($_.Exception.Message)"
+        }
         Write-Host "[OK] applied route state written: $statePath"
     }
 }
@@ -1019,6 +1028,16 @@ $script:StateRows = @(Load-StateRows)
 $script:ActiveCascadeAliases = @(Get-ActiveCascadeAliases)
 $script:ActiveCascadeLinks = @(Load-ActiveCascadeLinks)
 $script:CascadeTopologyFabric = Load-CascadeTopologyFabric
+
+if ($TimeoutSeconds -lt 1) {
+    Fail "-TimeoutSeconds must be at least 1"
+}
+if ($SshRetries -lt 1) {
+    Fail "-SshRetries must be at least 1"
+}
+if ($PreflightRetries -lt 1) {
+    Fail "-PreflightRetries must be at least 1"
+}
 
 if ($Action -in @("verify", "rollback")) {
     $appliedStates = @(Get-AppliedRouteStates)

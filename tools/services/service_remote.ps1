@@ -64,7 +64,11 @@ param(
 
     [int]$RemoteTransferAttempts = 6,
 
-    [int]$RemoteTransferRetryDelaySeconds = 5
+    [int]$RemoteTransferRetryDelaySeconds = 5,
+
+    [int]$CleanupAttempts = 3,
+
+    [int]$CleanupRetryDelaySeconds = 2
 )
 
 $ErrorActionPreference = "Stop"
@@ -167,12 +171,24 @@ function Invoke-CleanupSsh($Arguments, $Label) {
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        & $script:SshExecutablePath @Arguments *> $null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "$Label failed with exit code $LASTEXITCODE; continuing because cleanup is non-fatal best-effort"
+        for ($attempt = 1; $attempt -le $CleanupAttempts; $attempt++) {
+            & $script:SshExecutablePath @Arguments *> $null
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -eq 0) {
+                return
+            }
+            if ($exitCode -ne 255) {
+                Write-Warning "$Label failed with exit code $exitCode; cleanup is non-fatal"
+                return
+            }
+            if ($attempt -lt $CleanupAttempts) {
+                Start-Sleep -Seconds $CleanupRetryDelaySeconds
+                continue
+            }
+            Write-Warning "cleanup SSH transport failed; skipped $Label; non-fatal"
         }
     } catch {
-        Write-Warning "$Label failed: $($_.Exception.Message); continuing because cleanup is non-fatal best-effort"
+        Write-Warning "$Label failed: $($_.Exception.Message); cleanup is non-fatal"
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
@@ -187,7 +203,7 @@ function Invoke-RemoteTempCleanup($SshArgs, $Remote) {
         "find /tmp -maxdepth 1 -mindepth 1 -type d \( -name 'ai-service-platform.service-job.*' -o -name 'ai-service-platform.service-remote.*' \) -mmin +1440 -exec rm -rf -- {} +",
         "find /tmp -maxdepth 1 -mindepth 1 -type f -name 'ai-service-platform.service-remote.*.tar.gz' -mmin +1440 -delete"
     ) -join "; "
-    Invoke-CleanupSsh ($SshArgs + @($Remote, $cleanupCommand)) "remote old service temp cleanup"
+    Invoke-CleanupSsh ($SshArgs + @($Remote, (New-BackgroundCleanupCommand $cleanupCommand))) "remote old service temp cleanup"
 }
 
 function Invoke-CaptureExternal($FilePath, $Arguments) {

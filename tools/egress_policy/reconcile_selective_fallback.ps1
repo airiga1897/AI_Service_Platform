@@ -14,7 +14,15 @@ param(
     [int]$ProbeTimeoutSeconds = 5,
     [int]$ProbeAttempts = 1,
     [int]$ProbeRetryDelaySeconds = 1,
+    [int]$ApplyTimeoutSeconds = 5,
+    [int]$ApplySshRetries = 2,
+    [int]$ApplyPreflightRetries = 2,
     [bool]$RequireDeterministic = $true,
+    [switch]$SkipProbeWhenAcceptedExists = $true,
+    [switch]$FastApply = $true,
+    [switch]$SkipApplyVerify,
+    [switch]$SkipRefreshVerify,
+    [switch]$RefreshAlreadyApplied = $true,
     [switch]$AllowRollbackOnly,
     [switch]$Check,
     [switch]$Apply
@@ -200,6 +208,20 @@ function Get-StaleAppliedRoutes($AppliedRoutesDir, $Topology, $ProfileFilter, $T
     return $items.ToArray()
 }
 
+function Get-AppliedRouteIdSet($AppliedRoutesDir) {
+    Require-Directory $AppliedRoutesDir "applied routes directory"
+    $set = @{}
+    $files = @(Get-ChildItem -LiteralPath $AppliedRoutesDir -File -Filter "*.json" | Sort-Object Name)
+    foreach ($file in $files) {
+        $state = Read-JsonFile $file.FullName "applied route state"
+        $proposalId = [string]$state.proposal_id
+        if (-not [string]::IsNullOrWhiteSpace($proposalId)) {
+            $set[$proposalId] = $true
+        }
+    }
+    return $set
+}
+
 function Get-ProposalPathById($ProposalDir, $Id) {
     return Join-Path $ProposalDir "$Id.json"
 }
@@ -336,7 +358,7 @@ function Get-ApplicableAcceptedProposals($ProposalDir, $Topology, $Policy, $Prof
 }
 
 function Assert-LastExitCode($Label) {
-    if ($LASTEXITCODE -ne 0) {
+    if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
         Fail "$Label failed with exit code $LASTEXITCODE"
     }
 }
@@ -344,6 +366,117 @@ function Assert-LastExitCode($Label) {
 function Require-ChildScript($ScriptPath, $Label) {
     Require-File $ScriptPath $Label
     Write-Host "[RUN] $Label"
+}
+
+function Invoke-RouteApplyScript($RouteAction, $Ids, $Label) {
+    $selectedIds = @(Get-StringArray $Ids)
+    if ($selectedIds.Count -eq 0) {
+        return
+    }
+    Require-ChildScript $ApplyScript $Label
+    $applyParams = @{
+        Action = $RouteAction
+        Id = $selectedIds
+        SshPath = $SshPath
+    }
+    if ($FastApply) {
+        $applyParams.TimeoutSeconds = $ApplyTimeoutSeconds
+        $applyParams.SshRetries = $ApplySshRetries
+        $applyParams.PreflightRetries = $ApplyPreflightRetries
+    }
+    if ($SkipApplyVerify -and $RouteAction -in @("apply", "refresh", "cleanup")) {
+        $applyParams.SkipVerify = $true
+    }
+    & $ApplyScript @applyParams
+    Assert-LastExitCode $Label
+}
+
+function Invoke-RouteRefreshScript($Ids, $Label) {
+    $selectedIds = @(Get-StringArray $Ids)
+    if ($selectedIds.Count -eq 0) {
+        return
+    }
+    Require-ChildScript $ApplyScript $Label
+    $refreshParams = @{
+        Action = "refresh"
+        Id = $selectedIds
+        SshPath = $SshPath
+    }
+    if ($FastApply) {
+        $refreshParams.TimeoutSeconds = $ApplyTimeoutSeconds
+        $refreshParams.SshRetries = $ApplySshRetries
+        $refreshParams.PreflightRetries = $ApplyPreflightRetries
+    }
+    if ($SkipRefreshVerify) {
+        $refreshParams.SkipVerify = $true
+    }
+    & $ApplyScript @refreshParams
+    Assert-LastExitCode $Label
+}
+
+function Invoke-RefreshScript($ReplacementProposals) {
+    $items = @($ReplacementProposals)
+    if ($items.Count -eq 0) {
+        return
+    }
+    $refreshProfiles = @(Get-StringArray ($items | ForEach-Object { $_.Profile }) | Sort-Object -Unique)
+    $refreshDomains = @(Get-StringArray ($items | ForEach-Object { $_.Target }) | Sort-Object -Unique)
+    $label = "refresh selective fallback DNS sets"
+    Require-ChildScript $RefreshScript $label
+    $refreshParams = @{
+        Apply = $true
+        Profile = $refreshProfiles
+        Domain = $refreshDomains
+        SshPath = $SshPath
+    }
+    if (-not $SkipRefreshVerify) {
+        $refreshParams.Verify = $true
+    }
+    & $RefreshScript @refreshParams
+    Assert-LastExitCode $label
+}
+
+function Invoke-ProposalRouteActions($Proposals, $AppliedIdSet) {
+    $items = @($Proposals)
+    $applyIds = New-Object System.Collections.Generic.List[string]
+    $refreshIds = New-Object System.Collections.Generic.List[string]
+    $alreadyAppliedIds = New-Object System.Collections.Generic.List[string]
+
+    foreach ($proposal in $items) {
+        $id = [string]$proposal.Id
+        if ([string]::IsNullOrWhiteSpace($id)) {
+            continue
+        }
+        if ($AppliedIdSet.ContainsKey($id)) {
+            [void]$alreadyAppliedIds.Add($id)
+            if ($RefreshAlreadyApplied) {
+                [void]$refreshIds.Add($id)
+            }
+        } else {
+            [void]$applyIds.Add($id)
+        }
+    }
+
+    $applyList = @(Get-StringArray $applyIds.ToArray() | Sort-Object -Unique)
+    $refreshList = @(Get-StringArray $refreshIds.ToArray() | Sort-Object -Unique)
+    $alreadyAppliedList = @(Get-StringArray $alreadyAppliedIds.ToArray() | Sort-Object -Unique)
+
+    Write-Host "Apply ids: $(Format-ListCell $applyList)"
+    Write-Host "Refresh ids: $(Format-ListCell $refreshList)"
+    Write-Host "Already applied ids: $(Format-ListCell $alreadyAppliedList)"
+    if ($alreadyAppliedList.Count -gt 0 -and -not $RefreshAlreadyApplied) {
+        Write-Host "Already applied ids skipped strict apply."
+    }
+
+    if ($applyList.Count -gt 0) {
+        Invoke-RouteApplyScript "apply" $applyList "apply active selective fallback routes"
+    }
+    if ($refreshList.Count -gt 0) {
+        Invoke-RouteRefreshScript $refreshList "refresh already-applied selective fallback routes"
+    }
+    if ($applyList.Count -gt 0 -or $refreshList.Count -gt 0) {
+        Invoke-RefreshScript $items
+    }
 }
 
 function Format-ListCell($Items) {
@@ -369,6 +502,15 @@ if ($ProbeAttempts -lt 1) {
 if ($ProbeRetryDelaySeconds -lt 0) {
     Fail "-ProbeRetryDelaySeconds must be 0 or greater"
 }
+if ($ApplyTimeoutSeconds -lt 1) {
+    Fail "-ApplyTimeoutSeconds must be at least 1"
+}
+if ($ApplySshRetries -lt 1) {
+    Fail "-ApplySshRetries must be at least 1"
+}
+if ($ApplyPreflightRetries -lt 1) {
+    Fail "-ApplyPreflightRetries must be at least 1"
+}
 
 Require-File $PolicyFile "egress policy file"
 $policy = Read-JsonFile $PolicyFile "egress policy"
@@ -383,6 +525,7 @@ foreach ($profile in $profileFilter) {
 }
 
 $topology = Initialize-TopologySets (Get-CascadeTopology (Read-StateRows $StateFile))
+$appliedRouteIdSet = Get-AppliedRouteIdSet $AppliedRoutesDir
 $staleRoutes = @(Get-StaleAppliedRoutes $AppliedRoutesDir $topology $profileFilter $targetFilter)
 $plan = New-Object System.Collections.Generic.List[object]
 foreach ($route in $staleRoutes) {
@@ -430,18 +573,7 @@ if ($staleRoutes.Count -gt 0) {
         Write-Host "Check mode: no apply or refresh was run."
         exit 0
     }
-    $applyIds = @(Get-StringArray ($acceptedPlan | ForEach-Object { $_.Id }) | Sort-Object -Unique)
-    $label = "apply active selective fallback routes"
-    Require-ChildScript $ApplyScript $label
-    & $ApplyScript -Action apply -Id $applyIds -SshPath $SshPath
-    Assert-LastExitCode $label
-
-    $refreshProfiles = @(Get-StringArray ($acceptedPlan | ForEach-Object { $_.Profile }) | Sort-Object -Unique)
-    $refreshDomains = @(Get-StringArray ($acceptedPlan | ForEach-Object { $_.Target }) | Sort-Object -Unique)
-    $label = "refresh selective fallback DNS sets"
-    Require-ChildScript $RefreshScript $label
-    & $RefreshScript -Apply -Verify -Profile $refreshProfiles -Domain $refreshDomains -SshPath $SshPath
-    Assert-LastExitCode $label
+    Invoke-ProposalRouteActions $acceptedPlan $appliedRouteIdSet
     Write-Host "Selective fallback reconciliation completed."
     exit 0
 }
@@ -451,34 +583,60 @@ if ($Check) {
     exit 0
 }
 
-$profilesToProbe = @()
-foreach ($route in $staleRoutes) {
-    foreach ($profile in $route.Profiles) {
-        $profilesToProbe += $profile
+$replacementProposals = @(Get-ApplicableReplacementProposals $ProposalDir $staleRoutes $topology)
+$skipProbe = $false
+if ($SkipProbeWhenAcceptedExists -and $replacementProposals.Count -gt 0) {
+    $affected = @{}
+    foreach ($route in $staleRoutes) {
+        foreach ($profile in $route.Profiles) {
+            foreach ($target in $route.Targets) {
+                foreach ($port in $route.Ports) {
+                    $affected["$profile|$target|$port"] = $true
+                }
+            }
+        }
+    }
+    $covered = @{}
+    foreach ($proposal in $replacementProposals) {
+        $covered["$($proposal.Profile)|$($proposal.Target)|$($proposal.Port)"] = $true
+    }
+    $missingCoverage = @($affected.Keys | Where-Object { -not $covered.ContainsKey($_) })
+    $skipProbe = $missingCoverage.Count -eq 0
+    if ($skipProbe) {
+        Write-Host "Accepted deterministic replacements already cover all stale targets; probe/suggest skipped."
     }
 }
-$profilesToProbe = @($profilesToProbe | Sort-Object -Unique)
 
-foreach ($profile in $profilesToProbe) {
-    $label = "probe egress policy profile $profile"
-    Require-ChildScript $ProbeScript $label
-    & $ProbeScript `
-        -PolicyFile $PolicyFile `
-        -Profile $profile `
-        -IncludeCascade `
-        -SshPath $SshPath `
-        -TimeoutSeconds $ProbeTimeoutSeconds `
-        -ProbeAttempts $ProbeAttempts `
-        -ProbeRetryDelaySeconds $ProbeRetryDelaySeconds
+if (-not $skipProbe) {
+    $profilesToProbe = @()
+    foreach ($route in $staleRoutes) {
+        foreach ($profile in $route.Profiles) {
+            $profilesToProbe += $profile
+        }
+    }
+    $profilesToProbe = @($profilesToProbe | Sort-Object -Unique)
+
+    foreach ($profile in $profilesToProbe) {
+        $label = "probe egress policy profile $profile"
+        Require-ChildScript $ProbeScript $label
+        & $ProbeScript `
+            -PolicyFile $PolicyFile `
+            -Profile $profile `
+            -IncludeCascade `
+            -SshPath $SshPath `
+            -TimeoutSeconds $ProbeTimeoutSeconds `
+            -ProbeAttempts $ProbeAttempts `
+            -ProbeRetryDelaySeconds $ProbeRetryDelaySeconds
+        Assert-LastExitCode $label
+    }
+
+    $label = "suggest egress policy from latest probes"
+    Require-ChildScript $SuggestScript $label
+    & $SuggestScript -PolicyFile $PolicyFile -ProposalDir $ProposalDir -Latest -Force
     Assert-LastExitCode $label
+
+    $replacementProposals = @(Get-ApplicableReplacementProposals $ProposalDir $staleRoutes $topology)
 }
-
-$label = "suggest egress policy from latest probes"
-Require-ChildScript $SuggestScript $label
-& $SuggestScript -PolicyFile $PolicyFile -ProposalDir $ProposalDir -Latest -Force
-Assert-LastExitCode $label
-
-$replacementProposals = @(Get-ApplicableReplacementProposals $ProposalDir $staleRoutes $topology)
 if ($replacementProposals.Count -eq 0) {
     $retiredOnly = @($staleRoutes | Where-Object { $_.AllStaleEdgesRetired })
     $missingTargets = @($staleRoutes | ForEach-Object {
@@ -503,26 +661,14 @@ if ($replacementProposals.Count -eq 0) {
 $rollbackIds = @(Get-StringArray ($staleRoutes | ForEach-Object { $_.ProposalId }) | Sort-Object -Unique)
 Write-Host "Rollback ids: $(Format-ListCell $rollbackIds)"
 if ($rollbackIds.Count -gt 0) {
-    $label = "rollback stale selective fallback routes"
-    Require-ChildScript $ApplyScript $label
-    & $ApplyScript -Action rollback -Id $rollbackIds -SshPath $SshPath
-    Assert-LastExitCode $label
+    Invoke-RouteApplyScript "rollback" $rollbackIds "rollback stale selective fallback routes"
+    foreach ($id in $rollbackIds) {
+        if ($appliedRouteIdSet.ContainsKey($id)) {
+            $appliedRouteIdSet.Remove($id)
+        }
+    }
 }
 
-$applyIds = @(Get-StringArray ($replacementProposals | ForEach-Object { $_.Id }) | Sort-Object -Unique)
-Write-Host "Apply ids: $(Format-ListCell $applyIds)"
-if ($applyIds.Count -gt 0) {
-    $label = "apply active selective fallback routes"
-    Require-ChildScript $ApplyScript $label
-    & $ApplyScript -Action apply -Id $applyIds -SshPath $SshPath
-    Assert-LastExitCode $label
-
-    $refreshProfiles = @(Get-StringArray ($replacementProposals | ForEach-Object { $_.Profile }) | Sort-Object -Unique)
-    $refreshDomains = @(Get-StringArray ($replacementProposals | ForEach-Object { $_.Target }) | Sort-Object -Unique)
-    $label = "refresh selective fallback DNS sets"
-    Require-ChildScript $RefreshScript $label
-    & $RefreshScript -Apply -Verify -Profile $refreshProfiles -Domain $refreshDomains -SshPath $SshPath
-    Assert-LastExitCode $label
-}
+Invoke-ProposalRouteActions $replacementProposals $appliedRouteIdSet
 
 Write-Host "Selective fallback reconciliation completed."
