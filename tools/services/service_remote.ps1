@@ -74,6 +74,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ExpectedHeader = "current_alias,endpoint,connection,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
+$ExpectedNetworksHeader = "alias,policy_subnet,edge_ip,cascade_ip,cascade_router_ip,policy_gateway_ip"
 . (Join-Path $PSScriptRoot "..\common\private_key_acl.ps1")
 
 function Fail($Message) {
@@ -99,7 +100,16 @@ function Quote-BashArg($Value) {
     return "'" + ($text -replace "'", "'\''") + "'"
 }
 
-function New-TarGzBundle($ServiceRunnerScript, $AnsibleDir, $PolicyRouterDockerDir, $PolicyGatewayDockerDir, $EgressPolicyToolsDir) {
+function Split-RemoteParentPath($Path) {
+    $text = ([string]$Path).TrimEnd("/")
+    $index = $text.LastIndexOf("/")
+    if ($index -le 0) {
+        return "."
+    }
+    return $text.Substring(0, $index)
+}
+
+function New-TarGzBundle($ServiceRunnerScript, $AnsibleDir, $PolicyRouterDockerDir, $PolicyGatewayDockerDir, $EgressPolicyToolsDir, $NodesFile, $StateFile, $NetworksFile) {
     if (-not (Get-Command tar -ErrorAction SilentlyContinue)) {
         Fail "tar not found in PATH. It is required to upload service bundles as a single archive."
     }
@@ -118,6 +128,11 @@ function New-TarGzBundle($ServiceRunnerScript, $AnsibleDir, $PolicyRouterDockerD
         $toolsStagingDir = Join-Path (Join-Path $stagingDir "tools") "egress_policy"
         New-Item -ItemType Directory -Path (Split-Path -Parent $toolsStagingDir) | Out-Null
         Copy-Item -LiteralPath $EgressPolicyToolsDir -Destination $toolsStagingDir -Recurse
+        $operatorStagingDir = Join-Path $stagingDir "operator"
+        New-Item -ItemType Directory -Path $operatorStagingDir | Out-Null
+        Copy-Item -LiteralPath $NodesFile -Destination (Join-Path $operatorStagingDir "nodes.csv")
+        Copy-Item -LiteralPath $StateFile -Destination (Join-Path $operatorStagingDir "state.csv")
+        Copy-Item -LiteralPath $NetworksFile -Destination (Join-Path $operatorStagingDir "networks.csv")
         & tar -czf $archivePath -C $stagingDir .
         if ($LASTEXITCODE -ne 0) {
             Fail "Failed to create service bundle archive"
@@ -520,6 +535,9 @@ if ($RemoteTransferRetryDelaySeconds -lt 1) {
 
 Require-File $NodesFile "NodesFile"
 Require-File $StateFile "StateFile"
+$resolvedStateFile = (Resolve-Path -LiteralPath $StateFile).Path
+$NetworksFile = Join-Path (Split-Path -Parent $resolvedStateFile) "networks.csv"
+Require-File $NetworksFile "networks.csv next to StateFile"
 
 $script:SshExecutablePath = Resolve-OpenSshClient
 $script:ScpExecutablePath = Resolve-OpenSshExecutable "scp"
@@ -531,6 +549,10 @@ if ($nodesHeader -ne $ExpectedHeader) {
 $stateHeader = Get-Content -LiteralPath $StateFile -TotalCount 1
 if ($stateHeader -ne $ExpectedStateHeader) {
     Fail "state.csv header must be exactly: $ExpectedStateHeader"
+}
+$networksHeader = Get-Content -LiteralPath $NetworksFile -TotalCount 1
+if ($networksHeader -ne $ExpectedNetworksHeader) {
+    Fail "networks.csv header must be exactly: $ExpectedNetworksHeader"
 }
 
 $nodes = Import-Csv -LiteralPath $NodesFile
@@ -567,6 +589,10 @@ $remoteAnsibleTemp = "$remoteBundleDir/ansible"
 $remotePolicyRouterDockerTemp = "$remoteBundleDir/docker/policy-router"
 $remotePolicyGatewayDockerTemp = "$remoteBundleDir/docker/policy-gateway"
 $remoteEgressPolicyToolsTemp = "$remoteBundleDir/tools/egress_policy"
+$remoteOperatorCsvTemp = "$remoteBundleDir/operator"
+$remoteNodesDir = Split-RemoteParentPath $RemoteNodesFile
+$remoteOperatorDir = Split-RemoteParentPath $RemoteStateFile
+$remoteNetworksFile = "$remoteOperatorDir/networks.csv"
 $remoteJobDir = "/tmp/ai-service-platform.service-job.$([guid]::NewGuid().ToString('N'))"
 $remoteJobScript = "$remoteJobDir/run.sh"
 $remoteJobLog = "$remoteJobDir/output.log"
@@ -605,6 +631,11 @@ if (-not $isBatch) {
         "sudo cp -a $(Quote-BashArg $remotePolicyRouterDockerTemp) $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-router")",
         "sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-gateway")",
         "sudo cp -a $(Quote-BashArg $remotePolicyGatewayDockerTemp) $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-gateway")",
+        "printf '%s\n' 'Syncing operator CSV intent to orchestration node'",
+        "sudo mkdir -p $(Quote-BashArg $remoteNodesDir) $(Quote-BashArg $remoteOperatorDir)",
+        "sudo install -m 600 $(Quote-BashArg "$remoteOperatorCsvTemp/nodes.csv") $(Quote-BashArg $RemoteNodesFile)",
+        "sudo install -m 600 $(Quote-BashArg "$remoteOperatorCsvTemp/state.csv") $(Quote-BashArg $RemoteStateFile)",
+        "sudo install -m 600 $(Quote-BashArg "$remoteOperatorCsvTemp/networks.csv") $(Quote-BashArg $remoteNetworksFile)",
         "sudo bash -lc $(Quote-BashArg $serviceCommand)"
     ) -join "; "
 }
@@ -700,7 +731,12 @@ foreach ($line in @(
     "run_stage $(Quote-BashArg "remove previous policy-router Docker context") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-router")",
     "run_stage $(Quote-BashArg "install policy-router Docker context") sudo cp -a $(Quote-BashArg $remotePolicyRouterDockerTemp) $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-router")",
     "run_stage $(Quote-BashArg "remove previous policy-gateway Docker context") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-gateway")",
-    "run_stage $(Quote-BashArg "install policy-gateway Docker context") sudo cp -a $(Quote-BashArg $remotePolicyGatewayDockerTemp) $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-gateway")"
+    "run_stage $(Quote-BashArg "install policy-gateway Docker context") sudo cp -a $(Quote-BashArg $remotePolicyGatewayDockerTemp) $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-gateway")",
+    "printf '%s\n' 'Syncing operator CSV intent to orchestration node'",
+    "run_stage $(Quote-BashArg "prepare operator CSV directory") sudo mkdir -p $(Quote-BashArg $remoteNodesDir) $(Quote-BashArg $remoteOperatorDir)",
+    "run_stage $(Quote-BashArg "install operator nodes.csv") sudo install -m 600 $(Quote-BashArg "$remoteOperatorCsvTemp/nodes.csv") $(Quote-BashArg $RemoteNodesFile)",
+    "run_stage $(Quote-BashArg "install operator state.csv") sudo install -m 600 $(Quote-BashArg "$remoteOperatorCsvTemp/state.csv") $(Quote-BashArg $RemoteStateFile)",
+    "run_stage $(Quote-BashArg "install operator networks.csv") sudo install -m 600 $(Quote-BashArg "$remoteOperatorCsvTemp/networks.csv") $(Quote-BashArg $remoteNetworksFile)"
 )) { $runScriptLines.Add($line) | Out-Null }
 
 if ($isBatch) {
@@ -748,7 +784,7 @@ if ($isBatch) {
 
 try {
     Write-Host "Preparing local service bundle..."
-    $bundle = New-TarGzBundle $ServiceRunnerScript $AnsibleDir $PolicyRouterDockerDir $PolicyGatewayDockerDir $EgressPolicyToolsDir
+    $bundle = New-TarGzBundle $ServiceRunnerScript $AnsibleDir $PolicyRouterDockerDir $PolicyGatewayDockerDir $EgressPolicyToolsDir $NodesFile $StateFile $NetworksFile
     if ($useDetachedRemoteJob) {
         Write-LfScript $runScriptPath $runScriptLines
     }
@@ -790,7 +826,10 @@ try {
         "test -d $(Quote-BashArg $remoteEgressPolicyToolsTemp)",
         "test -d $(Quote-BashArg $remoteAnsibleTemp)",
         "test -d $(Quote-BashArg $remotePolicyRouterDockerTemp)",
-        "test -d $(Quote-BashArg $remotePolicyGatewayDockerTemp)"
+        "test -d $(Quote-BashArg $remotePolicyGatewayDockerTemp)",
+        "test -f $(Quote-BashArg "$remoteOperatorCsvTemp/nodes.csv")",
+        "test -f $(Quote-BashArg "$remoteOperatorCsvTemp/state.csv")",
+        "test -f $(Quote-BashArg "$remoteOperatorCsvTemp/networks.csv")"
     ) -join "; "
 
     Write-Host "Extracting service bundle on orchestration node..."

@@ -1397,7 +1397,16 @@
 
 - name: Store retired ingress-side vpn_cascade connections
   ansible.builtin.set_fact:
-    vpn_cascade_retired_connections: "{{ vpn_cascade_retired_connections_command.stdout_lines | default([]) | reject('equalto', '') | list | unique }}"
+    vpn_cascade_retired_connections: >-
+      {{
+        (
+          (vpn_cascade_retired_connection_names | default([]))
+          + (vpn_cascade_retired_connections_command.stdout_lines | default([]))
+        )
+        | reject('equalto', '')
+        | list
+        | unique
+      }}
   when:
     - vpn_cascade_state == 'present'
     - vpn_cascade_topology.present | default(false)
@@ -1417,8 +1426,15 @@
     set -euo pipefail
     tmp_file="$(mktemp)"
     trap 'rm -f "$tmp_file"' EXIT
+    printf 'Hub %s\nCascadeList\n' "$HUB_NAME" > "$tmp_file"
+    output="$(timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file"' < "$tmp_file" 2>/dev/null || true)"
+    if ! printf '%s\n' "$output" | grep -Eq "(^|[^A-Za-z0-9_.-])${CONNECTION_NAME}([^A-Za-z0-9_.-]|$)"; then
+      printf 'absent\n'
+      exit 0
+    fi
     printf 'Hub %s\nCascadeOffline %s\nCascadeDelete %s\nFlush\n' "$HUB_NAME" "$CONNECTION_NAME" "$CONNECTION_NAME" > "$tmp_file"
     timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file" >/dev/null' < "$tmp_file"
+    printf 'removed\n'
   args:
     executable: /bin/bash
   environment:
@@ -1429,7 +1445,40 @@
     VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
   loop: "{{ vpn_cascade_retired_connections | default([]) }}"
   no_log: true
-  changed_when: true
+  register: vpn_cascade_remove_retired_connections
+  changed_when: "'removed' in vpn_cascade_remove_retired_connections.stdout"
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_topology.present | default(false)
+    - vpn_cascade_retired_connections | default([]) | length > 0
+    - not ansible_check_mode
+
+- name: Verify retired ingress-side vpn_cascade connections are absent
+  ansible.builtin.shell: |
+    set -euo pipefail
+    tmp_file="$(mktemp)"
+    retired_file="$(mktemp)"
+    trap 'rm -f "$tmp_file" "$retired_file"' EXIT
+    cat > "$retired_file" <<'EOF_RETIRED'
+    {{ vpn_cascade_retired_connections | default([]) | join('\n') }}
+    EOF_RETIRED
+    printf 'Hub %s\nCascadeList\n' "$HUB_NAME" > "$tmp_file"
+    output="$(timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file"' < "$tmp_file" 2>/dev/null || true)"
+    while IFS= read -r connection_name; do
+      [ -n "$connection_name" ] || continue
+      if printf '%s\n' "$output" | grep -Eq "(^|[^A-Za-z0-9_.-])${connection_name}([^A-Za-z0-9_.-]|$)"; then
+        echo "Retired cascade connection still exists: $connection_name" >&2
+        exit 1
+      fi
+    done < "$retired_file"
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  changed_when: false
   when:
     - vpn_cascade_state == 'present'
     - vpn_cascade_topology.present | default(false)
