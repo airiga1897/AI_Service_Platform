@@ -8,9 +8,14 @@ param(
     [string]$StandbyPrepareScript = "tools/bootstrap/prepare_orchestration_standby.ps1",
     [string]$ServiceRemoteScript = "tools/services/service_remote.ps1",
     [string]$OperatorBackupScript = "tools/operator_backup/backup_operator.ps1",
+    [string]$OperatorBackupEnvFile = "D:\Projects\Ai_SP\Secure\operator-backup.env",
     [string]$OperatorBackupDir = "D:\Backup\Projects\AI_SP\operator",
     [string]$OperatorBackupRemoteDir = "/opt/backups/ai-service-platform/operator",
     [int]$OperatorBackupKeepLatest = 30,
+    [string]$SecureBackupScript = "tools/operator_backup/backup_secure_material.ps1",
+    [string]$SecureDir = "D:\Projects\Ai_SP\Secure",
+    [string]$SecureBackupDir = "D:\Backup\Projects\AI_SP\secure",
+    [int]$SecureBackupKeepLatest = 10,
     [string]$VpnIngressDomain = "mine-craft.su",
     [string[]]$ReseedVpnEdge = @(),
     [ValidateSet("", "edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector")]
@@ -47,6 +52,11 @@ function Split-AliasList($Value) {
     return @($Value -split "\+" | Where-Object { $_ })
 }
 
+function Split-CascadeEdgeList($Value) {
+    if (-not $Value) { return @() }
+    return @($Value -split "\+" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
 function Split-OperatorAliasList($Value) {
     if (-not $Value) { return @() }
     $aliases = New-Object System.Collections.Generic.List[string]
@@ -71,6 +81,21 @@ function Get-PresentServiceAliases($Rows, $Name) {
         }
     }
     return @($aliases)
+}
+
+function Get-RetiredServiceAliases($Row) {
+    if ($Row.state -ne "present") {
+        return @()
+    }
+    $activeAliases = @(Split-AliasList $Row.active_aliases)
+    $retiredAliases = New-Object System.Collections.Generic.List[string]
+    foreach ($alias in @(Split-AliasList $Row.old_aliases)) {
+        if ($activeAliases -contains $alias) {
+            Fail "$($Row.name) lists alias '$alias' in both active_aliases and old_aliases"
+        }
+        Add-UniqueAlias $retiredAliases $alias
+    }
+    return @($retiredAliases)
 }
 
 function Get-OrchestrationCandidateAliases($Rows, $Role) {
@@ -117,18 +142,31 @@ function Invoke-OperatorBackupIfNeeded($Reason) {
         return
     }
     if ($SkipOperatorBackup) {
-        Write-Warning "Operator backup skipped before local mutation: $Reason"
+        Write-Warning "Operator backup and secure material backup skipped before local mutation: $Reason"
         $script:OperatorBackupCompleted = $true
         return
     }
 
+    Require-File $SecureBackupScript "SecureBackupScript"
     Require-File $OperatorBackupScript "OperatorBackupScript"
+    Write-Host "Secure material backup before local mutation: $Reason"
+    $secureArgs = @(
+        "-SecureDir", $SecureDir,
+        "-LocalBackupDir", $SecureBackupDir,
+        "-KeepLatest", $SecureBackupKeepLatest
+    )
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $SecureBackupScript @secureArgs
+    if ($LASTEXITCODE -ne 0) {
+        Fail "secure material backup failed before local mutation: $Reason"
+    }
+
     Write-Host "Operator backup before local mutation: $Reason"
     $args = @(
         "-NodesFile", $NodesFile,
         "-StateFile", $StateFile,
         "-OperatorDir", $OperatorDir,
         "-ControlRole", $ControlRole,
+        "-OperatorBackupEnvFile", $OperatorBackupEnvFile,
         "-LocalBackupDir", $OperatorBackupDir,
         "-RemoteBackupDir", $OperatorBackupRemoteDir,
         "-KeepLatest", $OperatorBackupKeepLatest
@@ -167,11 +205,27 @@ function Normalize-StateRows($Rows, $NodeRows, $StatePath) {
             $changed = $true
         }
 
-        foreach ($field in @("active_aliases", "candidate_aliases", "old_aliases")) {
+        if ($row.kind -eq "cascade_topology") {
+            foreach ($field in @("active_aliases", "old_aliases")) {
+                foreach ($edge in (Split-CascadeEdgeList $row.$field)) {
+                    if ($edge -notmatch '^[A-Za-z0-9_.-]+>[A-Za-z0-9_.-]+$') {
+                        Fail "cascade_topology $($row.name) has invalid edge '$edge' in ${field}; expected alias>alias"
+                    }
+                }
+            }
+            continue
+        }
+
+        foreach ($field in @("active_aliases", "candidate_aliases")) {
             foreach ($alias in (Split-AliasList $row.$field)) {
                 if ($nodeAliases -notcontains $alias) {
                     Fail "state.csv references alias '$alias' in $($row.kind):$($row.name), but nodes.csv has no such alias."
                 }
+            }
+        }
+        foreach ($alias in (Split-AliasList $row.old_aliases)) {
+            if ($nodeAliases -notcontains $alias) {
+                Write-Host "state.csv old_aliases references retired alias '$alias' in $($row.kind):$($row.name); alias is not present in nodes.csv and will not be targeted directly."
             }
         }
     }
@@ -269,6 +323,143 @@ function Assert-VpnCascadeLinksAreAcyclic($Links) {
 
     if ($visited -lt $nodes.Count) {
         Fail "vpn_cascade active links contain a directed cycle. Active cascade fabric must be acyclic: $($edgeLabels -join ', ')"
+    }
+}
+
+function Assert-CascadeEdgeSetIsAcyclic($Edges, $Label) {
+    if ($Edges.Count -le 1) {
+        return
+    }
+    $nodes = @{}
+    $outgoing = @{}
+    $inDegree = @{}
+    foreach ($edge in @($Edges)) {
+        $parts = @([string]$edge -split '>')
+        $from = $parts[0]
+        $to = $parts[1]
+        foreach ($node in @($from, $to)) {
+            if (-not $nodes.ContainsKey($node)) {
+                $nodes[$node] = $true
+                $outgoing[$node] = New-Object System.Collections.ArrayList
+                $inDegree[$node] = 0
+            }
+        }
+        [void]$outgoing[$from].Add($to)
+        $inDegree[$to] = [int]$inDegree[$to] + 1
+    }
+    $queue = New-Object System.Collections.ArrayList
+    foreach ($node in $nodes.Keys) {
+        if ([int]$inDegree[$node] -eq 0) {
+            [void]$queue.Add($node)
+        }
+    }
+    $visited = 0
+    for ($i = 0; $i -lt $queue.Count; $i++) {
+        $node = [string]$queue[$i]
+        $visited++
+        foreach ($next in @($outgoing[$node])) {
+            $inDegree[$next] = [int]$inDegree[$next] - 1
+            if ([int]$inDegree[$next] -eq 0) {
+                [void]$queue.Add($next)
+            }
+        }
+    }
+    if ($visited -lt $nodes.Count) {
+        Fail "$Label contains a directed cycle. Active cascade fabric must be acyclic: $($Edges -join ', ')"
+    }
+}
+
+function Get-ActiveVpnCascadeServiceAliases($Rows) {
+    $aliases = New-Object System.Collections.Generic.List[string]
+    foreach ($row in @($Rows | Where-Object { $_.kind -eq "service" -and $_.name -eq "vpn_cascade" -and $_.state -eq "present" })) {
+        foreach ($alias in (Split-AliasList $row.active_aliases)) {
+            Add-UniqueAlias $aliases $alias
+        }
+    }
+    return @($aliases)
+}
+
+function Get-ActiveVpnCascadeSecretEdges() {
+    $secretPath = Get-VpnCascadeLinkSecretPath
+    if (-not (Test-Path -LiteralPath $secretPath -PathType Leaf)) {
+        Fail "vpn_cascade requires link secret JSON before rollout: $secretPath"
+    }
+    try {
+        $secret = Get-Content -Raw -LiteralPath $secretPath | ConvertFrom-Json
+    } catch {
+        Fail "vpn_cascade link secret JSON is not valid: $secretPath"
+    }
+    $links = if ($secret.links) {
+        @($secret.links | Where-Object { (-not $_.state) -or $_.state -eq "active" })
+    } else {
+        @($secret)
+    }
+    Assert-VpnCascadeLinksAreAcyclic $links
+    return @($links | ForEach-Object { "$($_.ingress_alias)>$($_.egress_alias)" } | Sort-Object -Unique)
+}
+
+function Assert-CascadeTopologyStateMatchesLinks($Rows, $NodeRows) {
+    $topologyRows = @($Rows | Where-Object { $_.kind -eq "cascade_topology" -and $_.state -eq "present" })
+    if ($topologyRows.Count -eq 0) {
+        return
+    }
+    if ($topologyRows.Count -gt 1) {
+        Fail "state.csv has multiple present cascade_topology rows; keep exactly one per cascade topology"
+    }
+    $topology = $topologyRows[0]
+    if ($topology.name -ne "lab-cascade") {
+        Fail "unsupported cascade_topology '$($topology.name)'; expected lab-cascade"
+    }
+
+    $nodeAliases = @($NodeRows | ForEach-Object { $_.current_alias } | Where-Object { $_ })
+    $serviceAliases = @(Get-ActiveVpnCascadeServiceAliases $Rows)
+    $activeEdges = @(Split-CascadeEdgeList $topology.active_aliases)
+    $oldEdges = @(Split-CascadeEdgeList $topology.old_aliases)
+    if ($activeEdges.Count -eq 0) {
+        Fail "cascade_topology $($topology.name) has state=present but active_aliases is empty"
+    }
+
+    $seenActive = @{}
+    foreach ($edge in $activeEdges) {
+        if ($edge -notmatch '^([A-Za-z0-9_.-]+)>([A-Za-z0-9_.-]+)$') {
+            Fail "cascade_topology $($topology.name) has invalid active edge '$edge'; expected alias>alias"
+        }
+        $from = $Matches[1]
+        $to = $Matches[2]
+        if ($from -eq $to) {
+            Fail "cascade_topology $($topology.name) active edge cannot point to itself: $edge"
+        }
+        if ($seenActive.ContainsKey($edge)) {
+            Fail "cascade_topology $($topology.name) has duplicate active edge: $edge"
+        }
+        $seenActive[$edge] = $true
+        foreach ($alias in @($from, $to)) {
+            if ($nodeAliases -notcontains $alias) {
+                Fail "cascade_topology $($topology.name) active edge '$edge' references alias '$alias', but nodes.csv has no such alias"
+            }
+            if ($serviceAliases -notcontains $alias) {
+                Fail "cascade_topology $($topology.name) active edge '$edge' references alias '$alias', but service vpn_cascade does not list it in active_aliases"
+            }
+        }
+    }
+    foreach ($edge in $oldEdges) {
+        if ($edge -notmatch '^([A-Za-z0-9_.-]+)>([A-Za-z0-9_.-]+)$') {
+            Fail "cascade_topology $($topology.name) has invalid old edge '$edge'; expected alias>alias"
+        }
+        if ($seenActive.ContainsKey($edge)) {
+            Fail "cascade_topology $($topology.name) lists edge in both active_aliases and old_aliases: $edge"
+        }
+        if ($Matches[1] -eq $Matches[2]) {
+            Fail "cascade_topology $($topology.name) old edge cannot point to itself: $edge"
+        }
+    }
+    Assert-CascadeEdgeSetIsAcyclic $activeEdges "cascade_topology $($topology.name)"
+
+    $secretEdges = @(Get-ActiveVpnCascadeSecretEdges)
+    $missingInState = @($secretEdges | Where-Object { $activeEdges -notcontains $_ })
+    $missingInSecret = @($activeEdges | Where-Object { $secretEdges -notcontains $_ })
+    if ($missingInState.Count -gt 0 -or $missingInSecret.Count -gt 0) {
+        Fail "cascade topology mismatch; update state.csv or lab-cascade.json. secret_only=[$($missingInState -join ', ')] state_only=[$($missingInSecret -join ', ')]"
     }
 }
 
@@ -677,6 +868,16 @@ function Invoke-ServiceApplyDryRun($Service, $Limit, $Label) {
     Invoke-ServiceRemote $Service "apply" $Limit -Check
 }
 
+function Invoke-ServiceActionDryRun($Service, $Action, $Limit, $Label) {
+    if ($SkipDryRun) {
+        Write-Host "${Label}: dry-run skipped"
+        Write-Host "Dry-run: skipped by operator request"
+        return
+    }
+    Write-Host "${Label}: dry-run queued"
+    Invoke-ServiceRemote $Service $Action $Limit -Check
+}
+
 function Invoke-VpnEdgeReseed($Alias, $ReseededAliases, $Summary) {
     if ($ReseededAliases -contains $Alias) {
         return
@@ -778,6 +979,7 @@ $serviceRows = @($stateRows | Where-Object { $_.kind -eq "service" })
 if ($serviceRows.Count -eq 0) {
     Fail "state.csv has no service rows"
 }
+Assert-CascadeTopologyStateMatchesLinks $stateRows $nodeRows
 Assert-VpnCascadeStateMatchesLinks $stateRows
 if ($OnlyService) {
     $onlyServiceRows = @($serviceRows | Where-Object { $_.name -eq $OnlyService })
@@ -838,6 +1040,7 @@ foreach ($serviceRow in $serviceRows) {
     if ($serviceRow.state -notin @("present", "absent", "purged")) {
         Fail "$($serviceRow.name) state must be one of: present, absent, purged"
     }
+    [void](Get-RetiredServiceAliases $serviceRow)
     foreach ($alias in (Split-AliasList $serviceRow.active_aliases)) {
         if ($serviceRow.name -eq "vpn_edge" -and $serviceRow.state -eq "present" -and ($vpnIngressAliases -notcontains $alias)) {
             Fail "service vpn_edge is present on $alias, but edge_route vpn_ingress is not present on the same alias"
@@ -906,6 +1109,7 @@ foreach ($serviceRow in $orderedServiceRows) {
     }
     $state = $serviceRow.state
     $aliases = @(Split-AliasList $serviceRow.active_aliases)
+    $retiredAliases = @(Get-RetiredServiceAliases $serviceRow | Where-Object { $nodeAliases -contains $_ })
     if ($service -eq "vpn_cascade" -and $state -eq "present") {
         $aliases = @(Get-VpnCascadeOrderedAliases $aliases)
     }
@@ -963,6 +1167,22 @@ foreach ($serviceRow in $orderedServiceRows) {
                 foreach ($alias in @($aliases | Where-Object { $reseedVpnEdgeAliases -contains $_ })) {
                     Invoke-VpnEdgeReseed $alias $reseededVpnEdgeAliases $summary
                 }
+            }
+            if ($retiredAliases.Count -gt 0) {
+                $retiredLimit = Join-AnsibleLimit $retiredAliases
+                foreach ($alias in $retiredAliases) {
+                    $retiredActionKey = "$service|absent|$alias"
+                    if ($processedServiceActions -contains $retiredActionKey) {
+                        Write-Host "$service on retired alias ${alias}: absent already queued; skipped"
+                        continue
+                    }
+                    Add-UniqueAlias $processedServiceActions $retiredActionKey
+                }
+                Write-Host "$service on retired aliases ${retiredLimit}: absent queued from old_aliases"
+                Invoke-ServiceActionDryRun $service "absent" $retiredLimit "$service retired aliases ${retiredLimit}"
+                Invoke-ServiceRemote $service "absent" $retiredLimit
+                Invoke-Postcheck $service "absent" $retiredLimit
+                $summary.Add("$service retired ${retiredLimit}: absent") | Out-Null
             }
         } elseif ($state -eq "absent") {
             Write-Host "$service on ${limit}: absent queued"

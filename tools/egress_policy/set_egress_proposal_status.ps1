@@ -4,7 +4,7 @@
     [Alias("Id")]
     [string]$ProposalId,
     [Parameter(Mandatory = $true)]
-    [ValidateSet("accepted", "rejected", "ignored")]
+    [ValidateSet("accepted", "rejected", "ignored", "stale")]
     [string]$Status,
     [Parameter(Mandatory = $true)]
     [string]$Reason,

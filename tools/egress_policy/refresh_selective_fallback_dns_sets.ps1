@@ -4,6 +4,9 @@ param(
     [string]$DnsSetDir = ".\operator\egress_policy\dns_sets",
     [string]$HistoryDir = ".\operator\egress_policy\history",
     [string]$NodesFile = ".\operator\nodes.csv",
+    [string]$StateFile = ".\operator\state.csv",
+    [string]$NetworksFile = ".\operator\networks.csv",
+    [string]$CascadeConfigFile = ".\operator\softether\cascade\secrets\lab-cascade.json",
     [string]$OperatorDir = ".\operator",
     [string]$ApplyScript = ".\tools\egress_policy\apply_selective_fallback_routes.ps1",
     [string]$SshUser = "useradmin",
@@ -24,6 +27,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ExpectedNodesHeader = "current_alias,endpoint,connection,root_password"
+$ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
+$ExpectedNetworksHeader = "alias,policy_subnet,edge_ip,cascade_ip,cascade_router_ip,policy_gateway_ip"
 
 function Fail($Message) {
     Write-Error $Message
@@ -140,6 +145,154 @@ function Read-CsvMap($Path, $ExpectedHeader, $KeyField, $Label) {
         $map[$key] = $row
     }
     return $map
+}
+
+function Split-AliasList($Value) {
+    return @(([string]$Value) -split '\+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+function Load-StateRows {
+    Require-File $StateFile "state.csv"
+    $lines = @(Get-Content -LiteralPath $StateFile)
+    if ($lines.Count -eq 0 -or $lines[0].Trim() -ne $ExpectedStateHeader) {
+        Fail "state.csv header must be exactly: $ExpectedStateHeader"
+    }
+    return @($lines | ConvertFrom-Csv)
+}
+
+function Get-ActiveCascadeAliases {
+    $aliases = New-Object System.Collections.ArrayList
+    foreach ($row in @($script:StateRows)) {
+        if ([string]$row.kind -eq "service" -and [string]$row.name -eq "vpn_cascade" -and [string]$row.state -eq "present") {
+            foreach ($aliasName in @(Split-AliasList $row.active_aliases)) {
+                [void]$aliases.Add($aliasName)
+            }
+        }
+    }
+    return @($aliases.ToArray() | Sort-Object -Unique)
+}
+
+function Get-CascadeTopologyRows {
+    return @($script:StateRows | Where-Object { [string]$_.kind -eq "cascade_topology" -and [string]$_.state -eq "present" })
+}
+
+function Split-CascadeEdgeList($Value) {
+    if (-not $Value) { return @() }
+    return @(([string]$Value) -split '\+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+function Load-CascadeTopologyFabric {
+    $rows = @(Get-CascadeTopologyRows)
+    if ($rows.Count -eq 0) {
+        return $null
+    }
+    if ($rows.Count -gt 1) {
+        Fail "state.csv has multiple present cascade_topology rows; keep exactly one"
+    }
+    $row = $rows[0]
+    $activeSet = @{}
+    $oldSet = @{}
+    foreach ($edge in @(Split-CascadeEdgeList $row.active_aliases)) {
+        if ($edge -notmatch '^[A-Za-z0-9_.-]+>[A-Za-z0-9_.-]+$') {
+            Fail "cascade_topology $($row.name) has invalid active edge '$edge'; expected alias>alias"
+        }
+        $activeSet[$edge] = $true
+    }
+    foreach ($edge in @(Split-CascadeEdgeList $row.old_aliases)) {
+        if ($edge -notmatch '^[A-Za-z0-9_.-]+>[A-Za-z0-9_.-]+$') {
+            Fail "cascade_topology $($row.name) has invalid old edge '$edge'; expected alias>alias"
+        }
+        $oldSet[$edge] = $true
+    }
+    return [pscustomobject]@{
+        name = [string]$row.name
+        active_edges = $activeSet
+        old_edges = $oldSet
+    }
+}
+
+function Load-ActiveCascadeLinks {
+    if (-not (Test-Path -LiteralPath $CascadeConfigFile -PathType Leaf)) {
+        return @()
+    }
+    $config = Read-JsonFile $CascadeConfigFile "cascade config"
+    return @($config.links | Where-Object { [string]$_.state -eq "active" })
+}
+
+function Test-ActiveCascadePath($Path) {
+    if ($script:CascadeTopologyFabric) {
+        $hops = @()
+        if ($Path.cascade_path -and @($Path.cascade_path).Count -gt 0) {
+            $hops = @($Path.cascade_path | ForEach-Object { "$($_.ingress_alias)>$($_.egress_alias)" })
+        } else {
+            $hops = @("$($Path.ingress_alias)>$($Path.egress_alias)")
+        }
+        foreach ($edge in @($hops)) {
+            if (-not $script:CascadeTopologyFabric.active_edges.ContainsKey($edge)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    $links = @($script:ActiveCascadeLinks)
+    if ($links.Count -eq 0) {
+        return $false
+    }
+    $hops = @()
+    if ($Path.cascade_path -and @($Path.cascade_path).Count -gt 0) {
+        $hops = @($Path.cascade_path | ForEach-Object {
+            [pscustomobject]@{
+                connection = [string]$_.connection
+                ingress_alias = [string]$_.ingress_alias
+                egress_alias = [string]$_.egress_alias
+            }
+        })
+    } else {
+        $hops = @([pscustomobject]@{
+            connection = [string]$Path.cascade_connection
+            ingress_alias = [string]$Path.ingress_alias
+            egress_alias = [string]$Path.egress_alias
+        })
+    }
+    foreach ($hop in @($hops)) {
+        $match = @($links | Where-Object {
+            [string]$_.ingress_alias -eq [string]$hop.ingress_alias -and
+            [string]$_.egress_alias -eq [string]$hop.egress_alias -and
+            ((-not $hop.connection) -or [string]$_.connection_name -eq [string]$hop.connection)
+        })
+        if ($match.Count -eq 0) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Assert-CurrentCascadeEgress($Proposal, $Label) {
+    if (-not $Proposal.recommended_path -or [string]$Proposal.recommended_path.mode -ne "cascade") {
+        Fail "$Label is not a cascade fallback proposal"
+    }
+    $ingressAlias = [string]$Proposal.recommended_path.ingress_alias
+    $egressAlias = [string]$Proposal.recommended_path.egress_alias
+    if (-not (Test-ActiveCascadePath $Proposal.recommended_path)) {
+        $edge = "$ingressAlias>$egressAlias"
+        if ($script:CascadeTopologyFabric) {
+            Fail "stale selective fallback proposal: $edge is not active in cascade_topology $($script:CascadeTopologyFabric.name)"
+        }
+        Fail "$Label points to stale cascade path $ingressAlias->${egressAlias}: no matching active link in $CascadeConfigFile"
+    }
+    if (-not $script:Nodes.ContainsKey($egressAlias)) {
+        Fail "$Label points to stale egress alias '$egressAlias': alias is not present in nodes.csv"
+    }
+    if (-not $script:Networks.ContainsKey($egressAlias)) {
+        Fail "$Label points to stale egress alias '$egressAlias': alias is not present in networks.csv"
+    }
+    if ($script:ActiveCascadeAliases -notcontains $ingressAlias) {
+        Fail "$Label points to inactive cascade ingress '$ingressAlias': alias is not active for service vpn_cascade in state.csv"
+    }
+    if ($script:ActiveCascadeAliases -notcontains $egressAlias) {
+        Fail "$Label points to inactive cascade egress '$egressAlias': alias is not active for service vpn_cascade in state.csv"
+    }
 }
 
 function Test-IPv4($Value) {
@@ -409,6 +562,11 @@ if (($Apply -or $Verify) -and -not (Test-Path -LiteralPath $ApplyScript -PathTyp
 
 $script:SshExecutablePath = Resolve-SshExecutable $SshPath
 $script:Nodes = Read-CsvMap $NodesFile $ExpectedNodesHeader "current_alias" "nodes.csv"
+$script:Networks = Read-CsvMap $NetworksFile $ExpectedNetworksHeader "alias" "networks.csv"
+$script:StateRows = @(Load-StateRows)
+$script:ActiveCascadeAliases = @(Get-ActiveCascadeAliases)
+$script:ActiveCascadeLinks = @(Load-ActiveCascadeLinks)
+$script:CascadeTopologyFabric = Load-CascadeTopologyFabric
 $proposals = @(Get-Proposals)
 if ($proposals.Count -eq 0) {
     Fail "no accepted domain fallback proposals matched the selected filters"
@@ -421,6 +579,9 @@ $results = @()
 foreach ($item in $proposals) {
     $proposal = $item.Proposal
     $proposalId = [string]$proposal.id
+    if ($Apply) {
+        Assert-CurrentCascadeEgress $proposal "proposal $proposalId"
+    }
     $domainValue = ([string]$proposal.target.value).ToLowerInvariant()
     $ingressAlias = [string]$proposal.recommended_path.ingress_alias
     $existingState = Read-DnsSetState $proposalId

@@ -43,7 +43,7 @@ usage() {
 Usage:
   sudo bash tools/bootstrap/create_inventory.sh \
     --nodes-file /opt/ai-service-platform/operator/nodes.csv \
-    --include vps1,vps2,vps3 \
+    --include vps1,vps2,vps6 \
     --check
 
 CSV header must be exactly:
@@ -52,17 +52,17 @@ CSV header must be exactly:
 CSV example:
   vps1,vps01.example.com,ssh,
   vps2,vps02.example.com,ssh,
-  vps3,local,local,
+  vps6,vps06.example.com,ssh,
 
 State CSV header must be exactly:
   kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state
 
 State CSV example:
   platform_role,production,prod,vps1,,,present
-  platform_role,orchestration,orchestration,vps3,vps4,,present
-  service,vpn_edge,vpn_edges,vps1+vps2+vps3,,,present
+  platform_role,orchestration,orchestration,vps5,vps6,vps3,present
+  service,vpn_edge,vpn_edges,vps1+vps2+vps6,,vps3,present
   service,vpn_cascade,vpn_cascades,,,,absent
-  service,edge_candidate_collector,edge_candidate_collectors,vps1+vps2+vps3+vps4+vps5,,,present
+  service,edge_candidate_collector,edge_candidate_collectors,vps1+vps2+vps6+vps4+vps5,,vps3,present
 
 Fallback without CSV:
   --active ROLE:NODE=ENDPOINT

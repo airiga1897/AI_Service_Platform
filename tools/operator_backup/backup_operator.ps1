@@ -3,6 +3,7 @@ param(
     [string]$StateFile = ".\operator\state.csv",
     [string]$OperatorDir = ".\operator",
     [string]$ControlRole = "orchestration",
+    [string]$OperatorBackupEnvFile = "D:\Projects\Ai_SP\Secure\operator-backup.env",
     [string]$LocalBackupDir = "D:\Backup\Projects\AI_SP\operator",
     [string]$RemoteBackupDir = "/opt/backups/ai-service-platform/operator",
     [string]$AdminUser = "useradmin",
@@ -143,8 +144,56 @@ function Get-StandbyOrchestrationAliases($Rows, $Role) {
     return $aliases
 }
 
+function Import-OperatorBackupEnvFile($Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return
+    }
+
+    Write-Host "Loading operator backup env as key-value text: $Path"
+    foreach ($rawLine in (Get-Content -LiteralPath $Path)) {
+        $line = ([string]$rawLine).Trim()
+        if (-not $line -or $line.StartsWith("#")) {
+            continue
+        }
+
+        $match = [regex]::Match(
+            $line,
+            '^(?:\$env:)?AI_SP_OPERATOR_BACKUP_AGE_RECIPIENT\s*=\s*(?<value>.*)$'
+        )
+        if (-not $match.Success) {
+            continue
+        }
+
+        $value = $match.Groups["value"].Value.Trim()
+        if (
+            ($value.Length -ge 2) -and
+            (
+                ($value.StartsWith('"') -and $value.EndsWith('"')) -or
+                ($value.StartsWith("'") -and $value.EndsWith("'"))
+            )
+        ) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+
+        if ($value -match '^AGE-SECRET-KEY-') {
+            Fail "Operator backup env file contains a private age identity, not a public recipient: $Path"
+        }
+        $env:AI_SP_OPERATOR_BACKUP_AGE_RECIPIENT = $value
+        return
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($env:AI_SP_OPERATOR_BACKUP_AGE_RECIPIENT)) {
-    Fail "AI_SP_OPERATOR_BACKUP_AGE_RECIPIENT is not set. Load the operator backup env file before running backup-enabled scripts."
+    Import-OperatorBackupEnvFile $OperatorBackupEnvFile
+    if ([string]::IsNullOrWhiteSpace($env:AI_SP_OPERATOR_BACKUP_AGE_RECIPIENT)) {
+        Fail "AI_SP_OPERATOR_BACKUP_AGE_RECIPIENT is not set. Expected operator backup env file: $OperatorBackupEnvFile. The env file is parsed as key-value text, not executed; create it with AI_SP_OPERATOR_BACKUP_AGE_RECIPIENT=age1... or pass -OperatorBackupEnvFile."
+    }
+}
+if ($env:AI_SP_OPERATOR_BACKUP_AGE_RECIPIENT -match '^AGE-SECRET-KEY-') {
+    Fail "AI_SP_OPERATOR_BACKUP_AGE_RECIPIENT must be a public age recipient (age1...), not a private age identity."
+}
+if ($env:AI_SP_OPERATOR_BACKUP_AGE_RECIPIENT -notmatch '^age1') {
+    Fail "AI_SP_OPERATOR_BACKUP_AGE_RECIPIENT must look like a public age recipient starting with age1."
 }
 if ($KeepLatest -lt 0) {
     Fail "KeepLatest must be 0 or greater"

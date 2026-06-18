@@ -10,6 +10,7 @@ edge_haproxy_operator_routes_file: "{{ edge_haproxy_operator_dir }}/routes.yml"
 edge_haproxy_operator_state_file: "{{ playbook_dir }}/../../operator/state.csv"
 edge_haproxy_operator_vpn_mgmt_ips: "{{ edge_haproxy_operator_lists_dir }}/vpn_mgmt_ips.lst"
 edge_haproxy_operator_blocked_ips: "{{ edge_haproxy_operator_lists_dir }}/blocked_ips.lst"
+edge_haproxy_operator_ru_networks: "{{ edge_haproxy_operator_lists_dir }}/ru_networks.lst"
 
 edge_haproxy_image: haproxy:2.9-alpine
 edge_haproxy_container_name: edge-haproxy
@@ -23,5 +24,39 @@ edge_haproxy_stats_bind: 127.0.0.1:8404
 edge_haproxy_tcp_rate_limit: 60
 edge_haproxy_tcp_rate_window: 10s
 edge_haproxy_tcp_conn_cur_limit: 80
+edge_haproxy_http_rate_limit: 50
+edge_haproxy_http_error_rate_limit: 5
+edge_haproxy_http_rate_window: 10s
+edge_haproxy_http_ban_expire: 30m
+edge_haproxy_http_scanner_paths:
+  - /SDK/webLanguage
+  - /hudson
+  - /wp-admin
+  - /wp-login
+  - /wp-content
+  - /wp-includes
+  - /xmlrpc.php
+  - /phpmyadmin
+  - /pma
+  - /administrator
+  - /cgi-bin
+  - /.env
+  - /.git
+  - /vendor
+  - /telescope
+  - /debug
+  - /console
+  - /solr
+  - /manager
+  - /jmx-console
+  - /invoker
+  - /jenkins
+  - /actuator
+  - /api/v1/pods
+  - /remote/fgt_lang
+  - /boaform
+  - /HNAP1
+  - /config
+  - /admin
 edge_haproxy_minecraft_game_rate_limit: 10
 edge_haproxy_minecraft_rcon_rate_limit: 5

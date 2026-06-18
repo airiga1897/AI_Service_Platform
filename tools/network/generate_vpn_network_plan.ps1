@@ -195,6 +195,14 @@ if ($Check) {
     foreach ($row in $plan) {
         $lines += ("{0},{1},{2},{3},{4},{5}" -f $row.alias, $row.policy_subnet, $row.edge_ip, $row.cascade_ip, $row.cascade_router_ip, $row.policy_gateway_ip)
     }
+    $newContent = ($lines -join "`r`n") + "`r`n"
+    if (Test-Path -LiteralPath $OutputFile -PathType Leaf) {
+        $existingContent = [System.IO.File]::ReadAllText((Resolve-Path -LiteralPath $OutputFile).Path)
+        if ($existingContent -eq $newContent -or ($existingContent -replace "`r`n?", "`n") -eq ($newContent -replace "`r`n?", "`n")) {
+            Write-Host "[OK] VPN network plan already up to date: $OutputFile"
+            return
+        }
+    }
     Set-Content -LiteralPath $OutputFile -Value $lines -Encoding ascii
     Write-Host "[OK] VPN network plan written: $OutputFile"
 }

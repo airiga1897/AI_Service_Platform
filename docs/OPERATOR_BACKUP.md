@@ -41,11 +41,27 @@ The public `age1...` recipient may be stored in docs or configuration. The
 private identity file must not be stored in git, `operator/`, any VPS, or inside
 the backup archive it protects.
 
+Store the public recipient in the operator-local env file:
+
+```dotenv
+AI_SP_OPERATOR_BACKUP_AGE_RECIPIENT=age1...
+```
+
+The default path is:
+
+```text
+D:\Projects\Ai_SP\Secure\operator-backup.env
+```
+
+PowerShell backup helpers parse this file as key-value text. They do not execute
+it as a script.
+
 ## Storage Rules
 
 - Keep `D:\Projects\Ai_SP\Secure\operator-backup-age-identity.txt` outside
   the repository.
-- Save a separate copy in a password manager or offline recovery medium.
+- Save a separate copy in a password manager, offline recovery medium, or the
+  operator-machine-only secure material backup directory documented below.
 - Do not upload the private identity to the standby orchestration candidate,
   backup-role VPS nodes, cloud storage, or any encrypted operator backup
   archive.
@@ -89,6 +105,39 @@ is additive and does not replace the standby orchestration copy.
 
 Only encrypted `.age` artifacts and their `.sha256` files may leave the operator
 machine. The private identity must never be copied to remote storage.
+
+## Local Secure Material Backup
+
+The private identity and operator backup env file are backed up separately from
+`operator/`. This backup is local/offline only and must not be uploaded to any
+VPS:
+
+```text
+D:\Backup\Projects\AI_SP\secure\
+```
+
+Use the PowerShell helper:
+
+```powershell
+.\tools\operator_backup\backup_secure_material.ps1
+```
+
+By default it archives `D:\Projects\Ai_SP\Secure` into timestamped local files:
+
+```text
+secure-material-YYYYMMDDTHHMMSSZ.zip
+secure-material-YYYYMMDDTHHMMSSZ.zip.sha256
+```
+
+The helper requires both `operator-backup-age-identity.txt` and
+`operator-backup.env`, keeps the newest 10 archives by default, and has no
+remote upload mode. `operator-backup.env` should contain only the public
+recipient line shown above. Inspect what it would do without creating an
+archive:
+
+```powershell
+.\tools\operator_backup\backup_secure_material.ps1 -WhatIf
+```
 
 ## Smoke Test
 

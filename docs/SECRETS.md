@@ -26,9 +26,19 @@ The age private identity for operator backups is also a secret:
 Do not commit the private identity, place it under `operator/`, upload it to a
 VPS, or include it in an operator backup archive.
 
+The operator backup env file may contain the public age recipient only:
+
+```dotenv
+AI_SP_OPERATOR_BACKUP_AGE_RECIPIENT=age1...
+```
+
 Encrypted `*.age` operator backup artifacts may be stored remotely only when the
 private identity is stored separately and remains unavailable to the remote
 storage target.
+
+Local secure material backups of `D:\Projects\Ai_SP\Secure` may be stored under
+`D:\Backup\Projects\AI_SP\secure` on the operator machine. They must not be
+uploaded to VPS nodes.
 
 See [`OPERATOR_BACKUP.md`](OPERATOR_BACKUP.md) for the operator backup key model
 and smoke-test commands.

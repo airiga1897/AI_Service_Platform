@@ -103,6 +103,27 @@ remove_alias_from_list() {
     printf '%s' "$result"
 }
 
+default_standby_include() {
+    local excluded_aliases="$1"
+    local result=""
+    local current_alias endpoint connection root_password extra
+    while IFS=, read -r current_alias endpoint connection root_password extra || [ -n "${current_alias:-}" ]; do
+        current_alias="${current_alias//$'\r'/}"
+        extra="${extra//$'\r'/}"
+        [ -n "$current_alias" ] || continue
+        [ -z "$extra" ] || fail "nodes.csv row for $current_alias has too many columns"
+        if alias_in_list "$current_alias" "$excluded_aliases"; then
+            continue
+        fi
+        if [ -z "$result" ]; then
+            result="$current_alias"
+        else
+            result="$result,$current_alias"
+        fi
+    done < <(tail -n +2 "$NODES_FILE")
+    printf '%s' "$result"
+}
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --alias) ALIAS="${2:-}"; shift 2 ;;
@@ -184,6 +205,12 @@ case "$active_aliases" in
 esac
 [ "$active_aliases" != "$ALIAS" ] || fail "Alias '$ALIAS' is already active for '$CONTROL_ROLE'; standby preparation expects a candidate alias"
 alias_in_list "$ALIAS" "$candidate_aliases" || fail "Alias '$ALIAS' must be listed in candidate_aliases for platform_role '$CONTROL_ROLE'"
+if [ -z "$INCLUDE_ALIASES" ]; then
+    INCLUDE_ALIASES="$(default_standby_include "$old_aliases")"
+    if [ -n "$INCLUDE_ALIASES" ]; then
+        echo "Standby inventory include defaults to current aliases excluding old $CONTROL_ROLE aliases: $INCLUDE_ALIASES"
+    fi
+fi
 
 temp_state="$(mktemp -t ai-service-platform.standby-state.XXXXXX.csv)"
 trap 'rm -f "$temp_state"' EXIT

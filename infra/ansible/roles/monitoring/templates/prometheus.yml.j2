@@ -27,11 +27,11 @@ scrape_configs:
         labels:
           instance: "VPS2-backup"
 
-  - job_name: "node_vps3"
+  - job_name: "node_vps6"
     static_configs:
       - targets: ["localhost:{{ node_exporter_port }}"]
         labels:
-          instance: "VPS3-management"
+          instance: "VPS6-management"
 
   - job_name: "postgres_vps1"
     static_configs:

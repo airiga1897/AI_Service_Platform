@@ -916,10 +916,49 @@ ANSIBLE_HOME="$(getent passwd "$ANSIBLE_USER" | cut -d: -f6 2>/dev/null || true)
 DEPLOY_KEY_PATH="$DEPLOY_HOME/.ssh/$DEPLOY_KEY_NAME"
 ADMIN_KEY_PATH="$ADMIN_HOME/.ssh/$ADMIN_KEY_NAME"
 ANSIBLE_KEY_PATH="${ANSIBLE_HOME:-}/.ssh/$ANSIBLE_KEY_NAME"
+RECOVERY_DIR="/root/ai-service-platform-bootstrap"
+RECOVERY_FILE="$RECOVERY_DIR/$TARGET.keys.txt"
+
+mkdir -p "$RECOVERY_DIR"
+chmod 700 "$RECOVERY_DIR"
+
+{
+    echo "GitHub Environment: $GITHUB_ENVIRONMENT"
+    echo "-------------------------------------"
+    echo "SSH_HOST=$SERVER_IP"
+    echo "SSH_USER=$DEPLOY_USER"
+    echo "SSH_PORT=$SSH_PORT"
+    echo "SSH_KEY=(copy private deploy key below)"
+    if [ "$NODE_ROLE" = "management" ]; then
+        echo "ANSIBLE_CONTROL_HOST=$SERVER_IP"
+        echo "ANSIBLE_CONTROL_USER=$ANSIBLE_USER"
+        echo "ANSIBLE_CONTROL_KEY=(copy private Ansible control key below)"
+    fi
+    echo ""
+    echo "--- BEGIN SSH_KEY ---"
+    cat "$DEPLOY_KEY_PATH"
+    echo "--- END SSH_KEY ---"
+    echo ""
+    if [ "$NODE_ROLE" = "management" ]; then
+        echo "--- BEGIN ANSIBLE CONTROL KEY ---"
+        cat "$ANSIBLE_KEY_PATH"
+        echo "--- END ANSIBLE CONTROL KEY ---"
+        echo ""
+        echo "__ANSIBLE_CONTROL_PUBLIC_KEY_BEGIN__"
+        cat "$ANSIBLE_KEY_PATH.pub"
+        echo "__ANSIBLE_CONTROL_PUBLIC_KEY_END__"
+        echo ""
+    fi
+    echo "--- BEGIN ADMIN KEY ---"
+    cat "$ADMIN_KEY_PATH"
+    echo "--- END ADMIN KEY ---"
+} > "$RECOVERY_FILE"
+chmod 600 "$RECOVERY_FILE"
 
 echo ""
 echo -e "${YELLOW}IMPORTANT: private keys are printed for one-time copy only.${NC}"
 echo -e "${YELLOW}Do not save them in repository files, docs, issues, or chat logs.${NC}"
+echo -e "${YELLOW}Recovery copy on server: $RECOVERY_FILE${NC}"
 echo ""
 
 echo "GitHub Environment: $GITHUB_ENVIRONMENT"

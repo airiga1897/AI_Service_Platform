@@ -52,21 +52,51 @@
     - edge_candidate_collector_state == 'present'
     - edge_candidate_collector_tcpdump_enabled | bool
 
-- name: Find existing edge candidate collector candidate files
-  ansible.builtin.find:
-    paths:
-      - "{{ edge_candidate_collector_candidate_dir }}"
-      - "{{ edge_candidate_collector_processed_dir }}"
-    patterns: "*.jsonl"
-    file_type: file
-  register: edge_candidate_collector_candidate_files
-  when: edge_candidate_collector_state == 'present'
-
 - name: Ensure existing edge candidate collector candidate files are readable
-  ansible.builtin.file:
-    path: "{{ item.path }}"
-    mode: "0644"
-  loop: "{{ edge_candidate_collector_candidate_files.files | default([]) }}"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    existing_dirs=""
+    for candidate_dir in "$CANDIDATE_DIR" "$PROCESSED_DIR"; do
+      if [ -d "$candidate_dir" ]; then
+        existing_dirs="${existing_dirs}${existing_dirs:+ }$candidate_dir"
+      fi
+    done
+    if [ -z "$existing_dirs" ]; then
+      if [ "$CHECK_MODE" = "true" ]; then
+        echo "candidate_files_requiring_chmod=0"
+      else
+        echo "candidate_files_chmodded=0"
+      fi
+      exit 0
+    fi
+    changed_count="$(
+      find $existing_dirs \
+        -type f -name '*.jsonl' ! -perm 0644 \
+        -printf '.\n' | wc -l
+    )"
+    if [ "$CHECK_MODE" = "true" ]; then
+      echo "candidate_files_requiring_chmod=$changed_count"
+      exit 0
+    fi
+    if [ "$changed_count" -gt 0 ]; then
+      find $existing_dirs \
+        -type f -name '*.jsonl' ! -perm 0644 \
+        -exec chmod 0644 {} +
+    fi
+    echo "candidate_files_chmodded=$changed_count"
+  args:
+    executable: /bin/bash
+  environment:
+    CANDIDATE_DIR: "{{ edge_candidate_collector_candidate_dir }}"
+    PROCESSED_DIR: "{{ edge_candidate_collector_processed_dir }}"
+    CHECK_MODE: "{{ ansible_check_mode | ternary('true', 'false') }}"
+  register: edge_candidate_collector_candidate_chmod
+  check_mode: false
+  changed_when: >
+    (
+      'candidate_files_requiring_chmod=0' not in edge_candidate_collector_candidate_chmod.stdout
+      and 'candidate_files_chmodded=0' not in edge_candidate_collector_candidate_chmod.stdout
+    )
   when: edge_candidate_collector_state == 'present'
 
 - name: Install edge candidate collector script

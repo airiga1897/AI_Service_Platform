@@ -11,10 +11,12 @@ vpn_cascade_local_override_dir: "{{ playbook_dir }}/../../operator/softether/cas
 vpn_cascade_link_secret_file: "{{ playbook_dir }}/../../operator/softether/cascade/secrets/lab-cascade.json"
 vpn_cascade_operator_mgmt_ips: "{{ playbook_dir }}/../../operator/haproxy/lists/vpn_mgmt_ips.lst"
 vpn_cascade_operator_networks_file: "{{ playbook_dir }}/../../operator/networks.csv"
+vpn_cascade_operator_state_file: "{{ playbook_dir }}/../../operator/state.csv"
+vpn_cascade_topology_name: lab-cascade
 
 vpn_cascade_image: softethervpn/vpnserver:stable
 vpn_cascade_container_name: softether-cascade
-vpn_cascade_build_policy_router_image: false
+vpn_cascade_build_policy_router_image: true
 vpn_cascade_policy_router_image_repository: ai-service-platform/policy-router
 vpn_cascade_policy_router_build_context: "{{ playbook_dir }}/../docker/policy-router"
 vpn_cascade_policy_router_image: ai-service-platform/policy-router:local

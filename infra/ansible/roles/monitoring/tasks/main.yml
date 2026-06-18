@@ -65,7 +65,7 @@
       - /var/log:/var/log:ro
     command: -config.file=/etc/promtail/config.yml
 
-# Prometheus + Grafana + Loki + Alertmanager — только VPS3
+# Prometheus + Grafana + Loki + Alertmanager — только active management node
 - name: Создать директории мониторинга
   file:
     path: "{{ item }}"

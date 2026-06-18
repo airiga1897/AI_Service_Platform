@@ -1,4 +1,4 @@
 current_alias,endpoint,connection,root_password
 vps1,vps01.example.com,ssh,
 vps2,vps02.example.com,ssh,
-vps3,vps03.example.com,ssh,
+vps6,vps06.example.com,ssh,

@@ -534,6 +534,8 @@ if (-not $SkipManaged) {
             "-OperatorBackupKeepLatest", $OperatorBackupKeepLatest,
             "-AdminUser", $AdminUser
         )
+        $candidateAnsiblePublicKeyFile = Join-Path (Join-Path $OperatorDir $managedAlias) "ansible_control.candidate.pub"
+        $managedArgs += @("-OutputAnsibleAuthorizedKeyFile", $candidateAnsiblePublicKeyFile)
         if ($useStateFile) {
             $managedArgs += @("-StateFile", $StateFile)
         }

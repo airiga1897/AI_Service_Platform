@@ -33,6 +33,9 @@ if ($ProbeAttempts -lt 1) {
 if ($ProbeRetryDelaySeconds -lt 0) {
     Fail "-ProbeRetryDelaySeconds must be 0 or greater"
 }
+if ($TimeoutSeconds -lt 1) {
+    Fail "-TimeoutSeconds must be at least 1"
+}
 if ($CascadeOnly -and ($IncludeCascade -or $PreferCascade)) {
     Fail "-CascadeOnly cannot be combined with -IncludeCascade or -PreferCascade"
 }
@@ -57,6 +60,17 @@ function Read-JsonFile($Path, $Label) {
 function Quote-BashArg($Value) {
     $text = [string]$Value
     return "'" + ($text -replace "'", "'\''") + "'"
+}
+
+function Resolve-ProbePath($Path, $Label) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Fail "$Label not found: $Path"
+    }
+    try {
+        return [string](Resolve-Path -LiteralPath $Path).Path
+    } catch {
+        Fail "failed to resolve ${Label}: $Path"
+    }
 }
 
 function Resolve-SshExecutable($Path) {
@@ -88,15 +102,18 @@ function Get-RawOutputPreview($Text) {
 }
 
 function Get-OpenSshCommonArgs($KeyFile) {
+    $connectTimeout = [Math]::Max(1, [Math]::Min(10, $TimeoutSeconds))
     $args = @(
         "-i", $KeyFile,
         "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=10",
+        "-o", "ConnectTimeout=$connectTimeout",
         "-o", "IdentitiesOnly=yes",
         "-o", "KbdInteractiveAuthentication=no",
         "-o", "PasswordAuthentication=no",
         "-o", "PreferredAuthentications=publickey",
-        "-o", "RequestTTY=no"
+        "-o", "RequestTTY=no",
+        "-o", "ServerAliveInterval=10",
+        "-o", "ServerAliveCountMax=2"
     )
     if ($AutoAcceptHostKey) {
         $args += @("-o", "StrictHostKeyChecking=accept-new")
@@ -822,8 +839,7 @@ function Invoke-DirectEgressProbe($PolicyProfile, $Target, $CandidateAlias, $Mod
     if ($node.connection -ne "ssh" -or $node.endpoint -eq "local") {
         Fail "probe alias $CandidateAlias must use connection=ssh and a real endpoint"
     }
-    $keyFile = Join-Path (Join-Path $OperatorDir $CandidateAlias) "admin_key"
-    Require-File $keyFile "admin key for $CandidateAlias"
+    $keyFile = Resolve-ProbePath (Join-Path (Join-Path $OperatorDir $CandidateAlias) "admin_key") "admin key for $CandidateAlias"
     $remote = "${SshUser}@$($node.endpoint)"
 
     if ($DryRun) {
@@ -931,11 +947,11 @@ function Invoke-CascadeEgressProbe($PolicyProfile, $Target, $PathLinks) {
         if ($node.connection -ne "ssh" -or $node.endpoint -eq "local") {
             Fail "cascade probe alias $aliasName must use connection=ssh and a real endpoint"
         }
-        Require-File (Join-Path (Join-Path $OperatorDir $aliasName) "admin_key") "admin key for $aliasName"
+        [void](Resolve-ProbePath (Join-Path (Join-Path $OperatorDir $aliasName) "admin_key") "admin key for $aliasName")
     }
 
-    $ingressKey = Join-Path (Join-Path $OperatorDir $ingressAlias) "admin_key"
-    $egressKey = Join-Path (Join-Path $OperatorDir $egressAlias) "admin_key"
+    $ingressKey = Resolve-ProbePath (Join-Path (Join-Path $OperatorDir $ingressAlias) "admin_key") "admin key for $ingressAlias"
+    $egressKey = Resolve-ProbePath (Join-Path (Join-Path $OperatorDir $egressAlias) "admin_key") "admin key for $egressAlias"
     $ingressRemote = "${SshUser}@$($ingressNode.endpoint)"
     $egressRemote = "${SshUser}@$($egressNode.endpoint)"
     $cascadeLabel = Get-CascadePathLabel $links
@@ -952,7 +968,7 @@ function Invoke-CascadeEgressProbe($PolicyProfile, $Target, $PathLinks) {
     $connectionHops = New-Object System.Collections.ArrayList
     foreach ($link in $links) {
         $linkIngressNode = $nodes[$link.ingress_alias]
-        $linkIngressKey = Join-Path (Join-Path $OperatorDir $link.ingress_alias) "admin_key"
+        $linkIngressKey = Resolve-ProbePath (Join-Path (Join-Path $OperatorDir $link.ingress_alias) "admin_key") "admin key for $($link.ingress_alias)"
         $linkIngressRemote = "${SshUser}@$($linkIngressNode.endpoint)"
         $linkLabel = "$($link.ingress_alias)->$($link.egress_alias):$($link.egress_port)"
 
@@ -964,7 +980,8 @@ function Invoke-CascadeEgressProbe($PolicyProfile, $Target, $PathLinks) {
         if ($transportStatus.reachable) {
             Write-Host "        [OK] transport reachable"
         } else {
-            Write-Host "        [FAIL] transport unreachable"
+            $transportPreview = Get-RawOutputPreview ($transportStatus.error)
+            Write-Host "        [WARN] transport unreachable: $transportPreview"
         }
         [void]$transportHops.Add([pscustomobject]@{
             connection = [string]$link.connection_name
@@ -976,15 +993,15 @@ function Invoke-CascadeEgressProbe($PolicyProfile, $Target, $PathLinks) {
             error = $transportStatus.error
         })
 
-        $dockerStatusScript = 'in_file="/tmp/ai-sp-cascade-status.$$"; cat > "$in_file"; timeout "$VPNCMD_TIMEOUT" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$in_file"; rc=$?; rm -f "$in_file"; exit "$rc"'
+        $dockerStatusScript = 'in_file="/tmp/ai-sp-cascade-status.$$"; cat > "$in_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$in_file"; rc=$?; rm -f "$in_file"; exit "$rc"'
         $remoteStatusTimeout = [Math]::Max(1, $TimeoutSeconds + 5)
         $statusCommand = @(
             "set -euo pipefail",
             "tmp_file=`$(mktemp)",
             "trap 'rm -f ""`$tmp_file""' EXIT",
             "printf 'Hub %s\nCascadeStatusGet %s\n' $(Quote-BashArg $link.hub_name) $(Quote-BashArg $link.connection_name) > ""`$tmp_file""",
-            "timeout $(Quote-BashArg ([string]$remoteStatusTimeout))s sudo docker exec -i -e SERVER_PASSWORD=$(Quote-BashArg $link.server_password) -e VPNCMD_TIMEOUT=$(Quote-BashArg ([string]$TimeoutSeconds)) softether-cascade sh -c $(Quote-BashArg $dockerStatusScript) < ""`$tmp_file"""
-        ) -join "; "
+            "timeout $(Quote-BashArg ([string]$remoteStatusTimeout))s sudo docker exec -i -e SERVER_PASSWORD=$(Quote-BashArg $link.server_password) softether-cascade sh -c $(Quote-BashArg $dockerStatusScript) < ""`$tmp_file"""
+        ) -join "`n"
         Write-Host "      checking cascade status $($link.connection_name)..."
         $statusProbe = Invoke-SshTextCommand $linkIngressKey $linkIngressRemote $statusCommand "cascade status probe $($link.connection_name)"
         $statusOutput = [string]$statusProbe.output
@@ -992,7 +1009,7 @@ function Invoke-CascadeEgressProbe($PolicyProfile, $Target, $PathLinks) {
         if ($statusOnline) {
             Write-Host "        [OK] cascade status online"
         } else {
-            Write-Host "        [FAIL] cascade status is not online"
+            Write-Host "        [FAIL] cascade status is not online: $(Get-RawOutputPreview $statusOutput)"
         }
         [void]$connectionHops.Add([pscustomobject]@{
             connection = [string]$link.connection_name

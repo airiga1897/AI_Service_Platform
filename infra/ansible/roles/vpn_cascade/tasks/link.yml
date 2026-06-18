@@ -37,7 +37,7 @@
   changed_when: false
   when:
     - vpn_cascade_state == 'present'
-    - vpn_cascade_connection_get.rc != 0
+    - (vpn_cascade_connection_get.rc | default(0)) != 0
     - not ansible_check_mode
 
 - name: Create ingress-side vpn_cascade connection
@@ -64,7 +64,7 @@
   changed_when: false
   when:
     - vpn_cascade_state == 'present'
-    - vpn_cascade_connection_get.rc != 0
+    - (vpn_cascade_connection_get.rc | default(0)) != 0
     - not ansible_check_mode
 
 - name: Fail on ingress-side vpn_cascade connection create failure
@@ -72,7 +72,7 @@
     msg: "vpn_cascade CascadeCreate failed for {{ vpn_cascade_link.connection_name }}. Egress TCP {{ vpn_cascade_link.egress_host }}:{{ vpn_cascade_link.egress_port }} check rc={{ vpn_cascade_egress_tcp_check.rc | default('skipped') }}. Verify hub/user on egress and CascadeCreate arguments."
   when:
     - vpn_cascade_state == 'present'
-    - vpn_cascade_connection_get.rc != 0
+    - (vpn_cascade_connection_get.rc | default(0)) != 0
     - vpn_cascade_connection_create.rc | default(1) != 0
     - not ansible_check_mode
 
@@ -96,7 +96,7 @@
   changed_when: false
   when:
     - vpn_cascade_state == 'present'
-    - (vpn_cascade_connection_get.rc == 0) or (vpn_cascade_connection_create.rc | default(1) == 0)
+    - (vpn_cascade_connection_get.rc | default(1) == 0) or (vpn_cascade_connection_create.rc | default(1) == 0)
     - not ansible_check_mode
 
 - name: Bring ingress-side vpn_cascade connection online
@@ -118,7 +118,7 @@
   changed_when: false
   when:
     - vpn_cascade_state == 'present'
-    - (vpn_cascade_connection_get.rc == 0) or (vpn_cascade_connection_create.rc | default(1) == 0)
+    - (vpn_cascade_connection_get.rc | default(1) == 0) or (vpn_cascade_connection_create.rc | default(1) == 0)
     - not ansible_check_mode
 
 - name: Verify ingress-side vpn_cascade connection is online

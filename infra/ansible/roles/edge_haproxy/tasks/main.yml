@@ -28,6 +28,14 @@
   register: edge_haproxy_blacklist_stat
   when: edge_haproxy_state == 'present'
 
+- name: Check operator HAProxy GeoIP networks on control node
+  ansible.builtin.stat:
+    path: "{{ edge_haproxy_operator_ru_networks }}"
+  delegate_to: localhost
+  become: false
+  register: edge_haproxy_ru_networks_stat
+  when: edge_haproxy_state == 'present'
+
 - name: Check operator state.csv on control node
   ansible.builtin.stat:
     path: "{{ edge_haproxy_operator_state_file }}"
@@ -293,6 +301,27 @@
     - edge_haproxy_state == 'present'
     - not edge_haproxy_blacklist_stat.stat.exists or not edge_haproxy_blacklist_stat.stat.isreg
 
+- name: Install GeoIP RU network list when provided
+  ansible.builtin.copy:
+    src: "{{ edge_haproxy_operator_ru_networks }}"
+    dest: "{{ edge_haproxy_lists_dir }}/ru_networks.lst"
+    mode: "0644"
+  register: edge_haproxy_ru_networks_copy
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_ru_networks_stat.stat.exists
+    - edge_haproxy_ru_networks_stat.stat.isreg
+
+- name: Create empty GeoIP RU network list when operator file is missing
+  ansible.builtin.copy:
+    dest: "{{ edge_haproxy_lists_dir }}/ru_networks.lst"
+    content: ""
+    mode: "0644"
+  register: edge_haproxy_ru_networks_empty
+  when:
+    - edge_haproxy_state == 'present'
+    - not edge_haproxy_ru_networks_stat.stat.exists or not edge_haproxy_ru_networks_stat.stat.isreg
+
 - name: Render edge_haproxy config
   ansible.builtin.template:
     src: haproxy.cfg.j2
@@ -379,6 +408,8 @@
       or (edge_haproxy_vpn_mgmt_ips_empty.changed | default(false))
       or (edge_haproxy_blocked_ips_copy.changed | default(false))
       or (edge_haproxy_blocked_ips_empty.changed | default(false))
+      or (edge_haproxy_ru_networks_copy.changed | default(false))
+      or (edge_haproxy_ru_networks_empty.changed | default(false))
       or (edge_haproxy_config_template.changed | default(false))
 
 - name: Verify running edge_haproxy container network attachment

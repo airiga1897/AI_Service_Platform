@@ -157,6 +157,69 @@
     - vpn_cascade_state == 'present'
     - item.state == 'active'
 
+- name: Parse cascade topology from state.csv
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - "$STATE_FILE" "$TOPOLOGY_NAME" <<'PY'
+    import csv
+    import json
+    import re
+    import sys
+
+    state_file = sys.argv[1]
+    topology_name = sys.argv[2]
+
+    def split_edges(value):
+        if not value:
+            return []
+        return [item.strip() for item in value.split("+") if item.strip()]
+
+    rows = []
+    with open(state_file, newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            if row.get("kind") == "cascade_topology" and row.get("name") == topology_name and row.get("state") == "present":
+                rows.append(row)
+    if not rows:
+        print(json.dumps({"present": False, "active_edges": [], "old_edges": []}, sort_keys=True))
+        sys.exit(0)
+    if len(rows) > 1:
+        raise SystemExit(f"multiple present cascade_topology rows found for {topology_name}")
+    row = rows[0]
+    edge_re = re.compile(r"^[A-Za-z0-9_.-]+>[A-Za-z0-9_.-]+$")
+    active_edges = split_edges(row.get("active_aliases", ""))
+    old_edges = split_edges(row.get("old_aliases", ""))
+    for edge in active_edges + old_edges:
+        if not edge_re.match(edge):
+            raise SystemExit(f"invalid cascade_topology edge: {edge}")
+    overlap = sorted(set(active_edges).intersection(old_edges))
+    if overlap:
+        raise SystemExit(f"cascade_topology edge(s) listed as active and old: {', '.join(overlap)}")
+    print(json.dumps({
+        "present": True,
+        "active_edges": active_edges,
+        "old_edges": old_edges,
+    }, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    STATE_FILE: "{{ vpn_cascade_operator_state_file }}"
+    TOPOLOGY_NAME: "{{ vpn_cascade_topology_name }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_cascade_topology_command
+  changed_when: false
+  check_mode: false
+  when: vpn_cascade_state == 'present'
+
+- name: Store cascade topology facts
+  ansible.builtin.set_fact:
+    vpn_cascade_topology: "{{ vpn_cascade_topology_command.stdout | from_json }}"
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_topology_command.stdout is defined
+    - vpn_cascade_topology_command.stdout | length > 0
+
 - name: Store node-scoped vpn_cascade links
   ansible.builtin.set_fact:
     vpn_cascade_ingress_links: "{{ vpn_cascade_active_links | selectattr('ingress_alias', 'equalto', inventory_hostname) | list }}"
@@ -167,6 +230,19 @@
     vpn_cascade_peer_aliases: "{{ ((vpn_cascade_active_links | selectattr('ingress_alias', 'equalto', inventory_hostname) | map(attribute='egress_alias') | list) + (vpn_cascade_active_links | selectattr('egress_alias', 'equalto', inventory_hostname) | map(attribute='ingress_alias') | list)) | unique }}"
     vpn_cascade_peer_hosts: []
   no_log: true
+  when: vpn_cascade_state == 'present'
+
+- name: Store node-scoped cascade topology cleanup facts
+  ansible.builtin.set_fact:
+    vpn_cascade_desired_connection_names: "{{ vpn_cascade_ingress_links | map(attribute='connection_name') | list | unique }}"
+    vpn_cascade_retired_connection_names: >-
+      {{
+        (vpn_cascade_topology.old_edges | default([]))
+        | select('match', '^' ~ inventory_hostname ~ '>')
+        | map('regex_replace', '^([A-Za-z0-9_.-]+)>([A-Za-z0-9_.-]+)$', '\1-to-\2')
+        | list
+        | unique
+      }}
   when: vpn_cascade_state == 'present'
 
 - name: Store ingress-side vpn_cascade peer endpoints
@@ -349,6 +425,7 @@
   become: false
   run_once: true
   register: vpn_cascade_policy_router_build_plan_command
+  check_mode: false
   changed_when: false
   when:
     - vpn_cascade_state == 'present'
@@ -1069,15 +1146,17 @@
 - name: Ensure vpn_cascade policy LocalBridge TAP exists
   ansible.builtin.shell: |
     set -euo pipefail
-    tmp_file="$(mktemp)"
-    trap 'rm -f "$tmp_file"' EXIT
-    printf 'BridgeList\n' > "$tmp_file"
-    bridge_output="$(timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file" 2>/dev/null' < "$tmp_file")"
+    bridge_output="$(timeout "${VPNCMD_TIMEOUT}s" docker exec "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD BridgeList 2>/dev/null)"
     if printf '%s\n' "$bridge_output" | grep -Fq "$TAP_DEVICE"; then
       exit 0
     fi
-    printf 'BridgeCreate %s /DEVICE:%s /TAP:yes\n' "$HUB_NAME" "$TAP_DEVICE" > "$tmp_file"
-    timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file" >/dev/null' < "$tmp_file"
+    timeout "${VPNCMD_TIMEOUT}s" docker exec "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD BridgeCreate "$HUB_NAME" /DEVICE:"$TAP_DEVICE" /TAP:yes >/dev/null
+    timeout "${VPNCMD_TIMEOUT}s" docker exec "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD Flush >/dev/null
+    bridge_output="$(timeout "${VPNCMD_TIMEOUT}s" docker exec "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD BridgeList 2>/dev/null)"
+    if ! printf '%s\n' "$bridge_output" | grep -Fq "$TAP_DEVICE"; then
+      echo "SoftEther LocalBridge for TAP device $TAP_DEVICE was not found after BridgeCreate" >&2
+      exit 1
+    fi
     echo "created"
   args:
     executable: /bin/bash
@@ -1272,6 +1351,90 @@
   when:
     - vpn_cascade_state == 'present'
     - vpn_cascade_ingress_links | length > 0
+
+- name: Discover retired ingress-side vpn_cascade connections
+  ansible.builtin.shell: |
+    set -euo pipefail
+    tmp_file="$(mktemp)"
+    desired_file="$(mktemp)"
+    retired_file="$(mktemp)"
+    trap 'rm -f "$tmp_file" "$desired_file" "$retired_file"' EXIT
+    cat > "$desired_file" <<'EOF_DESIRED'
+    {{ vpn_cascade_desired_connection_names | default([]) | join('\n') }}
+    EOF_DESIRED
+    cat > "$retired_file" <<'EOF_RETIRED'
+    {{ vpn_cascade_retired_connection_names | default([]) | join('\n') }}
+    EOF_RETIRED
+    printf 'Hub %s\nCascadeList\n' "$HUB_NAME" > "$tmp_file"
+    output="$(timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file"' < "$tmp_file" 2>/dev/null || true)"
+    printf '%s\n' "$output" |
+      grep -Eo '\b[A-Za-z0-9_.-]+-to-[A-Za-z0-9_.-]+\b' |
+      sort -u |
+      while IFS= read -r connection_name; do
+        [ -n "$connection_name" ] || continue
+        if grep -Fxq "$connection_name" "$retired_file"; then
+          printf '%s\n' "$connection_name"
+          continue
+        fi
+        if ! grep -Fxq "$connection_name" "$desired_file"; then
+          printf '%s\n' "$connection_name"
+        fi
+      done
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  register: vpn_cascade_retired_connections_command
+  changed_when: false
+  no_log: true
+  check_mode: false
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_topology.present | default(false)
+
+- name: Store retired ingress-side vpn_cascade connections
+  ansible.builtin.set_fact:
+    vpn_cascade_retired_connections: "{{ vpn_cascade_retired_connections_command.stdout_lines | default([]) | reject('equalto', '') | list | unique }}"
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_topology.present | default(false)
+
+- name: Report retired ingress-side vpn_cascade connections
+  ansible.builtin.debug:
+    msg: "would remove retired cascade connection {{ item }}"
+  loop: "{{ vpn_cascade_retired_connections | default([]) }}"
+  changed_when: ansible_check_mode
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_topology.present | default(false)
+    - vpn_cascade_retired_connections | default([]) | length > 0
+
+- name: Remove retired ingress-side vpn_cascade connections
+  ansible.builtin.shell: |
+    set -euo pipefail
+    tmp_file="$(mktemp)"
+    trap 'rm -f "$tmp_file"' EXIT
+    printf 'Hub %s\nCascadeOffline %s\nCascadeDelete %s\nFlush\n' "$HUB_NAME" "$CONNECTION_NAME" "$CONNECTION_NAME" > "$tmp_file"
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file" >/dev/null' < "$tmp_file"
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
+    CONNECTION_NAME: "{{ item }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  loop: "{{ vpn_cascade_retired_connections | default([]) }}"
+  no_log: true
+  changed_when: true
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_topology.present | default(false)
+    - vpn_cascade_retired_connections | default([]) | length > 0
+    - not ansible_check_mode
 
 - name: Verify vpn_cascade published transport ports
   ansible.builtin.command:

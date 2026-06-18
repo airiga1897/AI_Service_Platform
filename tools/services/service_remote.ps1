@@ -16,6 +16,8 @@ param(
 
     [string]$OperatorDir = ".\operator",
 
+    [string]$KnownHostsFile = "",
+
     [string]$SshUser = "useradmin",
 
     [string]$SshKeyFile = "",
@@ -165,15 +167,19 @@ function Invoke-CleanupSsh($Arguments, $Label) {
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        & ssh @Arguments *> $null
+        & $script:SshExecutablePath @Arguments *> $null
         if ($LASTEXITCODE -ne 0) {
-            Write-Warning "$Label failed with exit code $LASTEXITCODE; continuing because cleanup is best-effort"
+            Write-Warning "$Label failed with exit code $LASTEXITCODE; continuing because cleanup is non-fatal best-effort"
         }
     } catch {
-        Write-Warning "$Label failed: $($_.Exception.Message); continuing because cleanup is best-effort"
+        Write-Warning "$Label failed: $($_.Exception.Message); continuing because cleanup is non-fatal best-effort"
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
+}
+
+function New-BackgroundCleanupCommand($Command) {
+    return "nohup sh -c $(Quote-BashArg $Command) >/dev/null 2>&1 &"
 }
 
 function Invoke-RemoteTempCleanup($SshArgs, $Remote) {
@@ -216,6 +222,40 @@ function Invoke-CaptureExternal($FilePath, $Arguments) {
     } finally {
         $process.Dispose()
     }
+}
+
+function Resolve-OpenSshExecutable($Name) {
+    $candidates = @()
+    if ($env:WINDIR) {
+        $candidates += Join-Path $env:WINDIR "System32\OpenSSH\$Name.exe"
+    }
+    $commands = Get-Command "$Name.exe" -ErrorAction SilentlyContinue
+    if ($commands) {
+        $candidates += @($commands | ForEach-Object { $_.Source })
+    }
+    $commands = Get-Command $Name -ErrorAction SilentlyContinue
+    if ($commands) {
+        $candidates += @($commands | ForEach-Object { $_.Source })
+    }
+
+    foreach ($candidate in ($candidates | Where-Object { $_ } | Select-Object -Unique)) {
+        if ((Test-Path -LiteralPath $candidate -PathType Leaf) -and ([IO.Path]::GetExtension($candidate) -ieq ".exe")) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+    Fail "$Name.exe not found. Install Windows OpenSSH Client or fix PATH."
+}
+
+function Resolve-OpenSshClient() {
+    $sshPath = Resolve-OpenSshExecutable "ssh"
+    $version = (& $env:ComSpec /d /c "`"$sshPath`" -V 2>&1" | ForEach-Object { [string]$_ }) -join "`n"
+    if ($LASTEXITCODE -ne 0 -and -not $version) {
+        Fail "Failed to run ssh -V at $sshPath"
+    }
+    if ($version -notmatch "OpenSSH") {
+        Fail "Resolved ssh is not OpenSSH: $sshPath. Output:`n$version"
+    }
+    return $sshPath
 }
 
 function Write-LfScript($Path, $Lines) {
@@ -310,7 +350,7 @@ function Wait-RemoteServiceJob([string[]]$SshArgs, [string]$Remote, [string]$Rem
             "if [ -f $(Quote-BashArg $RemoteLog) ]; then tail -n +$($printedLines + 1) $(Quote-BashArg $RemoteLog); fi",
             "if [ -f $(Quote-BashArg $RemoteDone) ]; then echo __SERVICE_JOB_DONE__; cat $(Quote-BashArg $RemoteExitCode); elif [ -f $(Quote-BashArg $RemotePid) ] && ! kill -0 ""`$(cat $(Quote-BashArg $RemotePid))"" 2>/dev/null; then echo __SERVICE_JOB_DEAD__; fi"
         ) -join "; "
-        $result = Invoke-CaptureExternal "ssh" ($SshArgs + @($Remote, $pollCommand))
+        $result = Invoke-CaptureExternal $script:SshExecutablePath ($SshArgs + @($Remote, $pollCommand))
 
         if ($result.ExitCode -eq 255) {
             $transportFailures++
@@ -465,12 +505,8 @@ if ($RemoteTransferRetryDelaySeconds -lt 1) {
 Require-File $NodesFile "NodesFile"
 Require-File $StateFile "StateFile"
 
-if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
-    Fail "ssh not found in PATH. Install Windows OpenSSH Client or fix PATH."
-}
-if (-not (Get-Command scp -ErrorAction SilentlyContinue)) {
-    Fail "scp not found in PATH. Install Windows OpenSSH Client or fix PATH."
-}
+$script:SshExecutablePath = Resolve-OpenSshClient
+$script:ScpExecutablePath = Resolve-OpenSshExecutable "scp"
 
 $nodesHeader = Get-Content -LiteralPath $NodesFile -TotalCount 1
 if ($nodesHeader -ne $ExpectedHeader) {
@@ -487,6 +523,9 @@ $controlNode = Resolve-ControlNodeFromState $nodes $stateRows $ControlRole $Cont
 
 if (-not $SshKeyFile) {
     $SshKeyFile = Join-Path (Join-Path $OperatorDir $controlNode.current_alias) "admin_key"
+}
+if (-not $KnownHostsFile) {
+    $KnownHostsFile = Join-Path ([System.IO.Path]::GetTempPath()) "ai-service-platform.known_hosts"
 }
 Require-File $SshKeyFile "SshKeyFile"
 Ensure-OpenSshPrivateKeyAcl $SshKeyFile
@@ -596,7 +635,7 @@ $sshCommonArgs = @(
     "-o", "ServerAliveCountMax=2"
 )
 if ($AutoAcceptHostKey) {
-    $sshCommonArgs += @("-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR")
+    $sshCommonArgs += @("-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=$KnownHostsFile", "-o", "LogLevel=ERROR")
 }
 $scpCommonArgs = @(
     "-B",
@@ -611,7 +650,7 @@ $scpCommonArgs = @(
     "-o", "ServerAliveCountMax=2"
 )
 if ($AutoAcceptHostKey) {
-    $scpCommonArgs += @("-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR")
+    $scpCommonArgs += @("-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=$KnownHostsFile", "-o", "LogLevel=ERROR")
 }
 $runScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-service-platform.service-job." + [guid]::NewGuid().ToString("N") + ".sh")
 $remoteJobCompletedSuccessfully = $false
@@ -707,20 +746,20 @@ try {
         Write-Host "Creating remote temporary bundle directory..."
         $mkdirCommand = "mkdir -p $(Quote-BashArg $remoteBundleDir)"
     }
-    Invoke-ExternalRetryTransport "ssh" ($sshCommonArgs + @(
+    Invoke-ExternalRetryTransport $script:SshExecutablePath ($sshCommonArgs + @(
         $remote,
         $mkdirCommand
     )) "remote service bundle directory creation" $RemoteTransferAttempts
 
     Write-Host "Uploading service bundle archive..."
-    Invoke-ExternalRetrySshTransport "scp" ($scpCommonArgs + @(
+    Invoke-ExternalRetrySshTransport $script:ScpExecutablePath ($scpCommonArgs + @(
         $bundle.ArchivePath,
         "${remote}:$remoteBundleArchive"
     )) "service bundle upload" $RemoteTransferAttempts $RemoteTransferRetryDelaySeconds
 
     if ($useDetachedRemoteJob) {
         Write-Host "Uploading remote job runner..."
-        Invoke-ExternalRetrySshTransport "scp" ($scpCommonArgs + @(
+        Invoke-ExternalRetrySshTransport $script:ScpExecutablePath ($scpCommonArgs + @(
             $runScriptPath,
             "${remote}:$remoteJobScript"
         )) "remote job runner upload" $RemoteTransferAttempts $RemoteTransferRetryDelaySeconds
@@ -739,7 +778,7 @@ try {
     ) -join "; "
 
     Write-Host "Extracting service bundle on orchestration node..."
-    Invoke-ExternalRetryTransport "ssh" ($sshCommonArgs + @(
+    Invoke-ExternalRetryTransport $script:SshExecutablePath ($sshCommonArgs + @(
         $remote,
         $extractCommand
     )) "remote service bundle extract" $RemoteTransferAttempts
@@ -753,7 +792,7 @@ try {
         ) -join "; "
 
         Write-Host "Starting remote service job..."
-        Invoke-ExternalRetryTransport "ssh" ($sshCommonArgs + @(
+        Invoke-ExternalRetryTransport $script:SshExecutablePath ($sshCommonArgs + @(
             $remote,
             $startJobCommand
         )) "remote service job start" $RemoteTransferAttempts
@@ -763,10 +802,11 @@ try {
         $remoteJobCompletedSuccessfully = $true
     } else {
         Write-Host "Installing service bundle and running remote service command..."
-        Invoke-ExternalRetrySshTransport "ssh" ($sshCommonArgs + @(
+        Invoke-ExternalRetrySshTransport $script:SshExecutablePath ($sshCommonArgs + @(
             $remote,
             $installCommands
         )) "remote service command" $RemoteTransferAttempts $RemoteTransferRetryDelaySeconds
+        Write-Host "remote service command completed successfully; cleanup is non-fatal best-effort"
     }
 } finally {
     if ($bundle) {
@@ -776,18 +816,19 @@ try {
     Remove-Item -LiteralPath $runScriptPath -Force -ErrorAction SilentlyContinue
     if ($useDetachedRemoteJob -and $remoteJobCompletedSuccessfully) {
         Write-Host "Cleaning remote temporary service bundle and job..."
-        $cleanupTarget = "rm -rf $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteBundleArchive) $(Quote-BashArg $remoteJobDir)"
+        $cleanupTarget = New-BackgroundCleanupCommand "rm -rf $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteBundleArchive) $(Quote-BashArg $remoteJobDir)"
     } elseif ($useDetachedRemoteJob) {
         Write-Host "Cleaning remote temporary service bundle; preserving failed job log: $remoteJobLog"
-        $cleanupTarget = "rm -rf $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteBundleArchive)"
+        $cleanupTarget = New-BackgroundCleanupCommand "rm -rf $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteBundleArchive)"
     } else {
         Write-Host "Cleaning remote temporary service bundle..."
-        $cleanupTarget = "rm -rf $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteBundleArchive) $(Quote-BashArg $remoteJobDir)"
+        $cleanupTarget = New-BackgroundCleanupCommand "rm -rf $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteBundleArchive) $(Quote-BashArg $remoteJobDir)"
     }
     if ($remote -and $remoteBundleDir -and $remoteBundleArchive -and $remoteJobDir -and $sshCommonArgs) {
         Invoke-CleanupSsh ($sshCommonArgs + @(
             $remote,
             $cleanupTarget
         )) "remote service bundle and job cleanup"
+        Write-Host "Remote cleanup scheduled; cleanup failures are non-fatal"
     }
 }

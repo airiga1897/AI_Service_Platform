@@ -1,6 +1,7 @@
 param(
     [string]$SecretFile = ".\operator\softether\cascade\secrets\lab-cascade.json",
     [string]$NodesFile = ".\operator\nodes.csv",
+    [string]$StateFile = ".\operator\state.csv",
     [string]$OperatorDir = ".\operator",
     [string]$SshUser = "useradmin",
     [string]$SshPath = "ssh",
@@ -204,6 +205,9 @@ if ($TimeoutSeconds -lt 1) {
 
 $script:SshExecutablePath = Resolve-SshExecutable $SshPath
 $nodes = Load-Nodes $NodesFile
+if ($StateFile) {
+    Require-File $StateFile "StateFile"
+}
 $secret = Read-JsonFile $SecretFile "vpn_cascade secret"
 if (-not $secret.links -or $secret.links.Count -eq 0) {
     Fail "cascade secret must include links array: $SecretFile"

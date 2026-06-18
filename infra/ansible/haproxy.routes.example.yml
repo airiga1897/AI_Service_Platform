@@ -6,9 +6,9 @@ vpn_ingress:
     vps2:
       sni:
         - vpn-vps2.mine-craft.su
-    vps3:
+    vps6:
       sni:
-        - vpn-vps3.mine-craft.su
+        - vpn-vps6.mine-craft.su
   backend:
     host: 172.20.0.2
   ports:

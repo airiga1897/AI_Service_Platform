@@ -36,6 +36,11 @@ platform:
       country: Kazakhstan
       city: Almaty
       datacenter: Ahost
+    vps-ru-vps6-01:
+      current_alias: VPS6
+      country: Russia
+      city: Moscow
+      datacenter: replacement-vps6
     vps-ru-ixcellerate-01:
       current_alias: VPS3
       country: Russia
@@ -55,11 +60,11 @@ platform:
       candidate_node: null
       old_node: null
     management-monitoring-orchestration:
-      current_alias: VPS3
+      current_alias: VPS6
       ansible_group: management
-      active_node: vps-ru-ixcellerate-01
+      active_node: vps-ru-vps6-01
       candidate_node: null
-      old_node: null
+      old_node: vps-ru-ixcellerate-01
     vpn-only-edge:
       current_alias: null
       ansible_group: vpn_edges
@@ -78,7 +83,7 @@ platform:
       country: Kazakhstan
       resources_hint: 4cpu-4gb-80gb
       notes: preprod-валидация, hot standby, локальные бэкапы, цель failover
-    VPS3:
+    VPS6:
       role: management-monitoring-orchestration
       country: Russia
       resources_hint: 2cpu-2gb-40gb
@@ -93,7 +98,7 @@ platform:
       target_nodes:
         - VPS1
         - VPS2
-        - VPS3
+        - VPS6
       bootstrap_node: VPS1
       per_node_role: client-ingress-and-controlled-egress
       supports_vpn_only_expansion_nodes: true

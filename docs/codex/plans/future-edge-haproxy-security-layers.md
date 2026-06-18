@@ -1,30 +1,24 @@
-# Future Plan: Edge HAProxy Security Layers
+# Edge HAProxy Security Layers
 
-This plan preserves ideas from the previous HAProxy security work, but keeps
-them out of the first `edge_haproxy` rollout.
+This note tracks the edge security layers ported from the previous HAProxy
+security work.
 
-## Why Deferred
+## Current Layers
 
-The first HAProxy rollout serves the VPN/TCP path. It must not accidentally
-block SSTP or SoftEther management traffic with HTTP-specific rules.
-
-Current v1 protection:
+Current protection:
 
 - manual blacklist through `operator/haproxy/lists/blocked_ips.lst`;
 - management allowlist for `5555/tcp` through `operator/haproxy/lists/vpn_mgmt_ips.lst`;
-- soft TCP stick-table rate limiting;
+- optional GeoIP source list through `operator/haproxy/lists/ru_networks.lst`;
+- soft TCP stick-table rate limiting for VPN and Minecraft;
+- HTTP request/error-rate stick-table protection;
+- scanner-path blocking for common web probe paths;
+- ACME bypass for `/.well-known/acme-challenge/`;
 - local-only HAProxy stats.
 
-## Future Layers
+## Remaining Future Layers
 
-Add these only after VPN over HAProxy is stable:
-
-- GeoIP/generated policy allow/deny lists;
 - site-specific routing/security policies;
-- scanner-path autoban for HTTP frontends;
-- HTTP error-rate bans;
-- ACME bypass rules that never block Let's Encrypt validation;
-- separate policies for website routes and VPN routes;
 - operational scripts for safe HAProxy reload and log analysis.
 
 ## Rule

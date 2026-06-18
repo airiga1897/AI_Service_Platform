@@ -9,6 +9,8 @@ param(
 
     [string]$OperatorDir = ".\operator",
 
+    [string]$KnownHostsFile = "",
+
     [string]$SshUser = "useradmin",
 
     [string]$SshKeyFile = "",
@@ -209,32 +211,46 @@ function Resolve-ControlNodeFromState($NodeRows, $StateRows, $Role, $ExplicitAli
     return $node
 }
 
+function Resolve-OpenSshExecutable($Name) {
+    $candidates = @()
+    if ($env:WINDIR) {
+        $candidates += Join-Path $env:WINDIR "System32\OpenSSH\$Name.exe"
+    }
+    $commands = Get-Command "$Name.exe" -ErrorAction SilentlyContinue
+    if ($commands) {
+        $candidates += @($commands | ForEach-Object { $_.Source })
+    }
+    $commands = Get-Command $Name -ErrorAction SilentlyContinue
+    if ($commands) {
+        $candidates += @($commands | ForEach-Object { $_.Source })
+    }
+
+    foreach ($candidate in ($candidates | Where-Object { $_ } | Select-Object -Unique)) {
+        if ((Test-Path -LiteralPath $candidate -PathType Leaf) -and ([IO.Path]::GetExtension($candidate) -ieq ".exe")) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+    Fail "$Name.exe not found. Install Windows OpenSSH Client or fix PATH."
+}
+
+function Resolve-OpenSshClient() {
+    $sshPath = Resolve-OpenSshExecutable "ssh"
+    $version = (& $env:ComSpec /d /c "`"$sshPath`" -V 2>&1" | ForEach-Object { [string]$_ }) -join "`n"
+    if ($version -notmatch "OpenSSH") {
+        Fail "Resolved ssh is not OpenSSH: $sshPath. Output:`n$version"
+    }
+    return $sshPath
+}
+
 Require-File $NodesFile "NodesFile"
 Require-File $CreateInventoryScript "CreateInventoryScript"
 Require-File $PrepareInventoryScript "PrepareInventoryScript"
 Require-File $VerifyControlScript "VerifyControlScript"
 Require-File $GenerateNetworkPlanScript "GenerateNetworkPlanScript"
 
-if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
-    Fail "ssh not found in PATH. Install Windows OpenSSH Client or fix PATH."
-}
-if (-not (Get-Command scp -ErrorAction SilentlyContinue)) {
-    Fail "scp not found in PATH. Install Windows OpenSSH Client or fix PATH."
-}
-if (-not (Get-Command ssh-keygen -ErrorAction SilentlyContinue)) {
-    Fail "ssh-keygen not found in PATH. Install Windows OpenSSH Client or fix PATH."
-}
-
-try {
-    $previousErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    $sshVersion = (& ssh -V 2>&1 | ForEach-Object { [string]$_ }) -join "`n"
-} finally {
-    $ErrorActionPreference = $previousErrorActionPreference
-}
-if ($sshVersion -notmatch "OpenSSH") {
-    Fail "ssh in PATH does not look like OpenSSH. Output:`n$sshVersion"
-}
+$script:SshExecutablePath = Resolve-OpenSshClient
+$script:ScpExecutablePath = Resolve-OpenSshExecutable "scp"
+$script:SshKeygenExecutablePath = Resolve-OpenSshExecutable "ssh-keygen"
 
 $firstLine = Get-Content -LiteralPath $NodesFile -TotalCount 1
 if ($firstLine -ne $ExpectedHeader) {
@@ -275,6 +291,9 @@ if ($controlNode.endpoint -eq "local" -or $controlNode.connection -eq "local") {
 if (-not $SshKeyFile) {
     $SshKeyFile = Join-Path (Join-Path $OperatorDir $controlNode.current_alias) "admin_key"
 }
+if (-not $KnownHostsFile) {
+    $KnownHostsFile = Join-Path ([System.IO.Path]::GetTempPath()) "ai-service-platform.known_hosts"
+}
 Require-File $SshKeyFile "SshKeyFile"
 if (-not $Include) {
     $Include = ($rows | Where-Object { $_.current_alias } | ForEach-Object { $_.current_alias }) -join ","
@@ -306,7 +325,7 @@ function Get-OpenSshCommonArgs($KeyFile) {
         "-o", "PreferredAuthentications=publickey"
     )
     if ($AutoAcceptHostKey) {
-        $args += @("-o", "StrictHostKeyChecking=accept-new")
+        $args += @("-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=$KnownHostsFile")
     }
     return $args
 }
@@ -322,7 +341,7 @@ function Get-ScpKeyArgs($KeyFile) {
 function Invoke-ScpKey($KeyFile, $Source, $Target, $Label) {
     $scpArgs = @(Get-ScpKeyArgs $KeyFile) + @($Source, $Target)
     for ($attempt = 1; $attempt -le $SshTransferRetries; $attempt++) {
-        & scp @scpArgs
+        & $script:ScpExecutablePath @scpArgs
         $exitCode = $LASTEXITCODE
         if ($exitCode -eq 0) {
             return
@@ -339,7 +358,7 @@ function Invoke-ScpKey($KeyFile, $Source, $Target, $Label) {
 function Invoke-ScpKeyRecursive($KeyFile, $Source, $Target, $Label) {
     $scpArgs = @("-r") + @(Get-ScpKeyArgs $KeyFile) + @($Source, $Target)
     for ($attempt = 1; $attempt -le $SshTransferRetries; $attempt++) {
-        & scp @scpArgs
+        & $script:ScpExecutablePath @scpArgs
         $exitCode = $LASTEXITCODE
         if ($exitCode -eq 0) {
             return
@@ -356,7 +375,7 @@ function Invoke-ScpKeyRecursive($KeyFile, $Source, $Target, $Label) {
 function Invoke-SshKey($KeyFile, $Remote, $Command, $Label) {
     $sshArgs = @(Get-SshKeyArgs $KeyFile) + @($Remote, $Command)
     for ($attempt = 1; $attempt -le $SshTransferRetries; $attempt++) {
-        & ssh @sshArgs
+        & $script:SshExecutablePath @sshArgs
         $exitCode = $LASTEXITCODE
         if ($exitCode -eq 0) {
             return
@@ -436,19 +455,21 @@ function Clear-OpenSshHostKey($Endpoint) {
         return
     }
 
-    $sshDir = Join-Path $env:USERPROFILE ".ssh"
-    $knownHosts = Join-Path $sshDir "known_hosts"
-    New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
+    $knownHosts = $KnownHostsFile
+    $sshDir = Split-Path -Parent $knownHosts
+    if ($sshDir) {
+        New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
+    }
     New-Item -ItemType File -Force -Path $knownHosts | Out-Null
 
     Write-Host "Removing old OpenSSH known_hosts entries for $Endpoint"
-    & ssh-keygen -F $Endpoint -f $knownHosts *> $null
+    & $script:SshKeygenExecutablePath -F $Endpoint -f $knownHosts *> $null
     if ($LASTEXITCODE -ne 0) {
         Write-Host "No existing OpenSSH known_hosts entry for $Endpoint; continuing."
         return
     }
 
-    & ssh-keygen -R $Endpoint -f $knownHosts | Out-Host
+    & $script:SshKeygenExecutablePath -R $Endpoint -f $knownHosts | Out-Host
     if ($LASTEXITCODE -ne 0) {
         Fail "ssh-keygen -R failed for $Endpoint"
     }

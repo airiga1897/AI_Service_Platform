@@ -49,6 +49,27 @@ function Join-AliasList($Aliases) {
     return (@($Aliases | Where-Object { $_ }) -join "+")
 }
 
+function Join-IncludeAliasList($Aliases) {
+    return (@($Aliases | Where-Object { $_ }) -join ",")
+}
+
+function Get-DefaultStandbyInclude($NodeRows, $ExcludedAliases) {
+    $includeAliases = New-Object System.Collections.Generic.List[string]
+    foreach ($node in $NodeRows) {
+        $alias = [string]$node.current_alias
+        if (-not $alias) {
+            continue
+        }
+        if ($ExcludedAliases -contains $alias) {
+            continue
+        }
+        if ($includeAliases -notcontains $alias) {
+            [void]$includeAliases.Add($alias)
+        }
+    }
+    return (Join-IncludeAliasList $includeAliases)
+}
+
 function Write-StateCsv($Path, $Rows) {
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add($ExpectedStateHeader)
@@ -116,6 +137,12 @@ if ($activeAliases[0] -eq $Alias) {
 }
 if ($candidateAliases -notcontains $Alias) {
     Fail "Alias '$Alias' must be listed in candidate_aliases for platform_role '$ControlRole'"
+}
+if (-not $Include) {
+    $Include = Get-DefaultStandbyInclude $nodeRows $oldAliases
+    if ($Include) {
+        Write-Host "Standby inventory include defaults to current aliases excluding old $ControlRole aliases: $Include"
+    }
 }
 
 $tempState = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-service-platform.standby-state." + [guid]::NewGuid().ToString("N") + ".csv")

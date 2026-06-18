@@ -26,6 +26,19 @@ frontend http_in
     mode http
     acl is_acme path_beg /.well-known/acme-challenge/
     http-request deny deny_status 403 if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst } !is_acme
+    http-request track-sc1 src table st_http_rates if !is_acme
+    acl is_http_banned src_get_gpc0(st_http_rates) gt 0
+    http-request deny deny_status 403 if !is_acme is_http_banned
+    acl has_high_error_rate sc1_http_err_rate(st_http_rates) gt {{ edge_haproxy_http_error_rate_limit }}
+    http-request sc-inc-gpc0(1) if !is_acme has_high_error_rate
+    http-request deny deny_status 403 if !is_acme has_high_error_rate
+    acl http_req_rate_abuse sc1_http_req_rate(st_http_rates) gt {{ edge_haproxy_http_rate_limit }}
+    http-request deny deny_status 429 if !is_acme http_req_rate_abuse
+{% for scanner_path in edge_haproxy_http_scanner_paths %}
+    acl is_scanner_path path_beg -i {{ scanner_path }}
+{% endfor %}
+    http-request sc-inc-gpc0(1) if !is_acme is_scanner_path
+    http-request deny deny_status 403 if !is_acme is_scanner_path
     http-request redirect scheme https code 301 unless is_acme
     use_backend be_acme_placeholder if is_acme
 
@@ -87,6 +100,9 @@ frontend minecraft_game
     tcp-request connection reject if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
     tcp-request connection track-sc0 src table st_minecraft_game_rates
     tcp-request connection reject if { sc0_conn_rate gt {{ edge_haproxy_route_model.minecraft.game.rate_limit }} }
+{% if edge_haproxy_route_model.minecraft.policy.geoip | default('disabled') == 'ru_only' %}
+    tcp-request connection reject if !{ src -f /usr/local/etc/haproxy/lists/ru_networks.lst }
+{% endif %}
     default_backend be_minecraft_game
 
 backend be_minecraft_game
@@ -105,6 +121,9 @@ frontend minecraft_rcon
     tcp-request connection reject if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
     tcp-request connection track-sc0 src table st_minecraft_rcon_rates
     tcp-request connection reject if { sc0_conn_rate gt {{ edge_haproxy_route_model.minecraft.rcon.rate_limit }} }
+{% if edge_haproxy_route_model.minecraft.policy.geoip | default('disabled') == 'ru_only' %}
+    tcp-request connection reject if !{ src -f /usr/local/etc/haproxy/lists/ru_networks.lst }
+{% endif %}
     default_backend be_minecraft_rcon
 
 backend be_minecraft_rcon
@@ -121,6 +140,9 @@ backend be_minecraft_rcon
 backend st_tcp_rates
     stick-table type ip size 100k expire 5m store conn_rate({{ edge_haproxy_tcp_rate_window }}),conn_cur
 {% endif %}
+backend st_http_rates
+    stick-table type ip size 100k expire {{ edge_haproxy_http_ban_expire }} store http_req_rate({{ edge_haproxy_http_rate_window }}),http_err_rate({{ edge_haproxy_http_rate_window }}),gpc0,conn_rate({{ edge_haproxy_http_rate_window }})
+
 {% if edge_haproxy_route_model.minecraft_enabled | default(false) %}
 backend st_minecraft_game_rates
     stick-table type ip size 100k expire 5m store conn_rate({{ edge_haproxy_tcp_rate_window }})

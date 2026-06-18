@@ -1,5 +1,5 @@
 ---
-# Переменные VPS3 — Управление
+# Переменные management/orchestration-ноды
 
 # Ansible
 ansible_control_dir: /opt/ansible

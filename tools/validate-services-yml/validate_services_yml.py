@@ -112,6 +112,12 @@ def validate_platform(errors: list[str], data: dict[str, Any]) -> None:
             "city": "Almaty",
             "datacenter": "Ahost",
         },
+        "vps-ru-vps6-01": {
+            "current_alias": "VPS6",
+            "country": "Russia",
+            "city": "Moscow",
+            "datacenter": "replacement-vps6",
+        },
         "vps-ru-ixcellerate-01": {
             "current_alias": "VPS3",
             "country": "Russia",
@@ -153,9 +159,9 @@ def validate_platform(errors: list[str], data: dict[str, Any]) -> None:
             "active_node": "vps-kz-ahost-01",
         },
         "management-monitoring-orchestration": {
-            "current_alias": "VPS3",
+            "current_alias": "VPS6",
             "ansible_group": "management",
-            "active_node": "vps-ru-ixcellerate-01",
+            "active_node": "vps-ru-vps6-01",
         },
     }
     for role_name, expected in expected_roles.items():
@@ -194,7 +200,7 @@ def validate_platform(errors: list[str], data: dict[str, Any]) -> None:
                 )
 
     vps_layout = require_mapping(errors, platform.get("vps_layout"), "platform.vps_layout")
-    for node in ("VPS1", "VPS2", "VPS3"):
+    for node in ("VPS1", "VPS2", "VPS6"):
         node_data = require_mapping(errors, vps_layout.get(node), f"platform.vps_layout.{node}")
         for field in ("role", "country", "resources_hint", "notes"):
             if not node_data.get(field):
@@ -225,7 +231,7 @@ def validate_platform(errors: list[str], data: dict[str, Any]) -> None:
             "platform.edge_vpn.deployment_scope.target_nodes",
         )
     )
-    for node in ("VPS1", "VPS2", "VPS3"):
+    for node in ("VPS1", "VPS2", "VPS6"):
         if node not in target_nodes:
             fail(errors, f"platform.edge_vpn.deployment_scope.target_nodes must include {node}")
     if deployment_scope.get("bootstrap_node") not in target_nodes:

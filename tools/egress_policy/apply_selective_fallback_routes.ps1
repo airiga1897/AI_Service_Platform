@@ -4,7 +4,9 @@ param(
     [string]$ProposalDir = ".\operator\egress_policy\proposals",
     [string]$AppliedRoutesDir = ".\operator\egress_policy\applied_routes",
     [string]$NodesFile = ".\operator\nodes.csv",
+    [string]$StateFile = ".\operator\state.csv",
     [string]$NetworksFile = ".\operator\networks.csv",
+    [string]$CascadeConfigFile = ".\operator\softether\cascade\secrets\lab-cascade.json",
     [string]$OperatorDir = ".\operator",
     [string[]]$Id = @(),
     [string[]]$TargetIp = @(),
@@ -19,6 +21,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ExpectedNodesHeader = "current_alias,endpoint,connection,root_password"
+$ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 $ExpectedNetworksHeader = "alias,policy_subnet,edge_ip,cascade_ip,cascade_router_ip,policy_gateway_ip"
 $PolicyGatewayContainer = "policy-gateway"
 $CascadeContainer = "softether-cascade"
@@ -185,6 +188,156 @@ function Load-CsvMap($Path, $ExpectedHeader, $KeyField, $Label) {
         $map[$key] = $row
     }
     return $map
+}
+
+function Load-StateRows {
+    Require-File $StateFile "state.csv"
+    $lines = @(Get-Content -LiteralPath $StateFile)
+    if ($lines.Count -eq 0 -or $lines[0] -ne $ExpectedStateHeader) {
+        Fail "state.csv header must be exactly: $ExpectedStateHeader"
+    }
+    return @(Import-Csv -LiteralPath $StateFile)
+}
+
+function Split-AliasList($Value) {
+    return @(([string]$Value) -split '\+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+function Get-ActiveCascadeAliases {
+    $aliases = New-Object System.Collections.ArrayList
+    foreach ($row in @($script:StateRows)) {
+        if ([string]$row.kind -eq "service" -and [string]$row.name -eq "vpn_cascade" -and [string]$row.state -eq "present") {
+            foreach ($aliasName in @(Split-AliasList $row.active_aliases)) {
+                [void]$aliases.Add($aliasName)
+            }
+        }
+    }
+    return @($aliases.ToArray() | Sort-Object -Unique)
+}
+
+function Get-CascadeTopologyRows {
+    return @($script:StateRows | Where-Object { [string]$_.kind -eq "cascade_topology" -and [string]$_.state -eq "present" })
+}
+
+function Split-CascadeEdgeList($Value) {
+    if (-not $Value) { return @() }
+    return @(([string]$Value) -split '\+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+function Load-CascadeTopologyFabric {
+    $rows = @(Get-CascadeTopologyRows)
+    if ($rows.Count -eq 0) {
+        return $null
+    }
+    if ($rows.Count -gt 1) {
+        Fail "state.csv has multiple present cascade_topology rows; keep exactly one"
+    }
+    $row = $rows[0]
+    $activeEdges = @(Split-CascadeEdgeList $row.active_aliases)
+    $oldEdges = @(Split-CascadeEdgeList $row.old_aliases)
+    $activeSet = @{}
+    $oldSet = @{}
+    foreach ($edge in $activeEdges) {
+        if ($edge -notmatch '^[A-Za-z0-9_.-]+>[A-Za-z0-9_.-]+$') {
+            Fail "cascade_topology $($row.name) has invalid active edge '$edge'; expected alias>alias"
+        }
+        $activeSet[$edge] = $true
+    }
+    foreach ($edge in $oldEdges) {
+        if ($edge -notmatch '^[A-Za-z0-9_.-]+>[A-Za-z0-9_.-]+$') {
+            Fail "cascade_topology $($row.name) has invalid old edge '$edge'; expected alias>alias"
+        }
+        $oldSet[$edge] = $true
+    }
+    return [pscustomobject]@{
+        name = [string]$row.name
+        active_edges = $activeSet
+        old_edges = $oldSet
+    }
+}
+
+function Load-ActiveCascadeLinks {
+    if (-not (Test-Path -LiteralPath $CascadeConfigFile -PathType Leaf)) {
+        return @()
+    }
+    $config = Read-JsonFile $CascadeConfigFile "cascade config"
+    return @($config.links | Where-Object { [string]$_.state -eq "active" })
+}
+
+function Test-ActiveCascadePath($Path) {
+    if ($script:CascadeTopologyFabric) {
+        $hops = @()
+        if ($Path.cascade_path -and @($Path.cascade_path).Count -gt 0) {
+            $hops = @($Path.cascade_path | ForEach-Object { "$($_.ingress_alias)>$($_.egress_alias)" })
+        } else {
+            $hops = @("$($Path.ingress_alias)>$($Path.egress_alias)")
+        }
+        foreach ($edge in @($hops)) {
+            if (-not $script:CascadeTopologyFabric.active_edges.ContainsKey($edge)) {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    $links = @($script:ActiveCascadeLinks)
+    if ($links.Count -eq 0) {
+        return $false
+    }
+    $hops = @()
+    if ($Path.cascade_path -and @($Path.cascade_path).Count -gt 0) {
+        $hops = @($Path.cascade_path | ForEach-Object {
+            [pscustomobject]@{
+                connection = [string]$_.connection
+                ingress_alias = [string]$_.ingress_alias
+                egress_alias = [string]$_.egress_alias
+            }
+        })
+    } else {
+        $hops = @([pscustomobject]@{
+            connection = [string]$Path.cascade_connection
+            ingress_alias = [string]$Path.ingress_alias
+            egress_alias = [string]$Path.egress_alias
+        })
+    }
+    foreach ($hop in @($hops)) {
+        $match = @($links | Where-Object {
+            [string]$_.ingress_alias -eq [string]$hop.ingress_alias -and
+            [string]$_.egress_alias -eq [string]$hop.egress_alias -and
+            ((-not $hop.connection) -or [string]$_.connection_name -eq [string]$hop.connection)
+        })
+        if ($match.Count -eq 0) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Assert-CurrentCascadeEgress($Proposal, $Label) {
+    if (-not $Proposal.recommended_path -or [string]$Proposal.recommended_path.mode -ne "cascade") {
+        Fail "$Label is not a cascade fallback proposal"
+    }
+    $ingressAlias = [string]$Proposal.recommended_path.ingress_alias
+    $egressAlias = [string]$Proposal.recommended_path.egress_alias
+    if (-not (Test-ActiveCascadePath $Proposal.recommended_path)) {
+        $edge = "$ingressAlias>$egressAlias"
+        if ($script:CascadeTopologyFabric) {
+            Fail "stale selective fallback proposal: $edge is not active in cascade_topology $($script:CascadeTopologyFabric.name)"
+        }
+        Fail "$Label points to stale cascade path $ingressAlias->${egressAlias}: no matching active link in $CascadeConfigFile"
+    }
+    if (-not $script:Nodes.ContainsKey($egressAlias)) {
+        Fail "$Label points to stale egress alias '$egressAlias': alias is not present in nodes.csv"
+    }
+    if (-not $script:Networks.ContainsKey($egressAlias)) {
+        Fail "$Label points to stale egress alias '$egressAlias': alias is not present in networks.csv"
+    }
+    if ($script:ActiveCascadeAliases -notcontains $ingressAlias) {
+        Fail "$Label points to inactive cascade ingress '$ingressAlias': alias is not active for service vpn_cascade in state.csv"
+    }
+    if ($script:ActiveCascadeAliases -notcontains $egressAlias) {
+        Fail "$Label points to inactive cascade egress '$egressAlias': alias is not active for service vpn_cascade in state.csv"
+    }
 }
 
 function Get-Proposals {
@@ -731,7 +884,12 @@ function Test-StepAbsent($Step) {
     $ingressGatewayRoutes = Invoke-SshText $Step.ingress_alias "sudo docker exec -u 0 $(Quote-BashArg $PolicyGatewayContainer) ip route 2>/dev/null || true"
     $ingressCascadeRoutes = Invoke-SshText $Step.ingress_alias "sudo docker exec -u 0 $(Quote-BashArg $CascadeContainer) ip route 2>/dev/null || true"
     $ingressNat = Invoke-SshText $Step.ingress_alias "sudo docker exec -u 0 $(Quote-BashArg $PolicyGatewayContainer) iptables -t nat -S POSTROUTING 2>/dev/null || true"
-    $egressNat = Invoke-SshText $Step.egress_alias "sudo docker exec -u 0 $(Quote-BashArg $CascadeContainer) iptables -t nat -S POSTROUTING 2>/dev/null || true"
+    $egressNat = ""
+    if ($script:Nodes.ContainsKey([string]$Step.egress_alias)) {
+        $egressNat = Invoke-SshText $Step.egress_alias "sudo docker exec -u 0 $(Quote-BashArg $CascadeContainer) iptables -t nat -S POSTROUTING 2>/dev/null || true"
+    } else {
+        Write-Host "[WARN] skipping absent-route egress NAT check for retired alias $($Step.egress_alias)"
+    }
     $edgeRoutePresent = $edgeRoutes -match "(?m)^$targetRegex\b"
     $ingressGatewayRoutePresent = $ingressGatewayRoutes -match "(?m)^$targetRegex\b"
     $ingressCascadeRoutePresent = $ingressCascadeRoutes -match "(?m)^$targetRegex\b"
@@ -846,13 +1004,21 @@ function Invoke-StepRollback($Step) {
     Invoke-SshText $Step.ingress_alias $ingressCommand | Out-Null
     $ingressCascadeCommand = "sudo docker exec -u 0 $(Quote-BashArg $CascadeContainer) sh -c $(Quote-BashArg "ip route del $($Step.target_ip)/32 2>/dev/null || true") 2>/dev/null || true"
     Invoke-SshText $Step.ingress_alias $ingressCascadeCommand | Out-Null
-    $egressCommand = "sudo docker exec -u 0 $(Quote-BashArg $CascadeContainer) sh -c $(Quote-BashArg "iptables -t nat -D POSTROUTING $match -m comment --comment '$egressComment' -j MASQUERADE 2>/dev/null || true; iptables -t nat -D POSTROUTING $match -m comment --comment '$baseComment' -j MASQUERADE 2>/dev/null || true") 2>/dev/null || true"
-    Invoke-SshText $Step.egress_alias $egressCommand | Out-Null
+    if ($script:Nodes.ContainsKey([string]$Step.egress_alias)) {
+        $egressCommand = "sudo docker exec -u 0 $(Quote-BashArg $CascadeContainer) sh -c $(Quote-BashArg "iptables -t nat -D POSTROUTING $match -m comment --comment '$egressComment' -j MASQUERADE 2>/dev/null || true; iptables -t nat -D POSTROUTING $match -m comment --comment '$baseComment' -j MASQUERADE 2>/dev/null || true") 2>/dev/null || true"
+        Invoke-SshText $Step.egress_alias $egressCommand | Out-Null
+    } else {
+        Write-Host "[WARN] skipping egress cleanup for retired alias $($Step.egress_alias); ingress-side route state was still rolled back"
+    }
 }
 
 $script:SshExecutablePath = Resolve-SshExecutable $SshPath
 $script:Nodes = Load-CsvMap $NodesFile $ExpectedNodesHeader "current_alias" "nodes.csv"
 $script:Networks = Load-CsvMap $NetworksFile $ExpectedNetworksHeader "alias" "networks.csv"
+$script:StateRows = @(Load-StateRows)
+$script:ActiveCascadeAliases = @(Get-ActiveCascadeAliases)
+$script:ActiveCascadeLinks = @(Load-ActiveCascadeLinks)
+$script:CascadeTopologyFabric = Load-CascadeTopologyFabric
 
 if ($Action -in @("verify", "rollback")) {
     $appliedStates = @(Get-AppliedRouteStates)
@@ -904,6 +1070,9 @@ foreach ($ip in $explicitTargetIps) {
     }
 }
 foreach ($item in $proposals) {
+    if ($Action -in @("apply", "refresh")) {
+        Assert-CurrentCascadeEgress $item.Proposal "proposal $($item.Proposal.id)"
+    }
     $ingressAlias = [string]$item.Proposal.recommended_path.ingress_alias
     $candidateIps = if ($explicitTargetIps.Count -gt 0) { $explicitTargetIps } else { @(Resolve-TargetIps $item.Proposal.target $ingressAlias) }
     foreach ($ip in $candidateIps) {
