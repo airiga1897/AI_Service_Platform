@@ -16,6 +16,7 @@ REMOTE_NODES_FILE="/opt/ai-service-platform/operator/nodes.csv"
 REMOTE_STATE_FILE="/opt/ai-service-platform/operator/state.csv"
 REMOTE_INVENTORY="/opt/ai-service-platform/inventory.ini"
 SERVICE_RUNNER_SCRIPT="tools/services/service.sh"
+CREATE_INVENTORY_SCRIPT="tools/bootstrap/create_inventory.sh"
 ANSIBLE_DIR="infra/ansible"
 POLICY_ROUTER_DOCKER_DIR="infra/docker/policy-router"
 POLICY_GATEWAY_DOCKER_DIR="infra/docker/policy-gateway"
@@ -48,7 +49,7 @@ Options:
   --remote-repo-dir PATH  Repo path on orchestration node. Default: /opt/ai-service-platform
   --limit ALIAS           Service target alias.
   --build-policy-router-image
-                         vpn_cascade only: build and distribute policy-router image on orchestration node.
+                         vpn_cascade only: force rebuild instead of reusing a matching local image.
   --check                 Pass --check to service.sh apply.
   --confirm-purge         Pass --confirm-purge to service.sh purge.
   --detached-remote-job   Run service command as a detached job and poll its log.
@@ -246,8 +247,12 @@ done
 require_file "$NODES_FILE" "--nodes-file"
 require_file "$STATE_FILE" "--state-file"
 require_file "$SERVICE_RUNNER_SCRIPT" "--service-runner-script"
+require_file "$CREATE_INVENTORY_SCRIPT" "--create-inventory-script"
+NETWORKS_FILE="$(dirname "$STATE_FILE")/networks.csv"
+require_file "$NETWORKS_FILE" "networks.csv"
 [ -d "$ANSIBLE_DIR" ] || fail "Ansible directory not found: $ANSIBLE_DIR"
 [ -d "$POLICY_ROUTER_DOCKER_DIR" ] || fail "Policy-router Docker context not found: $POLICY_ROUTER_DOCKER_DIR"
+[ -d "$POLICY_GATEWAY_DOCKER_DIR" ] || fail "Policy-gateway Docker context not found: $POLICY_GATEWAY_DOCKER_DIR"
 [ -d "$EGRESS_POLICY_TOOLS_DIR" ] || fail "Egress policy tools directory not found: $EGRESS_POLICY_TOOLS_DIR"
 if [ "$BUILD_POLICY_ROUTER_IMAGE" = "true" ] && [ "$SERVICE" != "vpn_cascade" ]; then
     fail "--build-policy-router-image is supported only for service vpn_cascade"
@@ -318,10 +323,15 @@ remote="$SSH_USER@$control_endpoint"
 remote_bundle_dir="/tmp/ai-service-platform.service-remote.$(date +%s).$$"
 remote_bundle_archive="$remote_bundle_dir.tar.gz"
 remote_service_runner_temp="$remote_bundle_dir/service.sh"
+remote_create_inventory_temp="$remote_bundle_dir/tools/bootstrap/create_inventory.sh"
 remote_ansible_temp="$remote_bundle_dir/ansible"
 remote_policy_router_docker_temp="$remote_bundle_dir/docker/policy-router"
 remote_policy_gateway_docker_temp="$remote_bundle_dir/docker/policy-gateway"
 remote_egress_policy_tools_temp="$remote_bundle_dir/tools/egress_policy"
+remote_operator_temp="$remote_bundle_dir/operator"
+remote_operator_dir="$(dirname "$REMOTE_STATE_FILE")"
+remote_nodes_dir="$(dirname "$REMOTE_NODES_FILE")"
+remote_networks_file="$remote_operator_dir/networks.csv"
 remote_job_dir="/tmp/ai-service-platform.service-job.$(date +%s).$$"
 remote_job_script="$remote_job_dir/run.sh"
 remote_job_log="$remote_job_dir/output.log"
@@ -377,7 +387,39 @@ remote_args=(
 [ "$CONFIRM_PURGE" = "true" ] && remote_args+=("--confirm-purge")
 
 service_command="set -e; cd $(quote_bash_arg "$REMOTE_REPO_DIR"); if command -v stdbuf >/dev/null 2>&1; then stdbuf -oL -eL bash tools/services/service.sh ${remote_args[*]}; else bash tools/services/service.sh ${remote_args[*]}; fi"
-install_and_run_command="set -e; sudo mkdir -p $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services") $(quote_bash_arg "$REMOTE_REPO_DIR/tools") $(quote_bash_arg "$REMOTE_REPO_DIR/infra") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker"); sudo install -m 700 $(quote_bash_arg "$remote_service_runner_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services/service.sh"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/tools/egress_policy"); sudo cp -a $(quote_bash_arg "$remote_egress_policy_tools_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/egress_policy"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible"); sudo cp -a $(quote_bash_arg "$remote_ansible_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-router"); sudo cp -a $(quote_bash_arg "$remote_policy_router_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-router"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-gateway"); sudo cp -a $(quote_bash_arg "$remote_policy_gateway_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-gateway"); sudo bash -lc $(quote_bash_arg "$service_command")"
+refresh_known_hosts_script="$(cat <<EOF
+set -e
+nodes_file=$(quote_bash_arg "$REMOTE_NODES_FILE")
+ssh_dir=/home/ansible/.ssh
+known_hosts="\$ssh_dir/known_hosts"
+command -v ssh-keygen >/dev/null 2>&1
+command -v ssh-keyscan >/dev/null 2>&1
+id ansible >/dev/null 2>&1
+install -d -m 700 -o ansible -g ansible "\$ssh_dir"
+touch "\$known_hosts"
+chown ansible:ansible "\$known_hosts"
+chmod 600 "\$known_hosts"
+tail -n +2 "\$nodes_file" | while IFS=, read -r current_alias endpoint connection _root_password extra || [ -n "\${current_alias:-}" ]; do
+    current_alias="\${current_alias//$'\r'/}"
+    endpoint="\${endpoint//$'\r'/}"
+    connection="\${connection//$'\r'/}"
+    extra="\${extra//$'\r'/}"
+    [ -n "\$current_alias" ] || continue
+    [ -z "\$extra" ] || { echo "[ERROR] nodes.csv row for \$current_alias has too many columns" >&2; exit 1; }
+    [ "\$connection" = "ssh" ] || continue
+    [ "\$endpoint" != "local" ] || continue
+    echo "Refreshing ansible known_hosts for \$current_alias: \$endpoint"
+    sudo -u ansible ssh-keygen -R "\$endpoint" -f "\$known_hosts" >/dev/null 2>&1 || true
+    ssh-keyscan -T 10 -H "\$endpoint" >> "\$known_hosts" 2>/dev/null || { echo "[ERROR] ssh-keyscan failed for \$current_alias endpoint: \$endpoint" >&2; exit 1; }
+done
+sort -u "\$known_hosts" -o "\$known_hosts"
+chown ansible:ansible "\$known_hosts"
+chmod 600 "\$known_hosts"
+echo "[OK] ansible known_hosts refreshed"
+EOF
+)"
+refresh_known_hosts_command="sudo bash -lc $(quote_bash_arg "$refresh_known_hosts_script")"
+install_and_run_command="set -e; sudo mkdir -p $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap") $(quote_bash_arg "$REMOTE_REPO_DIR/tools") $(quote_bash_arg "$REMOTE_REPO_DIR/infra") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker"); sudo install -m 700 $(quote_bash_arg "$remote_service_runner_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services/service.sh"); sudo install -m 700 $(quote_bash_arg "$remote_create_inventory_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap/create_inventory.sh"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/tools/egress_policy"); sudo cp -a $(quote_bash_arg "$remote_egress_policy_tools_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/egress_policy"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible"); sudo cp -a $(quote_bash_arg "$remote_ansible_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-router"); sudo cp -a $(quote_bash_arg "$remote_policy_router_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-router"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-gateway"); sudo cp -a $(quote_bash_arg "$remote_policy_gateway_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-gateway"); sudo mkdir -p $(quote_bash_arg "$remote_nodes_dir") $(quote_bash_arg "$remote_operator_dir"); sudo install -o ansible -g ansible -m 600 $(quote_bash_arg "$remote_operator_temp/nodes.csv") $(quote_bash_arg "$REMOTE_NODES_FILE"); sudo install -o ansible -g ansible -m 600 $(quote_bash_arg "$remote_operator_temp/state.csv") $(quote_bash_arg "$REMOTE_STATE_FILE"); sudo install -o ansible -g ansible -m 600 $(quote_bash_arg "$remote_operator_temp/networks.csv") $(quote_bash_arg "$remote_networks_file"); printf '%s\n' 'Refreshing ansible known_hosts from operator nodes'; $refresh_known_hosts_command; if [ -d $(quote_bash_arg "$remote_operator_temp/haproxy") ]; then sudo rm -rf $(quote_bash_arg "$remote_operator_dir/haproxy"); sudo cp -a $(quote_bash_arg "$remote_operator_temp/haproxy") $(quote_bash_arg "$remote_operator_dir/haproxy"); sudo chown -R ansible:ansible $(quote_bash_arg "$remote_operator_dir/haproxy"); fi; if [ -d $(quote_bash_arg "$remote_operator_temp/softether") ]; then sudo rm -rf $(quote_bash_arg "$remote_operator_dir/softether"); sudo cp -a $(quote_bash_arg "$remote_operator_temp/softether") $(quote_bash_arg "$remote_operator_dir/softether"); sudo chown -R ansible:ansible $(quote_bash_arg "$remote_operator_dir/softether"); fi; sudo bash $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap/create_inventory.sh") --nodes-file $(quote_bash_arg "$REMOTE_NODES_FILE") --state-file $(quote_bash_arg "$REMOTE_STATE_FILE") --output $(quote_bash_arg "$REMOTE_INVENTORY"); sudo bash -lc $(quote_bash_arg "$service_command")"
 remote_service_display="${remote_args[*]}"
 
 echo "Control node: $active_aliases via role '$CONTROL_ROLE'"
@@ -395,12 +437,24 @@ fi
 
 echo "Preparing local service bundle..."
 cp "$SERVICE_RUNNER_SCRIPT" "$staging_dir/service.sh"
+mkdir -p "$staging_dir/tools/bootstrap"
+cp "$CREATE_INVENTORY_SCRIPT" "$staging_dir/tools/bootstrap/create_inventory.sh"
 cp -a "$ANSIBLE_DIR" "$staging_dir/ansible"
 mkdir -p "$staging_dir/tools"
 cp -a "$EGRESS_POLICY_TOOLS_DIR" "$staging_dir/tools/egress_policy"
 mkdir -p "$staging_dir/docker"
 cp -a "$POLICY_ROUTER_DOCKER_DIR" "$staging_dir/docker/policy-router"
 cp -a "$POLICY_GATEWAY_DOCKER_DIR" "$staging_dir/docker/policy-gateway"
+mkdir -p "$staging_dir/operator"
+cp "$NODES_FILE" "$staging_dir/operator/nodes.csv"
+cp "$STATE_FILE" "$staging_dir/operator/state.csv"
+cp "$NETWORKS_FILE" "$staging_dir/operator/networks.csv"
+operator_source_dir="$(dirname "$NODES_FILE")"
+for operator_subdir in haproxy softether; do
+    if [ -d "$operator_source_dir/$operator_subdir" ]; then
+        cp -a "$operator_source_dir/$operator_subdir" "$staging_dir/operator/$operator_subdir"
+    fi
+done
 tar -czf "$archive_path" -C "$staging_dir" .
 if [ "$DETACHED_REMOTE_JOB" = "true" ]; then
     cat > "$run_script_path" <<EOF
@@ -411,9 +465,11 @@ export ANSIBLE_FORCE_COLOR=0
 export ANSIBLE_DISPLAY_SKIPPED_HOSTS=true
 exec > $(quote_bash_arg "$remote_job_log") 2>&1
 log_stage() { printf '[remote-job] %s %s\n' "\$(date -u '+%H:%M:%S')" "\$*"; }
-run_stage() { label="\$1"; shift; log_stage "\$label"; "\$@"; rc="\$?"; if [ "\$rc" -ne 0 ]; then log_stage "failed: \$label (rc=\$rc)"; return "\$rc"; fi; }
-run_stage $(quote_bash_arg "prepare repo directories") sudo mkdir -p $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services") $(quote_bash_arg "$REMOTE_REPO_DIR/tools") $(quote_bash_arg "$REMOTE_REPO_DIR/infra") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker")
+finish_job() { rc="\$1"; printf '%s\n' "\$rc" > $(quote_bash_arg "$remote_job_exit_code"); touch $(quote_bash_arg "$remote_job_done"); exit "\$rc"; }
+run_stage() { label="\$1"; shift; log_stage "\$label"; "\$@"; rc="\$?"; if [ "\$rc" -ne 0 ]; then log_stage "failed: \$label (rc=\$rc)"; finish_job "\$rc"; fi; }
+run_stage $(quote_bash_arg "prepare repo directories") sudo mkdir -p $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap") $(quote_bash_arg "$REMOTE_REPO_DIR/tools") $(quote_bash_arg "$REMOTE_REPO_DIR/infra") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker")
 run_stage $(quote_bash_arg "install service runner") sudo install -m 700 $(quote_bash_arg "$remote_service_runner_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services/service.sh")
+run_stage $(quote_bash_arg "install inventory generator") sudo install -m 700 $(quote_bash_arg "$remote_create_inventory_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap/create_inventory.sh")
 run_stage $(quote_bash_arg "remove previous egress policy tools") sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/tools/egress_policy")
 run_stage $(quote_bash_arg "install egress policy tools") sudo cp -a $(quote_bash_arg "$remote_egress_policy_tools_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/egress_policy")
 run_stage $(quote_bash_arg "remove previous Ansible bundle") sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible")
@@ -422,6 +478,14 @@ run_stage $(quote_bash_arg "remove previous policy-router Docker context") sudo 
 run_stage $(quote_bash_arg "install policy-router Docker context") sudo cp -a $(quote_bash_arg "$remote_policy_router_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-router")
 run_stage $(quote_bash_arg "remove previous policy-gateway Docker context") sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-gateway")
 run_stage $(quote_bash_arg "install policy-gateway Docker context") sudo cp -a $(quote_bash_arg "$remote_policy_gateway_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-gateway")
+run_stage $(quote_bash_arg "prepare operator CSV directory") sudo mkdir -p $(quote_bash_arg "$remote_nodes_dir") $(quote_bash_arg "$remote_operator_dir")
+run_stage $(quote_bash_arg "install operator nodes.csv") sudo install -o ansible -g ansible -m 600 $(quote_bash_arg "$remote_operator_temp/nodes.csv") $(quote_bash_arg "$REMOTE_NODES_FILE")
+run_stage $(quote_bash_arg "install operator state.csv") sudo install -o ansible -g ansible -m 600 $(quote_bash_arg "$remote_operator_temp/state.csv") $(quote_bash_arg "$REMOTE_STATE_FILE")
+run_stage $(quote_bash_arg "install operator networks.csv") sudo install -o ansible -g ansible -m 600 $(quote_bash_arg "$remote_operator_temp/networks.csv") $(quote_bash_arg "$remote_networks_file")
+run_stage $(quote_bash_arg "refresh ansible known_hosts") bash -lc $(quote_bash_arg "$refresh_known_hosts_command")
+if [ -d $(quote_bash_arg "$remote_operator_temp/haproxy") ]; then run_stage $(quote_bash_arg "sync operator haproxy config") sudo bash -lc $(quote_bash_arg "rm -rf $(quote_bash_arg "$remote_operator_dir/haproxy"); cp -a $(quote_bash_arg "$remote_operator_temp/haproxy") $(quote_bash_arg "$remote_operator_dir/haproxy"); chown -R ansible:ansible $(quote_bash_arg "$remote_operator_dir/haproxy")"); fi
+if [ -d $(quote_bash_arg "$remote_operator_temp/softether") ]; then run_stage $(quote_bash_arg "sync operator softether config") sudo bash -lc $(quote_bash_arg "rm -rf $(quote_bash_arg "$remote_operator_dir/softether"); cp -a $(quote_bash_arg "$remote_operator_temp/softether") $(quote_bash_arg "$remote_operator_dir/softether"); chown -R ansible:ansible $(quote_bash_arg "$remote_operator_dir/softether")"); fi
+run_stage $(quote_bash_arg "regenerate Ansible inventory") sudo bash $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap/create_inventory.sh") --nodes-file $(quote_bash_arg "$REMOTE_NODES_FILE") --state-file $(quote_bash_arg "$REMOTE_STATE_FILE") --output $(quote_bash_arg "$REMOTE_INVENTORY")
 log_stage $(quote_bash_arg "running service command: $remote_service_display")
 sudo bash -lc $(quote_bash_arg "$service_command")
 rc=\$?
@@ -448,7 +512,7 @@ if [ "$DETACHED_REMOTE_JOB" = "true" ]; then
     scp "${scp_common_args[@]}" "$run_script_path" "$remote:$remote_job_script"
 fi
 
-extract_command="set -e; rm -rf $(quote_bash_arg "$remote_bundle_dir"); mkdir -p $(quote_bash_arg "$remote_bundle_dir"); tar -xzf $(quote_bash_arg "$remote_bundle_archive") -C $(quote_bash_arg "$remote_bundle_dir"); test -f $(quote_bash_arg "$remote_service_runner_temp"); test -d $(quote_bash_arg "$remote_egress_policy_tools_temp"); test -d $(quote_bash_arg "$remote_ansible_temp"); test -d $(quote_bash_arg "$remote_policy_router_docker_temp"); test -d $(quote_bash_arg "$remote_policy_gateway_docker_temp")"
+extract_command="set -e; rm -rf $(quote_bash_arg "$remote_bundle_dir"); mkdir -p $(quote_bash_arg "$remote_bundle_dir"); tar -xzf $(quote_bash_arg "$remote_bundle_archive") -C $(quote_bash_arg "$remote_bundle_dir"); test -f $(quote_bash_arg "$remote_service_runner_temp"); test -f $(quote_bash_arg "$remote_create_inventory_temp"); test -d $(quote_bash_arg "$remote_egress_policy_tools_temp"); test -d $(quote_bash_arg "$remote_ansible_temp"); test -d $(quote_bash_arg "$remote_policy_router_docker_temp"); test -d $(quote_bash_arg "$remote_policy_gateway_docker_temp"); test -f $(quote_bash_arg "$remote_operator_temp/nodes.csv"); test -f $(quote_bash_arg "$remote_operator_temp/state.csv"); test -f $(quote_bash_arg "$remote_operator_temp/networks.csv")"
 echo "Extracting service bundle on orchestration node..."
 invoke_retry_transport "remote service bundle extract" ssh "${ssh_common_args[@]}" "$remote" "$extract_command"
 

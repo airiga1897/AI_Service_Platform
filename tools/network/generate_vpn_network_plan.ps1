@@ -30,6 +30,13 @@ function Split-AliasList($Value) {
     return @($Value -split "\+" | Where-Object { $_ })
 }
 
+function Expand-StateAliasToken($Token, $Kind) {
+    if ($Kind -eq "cascade_topology" -and $Token -match "^([^>]+)>([^>]+)$") {
+        return @($Matches[1], $Matches[2])
+    }
+    return @($Token)
+}
+
 function ConvertTo-IPv4Int($Address) {
     $parts = @([string]$Address -split "\.")
     if ($parts.Count -ne 4) {
@@ -95,12 +102,21 @@ foreach ($node in $nodes) {
 
 $referenced = @{}
 foreach ($row in $stateRows) {
-    foreach ($field in @("active_aliases", "candidate_aliases", "old_aliases")) {
-        foreach ($alias in (Split-AliasList $row.$field)) {
-            if (-not $nodeAliases.ContainsKey($alias)) {
-                Fail "state.csv references alias '$alias' in $($row.kind):$($row.name), but nodes.csv has no such alias"
+    foreach ($field in @("active_aliases", "candidate_aliases")) {
+        foreach ($token in (Split-AliasList $row.$field)) {
+            foreach ($alias in (Expand-StateAliasToken $token $row.kind)) {
+                if (-not $nodeAliases.ContainsKey($alias)) {
+                    Fail "state.csv references alias '$alias' in $($row.kind):$($row.name), but nodes.csv has no such alias"
+                }
+                $referenced[$alias] = $true
             }
-            $referenced[$alias] = $true
+        }
+    }
+    foreach ($token in (Split-AliasList $row.old_aliases)) {
+        foreach ($alias in (Expand-StateAliasToken $token $row.kind)) {
+            if ($nodeAliases.ContainsKey($alias)) {
+                $referenced[$alias] = $true
+            }
         }
     }
 }

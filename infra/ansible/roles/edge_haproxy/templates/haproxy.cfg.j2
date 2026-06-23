@@ -42,9 +42,9 @@ frontend http_in
     http-request redirect scheme https code 301 unless is_acme
     use_backend be_acme_placeholder if is_acme
 
-{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+{% if (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) or (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) %}
 frontend https_in
-    bind *:{{ edge_haproxy_route_model.vpn_ingress.ports.sstp }}
+    bind *:443
     mode tcp
     option tcplog
     tcp-request connection reject if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
@@ -54,42 +54,122 @@ frontend https_in
     tcp-request content reject if { sc0_conn_rate gt {{ edge_haproxy_tcp_rate_limit }} }
     tcp-request content reject if { sc0_conn_cur gt {{ edge_haproxy_tcp_conn_cur_limit }} }
 
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
     acl is_softether req_ssl_sni -i {{ edge_haproxy_route_model.vpn_ingress.sni | join(' ') }}
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    acl is_cascade_https_sni req_ssl_sni -i {{ edge_haproxy_route_model.vpn_cascade.sni | join(' ') }}
+{% endif %}
+{% if (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) and (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) %}
+    tcp-request content reject unless is_softether or is_cascade_https_sni
+{% elif edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
     tcp-request content reject unless is_softether
+{% elif edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    tcp-request content reject unless is_cascade_https_sni
+{% endif %}
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
     use_backend be_softether_https if is_softether
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    use_backend be_cascade_https if is_cascade_https_sni
+{% endif %}
 
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
 backend be_softether_https
     mode tcp
     option tcp-check
-    server softether {{ edge_haproxy_route_model.vpn_ingress.backend_host }}:{{ edge_haproxy_route_model.vpn_ingress.ports.sstp }} check inter 5s fall 3 rise 2
+    server softether {{ edge_haproxy_route_model.vpn_ingress.backend_host }}:443 check inter 5s fall 3 rise 2
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+backend be_cascade_https
+    mode tcp
+    option tcp-check
+    server softether-cascade {{ edge_haproxy_route_model.vpn_cascade.backend_host }}:{{ edge_haproxy_route_model.vpn_cascade.ports.backend_https }} check inter 5s fall 3 rise 2
+{% endif %}
 
 frontend softether_tcp_992
-    bind *:{{ edge_haproxy_route_model.vpn_ingress.ports.softether_alt }}
+    bind *:992
     mode tcp
     option tcplog
     tcp-request connection reject if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
+    tcp-request inspect-delay 5s
+    tcp-request content accept if { req_ssl_hello_type 1 }
     tcp-request content track-sc0 src table st_tcp_rates
     tcp-request content reject if { sc0_conn_rate gt {{ edge_haproxy_tcp_rate_limit }} }
     tcp-request content reject if { sc0_conn_cur gt {{ edge_haproxy_tcp_conn_cur_limit }} }
-    default_backend be_softether_992
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+    acl is_softether_992_sni req_ssl_sni -i {{ edge_haproxy_route_model.vpn_ingress.sni | join(' ') }}
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    acl is_cascade_992_sni req_ssl_sni -i {{ edge_haproxy_route_model.vpn_cascade.sni | join(' ') }}
+{% endif %}
+{% if (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) and (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) %}
+    tcp-request content reject unless is_softether_992_sni or is_cascade_992_sni
+{% elif edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+    tcp-request content reject unless is_softether_992_sni
+{% elif edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    tcp-request content reject unless is_cascade_992_sni
+{% endif %}
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+    use_backend be_softether_992 if is_softether_992_sni
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    use_backend be_cascade_992 if is_cascade_992_sni
+{% endif %}
 
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
 backend be_softether_992
     mode tcp
     option tcp-check
-    server softether {{ edge_haproxy_route_model.vpn_ingress.backend_host }}:{{ edge_haproxy_route_model.vpn_ingress.ports.softether_alt }} check inter 5s fall 3 rise 2
+    server softether {{ edge_haproxy_route_model.vpn_ingress.backend_host }}:992 check inter 5s fall 3 rise 2
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+backend be_cascade_992
+    mode tcp
+    option tcp-check
+    server softether-cascade {{ edge_haproxy_route_model.vpn_cascade.backend_host }}:{{ edge_haproxy_route_model.vpn_cascade.ports.backend_alt }} check inter 5s fall 3 rise 2
+{% endif %}
 
 frontend softether_mgmt
-    bind *:{{ edge_haproxy_route_model.vpn_ingress.ports.management }}
+    bind *:5555
     mode tcp
     option tcplog
     tcp-request connection reject if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
     tcp-request connection reject if !{ src -f /usr/local/etc/haproxy/lists/vpn_mgmt_ips.lst }
-    default_backend be_softether_mgmt
+    tcp-request inspect-delay 5s
+    tcp-request content accept if { req_ssl_hello_type 1 }
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+    acl is_softether_mgmt_sni req_ssl_sni -i {{ edge_haproxy_route_model.vpn_ingress.sni | join(' ') }}
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    acl is_cascade_mgmt_sni req_ssl_sni -i {{ edge_haproxy_route_model.vpn_cascade.sni | join(' ') }}
+{% endif %}
+{% if (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) and (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) %}
+    tcp-request content reject unless is_softether_mgmt_sni or is_cascade_mgmt_sni
+{% elif edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+    tcp-request content reject unless is_softether_mgmt_sni
+{% elif edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    tcp-request content reject unless is_cascade_mgmt_sni
+{% endif %}
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+    use_backend be_softether_mgmt if is_softether_mgmt_sni
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    use_backend be_cascade_mgmt if is_cascade_mgmt_sni
+{% endif %}
 
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
 backend be_softether_mgmt
     mode tcp
     option tcp-check
-    server softether {{ edge_haproxy_route_model.vpn_ingress.backend_host }}:{{ edge_haproxy_route_model.vpn_ingress.ports.management }} check inter 5s fall 3 rise 2
+    server softether {{ edge_haproxy_route_model.vpn_ingress.backend_management_host }}:5555 check inter 5s fall 3 rise 2
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+backend be_cascade_mgmt
+    mode tcp
+    option tcp-check
+    server softether-cascade {{ edge_haproxy_route_model.vpn_cascade.backend_management_host }}:{{ edge_haproxy_route_model.vpn_cascade.ports.backend_management }} check inter 5s fall 3 rise 2
+{% endif %}
 {% endif %}
 
 {% if edge_haproxy_route_model.minecraft_enabled | default(false) %}
@@ -136,7 +216,7 @@ backend be_minecraft_rcon
 {% endif %}
 {% endif %}
 
-{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+{% if (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) or (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) %}
 backend st_tcp_rates
     stick-table type ip size 100k expire 5m store conn_rate({{ edge_haproxy_tcp_rate_window }}),conn_cur
 {% endif %}

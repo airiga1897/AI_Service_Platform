@@ -17,8 +17,22 @@ edge_haproxy_container_name: edge-haproxy
 edge_haproxy_network_name: ai_service_edge
 edge_haproxy_network_subnet: 172.20.0.0/24
 edge_haproxy_container_ipv4: 172.20.0.3
+edge_haproxy_management_network_name: ai_service_edge_mgmt
+edge_haproxy_management_network_subnet: 172.24.0.0/24
+edge_haproxy_management_container_ipv4: 172.24.0.3
+
+edge_haproxy_cascade_network_name: ai_service_cascade
+edge_haproxy_cascade_network_subnet: 172.21.0.0/24
+edge_haproxy_cascade_container_ipv4: 172.21.0.3
+edge_haproxy_cascade_management_network_name: ai_service_cascade_mgmt
+edge_haproxy_cascade_management_network_subnet: 172.25.0.0/24
+edge_haproxy_cascade_management_container_ipv4: 172.25.0.3
 
 edge_haproxy_softether_host: 172.20.0.2
+edge_haproxy_softether_management_host: 172.24.0.2
+edge_haproxy_softether_cascade_host: 172.21.0.2
+edge_haproxy_softether_cascade_management_host: 172.25.0.2
+edge_haproxy_default_sni_domain: mine-craft.su
 edge_haproxy_stats_bind: 127.0.0.1:8404
 
 edge_haproxy_tcp_rate_limit: 60

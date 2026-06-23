@@ -10,6 +10,7 @@ param(
     [string[]]$ProfileName = @(),
     [string[]]$Alias = @(),
     [int]$TimeoutSeconds = 10,
+    [int]$TargetTimeoutSeconds = 4,
     [switch]$DryRun,
     [switch]$Json,
     [switch]$AutoAcceptHostKey = $true
@@ -136,6 +137,78 @@ function Get-PolicyFallbackEgressAliases($Profile) {
         return @()
     }
     return @($Profile.candidate_fallback_egress_aliases | Where-Object { $_ })
+}
+
+function Get-TextPreview($Text, [int]$MaxLength = 160) {
+    $preview = (([string]$Text) -replace "`r", "\r" -replace "`n", "\n").Trim()
+    if ($preview.Length -gt $MaxLength) {
+        return $preview.Substring(0, $MaxLength) + "..."
+    }
+    return $preview
+}
+
+function Get-TargetDisplay($Target) {
+    $protocol = [string]$Target.protocol
+    $value = [string]$Target.value
+    $port = [string]$Target.port
+    $path = if ([string]::IsNullOrWhiteSpace([string]$Target.path)) { "/" } else { [string]$Target.path }
+    if ($protocol -in @("http", "https")) {
+        return "${protocol}://${value}:${port}${path}"
+    }
+    return "${protocol}:${value}:${port}"
+}
+
+function Get-TargetResultDisplay($Target, $TargetStatus, $HttpStatus) {
+    if ($Target.protocol -in @("http", "https")) {
+        if ($null -ne $HttpStatus) {
+            return [string]$HttpStatus
+        }
+        return "FAIL"
+    }
+    if ($TargetStatus.ok -and $TargetStatus.result) {
+        if ($Target.protocol -eq "tcp" -and $null -ne $TargetStatus.result.tcp_connect_ms) {
+            return "OK"
+        }
+        if ($Target.protocol -eq "icmp" -and $null -ne $TargetStatus.result.icmp_ms) {
+            return "OK"
+        }
+    }
+    return "FAIL"
+}
+
+function Get-ReadinessRecordStatus($InfraOk, $Target, $TargetStatus) {
+    if (-not $InfraOk) {
+        return "probe_error"
+    }
+    if (-not $TargetStatus.ok -or -not $TargetStatus.result) {
+        return "target_timeout"
+    }
+    $result = $TargetStatus.result
+    if ($Target.protocol -in @("http", "https")) {
+        if ($null -ne $result.http_status) {
+            if ($result.http_status -ge 200 -and $result.http_status -lt 400) {
+                return "observed"
+            }
+            if ($result.http_status -ge 400 -and $result.http_status -lt 500) {
+                return "target_rejected"
+            }
+            return "probe_error"
+        }
+        return "target_timeout"
+    }
+    if ($Target.protocol -eq "tcp") {
+        if ($null -ne $result.tcp_connect_ms) {
+            return "observed"
+        }
+        return "target_timeout"
+    }
+    if ($Target.protocol -eq "icmp") {
+        if ($null -ne $result.icmp_ms) {
+            return "observed"
+        }
+        return "target_timeout"
+    }
+    return "route_review"
 }
 
 function Load-CascadeLinks($Path, $Nodes) {
@@ -272,7 +345,7 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     } | ConvertTo-Json -Compress
     $scriptB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($python))
     $payloadB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($targetPayload))
-    $command = "python3 -c $(Quote-BashArg "import base64,sys; exec(base64.b64decode('$scriptB64'))") $(Quote-BashArg $payloadB64) $(Quote-BashArg ([string]$TimeoutSeconds))"
+    $command = "python3 -c $(Quote-BashArg "import base64,sys; exec(base64.b64decode('$scriptB64'))") $(Quote-BashArg $payloadB64) $(Quote-BashArg ([string]$TargetTimeoutSeconds))"
     $result = Invoke-SshText $keyFile $remote $command
     if (-not $result.ok) {
         return [pscustomobject]@{ ok = $false; error = $result.output }
@@ -483,7 +556,7 @@ foreach ($profile in $profiles) {
                 continue
             }
             if ($DryRun) {
-                Write-Host "[dry-run] readiness $($profile.name): $ingressAlias edge->policy-gateway -> $($path.connection_name -join '->') -> $($target.value)"
+                Write-Host "[dry-run] readiness $($profile.name): $ingressAlias edge->policy-gateway -> $($path.connection_name -join '->') -> $(Get-TargetDisplay $target)"
                 continue
             }
             $policyNetwork = Test-IngressPolicyNetwork $ingressAlias
@@ -504,16 +577,8 @@ foreach ($profile in $profiles) {
             }
             $targetStatus = Test-TargetFromEgress $egressAlias $target
             $httpStatus = if ($targetStatus.ok -and $targetStatus.result) { $targetStatus.result.http_status } else { $null }
-            $targetOk = $false
-            if ($targetStatus.ok -and $targetStatus.result) {
-                if ($target.protocol -in @("http", "https")) {
-                    $targetOk = ($null -ne $targetStatus.result.http_status -and $targetStatus.result.http_status -ge 200 -and $targetStatus.result.http_status -lt 400)
-                } elseif ($target.protocol -eq "tcp") {
-                    $targetOk = ($null -ne $targetStatus.result.tcp_connect_ms)
-                } elseif ($target.protocol -eq "icmp") {
-                    $targetOk = ($null -ne $targetStatus.result.icmp_ms)
-                }
-            }
+            $infraOk = $policyNetwork.edge_attached -and $policyNetwork.gateway_attached -and $policyNetwork.cascade_attached -and $ingressGateway.ok -and $ingressCascade.ok -and $egressCascade.ok -and $ingressNat.ok -and $egressNat.ok -and $tcp.reachable
+            $recordStatus = Get-ReadinessRecordStatus $infraOk $target $targetStatus
             $record = [ordered]@{
                 schema_version = 1
                 run_id = $runId
@@ -535,11 +600,27 @@ foreach ($profile in $profiles) {
                 egress_nat_status = $egressNat
                 cascade_transport_status = $tcp
                 target_status = if ($targetStatus.ok) { $targetStatus.result } else { $null }
-                status = if ($policyNetwork.edge_attached -and $policyNetwork.gateway_attached -and $policyNetwork.cascade_attached -and $ingressGateway.ok -and $ingressCascade.ok -and $egressCascade.ok -and $ingressNat.ok -and $egressNat.ok -and $tcp.reachable -and $targetOk) { "observed" } else { "probe_error" }
+                status = $recordStatus
                 error = if ($targetStatus.ok) { $null } else { $targetStatus.error }
             }
             [void]$records.Add([pscustomobject]$record)
-            Write-Host ("{0}->{1}: edge_policy={2}/{3}/{4} gateway={5}/{6} cascade={7}/{8}/{9}/{10} ingress_nat={11} egress_nat={12} cascade_tcp={13} target_http={14}" -f $ingressAlias, $egressAlias, $policyNetwork.edge_attached, $policyNetwork.gateway_attached, $policyNetwork.cascade_attached, $ingressGateway.container_present, $ingressGateway.gateway_ip_present, $ingressCascade.tap_present, $ingressCascade.router_ip_present, $egressCascade.tap_present, $egressCascade.router_ip_present, $ingressNat.ok, $egressNat.ok, $tcp.reachable, $httpStatus)
+            $targetDisplay = Get-TargetDisplay $target
+            $targetResult = Get-TargetResultDisplay $target $targetStatus $httpStatus
+            $connectionPath = $path.connection_name -join "->"
+            $errorSuffix = ""
+            if ($targetResult -eq "FAIL") {
+                $errorText = if ($targetStatus.ok -and $targetStatus.result -and $targetStatus.result.errors) {
+                    (($targetStatus.result.errors | ForEach-Object { "$($_.stage): $($_.message)" }) -join "; ")
+                } elseif (-not $targetStatus.ok) {
+                    $targetStatus.error
+                } else {
+                    ""
+                }
+                if (-not [string]::IsNullOrWhiteSpace($errorText)) {
+                    $errorSuffix = " error=`"$(Get-TextPreview $errorText)`""
+                }
+            }
+            Write-Host ("[{0}] {1} -> {2} via {3} | target {4} | infra={5} target={6} status={7}{8}" -f $profile.name, $ingressAlias, $egressAlias, $connectionPath, $targetDisplay, ($(if ($infraOk) { "OK" } else { "FAIL" })), $targetResult, $record.status, $errorSuffix)
             }
         }
     }

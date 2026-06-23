@@ -56,9 +56,9 @@ Options:
   --playbook PATH        Override service playbook.
   --limit VALUE          Ansible --limit. Default: service ansible_group.
   --policy-router-image-ref REF
-                        vpn_cascade only: override policy-router image.
+                        vpn_cascade only: pin policy-router image and skip cache/build.
   --build-policy-router-image
-                        vpn_cascade only: build and distribute policy-router image on orchestration node.
+                        vpn_cascade only: force rebuild instead of reusing a matching local image.
   --check                Pass --check to ansible-playbook.
   --confirm-purge        Required for purge.
   -h, --help             Show help.
@@ -210,10 +210,10 @@ service_extra_vars() {
         vpn_cascade)
             printf '%s\n' "-e" "vpn_cascade_state=$state" "-e" "vpn_cascade_purge_data=$purge" "-e" "vpn_cascade_reseed_config=$reseed"
             if [ -n "$policy_router_image_ref" ]; then
-                printf '%s\n' "-e" "vpn_cascade_policy_router_image=$policy_router_image_ref"
+                printf '%s\n' "-e" "vpn_cascade_policy_router_image=$policy_router_image_ref" "-e" "vpn_cascade_policy_router_image_explicit=true"
             fi
             if [ "$build_policy_router_image" = "true" ]; then
-                printf '%s\n' "-e" "vpn_cascade_build_policy_router_image=true"
+                printf '%s\n' "-e" "vpn_cascade_build_policy_router_image=true" "-e" "vpn_cascade_policy_router_image_mode=always"
             fi
             ;;
         policy_gateway)
@@ -510,6 +510,23 @@ if [ "$CHECK" = "true" ]; then
 fi
 
 mapfile -t extra_vars < <(service_extra_vars "$SERVICE" "$service_state" "$service_purge_data" "$service_reseed_config" "$POLICY_ROUTER_IMAGE_REF" "$BUILD_POLICY_ROUTER_IMAGE")
+
+list_hosts_output="$(
+    run_ansible_playbook \
+        -i "$INVENTORY" \
+        "$PLAYBOOK" \
+        "${extra_vars[@]}" \
+        "${limit_args[@]}" \
+        --list-hosts 2>&1
+)"
+list_hosts_rc=$?
+printf '%s\n' "$list_hosts_output"
+if [ "$list_hosts_rc" -ne 0 ]; then
+    fail "ansible --list-hosts failed before $SERVICE $ACTION with exit code $list_hosts_rc"
+fi
+list_hosts_count="$(printf '%s\n' "$list_hosts_output" | sed -n 's/.*hosts (\([0-9][0-9]*\)).*/\1/p' | head -n 1)"
+[ -n "$list_hosts_count" ] || fail "Could not determine Ansible host count before $SERVICE $ACTION"
+[ "$list_hosts_count" -gt 0 ] || fail "Ansible selected 0 hosts for $SERVICE $ACTION with limit $(limit_display_for_error "$LIMIT"). Regenerate inventory from nodes.csv/state.csv."
 
 set -x
 run_ansible_playbook \

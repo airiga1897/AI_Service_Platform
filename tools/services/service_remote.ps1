@@ -32,6 +32,8 @@ param(
 
     [string]$ServiceRunnerScript = "tools/services/service.sh",
 
+    [string]$CreateInventoryScript = "tools/bootstrap/create_inventory.sh",
+
     [string]$AnsibleDir = "infra/ansible",
 
     [string]$PolicyRouterDockerDir = "infra/docker/policy-router",
@@ -109,7 +111,7 @@ function Split-RemoteParentPath($Path) {
     return $text.Substring(0, $index)
 }
 
-function New-TarGzBundle($ServiceRunnerScript, $AnsibleDir, $PolicyRouterDockerDir, $PolicyGatewayDockerDir, $EgressPolicyToolsDir, $NodesFile, $StateFile, $NetworksFile) {
+function New-TarGzBundle($ServiceRunnerScript, $CreateInventoryScript, $AnsibleDir, $PolicyRouterDockerDir, $PolicyGatewayDockerDir, $EgressPolicyToolsDir, $NodesFile, $StateFile, $NetworksFile) {
     if (-not (Get-Command tar -ErrorAction SilentlyContinue)) {
         Fail "tar not found in PATH. It is required to upload service bundles as a single archive."
     }
@@ -119,20 +121,30 @@ function New-TarGzBundle($ServiceRunnerScript, $AnsibleDir, $PolicyRouterDockerD
     New-Item -ItemType Directory -Path $stagingDir | Out-Null
     try {
         Copy-Item -LiteralPath $ServiceRunnerScript -Destination (Join-Path $stagingDir "service.sh")
+        $bootstrapStagingDir = Join-Path (Join-Path $stagingDir "tools") "bootstrap"
+        New-Item -ItemType Directory -Path $bootstrapStagingDir -Force | Out-Null
+        Copy-Item -LiteralPath $CreateInventoryScript -Destination (Join-Path $bootstrapStagingDir "create_inventory.sh")
         Copy-Item -LiteralPath $AnsibleDir -Destination (Join-Path $stagingDir "ansible") -Recurse
         $dockerStagingDir = Join-Path (Join-Path $stagingDir "docker") "policy-router"
-        New-Item -ItemType Directory -Path (Split-Path -Parent $dockerStagingDir) | Out-Null
+        New-Item -ItemType Directory -Path (Split-Path -Parent $dockerStagingDir) -Force | Out-Null
         Copy-Item -LiteralPath $PolicyRouterDockerDir -Destination $dockerStagingDir -Recurse
         $gatewayDockerStagingDir = Join-Path (Join-Path $stagingDir "docker") "policy-gateway"
         Copy-Item -LiteralPath $PolicyGatewayDockerDir -Destination $gatewayDockerStagingDir -Recurse
         $toolsStagingDir = Join-Path (Join-Path $stagingDir "tools") "egress_policy"
-        New-Item -ItemType Directory -Path (Split-Path -Parent $toolsStagingDir) | Out-Null
+        New-Item -ItemType Directory -Path (Split-Path -Parent $toolsStagingDir) -Force | Out-Null
         Copy-Item -LiteralPath $EgressPolicyToolsDir -Destination $toolsStagingDir -Recurse
         $operatorStagingDir = Join-Path $stagingDir "operator"
         New-Item -ItemType Directory -Path $operatorStagingDir | Out-Null
         Copy-Item -LiteralPath $NodesFile -Destination (Join-Path $operatorStagingDir "nodes.csv")
         Copy-Item -LiteralPath $StateFile -Destination (Join-Path $operatorStagingDir "state.csv")
         Copy-Item -LiteralPath $NetworksFile -Destination (Join-Path $operatorStagingDir "networks.csv")
+        $operatorSourceDir = Split-Path -Parent (Resolve-Path -LiteralPath $NodesFile).Path
+        foreach ($operatorSubdir in @("haproxy", "softether")) {
+            $sourceSubdir = Join-Path $operatorSourceDir $operatorSubdir
+            if (Test-Path -LiteralPath $sourceSubdir -PathType Container) {
+                Copy-Item -LiteralPath $sourceSubdir -Destination (Join-Path $operatorStagingDir $operatorSubdir) -Recurse
+            }
+        }
         & tar -czf $archivePath -C $stagingDir .
         if ($LASTEXITCODE -ne 0) {
             Fail "Failed to create service bundle archive"
@@ -368,6 +380,40 @@ function New-ServiceCommand($Step, $RemoteRepoDir, $RemoteNodesFile, $RemoteStat
     ) -join "; "
 }
 
+function New-RefreshAnsibleKnownHostsCommand($RemoteNodesFile) {
+    $script = @"
+set -e
+nodes_file=$(Quote-BashArg $RemoteNodesFile)
+ssh_dir=/home/ansible/.ssh
+known_hosts="`$ssh_dir/known_hosts"
+command -v ssh-keygen >/dev/null 2>&1
+command -v ssh-keyscan >/dev/null 2>&1
+id ansible >/dev/null 2>&1
+install -d -m 700 -o ansible -g ansible "`$ssh_dir"
+touch "`$known_hosts"
+chown ansible:ansible "`$known_hosts"
+chmod 600 "`$known_hosts"
+tail -n +2 "`$nodes_file" | while IFS=, read -r current_alias endpoint connection _root_password extra || [ -n "`${current_alias:-}" ]; do
+    current_alias="`${current_alias%`$'\r'}"
+    endpoint="`${endpoint%`$'\r'}"
+    connection="`${connection%`$'\r'}"
+    extra="`${extra%`$'\r'}"
+    [ -n "`$current_alias" ] || continue
+    [ -z "`$extra" ] || { echo "[ERROR] nodes.csv row for `$current_alias has too many columns" >&2; exit 1; }
+    [ "`$connection" = "ssh" ] || continue
+    [ "`$endpoint" != "local" ] || continue
+    echo "Refreshing ansible known_hosts for `$current_alias: `$endpoint"
+    sudo -u ansible ssh-keygen -R "`$endpoint" -f "`$known_hosts" >/dev/null 2>&1 || true
+    ssh-keyscan -T 10 -H "`$endpoint" >> "`$known_hosts" 2>/dev/null || { echo "[ERROR] ssh-keyscan failed for `$current_alias endpoint: `$endpoint" >&2; exit 1; }
+done
+sort -u "`$known_hosts" -o "`$known_hosts"
+chown ansible:ansible "`$known_hosts"
+chmod 600 "`$known_hosts"
+echo "[OK] ansible known_hosts refreshed"
+"@
+    return "sudo bash -lc $(Quote-BashArg $script)"
+}
+
 function Wait-RemoteServiceJob([string[]]$SshArgs, [string]$Remote, [string]$RemoteLog, [string]$RemoteDone, [string]$RemoteExitCode, [string]$RemotePid, [int]$PollSeconds, [int]$ReconnectAttempts, [int]$HeartbeatSeconds) {
     $printedLines = 0
     $transportFailures = 0
@@ -568,6 +614,7 @@ if (-not $KnownHostsFile) {
 Require-File $SshKeyFile "SshKeyFile"
 Ensure-OpenSshPrivateKeyAcl $SshKeyFile
 Require-File $ServiceRunnerScript "ServiceRunnerScript"
+Require-File $CreateInventoryScript "CreateInventoryScript"
 if (-not (Test-Path -LiteralPath $AnsibleDir -PathType Container)) {
     Fail "AnsibleDir not found: $AnsibleDir"
 }
@@ -585,6 +632,7 @@ $remote = "$SshUser@$($controlNode.endpoint)"
 $remoteBundleDir = "/tmp/ai-service-platform.service-remote.$([guid]::NewGuid().ToString('N'))"
 $remoteBundleArchive = "$remoteBundleDir.tar.gz"
 $remoteServiceRunnerTemp = "$remoteBundleDir/service.sh"
+$remoteCreateInventoryTemp = "$remoteBundleDir/tools/bootstrap/create_inventory.sh"
 $remoteAnsibleTemp = "$remoteBundleDir/ansible"
 $remotePolicyRouterDockerTemp = "$remoteBundleDir/docker/policy-router"
 $remotePolicyGatewayDockerTemp = "$remoteBundleDir/docker/policy-gateway"
@@ -599,6 +647,7 @@ $remoteJobLog = "$remoteJobDir/output.log"
 $remoteJobPid = "$remoteJobDir/pid"
 $remoteJobExitCode = "$remoteJobDir/exit_code"
 $remoteJobDone = "$remoteJobDir/done"
+$refreshKnownHostsCommand = New-RefreshAnsibleKnownHostsCommand $RemoteNodesFile
 $isBatch = [bool]$BatchPlanFile
 $batchSteps = @()
 if ($isBatch) {
@@ -621,8 +670,9 @@ $installCommands = ""
 if (-not $isBatch) {
     $installCommands = @(
         "set -e",
-        "sudo mkdir -p $(Quote-BashArg "$RemoteRepoDir/tools/services") $(Quote-BashArg "$RemoteRepoDir/tools") $(Quote-BashArg "$RemoteRepoDir/infra") $(Quote-BashArg "$RemoteRepoDir/infra/docker")",
+        "sudo mkdir -p $(Quote-BashArg "$RemoteRepoDir/tools/services") $(Quote-BashArg "$RemoteRepoDir/tools/bootstrap") $(Quote-BashArg "$RemoteRepoDir/tools") $(Quote-BashArg "$RemoteRepoDir/infra") $(Quote-BashArg "$RemoteRepoDir/infra/docker")",
         "sudo install -m 700 $(Quote-BashArg $remoteServiceRunnerTemp) $(Quote-BashArg "$RemoteRepoDir/tools/services/service.sh")",
+        "sudo install -m 700 $(Quote-BashArg $remoteCreateInventoryTemp) $(Quote-BashArg "$RemoteRepoDir/tools/bootstrap/create_inventory.sh")",
         "sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/tools/egress_policy")",
         "sudo cp -a $(Quote-BashArg $remoteEgressPolicyToolsTemp) $(Quote-BashArg "$RemoteRepoDir/tools/egress_policy")",
         "sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/ansible")",
@@ -633,9 +683,15 @@ if (-not $isBatch) {
         "sudo cp -a $(Quote-BashArg $remotePolicyGatewayDockerTemp) $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-gateway")",
         "printf '%s\n' 'Syncing operator CSV intent to orchestration node'",
         "sudo mkdir -p $(Quote-BashArg $remoteNodesDir) $(Quote-BashArg $remoteOperatorDir)",
-        "sudo install -m 600 $(Quote-BashArg "$remoteOperatorCsvTemp/nodes.csv") $(Quote-BashArg $RemoteNodesFile)",
-        "sudo install -m 600 $(Quote-BashArg "$remoteOperatorCsvTemp/state.csv") $(Quote-BashArg $RemoteStateFile)",
-        "sudo install -m 600 $(Quote-BashArg "$remoteOperatorCsvTemp/networks.csv") $(Quote-BashArg $remoteNetworksFile)",
+        "sudo install -o ansible -g ansible -m 600 $(Quote-BashArg "$remoteOperatorCsvTemp/nodes.csv") $(Quote-BashArg $RemoteNodesFile)",
+        "sudo install -o ansible -g ansible -m 600 $(Quote-BashArg "$remoteOperatorCsvTemp/state.csv") $(Quote-BashArg $RemoteStateFile)",
+        "sudo install -o ansible -g ansible -m 600 $(Quote-BashArg "$remoteOperatorCsvTemp/networks.csv") $(Quote-BashArg $remoteNetworksFile)",
+        "printf '%s\n' 'Refreshing ansible known_hosts from operator nodes'",
+        $refreshKnownHostsCommand,
+        "printf '%s\n' 'Regenerating Ansible inventory from operator state'",
+        "sudo bash $(Quote-BashArg "$RemoteRepoDir/tools/bootstrap/create_inventory.sh") --nodes-file $(Quote-BashArg $RemoteNodesFile) --state-file $(Quote-BashArg $RemoteStateFile) --output $(Quote-BashArg $RemoteInventory)",
+        "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/haproxy") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/haproxy"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/haproxy") $(Quote-BashArg "$remoteOperatorDir/haproxy"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/haproxy"); fi",
+        "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/softether") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/softether"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/softether") $(Quote-BashArg "$remoteOperatorDir/softether"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/softether"); fi",
         "sudo bash -lc $(Quote-BashArg $serviceCommand)"
     ) -join "; "
 }
@@ -655,10 +711,10 @@ if ($isBatch) {
         Write-Host "Check:        true"
     }
     if ($PolicyRouterImageRef) {
-        Write-Host "Policy image: $PolicyRouterImageRef"
+        Write-Host "Policy image: $PolicyRouterImageRef (explicit pin)"
     }
     if ($BuildPolicyRouterImage) {
-        Write-Host "Build policy image: true"
+        Write-Host "Build policy image: forced"
     }
 }
 if ($useDetachedRemoteJob) {
@@ -721,9 +777,11 @@ foreach ($line in @(
     "SUMMARY_FILE=$(Quote-BashArg "$remoteJobDir/summary.jsonl")",
     "printf '' > ""`$SUMMARY_FILE""",
     "log_stage() { printf '[remote-job] %s %s\n' ""`$(date -u '+%H:%M:%S')"" ""`$*""; }",
-    "run_stage() { label=""`$1""; shift; log_stage ""`$label""; ""`$@""; rc=""`$?""; if [ ""`$rc"" -ne 0 ]; then log_stage ""failed: `$label (rc=`$rc)""; return ""`$rc""; fi; }",
-    "run_stage $(Quote-BashArg "prepare repo directories") sudo mkdir -p $(Quote-BashArg "$RemoteRepoDir/tools/services") $(Quote-BashArg "$RemoteRepoDir/tools") $(Quote-BashArg "$RemoteRepoDir/infra") $(Quote-BashArg "$RemoteRepoDir/infra/docker")",
+    "finish_job() { rc=""`$1""; printf '%s\n' ""`$rc"" > $(Quote-BashArg $remoteJobExitCode); touch $(Quote-BashArg $remoteJobDone); exit ""`$rc""; }",
+    "run_stage() { label=""`$1""; shift; log_stage ""`$label""; ""`$@""; rc=""`$?""; if [ ""`$rc"" -ne 0 ]; then log_stage ""failed: `$label (rc=`$rc)""; finish_job ""`$rc""; fi; }",
+    "run_stage $(Quote-BashArg "prepare repo directories") sudo mkdir -p $(Quote-BashArg "$RemoteRepoDir/tools/services") $(Quote-BashArg "$RemoteRepoDir/tools/bootstrap") $(Quote-BashArg "$RemoteRepoDir/tools") $(Quote-BashArg "$RemoteRepoDir/infra") $(Quote-BashArg "$RemoteRepoDir/infra/docker")",
     "run_stage $(Quote-BashArg "install service runner") sudo install -m 700 $(Quote-BashArg $remoteServiceRunnerTemp) $(Quote-BashArg "$RemoteRepoDir/tools/services/service.sh")",
+    "run_stage $(Quote-BashArg "install inventory generator") sudo install -m 700 $(Quote-BashArg $remoteCreateInventoryTemp) $(Quote-BashArg "$RemoteRepoDir/tools/bootstrap/create_inventory.sh")",
     "run_stage $(Quote-BashArg "remove previous egress policy tools") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/tools/egress_policy")",
     "run_stage $(Quote-BashArg "install egress policy tools") sudo cp -a $(Quote-BashArg $remoteEgressPolicyToolsTemp) $(Quote-BashArg "$RemoteRepoDir/tools/egress_policy")",
     "run_stage $(Quote-BashArg "remove previous Ansible bundle") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/ansible")",
@@ -734,9 +792,13 @@ foreach ($line in @(
     "run_stage $(Quote-BashArg "install policy-gateway Docker context") sudo cp -a $(Quote-BashArg $remotePolicyGatewayDockerTemp) $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-gateway")",
     "printf '%s\n' 'Syncing operator CSV intent to orchestration node'",
     "run_stage $(Quote-BashArg "prepare operator CSV directory") sudo mkdir -p $(Quote-BashArg $remoteNodesDir) $(Quote-BashArg $remoteOperatorDir)",
-    "run_stage $(Quote-BashArg "install operator nodes.csv") sudo install -m 600 $(Quote-BashArg "$remoteOperatorCsvTemp/nodes.csv") $(Quote-BashArg $RemoteNodesFile)",
-    "run_stage $(Quote-BashArg "install operator state.csv") sudo install -m 600 $(Quote-BashArg "$remoteOperatorCsvTemp/state.csv") $(Quote-BashArg $RemoteStateFile)",
-    "run_stage $(Quote-BashArg "install operator networks.csv") sudo install -m 600 $(Quote-BashArg "$remoteOperatorCsvTemp/networks.csv") $(Quote-BashArg $remoteNetworksFile)"
+    "run_stage $(Quote-BashArg "install operator nodes.csv") sudo install -o ansible -g ansible -m 600 $(Quote-BashArg "$remoteOperatorCsvTemp/nodes.csv") $(Quote-BashArg $RemoteNodesFile)",
+    "run_stage $(Quote-BashArg "install operator state.csv") sudo install -o ansible -g ansible -m 600 $(Quote-BashArg "$remoteOperatorCsvTemp/state.csv") $(Quote-BashArg $RemoteStateFile)",
+    "run_stage $(Quote-BashArg "install operator networks.csv") sudo install -o ansible -g ansible -m 600 $(Quote-BashArg "$remoteOperatorCsvTemp/networks.csv") $(Quote-BashArg $remoteNetworksFile)",
+    "run_stage $(Quote-BashArg "refresh ansible known_hosts") bash -lc $(Quote-BashArg $refreshKnownHostsCommand)",
+    "run_stage $(Quote-BashArg "regenerate Ansible inventory") sudo bash $(Quote-BashArg "$RemoteRepoDir/tools/bootstrap/create_inventory.sh") --nodes-file $(Quote-BashArg $RemoteNodesFile) --state-file $(Quote-BashArg $RemoteStateFile) --output $(Quote-BashArg $RemoteInventory)",
+    "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/haproxy") ]; then run_stage $(Quote-BashArg "sync operator haproxy config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/haproxy"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/haproxy") $(Quote-BashArg "$remoteOperatorDir/haproxy"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/haproxy")"); fi",
+    "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/softether") ]; then run_stage $(Quote-BashArg "sync operator softether config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/softether"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/softether") $(Quote-BashArg "$remoteOperatorDir/softether"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/softether")"); fi"
 )) { $runScriptLines.Add($line) | Out-Null }
 
 if ($isBatch) {
@@ -784,7 +846,7 @@ if ($isBatch) {
 
 try {
     Write-Host "Preparing local service bundle..."
-    $bundle = New-TarGzBundle $ServiceRunnerScript $AnsibleDir $PolicyRouterDockerDir $PolicyGatewayDockerDir $EgressPolicyToolsDir $NodesFile $StateFile $NetworksFile
+    $bundle = New-TarGzBundle $ServiceRunnerScript $CreateInventoryScript $AnsibleDir $PolicyRouterDockerDir $PolicyGatewayDockerDir $EgressPolicyToolsDir $NodesFile $StateFile $NetworksFile
     if ($useDetachedRemoteJob) {
         Write-LfScript $runScriptPath $runScriptLines
     }
@@ -823,6 +885,7 @@ try {
         "mkdir -p $(Quote-BashArg $remoteBundleDir)",
         "tar -xzf $(Quote-BashArg $remoteBundleArchive) -C $(Quote-BashArg $remoteBundleDir)",
         "test -f $(Quote-BashArg $remoteServiceRunnerTemp)",
+        "test -f $(Quote-BashArg $remoteCreateInventoryTemp)",
         "test -d $(Quote-BashArg $remoteEgressPolicyToolsTemp)",
         "test -d $(Quote-BashArg $remoteAnsibleTemp)",
         "test -d $(Quote-BashArg $remotePolicyRouterDockerTemp)",

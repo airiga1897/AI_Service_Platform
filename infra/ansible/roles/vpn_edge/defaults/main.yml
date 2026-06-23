@@ -16,6 +16,12 @@ vpn_edge_container_name: softether-edge
 vpn_edge_network_name: ai_service_edge
 vpn_edge_network_subnet: 172.20.0.0/24
 vpn_edge_container_ipv4: 172.20.0.2
+vpn_edge_management_network_name: ai_service_edge_mgmt
+vpn_edge_management_network_subnet: 172.24.0.0/24
+vpn_edge_management_container_ipv4: 172.24.0.2
+vpn_edge_admin_source_ips:
+  - 127.0.0.1
+  - 172.24.0.3
 vpn_edge_policy_network_name: ai_service_vpn_policy
 vpn_edge_policy_network_subnet: ""
 vpn_edge_policy_container_ipv4: ""

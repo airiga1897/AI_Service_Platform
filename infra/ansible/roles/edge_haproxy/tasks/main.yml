@@ -94,6 +94,10 @@
     state_file = os.environ["STATE_FILE"]
     routes_file = os.environ["ROUTES_FILE"]
     default_softether_host = os.environ["DEFAULT_SOFTETHER_HOST"]
+    default_softether_management_host = os.environ["DEFAULT_SOFTETHER_MANAGEMENT_HOST"]
+    default_cascade_host = os.environ["DEFAULT_CASCADE_HOST"]
+    default_cascade_management_host = os.environ["DEFAULT_CASCADE_MANAGEMENT_HOST"]
+    default_sni_domain = os.environ["DEFAULT_SNI_DOMAIN"]
     default_game_rate = int(os.environ["DEFAULT_GAME_RATE"])
     default_rcon_rate = int(os.environ["DEFAULT_RCON_RATE"])
 
@@ -131,6 +135,8 @@
         fail(f"edge_route present on {alias}, but service edge_haproxy is not present on the same alias")
     if "vpn_ingress" in present_routes and not present_on("service", "vpn_edge", alias):
         fail(f"edge_route vpn_ingress is present on {alias}, but service vpn_edge is not present on the same alias")
+    if "vpn_cascade" in present_routes and not present_on("service", "vpn_cascade", alias):
+        fail(f"edge_route vpn_cascade is present on {alias}, but service vpn_cascade is not present on the same alias")
 
     route_config = {}
     if present_routes:
@@ -142,6 +148,7 @@
     model = {
         "present_routes": present_routes,
         "vpn_ingress_enabled": False,
+        "vpn_cascade_enabled": False,
         "minecraft_enabled": False,
     }
 
@@ -161,7 +168,7 @@
         per_alias = (cfg.get("per_alias") or {}).get(alias) or {}
         sni = unique_strings(per_alias.get("sni") or [])
         if not sni:
-            fail(f"routes.yml vpn_ingress.per_alias.{alias}.sni must contain at least one SNI")
+            sni = [f"vpn-{alias}.{default_sni_domain}"]
         ports = {
             "sstp": 443,
             "softether_alt": 992,
@@ -169,11 +176,40 @@
         }
         ports.update(cfg.get("ports") or {})
         backend_host = (cfg.get("backend") or {}).get("host") or default_softether_host
+        backend_management_host = (cfg.get("backend") or {}).get("management_host") or default_softether_management_host
         model.update({
             "vpn_ingress_enabled": True,
             "vpn_ingress": {
                 "sni": sni,
                 "backend_host": backend_host,
+                "backend_management_host": backend_management_host,
+                "ports": ports,
+            },
+        })
+
+    if "vpn_cascade" in present_routes:
+        cfg = route_config.get("vpn_cascade") or {}
+        per_alias = (cfg.get("per_alias") or {}).get(alias) or {}
+        sni = unique_strings(per_alias.get("sni") or [])
+        if not sni:
+            sni = [f"cascade-{alias}.{default_sni_domain}"]
+        ports = {
+            "https": 443,
+            "softether_alt": 992,
+            "management": 5555,
+            "backend_https": 443,
+            "backend_alt": 992,
+            "backend_management": 5555,
+        }
+        ports.update(cfg.get("ports") or {})
+        backend_host = (cfg.get("backend") or {}).get("host") or default_cascade_host
+        backend_management_host = (cfg.get("backend") or {}).get("management_host") or default_cascade_management_host
+        model.update({
+            "vpn_cascade_enabled": True,
+            "vpn_cascade": {
+                "sni": sni,
+                "backend_host": backend_host,
+                "backend_management_host": backend_management_host,
                 "ports": ports,
             },
         })
@@ -231,6 +267,10 @@
     STATE_FILE: "{{ edge_haproxy_operator_state_file }}"
     ROUTES_FILE: "{{ edge_haproxy_operator_routes_file }}"
     DEFAULT_SOFTETHER_HOST: "{{ edge_haproxy_softether_host }}"
+    DEFAULT_SOFTETHER_MANAGEMENT_HOST: "{{ edge_haproxy_softether_management_host }}"
+    DEFAULT_CASCADE_HOST: "{{ edge_haproxy_softether_cascade_host }}"
+    DEFAULT_CASCADE_MANAGEMENT_HOST: "{{ edge_haproxy_softether_cascade_management_host }}"
+    DEFAULT_SNI_DOMAIN: "{{ edge_haproxy_default_sni_domain }}"
     DEFAULT_GAME_RATE: "{{ edge_haproxy_minecraft_game_rate_limit }}"
     DEFAULT_RCON_RATE: "{{ edge_haproxy_minecraft_rcon_rate_limit }}"
   delegate_to: localhost
@@ -374,6 +414,45 @@
     - edge_haproxy_state == 'present'
     - not ansible_check_mode
 
+- name: Ensure edge management Docker network exists
+  ansible.builtin.command:
+    cmd: docker network create --subnet "{{ edge_haproxy_management_network_subnet }}" "{{ edge_haproxy_management_network_name }}"
+  register: edge_haproxy_management_network_create
+  changed_when: edge_haproxy_management_network_create.rc == 0
+  failed_when:
+    - edge_haproxy_management_network_create.rc != 0
+    - "'already exists' not in (edge_haproxy_management_network_create.stderr | default(''))"
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.vpn_ingress_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Ensure cascade Docker network exists for HAProxy route
+  ansible.builtin.command:
+    cmd: docker network create --subnet "{{ edge_haproxy_cascade_network_subnet }}" "{{ edge_haproxy_cascade_network_name }}"
+  register: edge_haproxy_cascade_network_create
+  changed_when: edge_haproxy_cascade_network_create.rc == 0
+  failed_when:
+    - edge_haproxy_cascade_network_create.rc != 0
+    - "'already exists' not in (edge_haproxy_cascade_network_create.stderr | default(''))"
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.vpn_cascade_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Ensure cascade management Docker network exists for HAProxy route
+  ansible.builtin.command:
+    cmd: docker network create --subnet "{{ edge_haproxy_cascade_management_network_subnet }}" "{{ edge_haproxy_cascade_management_network_name }}"
+  register: edge_haproxy_cascade_management_network_create
+  changed_when: edge_haproxy_cascade_management_network_create.rc == 0
+  failed_when:
+    - edge_haproxy_cascade_management_network_create.rc != 0
+    - "'already exists' not in (edge_haproxy_cascade_management_network_create.stderr | default(''))"
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.vpn_cascade_enabled | default(false)
+    - not ansible_check_mode
+
 - name: Validate edge_haproxy config
   ansible.builtin.command:
     cmd: docker run --rm -v "{{ edge_haproxy_config_dir }}:/usr/local/etc/haproxy:ro" "{{ edge_haproxy_image }}" haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
@@ -430,6 +509,63 @@
     - edge_haproxy_state == 'present'
     - not ansible_check_mode
 
+- name: Verify running edge_haproxy management network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ edge_haproxy_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ edge_haproxy_management_network_name }}"
+    EXPECTED_IP: "{{ edge_haproxy_management_container_ipv4 }}"
+  changed_when: false
+  register: edge_haproxy_management_container_ready
+  until: edge_haproxy_management_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.vpn_ingress_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Verify running edge_haproxy cascade network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ edge_haproxy_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ edge_haproxy_cascade_network_name }}"
+    EXPECTED_IP: "{{ edge_haproxy_cascade_container_ipv4 }}"
+  changed_when: false
+  register: edge_haproxy_cascade_container_ready
+  until: edge_haproxy_cascade_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.vpn_cascade_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Verify running edge_haproxy cascade management network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ edge_haproxy_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ edge_haproxy_cascade_management_network_name }}"
+    EXPECTED_IP: "{{ edge_haproxy_cascade_management_container_ipv4 }}"
+  changed_when: false
+  register: edge_haproxy_cascade_management_container_ready
+  until: edge_haproxy_cascade_management_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.vpn_cascade_enabled | default(false)
+    - not ansible_check_mode
+
 - name: Verify edge_haproxy config inside running container
   ansible.builtin.command:
     cmd: docker exec "{{ edge_haproxy_container_name }}" haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
@@ -463,6 +599,23 @@
   when:
     - edge_haproxy_state == 'present'
     - edge_haproxy_route_model.minecraft_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Verify edge_haproxy published shared VPN ports when vpn_cascade route is enabled
+  ansible.builtin.command:
+    cmd: docker port "{{ edge_haproxy_container_name }}"
+  register: edge_haproxy_cascade_ports
+  changed_when: false
+  failed_when: >
+    ('443/tcp' not in edge_haproxy_cascade_ports.stdout)
+    or ('992/tcp' not in edge_haproxy_cascade_ports.stdout)
+    or ('5555/tcp' not in edge_haproxy_cascade_ports.stdout)
+    or ('8443/tcp' in edge_haproxy_cascade_ports.stdout)
+    or ('8992/tcp' in edge_haproxy_cascade_ports.stdout)
+    or ('8555/tcp' in edge_haproxy_cascade_ports.stdout)
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.vpn_cascade_enabled | default(false)
     - not ansible_check_mode
 
 - name: Ensure Docker service is running before stopping edge_haproxy

@@ -21,12 +21,6 @@ scrape_configs:
         labels:
           instance: "VPS1-prod"
 
-  - job_name: "node_vps2"
-    static_configs:
-      - targets: ["{{ groups['backup'][0] }}:{{ hostvars[groups['backup'][0]]['node_exporter_port'] }}"]
-        labels:
-          instance: "VPS2-backup"
-
   - job_name: "node_vps6"
     static_configs:
       - targets: ["localhost:{{ node_exporter_port }}"]

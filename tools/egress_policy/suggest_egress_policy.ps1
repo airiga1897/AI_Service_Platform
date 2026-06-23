@@ -4,6 +4,7 @@
     [string]$HistoryFile = "",
     [string]$ProposalDir = ".\operator\egress_policy\proposals",
     [switch]$Latest = $true,
+    [switch]$ReadinessHistory,
     [switch]$DryRun,
     [switch]$Force
 )
@@ -24,18 +25,20 @@ function Read-JsonFile($Path, $Label) {
 }
 
 function Get-HistoryFiles() {
+    $historyLabel = if ($ReadinessHistory) { "selective fallback readiness history" } else { "egress probe history" }
     if ($HistoryFile) {
         if (-not (Test-Path -LiteralPath $HistoryFile -PathType Leaf)) {
-            Fail "egress probe history file not found: $HistoryFile"
+            Fail "$historyLabel file not found: $HistoryFile"
         }
         return @(Get-Item -LiteralPath $HistoryFile)
     }
     if (-not (Test-Path -LiteralPath $HistoryDir -PathType Container)) {
-        Fail "egress probe history directory not found: $HistoryDir"
+        Fail "$historyLabel directory not found: $HistoryDir"
     }
-    $files = @(Get-ChildItem -LiteralPath $HistoryDir -File -Filter "egress-probes-*.jsonl" | Sort-Object Name -Descending)
+    $filter = if ($ReadinessHistory) { "selective-fallback-readiness-*.jsonl" } else { "egress-probes-*.jsonl" }
+    $files = @(Get-ChildItem -LiteralPath $HistoryDir -File -Filter $filter | Sort-Object Name -Descending)
     if ($files.Count -eq 0) {
-        Fail "no egress probe history files found in: $HistoryDir"
+        Fail "no $historyLabel files found in: $HistoryDir"
     }
     if ($Latest) {
         return @($files | Select-Object -First 1)
@@ -51,6 +54,24 @@ function ConvertTo-SafeIdPart($Value) {
         return "unknown"
     }
     return $text
+}
+
+function Get-ProposalPathIdPart($Record) {
+    if (-not $Record) {
+        return ""
+    }
+    if ((Get-RecordPathMode $Record) -ne "cascade") {
+        return ""
+    }
+    if ($Record.cascade_connection) {
+        return ConvertTo-SafeIdPart $Record.cascade_connection
+    }
+    $ingressAlias = if ($Record.ingress_alias) { [string]$Record.ingress_alias } else { [string]$Record.candidate_alias }
+    $egressAlias = if ($Record.egress_alias) { [string]$Record.egress_alias } else { [string]$Record.candidate_alias }
+    if ($ingressAlias -and $egressAlias) {
+        return ConvertTo-SafeIdPart "$ingressAlias-to-$egressAlias"
+    }
+    return ""
 }
 
 function Get-HumanStatus($Status) {
@@ -144,17 +165,27 @@ function Get-Recommendation($Record) {
     $obs = if ($Record.target_status) { $Record.target_status } else { $Record.observation }
     $protocol = if ($Record.target -and $Record.target.protocol) { [string]$Record.target.protocol } else { "" }
     $httpStatus = if ($obs) { $obs.http_status } else { $null }
+    $recordStatus = Get-EffectiveRecordStatus $Record
     $desired = if ($Record.behavior) { [string]$Record.behavior } else { "fallback_on_ingress_egress_failure" }
 
     if ($mode -eq "cascade") {
         $transportOk = $Record.cascade_transport_status -and $Record.cascade_transport_status.reachable
         $connectionOk = $Record.cascade_connection_status -and $Record.cascade_connection_status.online
-        if (-not $transportOk -and -not $connectionOk) {
+        if ($Record.path_mode -eq "dataplane_readiness") {
+            $infraOk = Test-ReadinessInfraOk $Record
+            if (-not $infraOk) {
+                return "fallback_unavailable"
+            }
+        } elseif (-not $transportOk -and -not $connectionOk) {
             return "fallback_unavailable"
         }
     }
 
-    if ($Record.status -eq "probe_error") {
+    if ($recordStatus -eq "target_timeout") {
+        return "review"
+    }
+
+    if ($recordStatus -eq "probe_error") {
         if ($mode -eq "cascade") {
             return "fallback_unavailable"
         }
@@ -185,14 +216,73 @@ function Get-Recommendation($Record) {
         return "good_ingress_local"
     }
 
+    if ($mode -eq "cascade" -and $recordStatus -eq "target_rejected") {
+        return "fallback_available"
+    }
+
     return "review"
 }
 
 function Get-RecordPathMode($Record) {
     if ($Record.path_mode) {
+        if ([string]$Record.path_mode -eq "dataplane_readiness") {
+            return "cascade"
+        }
         return [string]$Record.path_mode
     }
     return "direct"
+}
+
+function Test-ReadinessInfraOk($Record) {
+    if ($Record.path_mode -ne "dataplane_readiness") {
+        return $true
+    }
+    return [bool](
+        $Record.policy_network_status.edge_attached -and
+        $Record.policy_network_status.gateway_attached -and
+        $Record.policy_network_status.cascade_attached -and
+        $Record.ingress_gateway_status.ok -and
+        $Record.ingress_cascade_status.ok -and
+        $Record.egress_cascade_status.ok -and
+        $Record.ingress_nat_status.ok -and
+        $Record.egress_nat_status.ok -and
+        $Record.cascade_transport_status.reachable
+    )
+}
+
+function Get-EffectiveRecordStatus($Record) {
+    if (-not $ReadinessHistory -or $Record.path_mode -ne "dataplane_readiness") {
+        return [string]$Record.status
+    }
+    if (-not (Test-ReadinessInfraOk $Record)) {
+        return "probe_error"
+    }
+    $obs = if ($Record.target_status) { $Record.target_status } else { $Record.observation }
+    $protocol = if ($Record.target) { [string]$Record.target.protocol } else { "" }
+    if ($protocol -in @("http", "https")) {
+        if ($obs -and $null -ne $obs.http_status) {
+            if ($obs.http_status -ge 200 -and $obs.http_status -lt 400) {
+                return "observed"
+            }
+            if ($obs.http_status -ge 400 -and $obs.http_status -lt 500) {
+                return "target_rejected"
+            }
+        }
+        return "target_timeout"
+    }
+    if ($protocol -eq "tcp") {
+        if ($obs -and $null -ne $obs.tcp_connect_ms) {
+            return "observed"
+        }
+        return "target_timeout"
+    }
+    if ($protocol -eq "icmp") {
+        if ($obs -and $null -ne $obs.icmp_ms) {
+            return "observed"
+        }
+        return "target_timeout"
+    }
+    return [string]$Record.status
 }
 
 function Get-ResponseMs($Record) {
@@ -215,7 +305,7 @@ function Get-ResponseMs($Record) {
 function ConvertTo-EvidenceObservation($Record) {
     $obs = if ($Record.target_status) { $Record.target_status } else { $Record.observation }
     [ordered]@{
-        mode = if ($Record.path_mode) { $Record.path_mode } else { "direct" }
+        mode = Get-RecordPathMode $Record
         ingress_alias = if ($Record.ingress_alias) { $Record.ingress_alias } else { $Record.candidate_alias }
         egress_alias = if ($Record.egress_alias) { $Record.egress_alias } else { $Record.candidate_alias }
         cascade_connection = $Record.cascade_connection
@@ -234,7 +324,7 @@ function ConvertTo-EvidenceObservation($Record) {
 function ConvertTo-RecommendedPath($Record) {
     $obs = if ($Record.target_status) { $Record.target_status } else { $Record.observation }
     [ordered]@{
-        mode = if ($Record.path_mode) { $Record.path_mode } else { "direct" }
+        mode = Get-RecordPathMode $Record
         ingress_alias = if ($Record.ingress_alias) { $Record.ingress_alias } else { $Record.candidate_alias }
         egress_alias = if ($Record.egress_alias) { $Record.egress_alias } else { $Record.candidate_alias }
         cascade_connection = $Record.cascade_connection
@@ -373,6 +463,18 @@ function Get-IssueType($Records, $BestRecord, [bool]$TargetKnown) {
     $directRecords = @($Records | Where-Object { (Get-RecordPathMode $_) -eq "direct" })
     $directGoodRecords = @($directRecords | Where-Object { (Get-Recommendation $_) -eq "good_ingress_local" })
     if ($directRecords.Count -eq 0) {
+        if ($ReadinessHistory -and $BestRecord -and (Get-Recommendation $BestRecord) -eq "fallback_available") {
+            return "fallback_available"
+        }
+        if ($ReadinessHistory) {
+            $recommendations = @($Records | ForEach-Object { Get-Recommendation $_ })
+            if ($recommendations -contains "review") {
+                return "route_review"
+            }
+            if ($recommendations -contains "fallback_unavailable") {
+                return "fallback_unavailable"
+            }
+        }
         return $null
     }
     if ($directGoodRecords.Count -gt 0) {
@@ -438,7 +540,11 @@ function New-Proposal($Type, $Profile, $Target, $Records, $BestRecord, $HistoryF
     $runId = if ($BestRecord -and $BestRecord.run_id) { $BestRecord.run_id } elseif ($Records.Count -gt 0) { $Records[0].run_id } else { [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ") }
     $targetPart = ConvertTo-SafeIdPart "$($Target.value)-$($Target.port)"
     $profilePart = ConvertTo-SafeIdPart $(if ($Profile) { $Profile } else { "unknown-profile" })
+    $pathPart = Get-ProposalPathIdPart $BestRecord
     $id = "$(ConvertTo-SafeIdPart $Type)-$profilePart-$targetPart"
+    if ($pathPart) {
+        $id = "$id-$pathPart"
+    }
 
     $goodRecords = @($Records | Where-Object { Test-GoodRecommendation (Get-Recommendation $_) })
     $observations = @($Records | Sort-Object @{ Expression = { if (Test-GoodRecommendation (Get-Recommendation $_)) { 0 } else { 1 } } }, @{ Expression = { $ms = Get-ResponseMs $_; if ($null -eq $ms) { [double]::MaxValue } else { [double]$ms } } } | Select-Object -First 5 | ForEach-Object { ConvertTo-EvidenceObservation $_ })

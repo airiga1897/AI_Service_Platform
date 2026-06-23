@@ -97,10 +97,10 @@ function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false"
         "vpn_cascade" {
             $vars = @("-e", "vpn_cascade_state=$State", "-e", "vpn_cascade_purge_data=$PurgeData", "-e", "vpn_cascade_reseed_config=$ReseedConfig")
             if ($PolicyRouterImageRef) {
-                $vars += @("-e", "vpn_cascade_policy_router_image=$PolicyRouterImageRef")
+                $vars += @("-e", "vpn_cascade_policy_router_image=$PolicyRouterImageRef", "-e", "vpn_cascade_policy_router_image_explicit=true")
             }
             if ($BuildPolicyRouterImage) {
-                $vars += @("-e", "vpn_cascade_build_policy_router_image=true")
+                $vars += @("-e", "vpn_cascade_build_policy_router_image=true", "-e", "vpn_cascade_policy_router_image_mode=always")
             }
             return $vars
         }

@@ -250,6 +250,17 @@ function Get-PresentVpnIngressAliases($Rows) {
     return @($aliases)
 }
 
+function Get-PresentVpnCascadeRouteAliases($Rows) {
+    $aliases = New-Object System.Collections.Generic.List[string]
+    $rows = @($Rows | Where-Object { $_.kind -eq "edge_route" -and $_.name -eq "vpn_cascade" -and $_.state -eq "present" })
+    foreach ($row in $rows) {
+        foreach ($alias in (Split-AliasList $row.active_aliases)) {
+            Add-UniqueAlias $aliases $alias
+        }
+    }
+    return @($aliases)
+}
+
 function Get-VpnCascadeLinkSecretPath() {
     return (Join-Path (Join-Path (Join-Path (Join-Path $OperatorDir "softether") "cascade") "secrets") "lab-cascade.json")
 }
@@ -563,6 +574,16 @@ function New-VpnIngressAliasBlock($Aliases, $Domain) {
     return @($lines)
 }
 
+function New-VpnCascadeAliasBlock($Aliases, $Domain) {
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($alias in $Aliases) {
+        $lines.Add("    ${alias}:")
+        $lines.Add("      sni:")
+        $lines.Add("        - cascade-${alias}.${Domain}")
+    }
+    return @($lines)
+}
+
 function New-VpnIngressRoutesBlock($Aliases, $Domain) {
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add("vpn_ingress:")
@@ -576,6 +597,26 @@ function New-VpnIngressRoutesBlock($Aliases, $Domain) {
     $lines.Add("    sstp: 443")
     $lines.Add("    softether_alt: 992")
     $lines.Add("    management: 5555")
+    return @($lines)
+}
+
+function New-VpnCascadeRoutesBlock($Aliases, $Domain) {
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("vpn_cascade:")
+    $lines.Add("  per_alias:")
+    foreach ($line in (New-VpnCascadeAliasBlock $Aliases $Domain)) {
+        $lines.Add($line)
+    }
+    $lines.Add("  backend:")
+    $lines.Add("    host: 172.21.0.2")
+    $lines.Add("    management_host: 172.25.0.2")
+    $lines.Add("  ports:")
+    $lines.Add("    https: 443")
+    $lines.Add("    softether_alt: 992")
+    $lines.Add("    management: 5555")
+    $lines.Add("    backend_https: 443")
+    $lines.Add("    backend_alt: 992")
+    $lines.Add("    backend_management: 5555")
     return @($lines)
 }
 
@@ -682,6 +723,104 @@ function Normalize-HaproxyRoutes($RoutesPath, $VpnAliases, $Domain) {
     Invoke-OperatorBackupIfNeeded "add missing vpn_ingress aliases"
     Set-Content -LiteralPath $RoutesPath -Value $lines -Encoding ascii
     Write-Host "Added vpn_ingress routes for aliases: $($missing -join ', ')"
+}
+
+function Normalize-HaproxyCascadeRoutes($RoutesPath, $CascadeAliases, $Domain) {
+    if ($CascadeAliases.Count -eq 0) {
+        return
+    }
+
+    $routesDir = Split-Path -Parent $RoutesPath
+    if ($routesDir -and -not (Test-Path -LiteralPath $routesDir -PathType Container)) {
+        Invoke-OperatorBackupIfNeeded "create HAProxy routes directory"
+        New-Item -ItemType Directory -Force -Path $routesDir | Out-Null
+    }
+
+    if (-not (Test-Path -LiteralPath $RoutesPath -PathType Leaf)) {
+        Invoke-OperatorBackupIfNeeded "create HAProxy routes.yml"
+        Set-Content -LiteralPath $RoutesPath -Value (New-VpnCascadeRoutesBlock $CascadeAliases $Domain) -Encoding ascii
+        Write-Host "Created HAProxy routes.yml with vpn_cascade aliases: $($CascadeAliases -join ', ')"
+        return
+    }
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($line in (Get-Content -LiteralPath $RoutesPath)) {
+        $lines.Add([string]$line)
+    }
+
+    $cascadeIndex = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match "^vpn_cascade:\s*$") {
+            $cascadeIndex = $i
+            break
+        }
+    }
+
+    if ($cascadeIndex -lt 0) {
+        $newLines = New-Object System.Collections.Generic.List[string]
+        foreach ($line in $lines) {
+            $newLines.Add($line)
+        }
+        if ($newLines.Count -gt 0 -and $newLines[$newLines.Count - 1] -ne "") {
+            $newLines.Add("")
+        }
+        foreach ($line in (New-VpnCascadeRoutesBlock $CascadeAliases $Domain)) {
+            $newLines.Add($line)
+        }
+        Invoke-OperatorBackupIfNeeded "add vpn_cascade route config"
+        Set-Content -LiteralPath $RoutesPath -Value $newLines -Encoding ascii
+        Write-Host "Added vpn_cascade route config for aliases: $($CascadeAliases -join ', ')"
+        return
+    }
+
+    $cascadeEnd = Find-TopLevelSectionEnd $lines $cascadeIndex
+    $perAliasIndex = -1
+    for ($i = $cascadeIndex + 1; $i -lt $cascadeEnd; $i++) {
+        if ($lines[$i] -match "^  per_alias:\s*$") {
+            $perAliasIndex = $i
+            break
+        }
+    }
+
+    if ($perAliasIndex -lt 0) {
+        $insertAt = $cascadeIndex + 1
+        $insertLines = New-Object System.Collections.Generic.List[string]
+        $insertLines.Add("  per_alias:")
+        foreach ($line in (New-VpnCascadeAliasBlock $CascadeAliases $Domain)) {
+            $insertLines.Add($line)
+        }
+        $lines.InsertRange($insertAt, [string[]]$insertLines)
+        Invoke-OperatorBackupIfNeeded "add vpn_cascade.per_alias route config"
+        Set-Content -LiteralPath $RoutesPath -Value $lines -Encoding ascii
+        Write-Host "Added vpn_cascade.per_alias for aliases: $($CascadeAliases -join ', ')"
+        return
+    }
+
+    $perAliasEnd = $cascadeEnd
+    for ($i = $perAliasIndex + 1; $i -lt $cascadeEnd; $i++) {
+        if ($lines[$i] -match "^  \S") {
+            $perAliasEnd = $i
+            break
+        }
+    }
+
+    $existing = @()
+    for ($i = $perAliasIndex + 1; $i -lt $perAliasEnd; $i++) {
+        $match = [regex]::Match($lines[$i], "^    ([A-Za-z0-9_.-]+):\s*$")
+        if ($match.Success) {
+            $existing += $match.Groups[1].Value
+        }
+    }
+
+    $missing = @($CascadeAliases | Where-Object { $existing -notcontains $_ })
+    if ($missing.Count -eq 0) {
+        return
+    }
+
+    $lines.InsertRange($perAliasEnd, [string[]](New-VpnCascadeAliasBlock $missing $Domain))
+    Invoke-OperatorBackupIfNeeded "add missing vpn_cascade aliases"
+    Set-Content -LiteralPath $RoutesPath -Value $lines -Encoding ascii
+    Write-Host "Added vpn_cascade routes for aliases: $($missing -join ', ')"
 }
 
 function Resolve-EndpointIpAddresses($Endpoint, $Alias) {
@@ -972,6 +1111,7 @@ $stateRows = Import-Csv -LiteralPath $StateFile
 $stateRows = @(Normalize-StateRows $stateRows $nodeRows $StateFile)
 Update-VpnManagementAllowlist (Join-Path (Join-Path (Join-Path $OperatorDir "haproxy") "lists") "vpn_mgmt_ips.lst") $nodeRows
 Normalize-HaproxyRoutes (Join-Path (Join-Path $OperatorDir "haproxy") "routes.yml") (Get-PresentVpnIngressAliases $stateRows) $VpnIngressDomain
+Normalize-HaproxyCascadeRoutes (Join-Path (Join-Path $OperatorDir "haproxy") "routes.yml") (Get-PresentVpnCascadeRouteAliases $stateRows) $VpnIngressDomain
 $reseedVpnEdgeAliases = @(Split-OperatorAliasList $ReseedVpnEdge)
 $standbyOrchestrationAliases = @(Get-OrchestrationCandidateAliases $stateRows $ControlRole)
 

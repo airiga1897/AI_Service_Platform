@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("plan", "apply", "verify", "rollback", "cleanup", "refresh")]
+    [ValidateSet("plan", "apply", "verify", "rollback", "cleanup", "refresh", "counters")]
     [string]$Action = "plan",
     [string]$ProposalDir = ".\operator\egress_policy\proposals",
     [string]$AppliedRoutesDir = ".\operator\egress_policy\applied_routes",
@@ -740,7 +740,7 @@ protocol = payload["protocol"]
 port = int(payload["port"])
 path = payload.get("path") or "/"
 timeout = float(payload["timeout"])
-result = {"ok": False, "protocol": protocol, "http_status": None, "first_line": None, "elapsed_ms": None, "error": None}
+result = {"ok": False, "protocol": protocol, "http_status": None, "target_status": None, "first_line": None, "elapsed_ms": None, "error": None}
 start = time.monotonic()
 try:
     if protocol in ("http", "https"):
@@ -761,7 +761,14 @@ try:
         parts = first.split()
         if len(parts) >= 2 and parts[0].startswith("HTTP/"):
             result["http_status"] = int(parts[1])
-            result["ok"] = 200 <= result["http_status"] < 400
+            if 200 <= result["http_status"] < 400:
+                result["ok"] = True
+                result["target_status"] = "observed"
+            elif 400 <= result["http_status"] < 500:
+                result["ok"] = True
+                result["target_status"] = "target_rejected"
+            else:
+                result["target_status"] = "target_error"
         else:
             result["error"] = "response did not start with HTTP status line"
     elif protocol == "tcp":
@@ -883,6 +890,26 @@ function Test-StepApplied($Step) {
     }
 }
 
+function Get-StepCounters($Step) {
+    $ingressComment = Get-IngressNatComment $Step
+    $egressComment = Get-EgressNatComment $Step
+    $ingressNatCounters = Invoke-SshText $Step.ingress_alias "sudo docker exec -u 0 $(Quote-BashArg $PolicyGatewayContainer) iptables -t nat -L POSTROUTING -v -n -x 2>/dev/null || true"
+    $egressNatCounters = Invoke-SshText $Step.egress_alias "sudo docker exec -u 0 $(Quote-BashArg $CascadeContainer) iptables -t nat -L POSTROUTING -v -n -x 2>/dev/null || true"
+    return [pscustomobject]@{
+        id = [string]$Step.id
+        target = [string]$Step.target
+        target_ip = [string]$Step.target_ip
+        protocol = [string]$Step.protocol
+        port = [int]$Step.port
+        ingress_alias = [string]$Step.ingress_alias
+        egress_alias = [string]$Step.egress_alias
+        ingress_nat_packets = Get-NatPacketCount $ingressNatCounters $ingressComment
+        ingress_nat_any_packets = Get-NatPacketCountForTargetPort $ingressNatCounters $Step
+        egress_nat_packets = Get-NatPacketCount $egressNatCounters $egressComment
+        egress_nat_any_packets = Get-NatPacketCountForTargetPort $egressNatCounters $Step
+    }
+}
+
 function Test-StepAbsent($Step) {
     $ingressComment = Get-IngressNatComment $Step
     $egressComment = Get-EgressNatComment $Step
@@ -916,15 +943,54 @@ function Test-StepAbsent($Step) {
     }
 }
 
+function Get-TrafficSummary($Traffic) {
+    if (-not $Traffic) {
+        return "traffic=UNKNOWN"
+    }
+    $status = if ($Traffic.ok) { "OK" } else { "FAIL" }
+    $parts = @("traffic=$status")
+    if ($null -ne $Traffic.http_status) {
+        $parts += "http=$($Traffic.http_status)"
+    }
+    if ($Traffic.target_status) {
+        $parts += "target=$($Traffic.target_status)"
+    }
+    if ($null -ne $Traffic.elapsed_ms) {
+        $parts += "elapsed_ms=$($Traffic.elapsed_ms)"
+    }
+    if ($Traffic.first_line) {
+        $parts += "first_line=`"$($Traffic.first_line)`""
+    }
+    if ($Traffic.error) {
+        $parts += "error=`"$($Traffic.error)`""
+    }
+    return ($parts -join " ")
+}
+
+function Write-VerifyResultSummary($Result) {
+    $status = if ($Result.ok) { "[OK]" } else { "[FAIL]" }
+    $ingressCounters = "ingress_nat=$($Result.ingress_nat_packets_before)->$($Result.ingress_nat_packets_after)"
+    $egressCounters = "egress_nat=$($Result.egress_nat_packets_before)->$($Result.egress_nat_packets_after)"
+    Write-Host "$status verified selective fallback route $($Result.id) -> $($Result.target_ip) $(Get-TrafficSummary $Result.traffic) $ingressCounters $egressCounters"
+    if ($Result.ingress_nat_counter_note) {
+        Write-Host "[NOTE] $($Result.id) -> $($Result.target_ip) ingress_nat: $($Result.ingress_nat_counter_note)"
+    }
+    if ($Result.egress_nat_counter_note) {
+        Write-Host "[NOTE] $($Result.id) -> $($Result.target_ip) egress_nat: $($Result.egress_nat_counter_note)"
+    }
+}
+
+function Write-CounterSnapshotSummary($Result) {
+    Write-Host "[COUNTERS] $($Result.id) -> $($Result.target_ip) ingress_nat=$($Result.ingress_nat_packets) ingress_nat_any=$($Result.ingress_nat_any_packets) egress_nat=$($Result.egress_nat_packets) egress_nat_any=$($Result.egress_nat_any_packets)"
+}
+
 function Invoke-VerifyApplied($Steps) {
     $results = @()
     foreach ($step in $Steps) {
         $result = Test-StepApplied $step
         $results += $result
-        if ($result.ok) {
-            Write-Host "[OK] verified selective fallback route $($step.id) -> $($step.target_ip)"
-        } else {
-            Write-Host "[FAIL] selective fallback verification failed for $($step.id) -> $($step.target_ip)"
+        if (-not $Json) {
+            Write-VerifyResultSummary $result
         }
     }
     if ($Json) {
@@ -933,6 +999,20 @@ function Invoke-VerifyApplied($Steps) {
     $failed = @($results | Where-Object { -not $_.ok })
     if ($failed.Count -gt 0) {
         Fail "selective fallback verification failed; inspect failed stages above and run rollback for the affected proposal"
+    }
+}
+
+function Invoke-CounterSnapshot($Steps) {
+    $results = @()
+    foreach ($step in $Steps) {
+        $result = Get-StepCounters $step
+        $results += $result
+        if (-not $Json) {
+            Write-CounterSnapshotSummary $result
+        }
+    }
+    if ($Json) {
+        $results | ConvertTo-Json -Depth 10
     }
 }
 
@@ -1039,7 +1119,7 @@ if ($PreflightRetries -lt 1) {
     Fail "-PreflightRetries must be at least 1"
 }
 
-if ($Action -in @("verify", "rollback")) {
+if ($Action -in @("verify", "rollback", "counters")) {
     $appliedStates = @(Get-AppliedRouteStates)
     if ($appliedStates.Count -eq 0) {
         Write-Host "No applied selective fallback route state selected."
@@ -1050,12 +1130,14 @@ if ($Action -in @("verify", "rollback")) {
         Assert-StepValid $step "applied route state $($step.id) -> $($step.target_ip)"
     }
     if ($Action -eq "verify") {
-        if ($Json) {
-            $stateSteps | ForEach-Object { Get-StepDisplay $_ } | ConvertTo-Json -Depth 8
-        } else {
+        if (-not $Json) {
             $stateSteps | ForEach-Object { Get-StepDisplay $_ } | Format-List
         }
         Invoke-VerifyApplied $stateSteps
+        exit 0
+    }
+    if ($Action -eq "counters") {
+        Invoke-CounterSnapshot $stateSteps
         exit 0
     }
     if ($Json) {

@@ -11,17 +11,22 @@ services:
     volumes:
       - ./softether_data:/mnt
       - ./softether_logs:/usr/local/bin/server_log
+      - ./adminip.txt:/usr/local/bin/adminip.txt:ro
       - ./nginx/ssl:/etc/ssl/vpn:ro
       - /etc/localtime:/etc/localtime:ro
     restart: always
     networks:
       {{ vpn_edge_network_name }}:
         ipv4_address: {{ vpn_edge_container_ipv4 }}
+      {{ vpn_edge_management_network_name }}:
+        ipv4_address: {{ vpn_edge_management_container_ipv4 }}
       {{ vpn_edge_policy_network_name }}:
         ipv4_address: {{ vpn_edge_policy_container_ipv4 }}
 
 networks:
   {{ vpn_edge_network_name }}:
+    external: true
+  {{ vpn_edge_management_network_name }}:
     external: true
   {{ vpn_edge_policy_network_name }}:
     external: true

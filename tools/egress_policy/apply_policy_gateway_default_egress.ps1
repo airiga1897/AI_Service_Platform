@@ -172,6 +172,16 @@ function Write-State($PreviousDefaultRoute) {
     $state | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Get-StatePath) -Encoding utf8
 }
 
+function Get-FirstDefaultRouteLine($RouteText) {
+    foreach ($line in @(([string]$RouteText) -split "`n")) {
+        $trimmed = $line.Trim()
+        if ($trimmed -match '^default(\s|$)') {
+            return $trimmed
+        }
+    }
+    return ""
+}
+
 function Test-Applied {
     $network = $script:Networks[$Alias]
     $gatewayRegex = [regex]::Escape([string]$network.policy_gateway_ip)
@@ -218,7 +228,7 @@ if ($Action -eq "apply") {
 if ($Action -eq "apply") {
     $network = $script:Networks[$Alias]
     $comment = Get-Comment
-    $previousDefault = Invoke-SshText $Alias "sudo docker exec -u 0 $(Quote-BashArg $EdgeContainer) ip route show default 2>/dev/null || true"
+    $previousDefault = Get-FirstDefaultRouteLine (Invoke-SshText $Alias "sudo docker exec -u 0 $(Quote-BashArg $EdgeContainer) ip route show default 2>/dev/null || true")
     $gatewayCommand = "sudo docker exec -u 0 $(Quote-BashArg $PolicyGatewayContainer) sh -c $(Quote-BashArg "sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true; iptables -t nat -C POSTROUTING -s $EdgeSourceIp/32 -m comment --comment '$comment' -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s $EdgeSourceIp/32 -m comment --comment '$comment' -j MASQUERADE")"
     Invoke-SshText $Alias $gatewayCommand | Out-Null
     Invoke-SshText $Alias "sudo docker exec -u 0 $(Quote-BashArg $EdgeContainer) ip route replace default via $(Quote-BashArg $network.policy_gateway_ip)" | Out-Null
@@ -247,11 +257,11 @@ if ($Action -eq "rollback") {
         exit 0
     }
     $comment = if ($state.ordinary_nat_comment) { [string]$state.ordinary_nat_comment } else { Get-Comment }
-    $rollbackDefault = [string]$state.previous_edge_default_route
+    $rollbackDefault = Get-FirstDefaultRouteLine ([string]$state.previous_edge_default_route)
     $restoreCommand = if ([string]::IsNullOrWhiteSpace($rollbackDefault)) {
         "sudo docker exec -u 0 $(Quote-BashArg $EdgeContainer) ip route del default 2>/dev/null || true"
     } else {
-        "sudo docker exec -u 0 $(Quote-BashArg $EdgeContainer) sh -c $(Quote-BashArg "ip route replace $rollbackDefault")"
+        "sudo docker exec -u 0 $(Quote-BashArg $EdgeContainer) sh -c $(Quote-BashArg "ip route del default 2>/dev/null || true; ip route replace $rollbackDefault")"
     }
     Invoke-SshText $Alias $restoreCommand | Out-Null
     Invoke-SshText $Alias "sudo docker exec -u 0 $(Quote-BashArg $PolicyGatewayContainer) sh -c $(Quote-BashArg "iptables -t nat -D POSTROUTING -s $EdgeSourceIp/32 -m comment --comment '$comment' -j MASQUERADE 2>/dev/null || true")" | Out-Null

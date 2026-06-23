@@ -14,6 +14,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ExpectedNodesHeader = "current_alias,endpoint,connection,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
+. (Join-Path $PSScriptRoot "..\common\private_key_acl.ps1")
 
 function Fail($Message) {
     Write-Error $Message
@@ -269,6 +270,7 @@ try {
         }
         $adminKey = Join-Path (Join-Path $OperatorDir $alias) "admin_key"
         Require-File $adminKey "Admin key for standby orchestration alias $alias"
+        Ensure-OpenSshPrivateKeyAcl $adminKey
 
         $remote = "$AdminUser@$($node.endpoint)"
         $remoteTempDir = "/tmp/ai-service-platform.operator-backup.$([guid]::NewGuid().ToString('N'))"

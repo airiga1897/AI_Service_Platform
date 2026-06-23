@@ -241,10 +241,10 @@ validate_state_kind() {
     local kind="$1"
     local line_number="$2"
     case "$kind" in
-        platform_role|role|service|edge_route) ;;
+        platform_role|role|service|edge_route|cascade_topology) ;;
         *)
             print_error "state.csv line $line_number has unsupported kind: $kind"
-            print_error "Supported kinds: platform_role, service, edge_route"
+            print_error "Supported kinds: platform_role, service, edge_route, cascade_topology"
             exit 1
             ;;
     esac
@@ -332,6 +332,10 @@ add_state_alias_binding() {
 
     local record
     if ! record="$(get_node_record "$alias")"; then
+        if [ "$lifecycle" = "old" ]; then
+            print_warning "state.csv line $line_number old_aliases references retired alias not present in nodes.csv; skipping: $alias"
+            return 0
+        fi
         print_error "state.csv line $line_number references unknown alias: $alias"
         exit 1
     fi
@@ -340,6 +344,53 @@ add_state_alias_binding() {
     local group
     group="$(state_group_name "$lifecycle" "$ansible_group")"
     PARSED_BINDINGS+=("$lifecycle|$kind:$name|$group|$node_alias|$node_alias|$endpoint|$connection")
+}
+
+validate_topology_endpoint_alias() {
+    local lifecycle="$1"
+    local edge="$2"
+    local alias="$3"
+    local line_number="$4"
+
+    if ! include_alias "$alias"; then
+        return 0
+    fi
+
+    if ! get_node_record "$alias" >/dev/null; then
+        if [ "$lifecycle" = "old" ]; then
+            print_warning "state.csv line $line_number old cascade_topology edge references retired alias not present in nodes.csv; skipping endpoint $alias in edge $edge"
+            return 0
+        fi
+        print_error "state.csv line $line_number cascade_topology edge references unknown alias: $edge"
+        exit 1
+    fi
+}
+
+validate_topology_edges() {
+    local lifecycle="$1"
+    local edges="$2"
+    local line_number="$3"
+    local edge
+    local old_ifs="$IFS"
+
+    IFS=+
+    for edge in $edges; do
+        IFS="$old_ifs"
+        if [ -z "$edge" ]; then
+            IFS=+
+            continue
+        fi
+        if [[ ! "$edge" =~ ^[A-Za-z0-9_.-]+\>[A-Za-z0-9_.-]+$ ]]; then
+            print_error "state.csv line $line_number has invalid cascade_topology edge: $edge"
+            print_error "Expected directed edge format: source_alias>target_alias"
+            exit 1
+        fi
+
+        validate_topology_endpoint_alias "$lifecycle" "$edge" "${edge%%>*}" "$line_number"
+        validate_topology_endpoint_alias "$lifecycle" "$edge" "${edge#*>}" "$line_number"
+        IFS=+
+    done
+    IFS="$old_ifs"
 }
 
 read_nodes_file() {
@@ -483,8 +534,15 @@ read_state_file() {
         require_csv_value "$ansible_group" "ansible_group" "$line_number"
         require_csv_value "$state" "state" "$line_number"
         validate_state_kind "$kind" "$line_number"
-        validate_group "$ansible_group" "$line_number"
         validate_state_value "$state" "$line_number"
+
+        if [ "$kind" = "cascade_topology" ]; then
+            validate_topology_edges "active" "$active_aliases" "$line_number"
+            validate_topology_edges "old" "$old_aliases" "$line_number"
+            continue
+        fi
+
+        validate_group "$ansible_group" "$line_number"
         register_group "$ansible_group"
 
         local alias_item

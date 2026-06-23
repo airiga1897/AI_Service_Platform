@@ -125,6 +125,21 @@ function Is-OrchestrationCapableNode($StateRows, $AliasToCheck) {
     return (($activeAliases[0] -eq $AliasToCheck) -or ($candidateAliases -contains $AliasToCheck))
 }
 
+function Get-ActiveOrchestrationAlias($StateRows) {
+    $rows = @($StateRows | Where-Object { ($_.kind -eq "platform_role" -or $_.kind -eq "role") -and $_.name -eq "orchestration" -and $_.state -eq "present" })
+    if ($rows.Count -eq 0) {
+        Fail "No active orchestration platform_role found in state.csv."
+    }
+    if ($rows.Count -gt 1) {
+        Fail "Multiple orchestration rows found in state.csv. Keep exactly one present row."
+    }
+    $activeAliases = @(Split-AliasList $rows[0].active_aliases)
+    if ($activeAliases.Count -ne 1) {
+        Fail "orchestration must have exactly one active alias in state.csv."
+    }
+    return $activeAliases[0]
+}
+
 function Get-MarkedBlock($Lines, $BeginMarker, $EndMarker, $Label) {
     $blockLines = New-Object System.Collections.Generic.List[string]
     $insideBlock = $false
@@ -333,6 +348,36 @@ function Save-BootstrapKeys($Lines, $AliasToSave, $IsManagement, $BaseOperatorDi
         Save-TextFile (Join-Path $aliasDir "ansible_control.managed_nodes.pub") $publicKey $AllowOverwrite $KeepExisting
         Save-TextFile $PublicKeyPath $publicKey $AllowOverwrite $KeepExisting
         Write-Host "Saved Ansible control public key: $PublicKeyPath"
+    }
+}
+
+function Save-BootstrapKeysToStaging($Lines, $AliasToSave, $IsManagement, $StagingRoot) {
+    Save-BootstrapKeys $Lines $AliasToSave $IsManagement $StagingRoot $null $true $false
+}
+
+function Install-StagedBootstrapKeys($AliasToSave, $IsManagement, $StagingRoot, $BaseOperatorDir, $PublicKeyPath, $AllowOverwrite) {
+    $sourceAliasDir = Join-Path $StagingRoot $AliasToSave
+    $targetAliasDir = Join-Path $BaseOperatorDir $AliasToSave
+    New-Item -ItemType Directory -Force -Path $targetAliasDir | Out-Null
+
+    foreach ($name in @("deploy_key", "admin_key")) {
+        $source = Join-Path $sourceAliasDir $name
+        $target = Join-Path $targetAliasDir $name
+        Save-TextFile $target (Get-Content -LiteralPath $source) $AllowOverwrite $false
+        Ensure-OpenSshPrivateKeyAcl $target
+    }
+
+    if ($IsManagement) {
+        foreach ($name in @("ansible_control_key", "ansible_control.managed_nodes.pub")) {
+            $source = Join-Path $sourceAliasDir $name
+            $target = Join-Path $targetAliasDir $name
+            Save-TextFile $target (Get-Content -LiteralPath $source) $AllowOverwrite $false
+            if ($name -eq "ansible_control_key") {
+                Ensure-OpenSshPrivateKeyAcl $target
+            }
+        }
+        $sourcePublicKey = Join-Path $sourceAliasDir "ansible_control.managed_nodes.pub"
+        Save-TextFile $PublicKeyPath (Get-Content -LiteralPath $sourcePublicKey) $AllowOverwrite $false
     }
 }
 
@@ -546,7 +591,13 @@ $isManagementNode = Is-OrchestrationCapableNode $stateRows $Alias
 $useAdminKeyBootstrap = [string]::IsNullOrWhiteSpace([string]$row.root_password)
 $adminKeyFile = Join-Path (Join-Path $OperatorDir $Alias) "admin_key"
 if (-not $isManagementNode -and -not $AnsibleAuthorizedKeyFile) {
-    $AnsibleAuthorizedKeyFile = Join-Path $OperatorDir "ansible_control.managed_nodes.pub"
+    $activeOrchestrationAlias = Get-ActiveOrchestrationAlias $stateRows
+    $activeOrchestrationPublicKeyFile = Join-Path (Join-Path $OperatorDir $activeOrchestrationAlias) "ansible_control.managed_nodes.pub"
+    if (Test-Path -LiteralPath $activeOrchestrationPublicKeyFile -PathType Leaf) {
+        $AnsibleAuthorizedKeyFile = $activeOrchestrationPublicKeyFile
+    } else {
+        $AnsibleAuthorizedKeyFile = Join-Path $OperatorDir "ansible_control.managed_nodes.pub"
+    }
     Require-File $AnsibleAuthorizedKeyFile "AnsibleAuthorizedKeyFile"
 }
 if ($isManagementNode) {
@@ -581,6 +632,7 @@ Assert-BootstrapKeyPathsAvailable $Alias $isManagementNode $OperatorDir $OutputA
 
 $sanitized = New-TemporaryFile
 $remoteLog = New-TemporaryFile
+$stagedKeyRoot = ""
 try {
     Set-Content -LiteralPath $sanitized -Value $ExpectedHeader -Encoding ascii
     foreach ($item in $rows) {
@@ -684,6 +736,11 @@ try {
     $remoteOutput = Get-Content -LiteralPath $remoteLog -ErrorAction SilentlyContinue
     if ($remoteExitCode -ne 0) { Fail "remote setup_vps.sh failed" }
 
+    if (-not $useAdminKeyBootstrap) {
+        $stagedKeyRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-service-platform.bootstrap-keys." + [guid]::NewGuid().ToString("N"))
+        Save-BootstrapKeysToStaging $remoteOutput $Alias $isManagementNode $stagedKeyRoot
+    }
+
     if (Test-BootstrapLocalMutationExpected $Alias $isManagementNode $OperatorDir $OutputAnsibleAuthorizedKeyFile $Force $useAdminKeyBootstrap (-not $useAdminKeyBootstrap)) {
         $sanitizeRootPasswordAlias = ""
         if (-not $useAdminKeyBootstrap) {
@@ -693,7 +750,11 @@ try {
     }
 
     Write-Host "Step 4/4: save bootstrap keys"
-    Save-BootstrapKeys $remoteOutput $Alias $isManagementNode $OperatorDir $OutputAnsibleAuthorizedKeyFile $Force $useAdminKeyBootstrap
+    if ($useAdminKeyBootstrap) {
+        Save-BootstrapKeys $remoteOutput $Alias $isManagementNode $OperatorDir $OutputAnsibleAuthorizedKeyFile $Force $useAdminKeyBootstrap
+    } else {
+        Install-StagedBootstrapKeys $Alias $isManagementNode $stagedKeyRoot $OperatorDir $OutputAnsibleAuthorizedKeyFile $Force
+    }
 
     if (-not $useAdminKeyBootstrap) {
         Clear-RootPasswordForAlias $NodesFile $Alias
@@ -702,4 +763,7 @@ try {
 } finally {
     Remove-Item -LiteralPath $sanitized -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $remoteLog -Force -ErrorAction SilentlyContinue
+    if ($stagedKeyRoot -and (Test-Path -LiteralPath $stagedKeyRoot -PathType Container)) {
+        Remove-Item -LiteralPath $stagedKeyRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }

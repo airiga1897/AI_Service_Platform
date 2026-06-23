@@ -42,6 +42,7 @@ GitHub Actions позже должны вызывать эти же scripts, а 
 - [Future SD-WAN-like egress controller](future-sd-wan-like-egress-controller.md) - direct/cascade path selection for approved targets with health checks and safe route reconciliation.
 - [Future security checks](future-security-sast-sca-dast.md) - SAST, SCA/OSA и DAST в report-only режиме.
 - [Future platform role node migration](future-platform-role-node-migration-and-primary-promotion.md) - перенос physical node и назначение нового active node.
+- [Future operator state node retirement tool](future-operator-state-node-retirement-tool.md) - безопасное удаление VPS из service placement, cascade topology, inventory inputs и operator secrets.
 - [Future management control plane and knowledge retrieval](future-management-control-plane-and-knowledge-retrieval.md) - web control plane и AI semantic knowledge layer.
 - [Future data services and platform auth](future-data-services-and-platform-auth.md) - PostgreSQL, MariaDB reserved и platform auth.
 
