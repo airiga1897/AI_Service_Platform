@@ -610,9 +610,6 @@
     ('443/tcp' not in edge_haproxy_cascade_ports.stdout)
     or ('992/tcp' not in edge_haproxy_cascade_ports.stdout)
     or ('5555/tcp' not in edge_haproxy_cascade_ports.stdout)
-    or ('8443/tcp' in edge_haproxy_cascade_ports.stdout)
-    or ('8992/tcp' in edge_haproxy_cascade_ports.stdout)
-    or ('8555/tcp' in edge_haproxy_cascade_ports.stdout)
   when:
     - edge_haproxy_state == 'present'
     - edge_haproxy_route_model.vpn_cascade_enabled | default(false)

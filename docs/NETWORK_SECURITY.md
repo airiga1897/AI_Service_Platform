@@ -11,10 +11,11 @@ UFW with:
 - default incoming policy: `deny`;
 - default outgoing policy: `allow`;
 - explicit TCP allows for current platform public ports:
-  `22`, `80`, `443`, `992`, `5555`, `8443`, `8555`, `8992`, `25565`, `25575`.
+  `22`, `80`, `443`, `992`, `5555`, `25565`, `25575`.
 
-The port list is intentionally broad for the first enforced baseline so existing
-SSH, edge VPN, cascade, and Minecraft paths are not accidentally closed.
+Retired cascade-only host ports `8443`, `8555`, and `8992` are no longer part
+of the expected public surface. Cascade/fallback traffic uses
+`cascade-vpsN.mine-craft.su:443` through HAProxy SNI routing.
 
 ## Edge HAProxy
 

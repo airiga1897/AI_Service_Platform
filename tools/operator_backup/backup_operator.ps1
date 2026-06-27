@@ -8,11 +8,12 @@ param(
     [string]$RemoteBackupDir = "/opt/backups/ai-service-platform/operator",
     [string]$AdminUser = "useradmin",
     [int]$KeepLatest = 30,
-    [switch]$AutoAcceptHostKey = $true
+    [switch]$AutoAcceptHostKey = $true,
+    [switch]$LocalOnly
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedNodesHeader = "current_alias,endpoint,connection,root_password"
+$ExpectedNodesHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 . (Join-Path $PSScriptRoot "..\common\private_key_acl.ps1")
 
@@ -40,6 +41,18 @@ function Split-AliasList($Value) {
     return @($Value -split "\+" | Where-Object { $_ })
 }
 
+function Get-NodeSshPort($Node) {
+    $port = [string]$Node.ssh_port
+    if (-not $port) {
+        return "22"
+    }
+    $portNumber = 0
+    if (-not [int]::TryParse($port, [ref]$portNumber) -or $portNumber -lt 1 -or $portNumber -gt 65535) {
+        Fail "Invalid ssh_port for $($Node.current_alias): $port"
+    }
+    return [string]$portNumber
+}
+
 function Quote-BashArg($Value) {
     $text = [string]$Value
     return "'" + ($text -replace "'", "'\''") + "'"
@@ -61,8 +74,8 @@ function Get-OpenSshCommonArgs($KeyFile) {
     return $args
 }
 
-function Invoke-SshKey($KeyFile, $Remote, $Command, $Label) {
-    $sshArgs = @("-n", "-T") + @(Get-OpenSshCommonArgs $KeyFile) + @("-o", "RequestTTY=no", $Remote, $Command)
+function Invoke-SshKey($KeyFile, $Port, $Remote, $Command, $Label) {
+    $sshArgs = @("-n", "-T", "-p", $Port) + @(Get-OpenSshCommonArgs $KeyFile) + @("-o", "RequestTTY=no", $Remote, $Command)
     $previousErrorActionPreference = $ErrorActionPreference
     $exitCode = 0
     try {
@@ -77,8 +90,8 @@ function Invoke-SshKey($KeyFile, $Remote, $Command, $Label) {
     }
 }
 
-function Invoke-ScpKey($KeyFile, $Source, $Target, $Label) {
-    $scpArgs = @("-B") + @(Get-OpenSshCommonArgs $KeyFile) + @($Source, $Target)
+function Invoke-ScpKey($KeyFile, $Port, $Source, $Target, $Label) {
+    $scpArgs = @("-B", "-P", $Port) + @(Get-OpenSshCommonArgs $KeyFile) + @($Source, $Target)
     $previousErrorActionPreference = $ErrorActionPreference
     $exitCode = 0
     try {
@@ -228,7 +241,10 @@ if ($stateHeader -ne $ExpectedStateHeader) {
 
 $nodeRows = Import-Csv -LiteralPath $NodesFile
 $stateRows = Import-Csv -LiteralPath $StateFile
-$standbyAliases = @(Get-StandbyOrchestrationAliases $stateRows $ControlRole)
+$standbyAliases = @()
+if (-not $LocalOnly) {
+    $standbyAliases = @(Get-StandbyOrchestrationAliases $stateRows $ControlRole)
+}
 
 $operatorPath = (Resolve-Path -LiteralPath $OperatorDir).Path
 $operatorParent = Split-Path -Parent $operatorPath
@@ -243,6 +259,10 @@ $localChecksum = Join-Path $LocalBackupDir $checksumName
 
 try {
     New-Item -ItemType Directory -Force -Path $LocalBackupDir | Out-Null
+    if ($LocalOnly) {
+        Write-Host "Mode: local encrypted backup only"
+        Write-Host "Remote upload: skipped by -LocalOnly"
+    }
 
     Write-Host "Creating temporary operator archive: $rawArchive"
     & tar -czf $rawArchive -C $operatorParent $operatorLeaf
@@ -272,13 +292,14 @@ try {
         Require-File $adminKey "Admin key for standby orchestration alias $alias"
         Ensure-OpenSshPrivateKeyAcl $adminKey
 
+        $sshPort = Get-NodeSshPort $node
         $remote = "$AdminUser@$($node.endpoint)"
         $remoteTempDir = "/tmp/ai-service-platform.operator-backup.$([guid]::NewGuid().ToString('N'))"
         Write-Host "Uploading encrypted operator backup to standby orchestration alias ${alias}: $RemoteBackupDir"
-        Invoke-SshKey $adminKey $remote ("mkdir -p " + (Quote-BashArg $remoteTempDir)) "remote temp backup dir create"
+        Invoke-SshKey $adminKey $sshPort $remote ("mkdir -p " + (Quote-BashArg $remoteTempDir)) "remote temp backup dir create"
         try {
-            Invoke-ScpKey $adminKey $localEncrypted "${remote}:$remoteTempDir/$encryptedName" "scp encrypted operator backup"
-            Invoke-ScpKey $adminKey $localChecksum "${remote}:$remoteTempDir/$checksumName" "scp encrypted operator backup checksum"
+            Invoke-ScpKey $adminKey $sshPort $localEncrypted "${remote}:$remoteTempDir/$encryptedName" "scp encrypted operator backup"
+            Invoke-ScpKey $adminKey $sshPort $localChecksum "${remote}:$remoteTempDir/$checksumName" "scp encrypted operator backup checksum"
             $installParts = @(
                 "set -e",
                 ("sudo mkdir -p " + (Quote-BashArg $RemoteBackupDir)),
@@ -290,10 +311,10 @@ try {
                 $installParts += $remoteRotationCommand
             }
             $installCommand = $installParts -join "; "
-            Invoke-SshKey $adminKey $remote $installCommand "remote encrypted operator backup install"
+            Invoke-SshKey $adminKey $sshPort $remote $installCommand "remote encrypted operator backup install"
         } finally {
             $cleanupCommand = "rm -rf " + (Quote-BashArg $remoteTempDir)
-            & ssh @(@("-n", "-T") + @(Get-OpenSshCommonArgs $adminKey) + @("-o", "RequestTTY=no", $remote, $cleanupCommand)) 2>$null | Out-Null
+            & ssh @(@("-n", "-T", "-p", $sshPort) + @(Get-OpenSshCommonArgs $adminKey) + @("-o", "RequestTTY=no", $remote, $cleanupCommand)) 2>$null | Out-Null
         }
     }
 

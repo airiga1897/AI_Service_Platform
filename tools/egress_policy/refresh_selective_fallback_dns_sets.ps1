@@ -30,7 +30,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedNodesHeader = "current_alias,endpoint,connection,root_password"
+$ExpectedNodesHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 $ExpectedNetworksHeader = "alias,policy_subnet,edge_ip,cascade_ip,cascade_router_ip,policy_gateway_ip"
 
@@ -93,6 +93,16 @@ function Get-OpenSshCommonArgs($KeyFile) {
     return $args
 }
 
+function Get-NodeSshPort($Node) {
+    $port = [string]$Node.ssh_port
+    if (-not $port) { return "22" }
+    $portNumber = 0
+    if (-not [int]::TryParse($port, [ref]$portNumber) -or $portNumber -lt 1 -or $portNumber -gt 65535) {
+        Fail "Invalid ssh_port for $($Node.current_alias): $port"
+    }
+    return [string]$portNumber
+}
+
 function Invoke-SshText($AliasName, $Command) {
     $node = $script:Nodes[$AliasName]
     if (-not $node) {
@@ -101,7 +111,7 @@ function Invoke-SshText($AliasName, $Command) {
     $keyFile = Join-Path (Join-Path $OperatorDir $AliasName) "admin_key"
     Require-File $keyFile "admin key for $AliasName"
     $remote = "${SshUser}@$($node.endpoint)"
-    $sshArgs = @("-n", "-T") + @(Get-OpenSshCommonArgs $keyFile) + @($remote, $Command)
+    $sshArgs = @("-n", "-T", "-p", (Get-NodeSshPort $node)) + @(Get-OpenSshCommonArgs $keyFile) + @($remote, $Command)
     $output = @()
     $exitCode = 0
     for ($attempt = 1; $attempt -le $SshRetries; $attempt++) {

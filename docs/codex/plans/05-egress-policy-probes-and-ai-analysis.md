@@ -46,15 +46,19 @@ Target protocols are protocol-agnostic at the policy layer: `http`, `https`,
 route-capable, but without an explicit protocol-specific probe it remains
 `route_review` and is not auto-accepted.
 
-The probe-only runner is:
+Production probe runs should execute on the active orchestration node through
+the remote wrapper, so managed-node SSH is not affected by the operator
+workstation network or VPN state:
 
 ```powershell
-.\tools\egress_policy\probe_egress_policy.ps1
+.\tools\egress_policy\egress_policy_remote.ps1 `
+  -Command probe `
+  -Args "-IncludeCascade"
 ```
 
-Use `-DryRun` to validate and list selected profiles without SSH probes. A normal
-run executes read-only SSH probes from each selected VPS and writes JSONL history
-under `operator/egress_policy/history/`.
+Use direct `probe_egress_policy.ps1 -DryRun` only to validate and list selected
+profiles without SSH probes. Direct local runs execute read-only SSH probes from
+the current shell and are diagnostic-only.
 
 Operators can create or replace a probe-only profile without hand-editing JSON:
 
@@ -76,8 +80,8 @@ operator decides whether to add that host to the profile.
 
 This command changes only `operator/egress_policy/profiles.json`.
 
-Use `-SshPath` when the current shell resolves `ssh` to a wrapper instead of the
-real OpenSSH executable:
+For diagnostic local runs, use `-SshPath` when the current shell resolves `ssh`
+to a wrapper instead of the real OpenSSH executable:
 
 ```powershell
 .\tools\egress_policy\probe_egress_policy.ps1 -SshPath <path-to-ssh>
@@ -110,7 +114,7 @@ Render the latest history for humans with:
 Generate and review operator-visible proposals with:
 
 ```powershell
-.\tools\egress_policy\suggest_egress_policy.ps1 -DryRun
+.\tools\egress_policy\egress_policy_remote.ps1 -Command suggest -Args "-DryRun"
 .\tools\egress_policy\report_egress_proposals.ps1
 .\tools\egress_policy\review_egress_proposals.ps1
 .\tools\egress_policy\set_egress_proposal_status.ps1 -Id <proposal-id> -Status accepted -Reason "operator approved"
@@ -149,17 +153,17 @@ under `/var/lib/ai-service-platform/edge_candidate_collector/candidates/`.
 Operator-side aggregation pulls those JSONL records and creates safe proposals:
 
 ```powershell
-.\tools\egress_policy\collect_egress_candidates.ps1 -AllAliases
-.\tools\egress_policy\collect_egress_candidates.ps1 -IngressAlias vps4
+.\tools\egress_policy\egress_policy_remote.ps1 -Command collect -Args "-AllAliases"
+.\tools\egress_policy\egress_policy_remote.ps1 -Command collect -Args "-IngressAlias vps4"
 ```
 
 After a successful fetch and proposal generation, the operator may archive
 remote evidence without deleting it immediately:
 
 ```powershell
-.\tools\egress_policy\collect_egress_candidates.ps1 `
-  -IngressAlias vps4 `
-  -ArchiveRemoteAfterFetch
+.\tools\egress_policy\egress_policy_remote.ps1 `
+  -Command collect `
+  -Args "-IngressAlias vps4 -ArchiveRemoteAfterFetch"
 ```
 
 That mode moves remote `candidates/*.jsonl` into the collector `processed/`

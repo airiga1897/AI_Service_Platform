@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-EXPECTED_CSV_HEADER="current_alias,endpoint,connection,root_password"
+EXPECTED_CSV_HEADER="current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 EXPECTED_STATE_CSV_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 REPO_DIR="/opt/ai-service-platform"
 SOURCE_NODES_FILE=""
@@ -45,6 +45,28 @@ USAGE
 fail() {
     echo "[ERROR] $1" >&2
     exit 1
+}
+
+validate_expected_ip() {
+    local alias="$1"
+    local endpoint="$2"
+    local expected_ip="$3"
+    local resolved_ip
+
+    [ -n "$expected_ip" ] || return 0
+    [ "$endpoint" != "local" ] || return 0
+    if command -v getent >/dev/null 2>&1; then
+        resolved_ip="$(getent ahostsv4 "$endpoint" | awk '{print $1; exit}')"
+    elif command -v python >/dev/null 2>&1; then
+        resolved_ip="$(python -c 'import socket,sys; print(socket.gethostbyname(sys.argv[1]))' "$endpoint" 2>/dev/null || true)"
+    elif command -v python3 >/dev/null 2>&1; then
+        resolved_ip="$(python3 -c 'import socket,sys; print(socket.gethostbyname(sys.argv[1]))' "$endpoint" 2>/dev/null || true)"
+    else
+        echo "[!] getent/python not found; skipping expected_ip check for $alias" >&2
+        return 0
+    fi
+    [ -n "$resolved_ip" ] || fail "Could not resolve endpoint for expected_ip check: $alias -> $endpoint"
+    [ "$resolved_ip" = "$expected_ip" ] || fail "expected_ip mismatch for $alias: endpoint $endpoint resolved to $resolved_ip, expected $expected_ip"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -158,7 +180,7 @@ resolve_include_aliases() {
     [ -n "$INCLUDE_ALIASES" ] && return 0
     INCLUDE_ALIASES="$(
         tail -n +2 "$SOURCE_NODES_FILE" |
-            while IFS=, read -r current_alias _endpoint _connection _root_password extra || [ -n "${current_alias:-}" ]; do
+            while IFS=, read -r current_alias _endpoint _expected_ip _connection _ssh_port _root_password extra || [ -n "${current_alias:-}" ]; do
                 current_alias="${current_alias//$'\r'/}"
                 [ -n "$current_alias" ] || continue
                 printf '%s\n' "$current_alias"
@@ -181,10 +203,12 @@ trap 'rm -f "$tmp_nodes"' EXIT
 
 {
     echo "$EXPECTED_CSV_HEADER"
-    tail -n +2 "$SOURCE_NODES_FILE" | while IFS=, read -r current_alias endpoint connection _root_password extra || [ -n "${current_alias:-}" ]; do
+    tail -n +2 "$SOURCE_NODES_FILE" | while IFS=, read -r current_alias endpoint expected_ip connection ssh_port _root_password extra || [ -n "${current_alias:-}" ]; do
         current_alias="${current_alias//$'\r'/}"
         endpoint="${endpoint//$'\r'/}"
+        expected_ip="${expected_ip//$'\r'/}"
         connection="${connection//$'\r'/}"
+        ssh_port="${ssh_port//$'\r'/}"
         extra="${extra//$'\r'/}"
 
         [ -n "$current_alias" ] || continue
@@ -193,9 +217,12 @@ trap 'rm -f "$tmp_nodes"' EXIT
         if [ "$current_alias" = "$MANAGEMENT_ALIAS" ]; then
             endpoint="local"
             connection="local"
+            ssh_port=""
         fi
 
-        printf '%s,%s,%s,\n' "$current_alias" "$endpoint" "$connection"
+        validate_expected_ip "$current_alias" "$endpoint" "$expected_ip"
+        [ -n "$ssh_port" ] || [ "$connection" = "local" ] || ssh_port="22"
+        printf '%s,%s,%s,%s,%s,\n' "$current_alias" "$endpoint" "$expected_ip" "$connection" "$ssh_port"
     done
 } > "$tmp_nodes"
 
@@ -216,20 +243,29 @@ refresh_ansible_known_hosts() {
     chown ansible:ansible "$known_hosts"
     chmod 600 "$known_hosts"
 
-    tail -n +2 "$nodes_file" | while IFS=, read -r current_alias endpoint connection _root_password extra || [ -n "${current_alias:-}" ]; do
+    tail -n +2 "$nodes_file" | while IFS=, read -r current_alias endpoint expected_ip connection ssh_port _root_password extra || [ -n "${current_alias:-}" ]; do
         current_alias="${current_alias//$'\r'/}"
         endpoint="${endpoint//$'\r'/}"
+        expected_ip="${expected_ip//$'\r'/}"
         connection="${connection//$'\r'/}"
+        ssh_port="${ssh_port//$'\r'/}"
         extra="${extra//$'\r'/}"
 
         [ -n "$current_alias" ] || continue
         [ -z "$extra" ] || fail "nodes.csv row for $current_alias has too many columns"
+        validate_expected_ip "$current_alias" "$endpoint" "$expected_ip"
         [ "$connection" = "ssh" ] || continue
         [ "$endpoint" != "local" ] || continue
+        [ -n "$ssh_port" ] || ssh_port="22"
 
-        echo "Refreshing ansible known_hosts for $current_alias: $endpoint"
-        sudo -u ansible ssh-keygen -R "$endpoint" -f "$known_hosts" >/dev/null 2>&1 || true
-        if ! ssh-keyscan -T 10 -H "$endpoint" >> "$known_hosts" 2>/dev/null; then
+        known_host="$endpoint"
+        if [ "$ssh_port" != "22" ]; then
+            known_host="[$endpoint]:$ssh_port"
+        fi
+
+        echo "Refreshing ansible known_hosts for $current_alias: $endpoint:$ssh_port"
+        sudo -u ansible ssh-keygen -R "$known_host" -f "$known_hosts" >/dev/null 2>&1 || true
+        if ! ssh-keyscan -T 10 -p "$ssh_port" -H "$endpoint" >> "$known_hosts" 2>/dev/null; then
             fail "ssh-keyscan failed for $current_alias endpoint: $endpoint"
         fi
     done

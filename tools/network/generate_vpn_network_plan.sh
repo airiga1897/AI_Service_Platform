@@ -64,7 +64,7 @@ import sys
 from pathlib import Path
 
 nodes_file, state_file, override_file, output_file, check_only = sys.argv[1:]
-expected_nodes = "current_alias,endpoint,connection,root_password"
+expected_nodes = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 expected_state = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 expected_networks = "alias,policy_subnet,edge_ip,cascade_ip,cascade_router_ip,policy_gateway_ip"
 

@@ -7,6 +7,7 @@ param(
     [string]$Profile = "vps4_test_fallback",
     [string]$ProposalDir = ".\operator\egress_policy\proposals",
     [string]$PolicyFile = ".\operator\egress_policy\profiles.json",
+    [string]$StateFile = ".\operator\state.csv",
     [string]$CascadeFile = ".\operator\softether\cascade\secrets\lab-cascade.json",
     [string]$ApplyScript = ".\tools\egress_policy\apply_selective_fallback_routes.ps1",
     [switch]$Apply,
@@ -16,6 +17,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 
 function Fail($Message) {
     Write-Error $Message
@@ -67,6 +69,35 @@ function Get-PropertyArray($Object, $Name) {
     return @($Object.$Name | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
 }
 
+function Read-StateRows($Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Fail "state.csv not found: $Path"
+    }
+    $lines = @(Get-Content -LiteralPath $Path)
+    if ($lines.Count -eq 0 -or $lines[0] -ne $ExpectedStateHeader) {
+        Fail "state.csv header must be exactly: $ExpectedStateHeader"
+    }
+    return @(Import-Csv -LiteralPath $Path)
+}
+
+function Split-AliasList($Value) {
+    if ([string]::IsNullOrWhiteSpace([string]$Value)) {
+        return @()
+    }
+    return @(([string]$Value).Split("+", [System.StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+function Get-ActiveCascadeEdges($StateRows) {
+    $rows = @($StateRows | Where-Object { $_.kind -eq "cascade_topology" -and $_.state -eq "present" })
+    if ($rows.Count -eq 0) {
+        Fail "cascade_topology row not found in state.csv"
+    }
+    if ($rows.Count -gt 1) {
+        Fail "multiple present cascade_topology rows found in state.csv"
+    }
+    return @(Split-AliasList $rows[0].active_aliases)
+}
+
 function Resolve-FallbackPath($ProfileName, $IngressOverride, $EgressOverride) {
     $hasIngressOverride = -not [string]::IsNullOrWhiteSpace($IngressOverride)
     $hasEgressOverride = -not [string]::IsNullOrWhiteSpace($EgressOverride)
@@ -98,13 +129,22 @@ function Resolve-FallbackPath($ProfileName, $IngressOverride, $EgressOverride) {
             Fail "egress profile is duplicated: $ProfileName"
         }
         $profileObject = $profiles[0]
-        $ingresses = @(Get-PropertyArray $profileObject "candidate_ingress_aliases" | Sort-Object -Unique)
-        $egresses = @(Get-PropertyArray $profileObject "candidate_fallback_egress_aliases" | Sort-Object -Unique)
-        if ($ingresses.Count -ne 1 -or $egresses.Count -ne 1) {
-            Fail "profile $ProfileName does not identify exactly one fallback path. Pass -IngressAlias and -EgressAlias explicitly."
+        $anchorSet = @{}
+        foreach ($aliasName in @(Get-PropertyArray $profileObject "ingress_anchor_aliases" | Sort-Object -Unique)) {
+            $anchorSet[$aliasName] = $true
         }
-        $ingress = $ingresses[0]
-        $egress = $egresses[0]
+        if ($anchorSet.Count -eq 0) {
+            Fail "profile $ProfileName must include ingress_anchor_aliases. Pass -IngressAlias and -EgressAlias explicitly for a one-off path."
+        }
+        $matchingEdges = @(Get-ActiveCascadeEdges (Read-StateRows $StateFile) | Where-Object {
+            $_ -match '^([^>]+)>([^>]+)$' -and $anchorSet.ContainsKey($Matches[1])
+        })
+        if ($matchingEdges.Count -ne 1) {
+            Fail "profile $ProfileName does not resolve to exactly one active fallback path in state.csv. Pass -IngressAlias and -EgressAlias explicitly."
+        }
+        $matchingEdges[0] -match '^([^>]+)>([^>]+)$' | Out-Null
+        $ingress = $Matches[1]
+        $egress = $Matches[2]
     }
 
     if (-not $cascade) {

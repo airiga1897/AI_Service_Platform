@@ -69,7 +69,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedHeader = "current_alias,endpoint,connection,root_password"
+$ExpectedHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 $IsWindowsPlatform = ($PSVersionTable.PSEdition -eq "Desktop") -or ($PSVersionTable.ContainsKey("Platform") -and $PSVersionTable.Platform -eq "Win32NT") -or ($env:OS -eq "Windows_NT")
 . (Join-Path $PSScriptRoot "..\common\private_key_acl.ps1")
@@ -85,9 +85,37 @@ function Require-File($Path, $Label) {
     }
 }
 
+function Write-AsciiNoBomLines($Path, $Lines) {
+    $text = (($Lines | ForEach-Object { [string]$_ }) -join "`n") + "`n"
+    $encoding = New-Object System.Text.ASCIIEncoding
+    [System.IO.File]::WriteAllText((Resolve-Path -LiteralPath $Path), $text, $encoding)
+}
+
+function Format-HexPrefix($Bytes, $Count) {
+    if (-not $Bytes -or $Bytes.Length -eq 0) {
+        return ""
+    }
+    $last = [Math]::Min($Bytes.Length, $Count) - 1
+    return (($Bytes[0..$last] | ForEach-Object { "{0:X2}" -f $_ }) -join " ")
+}
+
+function Assert-SanitizedNodesFile($Path) {
+    $firstLine = Get-Content -LiteralPath $Path -TotalCount 1
+    if ($firstLine -eq $ExpectedHeader) {
+        return
+    }
+
+    $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $Path))
+    Write-Host ("Sanitized nodes.csv diagnostic: path={0}" -f $Path)
+    Write-Host ("Sanitized nodes.csv diagnostic: first_line_length={0}" -f ([string]$firstLine).Length)
+    Write-Host ("Sanitized nodes.csv diagnostic: first_bytes={0}" -f (Format-HexPrefix $bytes 32))
+    Fail "sanitized nodes.csv header must be exactly: $ExpectedHeader"
+}
+
 function New-SanitizedNodesFile($SourcePath) {
     $tempFile = (New-TemporaryFile).FullName
-    Set-Content -LiteralPath $tempFile -Value $ExpectedHeader -Encoding ascii
+    $sanitizedLines = New-Object System.Collections.Generic.List[string]
+    $sanitizedLines.Add($ExpectedHeader)
 
     $lines = Get-Content -LiteralPath $SourcePath
     if (-not $lines -or $lines.Count -eq 0) {
@@ -102,15 +130,36 @@ function New-SanitizedNodesFile($SourcePath) {
         if (-not $line) {
             continue
         }
-        $fields = $line -split ",", 5
-        if ($fields.Count -ne 4) {
+        $fields = $line -split ",", 7
+        if ($fields.Count -ne 6) {
             Fail "nodes.csv row has invalid column count: $line"
         }
-        $fields[3] = ""
-        Add-Content -LiteralPath $tempFile -Value ($fields -join ",") -Encoding ascii
+        $fields[5] = ""
+        $sanitizedLines.Add(($fields -join ","))
     }
 
+    Write-AsciiNoBomLines $tempFile $sanitizedLines
+    Assert-SanitizedNodesFile $tempFile
     return $tempFile
+}
+
+function Get-NodeSshPort($Node) {
+    $port = [string]$Node.ssh_port
+    if (-not $port) {
+        return "22"
+    }
+    $portNumber = 0
+    if (-not [int]::TryParse($port, [ref]$portNumber) -or $portNumber -lt 1 -or $portNumber -gt 65535) {
+        Fail "Invalid ssh_port for $($Node.current_alias): $port"
+    }
+    return [string]$portNumber
+}
+
+function Get-KnownHostTarget($Endpoint, $Port) {
+    if ([string]$Port -eq "22") {
+        return $Endpoint
+    }
+    return "[$Endpoint]:$Port"
 }
 
 function Split-AliasList($Value) {
@@ -304,6 +353,7 @@ $egressPolicySyncDir = $null
 $remoteCreateInventoryTemp = "/tmp/ai-service-platform.create_inventory.sh"
 $remotePrepareInventoryTemp = "/tmp/ai-service-platform.prepare_orchestration_inventory.sh"
 $remoteVerifyTemp = "/tmp/ai-service-platform.verify_control_node.sh"
+$controlSshPort = Get-NodeSshPort $controlNode
 $remote = "$SshUser@$($controlNode.endpoint)"
 
 Write-Host "Generating VPN network plan from nodes.csv/state.csv"
@@ -331,11 +381,11 @@ function Get-OpenSshCommonArgs($KeyFile) {
 }
 
 function Get-SshKeyArgs($KeyFile) {
-    return @("-n", "-T") + @(Get-OpenSshCommonArgs $KeyFile) + @("-o", "RequestTTY=no")
+    return @("-n", "-T", "-p", $controlSshPort) + @(Get-OpenSshCommonArgs $KeyFile) + @("-o", "RequestTTY=no")
 }
 
 function Get-ScpKeyArgs($KeyFile) {
-    return @("-B") + @(Get-OpenSshCommonArgs $KeyFile)
+    return @("-B", "-P", $controlSshPort) + @(Get-OpenSshCommonArgs $KeyFile)
 }
 
 function Invoke-ScpKey($KeyFile, $Source, $Target, $Label) {
@@ -450,7 +500,7 @@ function Invoke-TarDirectoryUpload($KeyFile, $SourceDir, $Remote, $RemoteDir, $L
     }
 }
 
-function Clear-OpenSshHostKey($Endpoint) {
+function Clear-OpenSshHostKey($Endpoint, $Port) {
     if (-not $AutoAcceptHostKey) {
         return
     }
@@ -462,21 +512,22 @@ function Clear-OpenSshHostKey($Endpoint) {
     }
     New-Item -ItemType File -Force -Path $knownHosts | Out-Null
 
-    Write-Host "Removing old OpenSSH known_hosts entries for $Endpoint"
-    & $script:SshKeygenExecutablePath -F $Endpoint -f $knownHosts *> $null
+    $knownHostTarget = Get-KnownHostTarget $Endpoint $Port
+    Write-Host "Removing old OpenSSH known_hosts entries for $knownHostTarget"
+    & $script:SshKeygenExecutablePath -F $knownHostTarget -f $knownHosts *> $null
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "No existing OpenSSH known_hosts entry for $Endpoint; continuing."
+        Write-Host "No existing OpenSSH known_hosts entry for $knownHostTarget; continuing."
         return
     }
 
-    & $script:SshKeygenExecutablePath -R $Endpoint -f $knownHosts | Out-Host
+    & $script:SshKeygenExecutablePath -R $knownHostTarget -f $knownHosts | Out-Host
     if ($LASTEXITCODE -ne 0) {
-        Fail "ssh-keygen -R failed for $Endpoint"
+        Fail "ssh-keygen -R failed for $knownHostTarget"
     }
 }
 
 Ensure-OpenSshPrivateKeyAcl $SshKeyFile
-Clear-OpenSshHostKey $controlNode.endpoint
+Clear-OpenSshHostKey $controlNode.endpoint $controlSshPort
 
 try {
     Write-Host "Syncing sanitized nodes.csv to control node $($controlNode.current_alias) at $remote"

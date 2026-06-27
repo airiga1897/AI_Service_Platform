@@ -74,7 +74,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedHeader = "current_alias,endpoint,connection,root_password"
+$ExpectedHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 $ExpectedNetworksHeader = "alias,policy_subnet,edge_ip,cascade_ip,cascade_router_ip,policy_gateway_ip"
 . (Join-Path $PSScriptRoot "..\common\private_key_acl.ps1")
@@ -95,6 +95,18 @@ function Split-AliasList($Value) {
         return @()
     }
     return @($Value -split "\+" | Where-Object { $_ })
+}
+
+function Get-NodeSshPort($Node) {
+    $port = [string]$Node.ssh_port
+    if (-not $port) {
+        return "22"
+    }
+    $portNumber = 0
+    if (-not [int]::TryParse($port, [ref]$portNumber) -or $portNumber -lt 1 -or $portNumber -gt 65535) {
+        Fail "Invalid ssh_port for $($Node.current_alias): $port"
+    }
+    return [string]$portNumber
 }
 
 function Quote-BashArg($Value) {
@@ -227,7 +239,7 @@ function New-BackgroundCleanupCommand($Command) {
 
 function Invoke-RemoteTempCleanup($SshArgs, $Remote) {
     $cleanupCommand = @(
-        "find /tmp -maxdepth 1 -mindepth 1 -type d \( -name 'ai-service-platform.service-job.*' -o -name 'ai-service-platform.service-remote.*' \) -mmin +1440 -exec rm -rf -- {} +",
+        "find /tmp -maxdepth 1 -mindepth 1 -type d -name 'ai-service-platform.service-remote.*' -mmin +1440 -exec rm -rf -- {} +",
         "find /tmp -maxdepth 1 -mindepth 1 -type f -name 'ai-service-platform.service-remote.*.tar.gz' -mmin +1440 -delete"
     ) -join "; "
     Invoke-CleanupSsh ($SshArgs + @($Remote, (New-BackgroundCleanupCommand $cleanupCommand))) "remote old service temp cleanup"
@@ -380,10 +392,11 @@ function New-ServiceCommand($Step, $RemoteRepoDir, $RemoteNodesFile, $RemoteStat
     ) -join "; "
 }
 
-function New-RefreshAnsibleKnownHostsCommand($RemoteNodesFile) {
+function New-RefreshAnsibleKnownHostsCommand($RemoteNodesFile, $ControlAlias) {
     $script = @"
 set -e
 nodes_file=$(Quote-BashArg $RemoteNodesFile)
+control_alias=$(Quote-BashArg $ControlAlias)
 ssh_dir=/home/ansible/.ssh
 known_hosts="`$ssh_dir/known_hosts"
 command -v ssh-keygen >/dev/null 2>&1
@@ -393,18 +406,23 @@ install -d -m 700 -o ansible -g ansible "`$ssh_dir"
 touch "`$known_hosts"
 chown ansible:ansible "`$known_hosts"
 chmod 600 "`$known_hosts"
-tail -n +2 "`$nodes_file" | while IFS=, read -r current_alias endpoint connection _root_password extra || [ -n "`${current_alias:-}" ]; do
+tail -n +2 "`$nodes_file" | while IFS=, read -r current_alias endpoint expected_ip connection ssh_port _root_password extra || [ -n "`${current_alias:-}" ]; do
     current_alias="`${current_alias%`$'\r'}"
     endpoint="`${endpoint%`$'\r'}"
     connection="`${connection%`$'\r'}"
+    ssh_port="`${ssh_port%`$'\r'}"
     extra="`${extra%`$'\r'}"
     [ -n "`$current_alias" ] || continue
+    [ "`$current_alias" != "`$control_alias" ] || continue
     [ -z "`$extra" ] || { echo "[ERROR] nodes.csv row for `$current_alias has too many columns" >&2; exit 1; }
     [ "`$connection" = "ssh" ] || continue
     [ "`$endpoint" != "local" ] || continue
-    echo "Refreshing ansible known_hosts for `$current_alias: `$endpoint"
-    sudo -u ansible ssh-keygen -R "`$endpoint" -f "`$known_hosts" >/dev/null 2>&1 || true
-    ssh-keyscan -T 10 -H "`$endpoint" >> "`$known_hosts" 2>/dev/null || { echo "[ERROR] ssh-keyscan failed for `$current_alias endpoint: `$endpoint" >&2; exit 1; }
+    [ -n "`$ssh_port" ] || ssh_port=22
+    known_host="`$endpoint"
+    if [ "`$ssh_port" != "22" ]; then known_host="[`$endpoint]:`$ssh_port"; fi
+    echo "Refreshing ansible known_hosts for `$current_alias: `$endpoint:`$ssh_port"
+    sudo -u ansible ssh-keygen -R "`$known_host" -f "`$known_hosts" >/dev/null 2>&1 || true
+    ssh-keyscan -T 10 -p "`$ssh_port" -H "`$endpoint" >> "`$known_hosts" 2>/dev/null || { echo "[ERROR] ssh-keyscan failed for `$current_alias endpoint: `$endpoint" >&2; exit 1; }
 done
 sort -u "`$known_hosts" -o "`$known_hosts"
 chown ansible:ansible "`$known_hosts"
@@ -578,7 +596,6 @@ if ($RemoteTransferAttempts -lt 1) {
 if ($RemoteTransferRetryDelaySeconds -lt 1) {
     Fail "RemoteTransferRetryDelaySeconds must be greater than zero"
 }
-
 Require-File $NodesFile "NodesFile"
 Require-File $StateFile "StateFile"
 $resolvedStateFile = (Resolve-Path -LiteralPath $StateFile).Path
@@ -604,6 +621,7 @@ if ($networksHeader -ne $ExpectedNetworksHeader) {
 $nodes = Import-Csv -LiteralPath $NodesFile
 $stateRows = Import-Csv -LiteralPath $StateFile
 $controlNode = Resolve-ControlNodeFromState $nodes $stateRows $ControlRole $ControlAlias
+$controlSshPort = Get-NodeSshPort $controlNode
 
 if (-not $SshKeyFile) {
     $SshKeyFile = Join-Path (Join-Path $OperatorDir $controlNode.current_alias) "admin_key"
@@ -641,13 +659,16 @@ $remoteOperatorCsvTemp = "$remoteBundleDir/operator"
 $remoteNodesDir = Split-RemoteParentPath $RemoteNodesFile
 $remoteOperatorDir = Split-RemoteParentPath $RemoteStateFile
 $remoteNetworksFile = "$remoteOperatorDir/networks.csv"
-$remoteJobDir = "/tmp/ai-service-platform.service-job.$([guid]::NewGuid().ToString('N'))"
+$remoteJobId = "service-$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'))-$([guid]::NewGuid().ToString('N'))"
+$remoteJobLogDir = "/var/log/ai-service-platform/jobs"
+$remoteJobStateRoot = "/var/lib/ai-service-platform/jobs"
+$remoteJobDir = "$remoteJobStateRoot/$remoteJobId"
 $remoteJobScript = "$remoteJobDir/run.sh"
-$remoteJobLog = "$remoteJobDir/output.log"
+$remoteJobLog = "$remoteJobLogDir/$remoteJobId.log"
 $remoteJobPid = "$remoteJobDir/pid"
 $remoteJobExitCode = "$remoteJobDir/exit_code"
 $remoteJobDone = "$remoteJobDir/done"
-$refreshKnownHostsCommand = New-RefreshAnsibleKnownHostsCommand $RemoteNodesFile
+$refreshKnownHostsCommand = New-RefreshAnsibleKnownHostsCommand $RemoteNodesFile $controlNode.current_alias
 $isBatch = [bool]$BatchPlanFile
 $batchSteps = @()
 if ($isBatch) {
@@ -719,6 +740,8 @@ if ($isBatch) {
 }
 if ($useDetachedRemoteJob) {
     Write-Host "Mode:         detached remote job"
+    Write-Host "Job id:       $remoteJobId"
+    Write-Host "Remote log:   $remoteJobLog"
 } else {
     Write-Host "Mode:         direct SSH stream"
 }
@@ -726,6 +749,7 @@ if ($useDetachedRemoteJob) {
 $sshCommonArgs = @(
     "-n",
     "-T",
+    "-p", $controlSshPort,
     "-i", $SshKeyFile,
     "-o", "BatchMode=yes",
     "-o", "ConnectTimeout=10",
@@ -742,6 +766,7 @@ if ($AutoAcceptHostKey) {
 }
 $scpCommonArgs = @(
     "-B",
+    "-P", $controlSshPort,
     "-i", $SshKeyFile,
     "-o", "BatchMode=yes",
     "-o", "ConnectTimeout=10",
@@ -854,8 +879,14 @@ try {
     Invoke-RemoteTempCleanup $sshCommonArgs $remote
 
     if ($useDetachedRemoteJob) {
-        Write-Host "Creating remote temporary bundle and job directories..."
-        $mkdirCommand = "mkdir -p $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteJobDir)"
+        Write-Host "Creating remote temporary bundle and durable job directories..."
+        $mkdirCommand = @(
+            "set -e",
+            "mkdir -p $(Quote-BashArg $remoteBundleDir)",
+            "sudo mkdir -p $(Quote-BashArg $remoteJobLogDir) $(Quote-BashArg $remoteJobDir)",
+            "sudo chown ""`$(id -u):`$(id -g)"" $(Quote-BashArg $remoteJobLogDir) $(Quote-BashArg $remoteJobDir)",
+            "chmod 750 $(Quote-BashArg $remoteJobDir)"
+        ) -join "; "
     } else {
         Write-Host "Creating remote temporary bundle directory..."
         $mkdirCommand = "mkdir -p $(Quote-BashArg $remoteBundleDir)"
@@ -933,10 +964,10 @@ try {
     }
     Remove-Item -LiteralPath $runScriptPath -Force -ErrorAction SilentlyContinue
     if ($useDetachedRemoteJob -and $remoteJobCompletedSuccessfully) {
-        Write-Host "Cleaning remote temporary service bundle and job..."
+        Write-Host "Cleaning remote temporary service bundle and completed job state; preserving rotated job log: $remoteJobLog"
         $cleanupTarget = New-BackgroundCleanupCommand "rm -rf $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteBundleArchive) $(Quote-BashArg $remoteJobDir)"
     } elseif ($useDetachedRemoteJob) {
-        Write-Host "Cleaning remote temporary service bundle; preserving failed job log: $remoteJobLog"
+        Write-Host "Cleaning remote temporary service bundle; preserving failed job state: $remoteJobDir and log: $remoteJobLog"
         $cleanupTarget = New-BackgroundCleanupCommand "rm -rf $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteBundleArchive)"
     } else {
         Write-Host "Cleaning remote temporary service bundle..."

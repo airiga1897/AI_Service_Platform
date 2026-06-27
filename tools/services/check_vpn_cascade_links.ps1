@@ -12,7 +12,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedNodesHeader = "current_alias,endpoint,connection,root_password"
+$ExpectedNodesHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 
 function Fail($Message) {
     Write-Error $Message

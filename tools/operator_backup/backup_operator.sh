@@ -11,7 +11,7 @@ REMOTE_BACKUP_DIR="/opt/backups/ai-service-platform/operator"
 ADMIN_USER="useradmin"
 AUTO_ACCEPT_HOST_KEY="false"
 
-EXPECTED_NODES_HEADER="current_alias,endpoint,connection,root_password"
+EXPECTED_NODES_HEADER="current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 EXPECTED_STATE_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 
 usage() {
@@ -81,22 +81,24 @@ ssh_common_args() {
 
 invoke_ssh_key() {
     local key_file="$1"
-    local remote="$2"
-    local command="$3"
-    local label="$4"
+    local port="$2"
+    local remote="$3"
+    local command="$4"
+    local label="$5"
     local args=()
     mapfile -d '' -t args < <(ssh_common_args "$key_file")
-    ssh -n "${args[@]}" "$remote" "$command" || fail "$label failed"
+    ssh -n -p "$port" "${args[@]}" "$remote" "$command" || fail "$label failed"
 }
 
 invoke_scp_key() {
     local key_file="$1"
-    local source="$2"
-    local target="$3"
-    local label="$4"
+    local port="$2"
+    local source="$3"
+    local target="$4"
+    local label="$5"
     local args=()
     mapfile -d '' -t args < <(ssh_common_args "$key_file")
-    scp "${args[@]}" "$source" "$target" || fail "$label failed"
+    scp -P "$port" "${args[@]}" "$source" "$target" || fail "$label failed"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -180,9 +182,11 @@ echo "Wrote checksum: $local_checksum"
 for alias in "${standby_aliases[@]}"; do
     node_line="$(awk -F, -v alias="$alias" 'NR > 1 && $1 == alias { print; exit }' "$NODES_FILE")"
     [ -n "$node_line" ] || fail "Standby orchestration alias not found in nodes.csv: $alias"
-    IFS=, read -r _current_alias endpoint connection _root_password _extra <<< "$node_line"
+    IFS=, read -r _current_alias endpoint _expected_ip connection ssh_port _root_password _extra <<< "$node_line"
     endpoint="${endpoint//$'\r'/}"
     connection="${connection//$'\r'/}"
+    ssh_port="${ssh_port//$'\r'/}"
+    [ -n "$ssh_port" ] || ssh_port="22"
     [ "$connection" = "ssh" ] && [ "$endpoint" != "local" ] || fail "Standby orchestration alias $alias must use connection=ssh and a real endpoint"
     admin_key="$OPERATOR_DIR/$alias/admin_key"
     require_file "$admin_key" "admin key for standby orchestration alias $alias"
@@ -190,11 +194,11 @@ for alias in "${standby_aliases[@]}"; do
     remote="$ADMIN_USER@$endpoint"
     remote_temp_dir="/tmp/ai-service-platform.operator-backup.$(date -u +%Y%m%dT%H%M%SZ).$$.$alias"
     echo "Uploading encrypted operator backup to standby orchestration alias $alias: $REMOTE_BACKUP_DIR"
-    invoke_ssh_key "$admin_key" "$remote" "mkdir -p $(quote_bash_arg "$remote_temp_dir")" "remote temp backup dir create"
-    invoke_scp_key "$admin_key" "$local_encrypted" "$remote:$remote_temp_dir/$encrypted_name" "scp encrypted operator backup"
-    invoke_scp_key "$admin_key" "$local_checksum" "$remote:$remote_temp_dir/$checksum_name" "scp encrypted operator backup checksum"
+    invoke_ssh_key "$admin_key" "$ssh_port" "$remote" "mkdir -p $(quote_bash_arg "$remote_temp_dir")" "remote temp backup dir create"
+    invoke_scp_key "$admin_key" "$ssh_port" "$local_encrypted" "$remote:$remote_temp_dir/$encrypted_name" "scp encrypted operator backup"
+    invoke_scp_key "$admin_key" "$ssh_port" "$local_checksum" "$remote:$remote_temp_dir/$checksum_name" "scp encrypted operator backup checksum"
     install_command="set -e; sudo mkdir -p $(quote_bash_arg "$REMOTE_BACKUP_DIR"); sudo install -m 600 $(quote_bash_arg "$remote_temp_dir/$encrypted_name") $(quote_bash_arg "$REMOTE_BACKUP_DIR/$encrypted_name"); sudo install -m 600 $(quote_bash_arg "$remote_temp_dir/$checksum_name") $(quote_bash_arg "$REMOTE_BACKUP_DIR/$checksum_name"); rm -rf $(quote_bash_arg "$remote_temp_dir")"
-    invoke_ssh_key "$admin_key" "$remote" "$install_command" "remote encrypted operator backup install"
+    invoke_ssh_key "$admin_key" "$ssh_port" "$remote" "$install_command" "remote encrypted operator backup install"
 done
 
 echo "[OK] Encrypted operator backup completed: $local_encrypted"

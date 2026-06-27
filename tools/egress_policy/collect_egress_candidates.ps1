@@ -15,7 +15,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedNodesHeader = "current_alias,endpoint,connection,root_password"
+$ExpectedNodesHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 $script:FetchedRemoteAliases = New-Object System.Collections.Generic.HashSet[string]
 
@@ -206,6 +206,17 @@ function Get-RemoteCollectorDirs() {
     }
 }
 
+function Get-NodeSshPort($Node) {
+    $port = [string]$Node.ssh_port
+    if (-not $port) { return "22" }
+    $portNumber = 0
+    if (-not [int]::TryParse($port, [ref]$portNumber) -or $portNumber -lt 1 -or $portNumber -gt 65535) {
+        Write-Host "Invalid ssh_port for $($Node.current_alias): $port"
+        return "22"
+    }
+    return [string]$portNumber
+}
+
 function Invoke-SshBestEffort($Alias, $Node, $Command, $Label) {
     $keyPath = Join-Path (Split-Path -Parent $StateFile) (Join-Path $Alias "admin_key")
     if (-not (Test-Path -LiteralPath $keyPath -PathType Leaf)) {
@@ -213,7 +224,7 @@ function Invoke-SshBestEffort($Alias, $Node, $Command, $Label) {
         return $false
     }
     $remote = "{0}@{1}" -f $AdminUser, $Node.endpoint
-    $args = @("-i", $keyPath, "-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR", $remote, $Command)
+    $args = @("-p", (Get-NodeSshPort $Node), "-i", $keyPath, "-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR", $remote, $Command)
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
@@ -254,7 +265,7 @@ function Fetch-RemoteCandidates($Alias, $Node) {
     $localPath = Join-Path $aliasDir ("{0}-remote-candidates.jsonl" -f $Alias)
     $fetchInner = "find $candidatePath -maxdepth 1 -type f -name '*.jsonl' -size +0c -print0 | sort -z | xargs -0 -r cat"
     $fetchCommand = "sudo bash -lc $(Quote-BashArg $fetchInner)"
-    $args = @("-i", $keyPath, "-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR", $remote, $fetchCommand)
+    $args = @("-p", (Get-NodeSshPort $Node), "-i", $keyPath, "-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR", $remote, $fetchCommand)
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {

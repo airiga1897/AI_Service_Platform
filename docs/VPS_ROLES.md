@@ -18,16 +18,16 @@ operator/nodes.csv
 Header:
 
 ```csv
-current_alias,endpoint,connection,root_password
+current_alias,endpoint,expected_ip,connection,ssh_port,root_password
 ```
 
 Пример:
 
 ```csv
-current_alias,endpoint,connection,root_password
-vps1,vps01.example.com,ssh,
-vps2,vps02.example.com,ssh,
-vps3,vps03.example.com,ssh,
+current_alias,endpoint,expected_ip,connection,ssh_port,root_password
+vps1,vps01.example.com,203.0.113.11,ssh,22,
+vps2,vps02.example.com,203.0.113.12,ssh,22,
+vps3,vps03.example.com,203.0.113.13,ssh,22,
 ```
 
 Смысл:
@@ -51,6 +51,11 @@ management-capable nodes. Other present aliases are managed nodes.
 `bootstrap_all_from_windows.ps1` can converge both categories automatically:
 first orchestration candidates, then the aggregate Ansible trust bundle and
 trust mesh, then managed nodes.
+
+An orchestration candidate may also run normal edge services. For example,
+`vps5` can be a standby orchestration node for `vps6` and still be an active VPN
+ingress node when `state.csv` contains the matching `edge_haproxy`, `vpn_edge`,
+and `edge_route,vpn_ingress` rows.
 
 ## state.csv
 
@@ -104,12 +109,23 @@ Service naming is semantic, not positional:
   HAProxy/policy/cascade candidate facts and writes local JSONL evidence. It
   does not apply routes, NAT, firewall, HAProxy, Docker, or SoftEther changes.
 
+Every active, non-retired VPS in `nodes.csv` is expected to have the full VPN
+ingress stack in `state.csv`: `service,edge_haproxy`,
+`service,vpn_edge`, and `edge_route,vpn_ingress`. Exceptions must be explicit
+and temporary, for example a newly bootstrapped node that is waiting for public
+TCP provider forwarding checks.
+
 `edge_candidate_collector` lifecycle is controlled only by `state.csv`. Its
 output is pulled into the operator proposal inbox with:
 
 ```powershell
-.\tools\egress_policy\collect_egress_candidates.ps1 -AllAliases
-.\tools\egress_policy\collect_egress_candidates.ps1 -IngressAlias vps4
+.\tools\egress_policy\egress_policy_remote.ps1 `
+  -Command collect `
+  -Args "-AllAliases"
+
+.\tools\egress_policy\egress_policy_remote.ps1 `
+  -Command collect `
+  -Args "-IngressAlias vps4"
 ```
 
 Generated proposals remain `suggested` until the operator accepts or rejects
@@ -194,6 +210,12 @@ minecraft:
       vpn_sni:
         - mainsrv01.mine-craft.su
 ```
+
+Provider-NAT VPS require a separate public TCP readiness check. SSH reachability
+through `nodes.csv` is not enough: VPN ingress is healthy only when public TCP
+`443`, `992`, and `5555` reach the VPS and HAProxy counters move. A SoftEther
+client NAT Traversal warning means the session bypassed the intended TCP/SNI
+path and must not be accepted as production ingress readiness.
 
 ## Inventory Generation
 

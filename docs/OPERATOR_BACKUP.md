@@ -175,6 +175,22 @@ By default this uses `.\operator\nodes.csv`, `.\operator\state.csv`,
 `.\operator`, `D:\Backup\Projects\AI_SP\operator`, and
 `StrictHostKeyChecking=accept-new` for standby upload.
 
+Emergency local-only mode is available when there is temporarily no standby
+orchestration candidate:
+
+```powershell
+.\tools\operator_backup\backup_operator.ps1 `
+  -NodesFile .\operator\nodes.csv `
+  -StateFile .\operator\state.csv `
+  -LocalOnly
+```
+
+`-LocalOnly` still creates the encrypted local `.age` archive, writes the
+matching `.sha256`, and applies local rotation. It does not require
+`candidate_aliases` in `state.csv` and does not upload to remote standby
+storage. Normal runs without `-LocalOnly` remain strict and fail when standby
+orchestration is absent.
+
 Backup rotation is enabled by default. The helper keeps the newest 30
 timestamped `.age` archives and matching `.sha256` files locally and on the
 standby orchestration candidate. Override it with `-KeepLatest N`, or use

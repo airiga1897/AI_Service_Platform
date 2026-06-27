@@ -43,7 +43,7 @@ operator/state.csv
 `operator/nodes.csv` - только адресная книга и временный root password для первого bootstrap:
 
 ```csv
-current_alias,endpoint,connection,root_password
+current_alias,endpoint,expected_ip,connection,ssh_port,root_password
 vps1,vps01.example.com,ssh,<temporary-root-password>
 vps2,vps02.example.com,ssh,<temporary-root-password>
 vps3,vps03.example.com,ssh,<temporary-root-password>

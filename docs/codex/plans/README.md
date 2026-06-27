@@ -1,4 +1,4 @@
-﻿# Codex Plans
+# Codex Plans
 
 Эта папка хранит operational order и будущие планы. Numbered-файлы описывают основной порядок внедрения. `future-*` и prompt/archive документы не являются текущим порядком выполнения.
 
@@ -12,7 +12,7 @@
 
 ## Текущая Модель
 
-- `nodes.csv` - только адресная книга: `current_alias,endpoint,connection,root_password`.
+- `nodes.csv` - только адресная книга: `current_alias,endpoint,expected_ip,connection,ssh_port,root_password`.
 - `state.csv` - источник истины для `platform_role`, `service`, `active/candidate/old` и `present/absent/purged`.
 - `edge_route` - HAProxy route внутри `edge_haproxy`, не отдельный контейнер.
 - `plan` - команда runner-а, а не состояние сервиса.
@@ -34,6 +34,13 @@
   ```
 
 GitHub Actions позже должны вызывать эти же scripts, а не содержать отдельную deploy-логику.
+
+Detached service jobs are the normal path for long-running rollout. Upload and
+extract bundles stay temporary in `/tmp`; durable job logs are written to
+`/var/log/ai-service-platform/jobs/<job-id>.log`, and job state is written to
+`/var/lib/ai-service-platform/jobs/<job-id>/`. The `platform_ops` role creates
+these paths and installs log rotation on every current and future VPS. See
+[Durable detached job logs](durable-job-logs.md).
 
 ## Будущие Материалы
 

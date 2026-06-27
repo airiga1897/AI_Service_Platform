@@ -12,8 +12,7 @@ param(
     [string]$Path = "/",
     [Parameter(Mandatory = $true)]
     [string[]]$IngressAlias,
-    [Parameter(Mandatory = $true)]
-    [string[]]$FallbackEgressAlias,
+    [string[]]$FallbackEgressAlias = @(),
     [ValidateSet("probe", "disabled")]
     [string]$State = "probe",
     [Parameter(Mandatory = $true)]
@@ -89,7 +88,9 @@ if ([string]::IsNullOrWhiteSpace($Rollback)) {
 
 $targets = Assert-NonEmptyList $TargetValue "-TargetValue"
 $ingressAliases = Assert-NonEmptyList $IngressAlias "-IngressAlias"
-$fallbackEgressAliases = Assert-NonEmptyList $FallbackEgressAlias "-FallbackEgressAlias"
+if (@($FallbackEgressAlias | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0) {
+    Fail "-FallbackEgressAlias is no longer stored in profiles. Keep fallback candidates in state.csv cascade_topology."
+}
 $portValue = Get-DefaultPort $Protocol $Port
 if (($Protocol -eq "icmp" -and $portValue -ne 0) -or ($Protocol -ne "icmp" -and ($portValue -le 0 -or $portValue -gt 65535))) {
     Fail "-Port must be 0 for icmp or in 1..65535 for tcp/udp/http/https"
@@ -134,8 +135,7 @@ $profile = [ordered]@{
     behavior = "fallback_on_ingress_egress_failure"
     reason = $Reason
     rollback = $Rollback
-    candidate_ingress_aliases = @($ingressAliases)
-    candidate_fallback_egress_aliases = @($fallbackEgressAliases)
+    ingress_anchor_aliases = @($ingressAliases)
     targets = @($targetObjects)
 }
 
@@ -152,8 +152,7 @@ if ($DryRun) {
     } else {
         Write-Host "[dry-run] Profile would be written: $Name"
         Write-Host "Targets: $($targets -join ', ')"
-        Write-Host "Ingress aliases: $($ingressAliases -join ', ')"
-        Write-Host "Fallback egress aliases: $($fallbackEgressAliases -join ', ')"
+        Write-Host "Ingress anchors: $($ingressAliases -join ', ')"
     }
     exit 0
 }

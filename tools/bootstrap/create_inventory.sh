@@ -7,7 +7,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
-EXPECTED_CSV_HEADER="current_alias,endpoint,connection,root_password"
+EXPECTED_CSV_HEADER="current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 EXPECTED_STATE_CSV_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 
 print_header() {
@@ -47,12 +47,12 @@ Usage:
     --check
 
 CSV header must be exactly:
-  current_alias,endpoint,connection,root_password
+  current_alias,endpoint,expected_ip,connection,ssh_port,root_password
 
 CSV example:
-  vps1,vps01.example.com,ssh,
-  vps2,vps02.example.com,ssh,
-  vps6,vps06.example.com,ssh,
+  vps1,vps01.example.com,ssh,22,
+  vps2,vps02.example.com,ssh,2222,
+  vps6,vps06.example.com,ssh,22,
 
 State CSV header must be exactly:
   kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state
@@ -227,6 +227,51 @@ validate_connection() {
     esac
 }
 
+validate_ssh_port() {
+    local port="$1"
+    local connection="$2"
+    local line_number="$3"
+    if [ -z "$port" ]; then
+        port="22"
+    fi
+    if [ "$connection" = "local" ]; then
+        return 0
+    fi
+    if ! printf '%s\n' "$port" | grep -Eq '^[0-9]+$' || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        print_error "nodes.csv line $line_number has invalid ssh_port: $port"
+        exit 1
+    fi
+}
+
+validate_expected_ip() {
+    local alias="$1"
+    local endpoint="$2"
+    local expected_ip="$3"
+    local line_number="$4"
+    local resolved_ip
+
+    [ -n "$expected_ip" ] || return 0
+    [ "$endpoint" != "local" ] || return 0
+    if command -v getent >/dev/null 2>&1; then
+        resolved_ip="$(getent ahostsv4 "$endpoint" | awk '{print $1; exit}')"
+    elif command -v python >/dev/null 2>&1; then
+        resolved_ip="$(python -c 'import socket,sys; print(socket.gethostbyname(sys.argv[1]))' "$endpoint" 2>/dev/null || true)"
+    elif command -v python3 >/dev/null 2>&1; then
+        resolved_ip="$(python3 -c 'import socket,sys; print(socket.gethostbyname(sys.argv[1]))' "$endpoint" 2>/dev/null || true)"
+    else
+        print_warning "getent/python not found; skipping expected_ip check for $alias"
+        return 0
+    fi
+    if [ -z "$resolved_ip" ]; then
+        print_error "nodes.csv line $line_number could not resolve endpoint for expected_ip check: $endpoint"
+        exit 1
+    fi
+    if [ "$resolved_ip" != "$expected_ip" ]; then
+        print_error "nodes.csv line $line_number expected_ip mismatch for $alias: endpoint $endpoint resolved to $resolved_ip, expected $expected_ip"
+        exit 1
+    fi
+}
+
 validate_group() {
     local group="$1"
     local line_number="$2"
@@ -281,7 +326,7 @@ get_node_record() {
     local alias="$1"
     local record
     for record in "${NODE_RECORDS[@]}"; do
-        IFS='|' read -r node_alias _endpoint _connection <<< "$record"
+        IFS='|' read -r node_alias _endpoint _connection _ssh_port <<< "$record"
         if [ "$node_alias" = "$alias" ]; then
             printf '%s\n' "$record"
             return 0
@@ -340,10 +385,10 @@ add_state_alias_binding() {
         exit 1
     fi
 
-    IFS='|' read -r node_alias endpoint connection <<< "$record"
+    IFS='|' read -r node_alias endpoint connection ssh_port <<< "$record"
     local group
     group="$(state_group_name "$lifecycle" "$ansible_group")"
-    PARSED_BINDINGS+=("$lifecycle|$kind:$name|$group|$node_alias|$node_alias|$endpoint|$connection")
+    PARSED_BINDINGS+=("$lifecycle|$kind:$name|$group|$node_alias|$node_alias|$endpoint|$connection|$ssh_port")
 }
 
 validate_topology_endpoint_alias() {
@@ -403,20 +448,22 @@ read_nodes_file() {
     local matched_count=0
     local matched_aliases=","
     local header_seen="false"
-    local current_alias endpoint connection root_password extra
+    local current_alias endpoint expected_ip connection ssh_port root_password extra
     NODE_RECORDS=()
 
-    while IFS=, read -r current_alias endpoint connection root_password extra || [ -n "${current_alias:-}" ]; do
+    while IFS=, read -r current_alias endpoint expected_ip connection ssh_port root_password extra || [ -n "${current_alias:-}" ]; do
         line_number=$((line_number + 1))
         current_alias="${current_alias//$'\r'/}"
         endpoint="${endpoint//$'\r'/}"
+        expected_ip="${expected_ip//$'\r'/}"
         connection="${connection//$'\r'/}"
+        ssh_port="${ssh_port//$'\r'/}"
         root_password="${root_password//$'\r'/}"
         extra="${extra//$'\r'/}"
 
         if [ "$line_number" -eq 1 ]; then
             local header
-            header="$current_alias,$endpoint,$connection,$root_password"
+            header="$current_alias,$endpoint,$expected_ip,$connection,$ssh_port,$root_password"
             if [ "$header" != "$EXPECTED_CSV_HEADER" ] || [ -n "$extra" ]; then
                 print_error "nodes.csv header must be exactly:"
                 echo "$EXPECTED_CSV_HEADER"
@@ -426,7 +473,7 @@ read_nodes_file() {
             continue
         fi
 
-        if [ -z "$current_alias" ] && [ -z "$endpoint" ] && [ -z "$connection" ] && [ -z "$root_password" ]; then
+        if [ -z "$current_alias" ] && [ -z "$endpoint" ] && [ -z "$connection" ] && [ -z "$ssh_port" ] && [ -z "$root_password" ]; then
             continue
         fi
         if [ -n "$extra" ]; then
@@ -436,8 +483,13 @@ read_nodes_file() {
 
         require_csv_value "$current_alias" "current_alias" "$line_number"
         require_csv_value "$endpoint" "endpoint" "$line_number"
+        validate_expected_ip "$current_alias" "$endpoint" "$expected_ip" "$line_number"
         require_csv_value "$connection" "connection" "$line_number"
         validate_connection "$connection" "$line_number"
+        validate_ssh_port "$ssh_port" "$connection" "$line_number"
+        if [ -z "$ssh_port" ]; then
+            ssh_port="22"
+        fi
 
         if [ "$connection" = "local" ] && [ "$endpoint" != "local" ]; then
             print_error "nodes.csv line $line_number uses connection=local but endpoint is not local"
@@ -448,7 +500,7 @@ read_nodes_file() {
             matched_count=$((matched_count + 1))
             matched_aliases="${matched_aliases}${current_alias},"
         fi
-        NODE_RECORDS+=("$current_alias|$endpoint|$connection")
+        NODE_RECORDS+=("$current_alias|$endpoint|$connection|$ssh_port")
     done < "$NODES_FILE"
 
     if [ "$header_seen" != "true" ]; then
@@ -614,7 +666,7 @@ parse_fallback_binding() {
         connection="local"
     fi
 
-    PARSED_BINDINGS+=("$state|$role|$group|$node|$host_alias|$endpoint|$connection")
+    PARSED_BINDINGS+=("$state|$role|$group|$node|$host_alias|$endpoint|$connection|22")
 }
 
 require_value "$OUTPUT_PATH" "--output"
@@ -665,8 +717,8 @@ print_header "AI Service Platform Ansible inventory"
 
 echo "Inventory bindings:"
 for parsed in "${PARSED_BINDINGS[@]}"; do
-    IFS='|' read -r state role group node host_alias endpoint connection <<< "$parsed"
-    echo "  $state $role -> $host_alias ($group, $connection): $endpoint"
+    IFS='|' read -r state role group node host_alias endpoint connection ssh_port <<< "$parsed"
+    echo "  $state $role -> $host_alias ($group, $connection): $endpoint:$ssh_port"
 done
 echo "  output:       $OUTPUT_PATH"
 echo "  ansible user: $ANSIBLE_USER"
@@ -690,7 +742,7 @@ EOF
         echo "[$group]"
         printed_hosts=","
         for parsed in "${PARSED_BINDINGS[@]}"; do
-            IFS='|' read -r state role parsed_group node host_alias endpoint connection <<< "$parsed"
+            IFS='|' read -r state role parsed_group node host_alias endpoint connection ssh_port <<< "$parsed"
             if [ "$parsed_group" != "$group" ]; then
                 continue
             fi
@@ -701,7 +753,7 @@ EOF
             if [ "$connection" = "local" ]; then
                 echo "$host_alias ansible_connection=local"
             else
-                echo "$host_alias ansible_host=$endpoint ansible_user=$ANSIBLE_USER ansible_ssh_private_key_file=$KEY_FILE"
+                echo "$host_alias ansible_host=$endpoint ansible_port=$ssh_port ansible_user=$ANSIBLE_USER ansible_ssh_private_key_file=$KEY_FILE"
             fi
         done
         echo ""

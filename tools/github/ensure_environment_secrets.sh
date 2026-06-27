@@ -129,16 +129,17 @@ if [ -n "$NODES_FILE" ] || [ -n "$NODE_ALIAS" ]; then
     [ -f "$NODES_FILE" ] || fail "nodes file not found: $NODES_FILE"
     line_number=0
     found="false"
-    while IFS=, read -r csv_alias csv_endpoint csv_connection _csv_root_password extra || [ -n "${csv_alias:-}" ]; do
+    while IFS=, read -r csv_alias csv_endpoint csv_expected_ip csv_connection csv_ssh_port _csv_root_password extra || [ -n "${csv_alias:-}" ]; do
         line_number=$((line_number + 1))
         csv_alias="${csv_alias//$'\r'/}"
         csv_endpoint="${csv_endpoint//$'\r'/}"
         csv_connection="${csv_connection//$'\r'/}"
+        csv_ssh_port="${csv_ssh_port//$'\r'/}"
         _csv_root_password="${_csv_root_password//$'\r'/}"
         extra="${extra//$'\r'/}"
         if [ "$line_number" -eq 1 ]; then
-            header="$csv_alias,$csv_endpoint,$csv_connection,$_csv_root_password"
-            expected_header="current_alias,endpoint,connection,root_password"
+            header="$csv_alias,$csv_endpoint,$csv_connection,$csv_ssh_port,$_csv_root_password"
+            expected_header="current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
             [ "$header" = "$expected_header" ] && [ -z "$extra" ] || fail "nodes.csv header must be exactly: $expected_header"
             continue
         fi
@@ -146,6 +147,9 @@ if [ -n "$NODES_FILE" ] || [ -n "$NODE_ALIAS" ]; then
             [ "$csv_endpoint" != "local" ] && [ "$csv_connection" != "local" ] || fail "Alias $NODE_ALIAS uses local endpoint; GitHub SSH secrets require a public DNS/IP endpoint"
             if [ -z "$SSH_HOST" ]; then
                 SSH_HOST="$csv_endpoint"
+            fi
+            if [ -z "$SSH_PORT" ]; then
+                SSH_PORT="${csv_ssh_port:-22}"
             fi
             found="true"
             break

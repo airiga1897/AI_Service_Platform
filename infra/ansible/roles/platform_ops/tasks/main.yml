@@ -1,0 +1,31 @@
+---
+- name: Ensure logrotate is installed
+  ansible.builtin.apt:
+    name: logrotate
+    state: present
+    update_cache: true
+
+- name: Ensure AI Service Platform operation directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ platform_ops_user }}"
+    group: "{{ platform_ops_group }}"
+    mode: "0750"
+  loop:
+    - "{{ platform_ops_log_dir }}"
+    - "{{ platform_ops_job_log_dir }}"
+    - "{{ platform_ops_state_dir }}"
+    - "{{ platform_ops_job_state_dir }}"
+
+- name: Install AI Service Platform logrotate policy
+  ansible.builtin.template:
+    src: ai-service-platform.logrotate.j2
+    dest: /etc/logrotate.d/ai-service-platform
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Validate AI Service Platform logrotate policy
+  ansible.builtin.command: logrotate -d /etc/logrotate.d/ai-service-platform
+  changed_when: false

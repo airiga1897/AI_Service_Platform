@@ -11,6 +11,7 @@
   hosts: all
   become: true
   roles:
+    - platform_ops
     - docker
     - security
 

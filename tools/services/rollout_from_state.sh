@@ -22,7 +22,7 @@ SKIP_OPERATOR_BACKUP="false"
 RESEED_VPN_EDGE=""
 ONLY_SERVICE=""
 
-EXPECTED_HEADER="current_alias,endpoint,connection,root_password"
+EXPECTED_HEADER="current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 EXPECTED_STATE_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 
 usage() {
@@ -461,7 +461,7 @@ state_first_line="$(head -n 1 "$STATE_FILE" | tr -d '\r')"
 update_vpn_management_allowlist "$OPERATOR_DIR/haproxy/lists/vpn_mgmt_ips.lst"
 
 node_aliases=""
-while IFS=, read -r current_alias _endpoint _connection _root_password extra || [ -n "${current_alias:-}" ]; do
+while IFS=, read -r current_alias _endpoint _expected_ip _connection _ssh_port _root_password extra || [ -n "${current_alias:-}" ]; do
     current_alias="${current_alias//$'\r'/}"
     extra="${extra//$'\r'/}"
     [ -z "$current_alias" ] && continue

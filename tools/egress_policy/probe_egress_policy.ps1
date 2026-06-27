@@ -1,6 +1,7 @@
-﻿param(
+param(
     [string]$PolicyFile = ".\operator\egress_policy\profiles.json",
     [string]$NodesFile = ".\operator\nodes.csv",
+    [string]$StateFile = ".\operator\state.csv",
     [string]$OperatorDir = ".\operator",
     [string]$OutputDir = ".\operator\egress_policy\history",
     [string]$CascadeSecretDir = ".\operator\softether\cascade\secrets",
@@ -20,7 +21,8 @@
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedNodesHeader = "current_alias,endpoint,connection,root_password"
+$ExpectedNodesHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
+$ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 
 function Fail($Message) {
     Write-Error $Message
@@ -121,8 +123,18 @@ function Get-OpenSshCommonArgs($KeyFile) {
     return $args
 }
 
-function Invoke-SshJsonProbe($KeyFile, $Remote, $Command, $Label) {
-    $sshArgs = @("-n", "-T") + @(Get-OpenSshCommonArgs $KeyFile) + @($Remote, $Command)
+function Get-NodeSshPort($Node) {
+    $port = [string]$Node.ssh_port
+    if (-not $port) { return "22" }
+    $portNumber = 0
+    if (-not [int]::TryParse($port, [ref]$portNumber) -or $portNumber -lt 1 -or $portNumber -gt 65535) {
+        Fail "Invalid ssh_port for $($Node.current_alias): $port"
+    }
+    return [string]$portNumber
+}
+
+function Invoke-SshJsonProbe($KeyFile, $Port, $Remote, $Command, $Label) {
+    $sshArgs = @("-n", "-T", "-p", $Port) + @(Get-OpenSshCommonArgs $KeyFile) + @($Remote, $Command)
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $script:ErrorActionPreference = "Continue"
@@ -163,8 +175,8 @@ function Invoke-SshJsonProbe($KeyFile, $Remote, $Command, $Label) {
     }
 }
 
-function Invoke-SshTextCommand($KeyFile, $Remote, $Command, $Label) {
-    $sshArgs = @("-n", "-T") + @(Get-OpenSshCommonArgs $KeyFile) + @($Remote, $Command)
+function Invoke-SshTextCommand($KeyFile, $Port, $Remote, $Command, $Label) {
+    $sshArgs = @("-n", "-T", "-p", $Port) + @(Get-OpenSshCommonArgs $KeyFile) + @($Remote, $Command)
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $script:ErrorActionPreference = "Continue"
@@ -201,22 +213,108 @@ function Load-Nodes($Path) {
     return $map
 }
 
+function Read-StateRows($Path) {
+    Require-File $Path "state.csv"
+    $lines = @(Get-Content -LiteralPath $Path)
+    if ($lines.Count -eq 0 -or $lines[0] -ne $ExpectedStateHeader) {
+        Fail "state.csv header must be exactly: $ExpectedStateHeader"
+    }
+    return @(Import-Csv -LiteralPath $Path)
+}
+
+function Split-AliasList($Value) {
+    if ([string]::IsNullOrWhiteSpace([string]$Value)) {
+        return @()
+    }
+    return @(([string]$Value).Split("+", [System.StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+function Get-ObjectArray($Object, $PropertyName) {
+    if ($null -eq $Object -or -not ($Object.PSObject.Properties.Name -contains $PropertyName)) {
+        return @()
+    }
+    return @($Object.$PropertyName | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
+function Get-StateExpandedAliases($StateRows, $Kind, $Name, $AnchorAliases) {
+    $aliases = New-Object System.Collections.ArrayList
+    $anchorSet = @{}
+    foreach ($aliasName in @($AnchorAliases | Where-Object { $_ })) {
+        $anchorSet[[string]$aliasName] = $true
+    }
+    foreach ($row in @($StateRows | Where-Object { $_.kind -eq $Kind -and $_.name -eq $Name -and $_.state -eq "present" })) {
+        $activeAliases = @(Split-AliasList $row.active_aliases)
+        $candidateAliases = @(Split-AliasList $row.candidate_aliases)
+        if ($anchorSet.Count -eq 0) {
+            foreach ($aliasName in @($activeAliases + $candidateAliases)) {
+                [void]$aliases.Add($aliasName)
+            }
+            continue
+        }
+        $matchesAnchor = $false
+        foreach ($aliasName in $activeAliases) {
+            if ($anchorSet.ContainsKey($aliasName)) {
+                $matchesAnchor = $true
+                [void]$aliases.Add($aliasName)
+                break
+            }
+        }
+        if ($matchesAnchor) {
+            foreach ($aliasName in $candidateAliases) {
+                [void]$aliases.Add($aliasName)
+            }
+            continue
+        }
+        foreach ($aliasName in $candidateAliases) {
+            if ($anchorSet.ContainsKey($aliasName)) {
+                [void]$aliases.Add($aliasName)
+            }
+        }
+    }
+    return @($aliases.ToArray() | Sort-Object -Unique)
+}
+
+function Get-StateCascadeFallbackEgressAliases($StateRows, $IngressAliases) {
+    $ingressSet = @{}
+    foreach ($aliasName in @($IngressAliases | Where-Object { $_ })) {
+        $ingressSet[[string]$aliasName] = $true
+    }
+    $aliases = New-Object System.Collections.ArrayList
+    foreach ($row in @($StateRows | Where-Object { $_.kind -eq "cascade_topology" -and $_.state -eq "present" })) {
+        foreach ($edge in @(Split-AliasList $row.active_aliases)) {
+            if ($edge -notmatch '^([^>]+)>([^>]+)$') {
+                continue
+            }
+            $ingress = $Matches[1]
+            $egress = $Matches[2]
+            if ($ingressSet.Count -eq 0 -or $ingressSet.ContainsKey($ingress)) {
+                [void]$aliases.Add($egress)
+            }
+        }
+    }
+    return @($aliases.ToArray() | Sort-Object -Unique)
+}
+
 function Get-PolicyBehavior($Profile) {
     return [string]$Profile.behavior
 }
 
-function Get-PolicyIngressAliases($Profile) {
-    return @($Profile.candidate_ingress_aliases | Where-Object { $_ })
+function Get-PolicyIngressAnchorAliases($Profile) {
+    $anchorAliases = @(Get-ObjectArray $Profile "ingress_anchor_aliases")
+    return @($anchorAliases | Sort-Object -Unique)
 }
 
-function Get-PolicyFallbackEgressAliases($Profile) {
-    if ($null -eq $Profile.candidate_fallback_egress_aliases) {
-        return @()
-    }
-    return @($Profile.candidate_fallback_egress_aliases | Where-Object { $_ })
+function Get-PolicyIngressAliases($Profile, $StateRows) {
+    $anchorAliases = @(Get-PolicyIngressAnchorAliases $Profile)
+    return @(Get-StateExpandedAliases $StateRows "edge_route" "vpn_ingress" $anchorAliases)
 }
 
-function Validate-Policy($Policy, $Nodes) {
+function Get-PolicyFallbackEgressAliases($Profile, $StateRows) {
+    $ingressAliases = @(Get-PolicyIngressAliases $Profile $StateRows)
+    return @(Get-StateCascadeFallbackEgressAliases $StateRows $ingressAliases)
+}
+
+function Validate-Policy($Policy, $Nodes, $StateRows) {
     if ($Policy.version -ne 1) {
         Fail "egress policy registry version must be 1"
     }
@@ -253,9 +351,9 @@ function Validate-Policy($Policy, $Nodes) {
         if (-not $profile.targets -or $profile.targets.Count -eq 0) {
             Fail "egress profile $($profile.name) must include at least one target"
         }
-        $ingressAliases = @(Get-PolicyIngressAliases $profile)
+        $ingressAliases = @(Get-PolicyIngressAliases $profile $StateRows)
         if ($ingressAliases.Count -eq 0) {
-            Fail "egress profile $($profile.name) must include candidate_ingress_aliases"
+            Fail "egress profile $($profile.name) must include ingress_anchor_aliases that can be expanded through state.csv"
         }
 
         $seenAliases = @{}
@@ -270,9 +368,9 @@ function Validate-Policy($Policy, $Nodes) {
         }
 
         $seenFallbackEgressAliases = @{}
-        $fallbackEgressAliases = @(Get-PolicyFallbackEgressAliases $profile)
+        $fallbackEgressAliases = @(Get-PolicyFallbackEgressAliases $profile $StateRows)
         if ($behavior -eq "fallback_on_ingress_egress_failure" -and $fallbackEgressAliases.Count -eq 0) {
-            Fail "egress profile $($profile.name) must include candidate_fallback_egress_aliases"
+            Fail "egress profile $($profile.name) must derive fallback egress aliases from state.csv cascade_topology"
         }
         foreach ($egressAlias in $fallbackEgressAliases) {
             if ([string]::IsNullOrWhiteSpace([string]$egressAlias)) {
@@ -743,13 +841,13 @@ function New-RetryObservation($Attempt, $Probe, $Reason) {
     }
 }
 
-function Invoke-TargetProbeWithRetries($KeyFile, $Remote, $Target, $Label) {
+function Invoke-TargetProbeWithRetries($KeyFile, $Port, $Remote, $Target, $Label) {
     $command = New-TargetProbeCommand $Target
     $retryErrors = New-Object System.Collections.ArrayList
     $lastProbe = $null
 
     for ($attempt = 1; $attempt -le $ProbeAttempts; $attempt += 1) {
-        $lastProbe = Invoke-SshJsonProbe $KeyFile $Remote $command "$Label attempt $attempt/$ProbeAttempts"
+        $lastProbe = Invoke-SshJsonProbe $KeyFile $Port $Remote $command "$Label attempt $attempt/$ProbeAttempts"
         $shouldRetry = Test-TargetProbeShouldRetry $lastProbe $Target
         if (-not $shouldRetry -or $attempt -eq $ProbeAttempts) {
             if ($shouldRetry) {
@@ -879,7 +977,7 @@ function Invoke-DirectEgressProbe($PolicyProfile, $Target, $CandidateAlias, $Mod
     }
 
     Write-Host "    probing $ModeLabel $CandidateAlias..."
-    $probe = Invoke-TargetProbeWithRetries $keyFile $remote $Target "egress probe $($PolicyProfile.name)/$CandidateAlias/$($Target.value)"
+    $probe = Invoke-TargetProbeWithRetries $keyFile (Get-NodeSshPort $node) $remote $Target "egress probe $($PolicyProfile.name)/$CandidateAlias/$($Target.value)"
 
     $record = [ordered]@{
         schema_version = 1
@@ -975,7 +1073,7 @@ function Invoke-CascadeEgressProbe($PolicyProfile, $Target, $PathLinks) {
         $tcpScriptB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($remoteTcpCheckPython))
         $tcpCommand = "python3 -c $(Quote-BashArg "import base64,sys; exec(base64.b64decode('$tcpScriptB64'))") $(Quote-BashArg $link.egress_host) $(Quote-BashArg ([string]$link.egress_port)) $(Quote-BashArg ([string]$TimeoutSeconds))"
         Write-Host "      checking cascade transport $linkLabel..."
-        $transportProbe = Invoke-SshJsonProbe $linkIngressKey $linkIngressRemote $tcpCommand "cascade transport probe $linkLabel"
+        $transportProbe = Invoke-SshJsonProbe $linkIngressKey (Get-NodeSshPort $linkIngressNode) $linkIngressRemote $tcpCommand "cascade transport probe $linkLabel"
         $transportStatus = if ($transportProbe.ok) { $transportProbe.result } else { [pscustomobject]@{ reachable = $false; error = $transportProbe.error; raw = $transportProbe.raw } }
         if ($transportStatus.reachable) {
             Write-Host "        [OK] transport reachable"
@@ -1003,7 +1101,7 @@ function Invoke-CascadeEgressProbe($PolicyProfile, $Target, $PathLinks) {
             "timeout $(Quote-BashArg ([string]$remoteStatusTimeout))s sudo docker exec -i -e SERVER_PASSWORD=$(Quote-BashArg $link.server_password) softether-cascade sh -c $(Quote-BashArg $dockerStatusScript) < ""`$tmp_file"""
         ) -join "`n"
         Write-Host "      checking cascade status $($link.connection_name)..."
-        $statusProbe = Invoke-SshTextCommand $linkIngressKey $linkIngressRemote $statusCommand "cascade status probe $($link.connection_name)"
+        $statusProbe = Invoke-SshTextCommand $linkIngressKey (Get-NodeSshPort $linkIngressNode) $linkIngressRemote $statusCommand "cascade status probe $($link.connection_name)"
         $statusOutput = [string]$statusProbe.output
         $statusOnline = $statusProbe.ok -and ($statusOutput -match "Connection Completed|Session Established|Online|Connected")
         if ($statusOnline) {
@@ -1057,7 +1155,7 @@ function Invoke-CascadeEgressProbe($PolicyProfile, $Target, $PathLinks) {
         })
     }
 
-    $targetProbe = Invoke-TargetProbeWithRetries $egressKey $egressRemote $Target "cascade target probe $egressAlias/$($Target.value)"
+    $targetProbe = Invoke-TargetProbeWithRetries $egressKey (Get-NodeSshPort $egressNode) $egressRemote $Target "cascade target probe $egressAlias/$($Target.value)"
 
     $record = [ordered]@{
         schema_version = 1
@@ -1113,13 +1211,14 @@ if ($DryRun) {
 
 Require-File $PolicyFile "egress policy registry"
 $nodes = Load-Nodes $NodesFile
+$stateRows = Read-StateRows $StateFile
 $policy = Read-JsonFile $PolicyFile "egress policy registry"
-Validate-Policy $policy $nodes
+Validate-Policy $policy $nodes $stateRows
 $cascadeLinks = @()
 if ($IncludeCascade -or $CascadeOnly -or $PreferCascade) {
     $cascadeLinks = @(Load-CascadeLinks $CascadeSecretDir $nodes)
     foreach ($profile in @($policy.profiles)) {
-        foreach ($egressAlias in @(Get-PolicyFallbackEgressAliases $profile)) {
+        foreach ($egressAlias in @(Get-PolicyFallbackEgressAliases $profile $stateRows)) {
             if (-not $nodes.ContainsKey($egressAlias)) {
                 Fail "egress profile $($profile.name) references unknown candidate fallback egress alias: $egressAlias"
             }
@@ -1162,8 +1261,8 @@ if ($IncludeCascade -or $CascadeOnly -or $PreferCascade) {
     Write-Host "Cascade probe links: $($cascadeLinks.Count)"
 }
 foreach ($policyProfile in $profiles) {
-    $profileIngressAliases = @(Get-PolicyIngressAliases $policyProfile)
-    $profileFallbackEgressAliases = @(Get-PolicyFallbackEgressAliases $policyProfile)
+    $profileIngressAliases = @(Get-PolicyIngressAliases $policyProfile $stateRows)
+    $profileFallbackEgressAliases = @(Get-PolicyFallbackEgressAliases $policyProfile $stateRows)
     $candidateAliases = @($profileIngressAliases | Where-Object {
         $aliasFilter.Count -eq 0 -or $aliasFilter -contains $_
     })

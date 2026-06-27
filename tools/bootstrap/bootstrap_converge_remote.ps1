@@ -35,7 +35,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedHeader = "current_alias,endpoint,connection,root_password"
+$ExpectedHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 . (Join-Path $PSScriptRoot "..\common\private_key_acl.ps1")
 
@@ -146,7 +146,7 @@ function Invoke-CleanupSsh($Arguments, $Label) {
 
 function Invoke-RemoteTempCleanup($SshArgs, $Remote) {
     $cleanupCommand = @(
-        "find /tmp -maxdepth 1 -mindepth 1 -type d \( -name 'ai-service-platform.bootstrap-job.*' -o -name 'ai-service-platform.bootstrap-converge.*' \) -mmin +1440 -exec rm -rf -- {} +",
+        "find /tmp -maxdepth 1 -mindepth 1 -type d -name 'ai-service-platform.bootstrap-converge.*' -mmin +1440 -exec rm -rf -- {} +",
         "find /tmp -maxdepth 1 -mindepth 1 -type f -name 'ai-service-platform.bootstrap-converge.*.tar.gz' -mmin +1440 -delete"
     ) -join "; "
     Invoke-CleanupSsh ($SshArgs + @($Remote, $cleanupCommand)) "remote old bootstrap temp cleanup"
@@ -283,9 +283,12 @@ $remoteBundleDir = "/tmp/ai-service-platform.bootstrap-converge.$([guid]::NewGui
 $remoteBundleArchive = "$remoteBundleDir.tar.gz"
 $remoteAnsibleTemp = "$remoteBundleDir/ansible"
 $remoteAuthorizedKeyFile = "$remoteBundleDir/ansible_authorized_keys.pub"
-$remoteJobDir = "/tmp/ai-service-platform.bootstrap-job.$([guid]::NewGuid().ToString('N'))"
+$remoteJobId = "bootstrap-$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'))-$([guid]::NewGuid().ToString('N'))"
+$remoteJobLogDir = "/var/log/ai-service-platform/jobs"
+$remoteJobStateRoot = "/var/lib/ai-service-platform/jobs"
+$remoteJobDir = "$remoteJobStateRoot/$remoteJobId"
 $remoteJobScript = "$remoteJobDir/run.sh"
-$remoteJobLog = "$remoteJobDir/output.log"
+$remoteJobLog = "$remoteJobLogDir/$remoteJobId.log"
 $remoteJobPid = "$remoteJobDir/pid"
 $remoteJobExitCode = "$remoteJobDir/exit_code"
 $remoteJobDone = "$remoteJobDir/done"
@@ -294,6 +297,8 @@ Write-Host "Control node: $($controlNode.current_alias) via role '$ControlRole'"
 Write-Host "Remote:       $remote"
 Write-Host "Limit:        $Limit"
 Write-Host "Mode:         detached remote bootstrap converge job"
+Write-Host "Job id:       $remoteJobId"
+Write-Host "Remote log:   $remoteJobLog"
 
 $sshCommonArgs = @(
     "-n",
@@ -358,10 +363,17 @@ try {
 
     Invoke-RemoteTempCleanup $sshCommonArgs $remote
 
-    Write-Host "Creating remote temporary bundle and job directories..."
+    Write-Host "Creating remote temporary bundle and durable job directories..."
+    $mkdirCommand = @(
+        "set -e",
+        "mkdir -p $(Quote-BashArg $remoteBundleDir)",
+        "sudo mkdir -p $(Quote-BashArg $remoteJobLogDir) $(Quote-BashArg $remoteJobDir)",
+        "sudo chown ""`$(id -u):`$(id -g)"" $(Quote-BashArg $remoteJobLogDir) $(Quote-BashArg $remoteJobDir)",
+        "chmod 750 $(Quote-BashArg $remoteJobDir)"
+    ) -join "; "
     Invoke-ExternalRetryTransport "ssh" ($sshCommonArgs + @(
         $remote,
-        "mkdir -p $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteJobDir)"
+        $mkdirCommand
     )) "remote bootstrap converge directory creation"
 
     Write-Host "Uploading bootstrap converge bundle archive..."
@@ -406,10 +418,10 @@ try {
     }
     Remove-Item -LiteralPath $runScriptPath -Force -ErrorAction SilentlyContinue
     if ($remoteJobCompletedSuccessfully) {
-        Write-Host "Cleaning remote bootstrap converge bundle and job..."
-        $cleanupTarget = "rm -rf $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteBundleArchive) $(Quote-BashArg $remoteJobDir)"
+        Write-Host "Cleaning remote bootstrap converge bundle and completed job state; preserving rotated job log: $remoteJobLog"
+        $cleanupTarget = "rm -rf $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteBundleArchive); sudo rm -rf $(Quote-BashArg $remoteJobDir)"
     } else {
-        Write-Host "Cleaning remote bootstrap converge bundle; preserving failed job log: $remoteJobLog"
+        Write-Host "Cleaning remote bootstrap converge bundle; preserving failed job state: $remoteJobDir and log: $remoteJobLog"
         $cleanupTarget = "rm -rf $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteBundleArchive)"
     }
     if ($remote -and $remoteBundleDir -and $remoteBundleArchive -and $remoteJobDir -and $sshCommonArgs) {

@@ -18,11 +18,13 @@ param(
     [int]$PreflightRetries = 6,
     [switch]$AutoAcceptHostKey = $true,
     [switch]$SkipVerify,
-    [switch]$Json
+    [switch]$TrafficProbe,
+    [switch]$Json,
+    [switch]$AllowLocalManagedSsh
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedNodesHeader = "current_alias,endpoint,connection,root_password"
+$ExpectedNodesHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 $ExpectedNetworksHeader = "alias,policy_subnet,edge_ip,cascade_ip,cascade_router_ip,policy_gateway_ip"
 $PolicyGatewayContainer = "policy-gateway"
@@ -98,6 +100,16 @@ function Get-OpenSshCommonArgs($KeyFile) {
     return $args
 }
 
+function Get-NodeSshPort($Node) {
+    $port = [string]$Node.ssh_port
+    if (-not $port) { return "22" }
+    $portNumber = 0
+    if (-not [int]::TryParse($port, [ref]$portNumber) -or $portNumber -lt 1 -or $portNumber -gt 65535) {
+        Fail "Invalid ssh_port for $($Node.current_alias): $port"
+    }
+    return [string]$portNumber
+}
+
 function Invoke-SshText($AliasName, $Command) {
     $node = $script:Nodes[$AliasName]
     if (-not $node) {
@@ -106,7 +118,7 @@ function Invoke-SshText($AliasName, $Command) {
     $keyFile = Join-Path (Join-Path $OperatorDir $AliasName) "admin_key"
     Require-File $keyFile "admin key for $AliasName"
     $remote = "${SshUser}@$($node.endpoint)"
-    $sshArgs = @("-n", "-T") + @(Get-OpenSshCommonArgs $keyFile) + @($remote, $Command)
+    $sshArgs = @("-n", "-T", "-p", (Get-NodeSshPort $node)) + @(Get-OpenSshCommonArgs $keyFile) + @($remote, $Command)
     $output = @()
     $exitCode = 0
     for ($attempt = 1; $attempt -le $SshRetries; $attempt++) {
@@ -143,7 +155,7 @@ function Test-RemoteCommand($AliasName, $Command) {
     $keyFile = Join-Path (Join-Path $OperatorDir $AliasName) "admin_key"
     Require-File $keyFile "admin key for $AliasName"
     $remote = "${SshUser}@$($node.endpoint)"
-    $sshArgs = @("-n", "-T") + @(Get-OpenSshCommonArgs $keyFile) + @($remote, $Command)
+    $sshArgs = @("-n", "-T", "-p", (Get-NodeSshPort $node)) + @(Get-OpenSshCommonArgs $keyFile) + @($remote, $Command)
     $output = @()
     $exitCode = 0
     $transport_error = $false
@@ -822,14 +834,9 @@ function Test-StepApplied($Step) {
     $edgeRoutes = Invoke-SshText $Step.ingress_alias "sudo docker exec -u 0 $(Quote-BashArg $EdgeContainer) ip route 2>/dev/null || true"
     $ingressGatewayRoutes = Invoke-SshText $Step.ingress_alias "sudo docker exec -u 0 $(Quote-BashArg $PolicyGatewayContainer) ip route 2>/dev/null || true"
     $ingressNat = Invoke-SshText $Step.ingress_alias "sudo docker exec -u 0 $(Quote-BashArg $PolicyGatewayContainer) iptables -t nat -S POSTROUTING 2>/dev/null || true"
-    $ingressNatCountersBefore = Invoke-SshText $Step.ingress_alias "sudo docker exec -u 0 $(Quote-BashArg $PolicyGatewayContainer) iptables -t nat -L POSTROUTING -v -n -x 2>/dev/null || true"
     $ingressCascadeRoutes = Invoke-SshText $Step.ingress_alias "sudo docker exec -u 0 $(Quote-BashArg $CascadeContainer) ip route 2>/dev/null || true"
     $egressCascadeRoutes = Invoke-SshText $Step.egress_alias "sudo docker exec -u 0 $(Quote-BashArg $CascadeContainer) ip route 2>/dev/null || true"
     $egressNat = Invoke-SshText $Step.egress_alias "sudo docker exec -u 0 $(Quote-BashArg $CascadeContainer) iptables -t nat -S POSTROUTING 2>/dev/null || true"
-    $egressNatCountersBefore = Invoke-SshText $Step.egress_alias "sudo docker exec -u 0 $(Quote-BashArg $CascadeContainer) iptables -t nat -L POSTROUTING -v -n -x 2>/dev/null || true"
-    $traffic = Invoke-StepTrafficCheck $Step
-    $ingressNatCountersAfter = Invoke-SshText $Step.ingress_alias "sudo docker exec -u 0 $(Quote-BashArg $PolicyGatewayContainer) iptables -t nat -L POSTROUTING -v -n -x 2>/dev/null || true"
-    $egressNatCountersAfter = Invoke-SshText $Step.egress_alias "sudo docker exec -u 0 $(Quote-BashArg $CascadeContainer) iptables -t nat -L POSTROUTING -v -n -x 2>/dev/null || true"
 
     $edgeRouteOk = $edgeRoutes -match "(?m)^$targetRegex\s+via\s+$ingressGatewayRegex(\s|$)"
     $ingressEdgeReturnRouteOk = $ingressGatewayRoutes -match "(?m)^$edgeSourceRegex\s+via\s+$ingressEdgeRegex(\s|$)"
@@ -838,20 +845,41 @@ function Test-StepApplied($Step) {
     $egressReturnRouteOk = $egressCascadeRoutes -match "(?m)^$ingressSubnetRegex\s+via\s+$ingressRouterRegex\b.*\b$TapInterface\b"
     $ingressNatOk = $ingressNat -match $ingressCommentRegex
     $egressNatOk = $egressNat -match $egressCommentRegex
-    $ingressNatBefore = Get-NatPacketCount $ingressNatCountersBefore $ingressComment
-    $ingressNatAfter = Get-NatPacketCount $ingressNatCountersAfter $ingressComment
-    $egressNatBefore = Get-NatPacketCount $egressNatCountersBefore $egressComment
-    $egressNatAfter = Get-NatPacketCount $egressNatCountersAfter $egressComment
-    $ingressNatAnyBefore = Get-NatPacketCountForTargetPort $ingressNatCountersBefore $Step
-    $ingressNatAnyAfter = Get-NatPacketCountForTargetPort $ingressNatCountersAfter $Step
-    $egressNatAnyBefore = Get-NatPacketCountForTargetPort $egressNatCountersBefore $Step
-    $egressNatAnyAfter = Get-NatPacketCountForTargetPort $egressNatCountersAfter $Step
-    $counterCheckRequired = [string]$Step.protocol -ne "udp"
-    $syntheticProbeBypassesSecureNatSource = $counterCheckRequired -and ([bool]$traffic.ok) -and (($egressNatAfter -gt $egressNatBefore) -or ($egressNatAnyAfter -gt $egressNatAnyBefore)) -and ($ingressNatAfter -le $ingressNatBefore)
-    $ingressNatCounterShadowedByDuplicate = $counterCheckRequired -and ([bool]$traffic.ok) -and ($ingressNatAfter -le $ingressNatBefore) -and ($ingressNatAnyAfter -gt $ingressNatAnyBefore)
-    $egressNatCounterShadowedByDuplicate = $counterCheckRequired -and ([bool]$traffic.ok) -and ($egressNatAfter -le $egressNatBefore) -and ($egressNatAnyAfter -gt $egressNatAnyBefore)
-    $ingressNatCounterOk = (-not $counterCheckRequired) -or ($ingressNatAfter -gt $ingressNatBefore) -or $syntheticProbeBypassesSecureNatSource -or $ingressNatCounterShadowedByDuplicate
-    $egressNatCounterOk = (-not $counterCheckRequired) -or ($egressNatAfter -gt $egressNatBefore) -or $egressNatCounterShadowedByDuplicate
+    $traffic = [pscustomobject]@{ ok = $true; skipped = $true; reason = "traffic probe skipped; pass -TrafficProbe for dataplane target check" }
+    $ingressNatBefore = $null
+    $ingressNatAfter = $null
+    $egressNatBefore = $null
+    $egressNatAfter = $null
+    $ingressNatAnyBefore = $null
+    $ingressNatAnyAfter = $null
+    $egressNatAnyBefore = $null
+    $egressNatAnyAfter = $null
+    $syntheticProbeBypassesSecureNatSource = $false
+    $ingressNatCounterShadowedByDuplicate = $false
+    $egressNatCounterShadowedByDuplicate = $false
+    $ingressNatCounterOk = $true
+    $egressNatCounterOk = $true
+    if ($TrafficProbe) {
+        $ingressNatCountersBefore = Invoke-SshText $Step.ingress_alias "sudo docker exec -u 0 $(Quote-BashArg $PolicyGatewayContainer) iptables -t nat -L POSTROUTING -v -n -x 2>/dev/null || true"
+        $egressNatCountersBefore = Invoke-SshText $Step.egress_alias "sudo docker exec -u 0 $(Quote-BashArg $CascadeContainer) iptables -t nat -L POSTROUTING -v -n -x 2>/dev/null || true"
+        $traffic = Invoke-StepTrafficCheck $Step
+        $ingressNatCountersAfter = Invoke-SshText $Step.ingress_alias "sudo docker exec -u 0 $(Quote-BashArg $PolicyGatewayContainer) iptables -t nat -L POSTROUTING -v -n -x 2>/dev/null || true"
+        $egressNatCountersAfter = Invoke-SshText $Step.egress_alias "sudo docker exec -u 0 $(Quote-BashArg $CascadeContainer) iptables -t nat -L POSTROUTING -v -n -x 2>/dev/null || true"
+        $ingressNatBefore = Get-NatPacketCount $ingressNatCountersBefore $ingressComment
+        $ingressNatAfter = Get-NatPacketCount $ingressNatCountersAfter $ingressComment
+        $egressNatBefore = Get-NatPacketCount $egressNatCountersBefore $egressComment
+        $egressNatAfter = Get-NatPacketCount $egressNatCountersAfter $egressComment
+        $ingressNatAnyBefore = Get-NatPacketCountForTargetPort $ingressNatCountersBefore $Step
+        $ingressNatAnyAfter = Get-NatPacketCountForTargetPort $ingressNatCountersAfter $Step
+        $egressNatAnyBefore = Get-NatPacketCountForTargetPort $egressNatCountersBefore $Step
+        $egressNatAnyAfter = Get-NatPacketCountForTargetPort $egressNatCountersAfter $Step
+        $counterCheckRequired = [string]$Step.protocol -ne "udp"
+        $syntheticProbeBypassesSecureNatSource = $counterCheckRequired -and ([bool]$traffic.ok) -and (($egressNatAfter -gt $egressNatBefore) -or ($egressNatAnyAfter -gt $egressNatAnyBefore)) -and ($ingressNatAfter -le $ingressNatBefore)
+        $ingressNatCounterShadowedByDuplicate = $counterCheckRequired -and ([bool]$traffic.ok) -and ($ingressNatAfter -le $ingressNatBefore) -and ($ingressNatAnyAfter -gt $ingressNatAnyBefore)
+        $egressNatCounterShadowedByDuplicate = $counterCheckRequired -and ([bool]$traffic.ok) -and ($egressNatAfter -le $egressNatBefore) -and ($egressNatAnyAfter -gt $egressNatAnyBefore)
+        $ingressNatCounterOk = (-not $counterCheckRequired) -or ($ingressNatAfter -gt $ingressNatBefore) -or $syntheticProbeBypassesSecureNatSource -or $ingressNatCounterShadowedByDuplicate
+        $egressNatCounterOk = (-not $counterCheckRequired) -or ($egressNatAfter -gt $egressNatBefore) -or $egressNatCounterShadowedByDuplicate
+    }
     $trafficOk = [bool]$traffic.ok
 
     return [pscustomobject]@{
@@ -961,6 +989,12 @@ function Get-TrafficSummary($Traffic) {
     if ($Traffic.first_line) {
         $parts += "first_line=`"$($Traffic.first_line)`""
     }
+    if ($Traffic.skipped) {
+        $parts += "skipped=true"
+    }
+    if ($Traffic.reason) {
+        $parts += "reason=`"$($Traffic.reason)`""
+    }
     if ($Traffic.error) {
         $parts += "error=`"$($Traffic.error)`""
     }
@@ -969,9 +1003,14 @@ function Get-TrafficSummary($Traffic) {
 
 function Write-VerifyResultSummary($Result) {
     $status = if ($Result.ok) { "[OK]" } else { "[FAIL]" }
-    $ingressCounters = "ingress_nat=$($Result.ingress_nat_packets_before)->$($Result.ingress_nat_packets_after)"
-    $egressCounters = "egress_nat=$($Result.egress_nat_packets_before)->$($Result.egress_nat_packets_after)"
-    Write-Host "$status verified selective fallback route $($Result.id) -> $($Result.target_ip) $(Get-TrafficSummary $Result.traffic) $ingressCounters $egressCounters"
+    $parts = @("$status verified selective fallback route $($Result.id) -> $($Result.target_ip)", (Get-TrafficSummary $Result.traffic))
+    if ($null -ne $Result.ingress_nat_packets_before) {
+        $parts += "ingress_nat=$($Result.ingress_nat_packets_before)->$($Result.ingress_nat_packets_after)"
+    }
+    if ($null -ne $Result.egress_nat_packets_before) {
+        $parts += "egress_nat=$($Result.egress_nat_packets_before)->$($Result.egress_nat_packets_after)"
+    }
+    Write-Host ($parts -join " ")
     if ($Result.ingress_nat_counter_note) {
         Write-Host "[NOTE] $($Result.id) -> $($Result.target_ip) ingress_nat: $($Result.ingress_nat_counter_note)"
     }
@@ -1117,6 +1156,10 @@ if ($SshRetries -lt 1) {
 }
 if ($PreflightRetries -lt 1) {
     Fail "-PreflightRetries must be at least 1"
+}
+
+if (-not $AllowLocalManagedSsh) {
+    Fail "Local apply_selective_fallback_routes.ps1 opens SSH from the operator machine to managed VPS aliases. Use tools/egress_policy/egress_policy_remote.ps1 -Command apply so orchestration executes the runtime work, or pass -AllowLocalManagedSsh for legacy diagnostics."
 }
 
 if ($Action -in @("verify", "rollback", "counters")) {

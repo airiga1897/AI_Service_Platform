@@ -15,7 +15,7 @@ REFRESH_KNOWN_HOSTS="false"
 SKIP_VERIFY="false"
 SKIP_SERVICE_PLAN="false"
 
-EXPECTED_HEADER="current_alias,endpoint,connection,root_password"
+EXPECTED_HEADER="current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 EXPECTED_STATE_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 
 usage() {
@@ -106,8 +106,8 @@ remove_alias_from_list() {
 default_standby_include() {
     local excluded_aliases="$1"
     local result=""
-    local current_alias endpoint connection root_password extra
-    while IFS=, read -r current_alias endpoint connection root_password extra || [ -n "${current_alias:-}" ]; do
+    local current_alias endpoint expected_ip connection ssh_port root_password extra
+    while IFS=, read -r current_alias endpoint expected_ip connection ssh_port root_password extra || [ -n "${current_alias:-}" ]; do
         current_alias="${current_alias//$'\r'/}"
         extra="${extra//$'\r'/}"
         [ -n "$current_alias" ] || continue
@@ -156,7 +156,7 @@ state_first_line="$(head -n 1 "$STATE_FILE" | tr -d '\r')"
 target_found="false"
 target_endpoint=""
 target_connection=""
-while IFS=, read -r current_alias endpoint connection _root_password extra || [ -n "${current_alias:-}" ]; do
+while IFS=, read -r current_alias endpoint expected_ip connection _ssh_port _root_password extra || [ -n "${current_alias:-}" ]; do
     current_alias="${current_alias//$'\r'/}"
     endpoint="${endpoint//$'\r'/}"
     connection="${connection//$'\r'/}"

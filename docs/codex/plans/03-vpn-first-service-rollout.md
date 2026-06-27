@@ -32,7 +32,7 @@ HAProxy routes SoftEther backends на `172.20.0.2`. `edge-haproxy` имеет �
 `nodes.csv` - только адресная книга:
 
 ```csv
-current_alias,endpoint,connection,root_password
+current_alias,endpoint,expected_ip,connection,ssh_port,root_password
 vps1,vps01.example.com,ssh,
 vps2,vps02.example.com,ssh,
 vps3,vps03.example.com,ssh,

@@ -7,11 +7,8 @@
       "behavior": "fallback_on_ingress_egress_failure",
       "reason": "Probe a restricted or unreliable service with ingress-local egress first; consider cascade only when the ingress-local path fails or degrades.",
       "rollback": "Probe-only stage has no runtime effect; disable this profile or remove future approved fallback rules to return to ingress-local egress.",
-      "candidate_ingress_aliases": [
-        "vps5"
-      ],
-      "candidate_fallback_egress_aliases": [
-        "vps4"
+      "ingress_anchor_aliases": [
+        "vps1"
       ],
       "targets": [
         {

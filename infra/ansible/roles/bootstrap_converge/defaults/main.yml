@@ -19,8 +19,5 @@ bootstrap_converge_firewall_allowed_tcp_ports:
   - 443
   - 992
   - 5555
-  - 8443
-  - 8555
-  - 8992
   - 25565
   - 25575

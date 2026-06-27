@@ -53,6 +53,10 @@ param(
 
     [switch]$UseAdminKeyFallback,
 
+    [switch]$SkipOperatorRoutePreflight,
+
+    [switch]$ContinueOnBootstrapFailure,
+
     [int]$BootstrapConvergePollSeconds = 2,
 
     [int]$BootstrapConvergeHeartbeatSeconds = 10,
@@ -61,7 +65,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedHeader = "current_alias,endpoint,connection,root_password"
+$ExpectedHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 . (Join-Path $PSScriptRoot "..\common\private_key_acl.ps1")
 
@@ -192,6 +196,42 @@ function Invoke-ChildScript($ScriptPath, $Arguments) {
     }
 }
 
+function Test-AliasReferencedInPresentState($AliasToCheck, $StateRows) {
+    foreach ($row in @($StateRows | Where-Object { $_.state -eq "present" })) {
+        foreach ($field in @("active_aliases", "candidate_aliases")) {
+            foreach ($alias in @(Split-AliasList $row.$field)) {
+                if ($alias -eq $AliasToCheck) {
+                    return $true
+                }
+            }
+        }
+    }
+    return $false
+}
+
+function Invoke-BootstrapChildScript($ScriptPath, $Arguments, $AliasToBootstrap, $StageLabel) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $ScriptPath @Arguments
+    if ($LASTEXITCODE -eq 0) {
+        return $true
+    }
+
+    $isActiveOrCandidate = Test-AliasReferencedInPresentState $AliasToBootstrap $stateRows
+    if ($ContinueOnBootstrapFailure -and -not $isActiveOrCandidate) {
+        $script:bootstrapFailures.Add([PSCustomObject]@{
+            Alias = $AliasToBootstrap
+            Stage = $StageLabel
+            ExitCode = $LASTEXITCODE
+        }) | Out-Null
+        Write-Warning "Bootstrap failed for inactive/future node $AliasToBootstrap during $StageLabel; continuing because -ContinueOnBootstrapFailure is set."
+        return $false
+    }
+
+    if ($ContinueOnBootstrapFailure -and $isActiveOrCandidate) {
+        Fail "Child script failed for active/candidate alias $AliasToBootstrap during $StageLabel`: $ScriptPath"
+    }
+    Fail "Child script failed: $ScriptPath"
+}
+
 function Invoke-SyncRunner($Label, [switch]$SkipVerifyForSync, [switch]$SkipServicePlanForSync) {
     $syncArgs = @(
         "-NodesFile", $NodesFile,
@@ -257,6 +297,136 @@ function Has-RootPassword($Node) {
 function Has-AdminKey($AliasToCheck, $BaseOperatorDir) {
     $adminKey = Join-Path (Join-Path $BaseOperatorDir $AliasToCheck) "admin_key"
     return (Test-Path -LiteralPath $adminKey -PathType Leaf)
+}
+
+function Get-NodeSshPort($Node) {
+    $port = [string]$Node.ssh_port
+    if (-not $port) {
+        return "22"
+    }
+    $portNumber = 0
+    if (-not [int]::TryParse($port, [ref]$portNumber) -or $portNumber -lt 1 -or $portNumber -gt 65535) {
+        Fail "Invalid ssh_port for $($Node.current_alias): $port"
+    }
+    return [string]$portNumber
+}
+
+function Test-VpnLikeInterface($InterfaceAlias) {
+    if ([string]::IsNullOrWhiteSpace([string]$InterfaceAlias)) {
+        return $false
+    }
+    return ([string]$InterfaceAlias) -match "(?i)(vpn|wireguard|softether|tap|tun|tailscale|zerotier)"
+}
+
+function Resolve-EndpointAddressesFast($Endpoint) {
+    try {
+        return @([System.Net.Dns]::GetHostAddresses($Endpoint) | ForEach-Object { $_.IPAddressToString })
+    } catch {
+        Fail "Operator DNS/IP control check failed for $Endpoint. DNS error: $($_.Exception.Message)"
+    }
+}
+
+function Test-TcpConnectFast($Endpoint, $Port, $TimeoutSeconds) {
+    $client = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $task = $client.ConnectAsync($Endpoint, [int]$Port)
+        $completed = $task.Wait([TimeSpan]::FromSeconds($TimeoutSeconds))
+        if (-not $completed) {
+            return [PSCustomObject]@{
+                TcpSucceeded = $false
+                Error = "timeout after ${TimeoutSeconds}s"
+            }
+        }
+        if ($task.IsFaulted) {
+            return [PSCustomObject]@{
+                TcpSucceeded = $false
+                Error = $task.Exception.InnerException.Message
+            }
+        }
+        return [PSCustomObject]@{
+            TcpSucceeded = $true
+            Error = ""
+        }
+    } catch {
+        return [PSCustomObject]@{
+            TcpSucceeded = $false
+            Error = $_.Exception.Message
+        }
+    } finally {
+        $client.Dispose()
+    }
+}
+
+function Get-TestNetConnectionDiagnostic($Endpoint, $Port) {
+    if (-not (Get-Command Test-NetConnection -ErrorAction SilentlyContinue)) {
+        return $null
+    }
+    try {
+        return Test-NetConnection $Endpoint -Port ([int]$Port) -WarningAction SilentlyContinue
+    } catch {
+        Write-Warning "Test-NetConnection diagnostic failed for ${Endpoint}:$Port. $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Invoke-OperatorRoutePreflight($NodesToCheck, $Reason) {
+    if ($SkipOperatorRoutePreflight) {
+        Write-Host "Operator SSH route preflight skipped by -SkipOperatorRoutePreflight for $Reason"
+        return
+    }
+
+    foreach ($node in $NodesToCheck) {
+        if (-not $node -or $node.connection -ne "ssh" -or $node.endpoint -eq "local") {
+            continue
+        }
+
+        $alias = [string]$node.current_alias
+        $endpoint = [string]$node.endpoint
+        $expectedIp = [string]$node.expected_ip
+        $port = Get-NodeSshPort $node
+
+        Write-Host "Operator SSH route preflight for $alias at ${endpoint}:$port"
+        $resolvedAddresses = @(Resolve-EndpointAddressesFast $endpoint)
+        $remoteAddress = $resolvedAddresses | Select-Object -First 1
+        $tcpResult = Test-TcpConnectFast $endpoint $port 7
+        $tcpSucceeded = [bool]$tcpResult.TcpSucceeded
+
+        Write-Host ("  resolved/remote: {0}" -f ($(if ($resolvedAddresses.Count -gt 0) { $resolvedAddresses -join "," } else { "unknown" })))
+        if ($expectedIp) {
+            Write-Host ("  expected_ip:     {0}" -f $expectedIp)
+            if ($resolvedAddresses.Count -gt 0 -and $resolvedAddresses -notcontains $expectedIp) {
+                Fail "Operator DNS/IP control check failed for $alias. $endpoint resolved to $($resolvedAddresses -join ','), expected $expectedIp from nodes.csv. Update DNS or expected_ip before bootstrap."
+            }
+        }
+        Write-Host ("  tcp:             {0}" -f $tcpSucceeded)
+
+        if (-not $tcpSucceeded) {
+            if ($tcpResult.Error) {
+                Write-Host ("  tcp_error:       {0}" -f $tcpResult.Error)
+            }
+
+            $test = Get-TestNetConnectionDiagnostic $endpoint $port
+            $interfaceAlias = ""
+            $sourceAddress = ""
+            $vpnLike = $false
+            if ($test) {
+                $interfaceAlias = [string]$test.InterfaceAlias
+                $sourceAddress = [string]$test.SourceAddress
+                $diagnosticRemoteAddress = [string]$test.RemoteAddress
+                $vpnLike = Test-VpnLikeInterface $interfaceAlias
+                Write-Host ("  diagnostic_remote: {0}" -f ($(if ($diagnosticRemoteAddress) { $diagnosticRemoteAddress } else { "unknown" })))
+                Write-Host ("  interface:         {0}" -f ($(if ($interfaceAlias) { $interfaceAlias } else { "unknown" })))
+                Write-Host ("  source:            {0}" -f ($(if ($sourceAddress) { $sourceAddress } else { "unknown" })))
+                Write-Host ("  diagnostic_tcp:    {0}" -f ([bool]$test.TcpTestSucceeded))
+            }
+
+            $vpnHint = ""
+            if ($vpnLike) {
+                $vpnHint = " Detected VPN-like interface '$interfaceAlias'; SSH may be routed through the operator VPN before AllowedIPs/routes are ready."
+            }
+            Fail "Operator cannot reach $alias SSH at ${endpoint}:$port before $Reason.$vpnHint Disconnect the operator VPN or add a temporary host route for the VPS public IP through the normal internet gateway, then rerun. Use -SkipOperatorRoutePreflight only if this VPN path is intentional."
+        }
+    }
 }
 
 function Add-PublicKeyLines($Path, $Label, $KeyLines) {
@@ -508,6 +678,7 @@ if ($controlNeedsBootstrap -or (-not $SkipManaged -and $needsAnsibleAuthorizedKe
 
 $managedAnsibleAuthorizedKeyFile = $AnsibleAuthorizedKeyFile
 $temporaryAnsibleAuthorizedKeyFile = ""
+$bootstrapFailures = New-Object System.Collections.Generic.List[object]
 
 try {
 if (-not $SkipManaged) {
@@ -557,7 +728,7 @@ if (-not $SkipManaged) {
         } else {
             Write-Host "Step 2a/5: re-bootstrap orchestration-capable node $managedAlias through admin key"
         }
-        Invoke-ChildScript $BootstrapRunner $managedArgs
+        [void](Invoke-BootstrapChildScript $BootstrapRunner $managedArgs $managedAlias "orchestration-capable bootstrap")
     }
 
     if ($needsAnsibleTrustBundle) {
@@ -569,6 +740,16 @@ if (-not $SkipManaged) {
     }
 
     if ($needsAnsibleTrustBundle) {
+        $orchestrationCapableNodes = @()
+        foreach ($managedAlias in $orchestrationCapableAliases) {
+            $managedNode = $rows | Where-Object { $_.current_alias -eq $managedAlias } | Select-Object -First 1
+            if (-not $managedNode) {
+                Fail "Orchestration-capable alias not found in nodes file: $managedAlias"
+            }
+            $orchestrationCapableNodes += $managedNode
+        }
+        Invoke-OperatorRoutePreflight $orchestrationCapableNodes "orchestration trust mesh refresh"
+
         foreach ($managedAlias in $orchestrationCapableAliases) {
             $managedNode = $rows | Where-Object { $_.current_alias -eq $managedAlias } | Select-Object -First 1
             if (-not $managedNode) {
@@ -601,7 +782,7 @@ if (-not $SkipManaged) {
             }
 
             Write-Host "Step 2c/5: refresh orchestration trust mesh on $managedAlias"
-            Invoke-ChildScript $BootstrapRunner $managedArgs
+            [void](Invoke-BootstrapChildScript $BootstrapRunner $managedArgs $managedAlias "orchestration trust mesh refresh")
         }
     }
 
@@ -654,7 +835,7 @@ if (-not $SkipManaged) {
         } else {
             Write-Host "Step 2d/5: re-bootstrap existing managed node $managedAlias through admin key fallback"
         }
-        Invoke-ChildScript $BootstrapRunner $managedArgs
+        [void](Invoke-BootstrapChildScript $BootstrapRunner $managedArgs $managedAlias "managed bootstrap")
     }
 }
 
@@ -676,6 +857,13 @@ if (-not $SkipSync) {
     Invoke-SyncRunner "Step 4/5: final sync sanitized nodes.csv to control node"
 } else {
     Write-Host "Step 4/5: sync skipped; verify skipped too"
+}
+
+if ($bootstrapFailures.Count -gt 0) {
+    Write-Warning "Bootstrap completed with skipped inactive/future node failures:"
+    foreach ($failure in $bootstrapFailures) {
+        Write-Warning ("  {0}: {1} failed with exit code {2}" -f $failure.Alias, $failure.Stage, $failure.ExitCode)
+    }
 }
 
 if ($SkipSync) {

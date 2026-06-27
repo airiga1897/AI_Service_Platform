@@ -188,14 +188,19 @@ service,vpn_cascade,vpn_cascades,vps5+vps4+vps3,,,present
 ```
 
 The current lab cascade fabric uses directed links declared in a shared operator
-secret. Each cascade node publishes separate cascade-only host ports and does
-not occupy public edge `443/tcp`:
+secret. Cascade receivers are reached through HAProxy SNI names such as
+`cascade-vps3.mine-craft.su` on shared public port `443/tcp`; the
+`vpn_cascade` container does not publish direct host ports when HAProxy owns the
+entrypoints.
 
 | Host port | Container port | Purpose |
 |---|---|---|
-| `8443/tcp` | `443/tcp` | primary cascade HTTPS-like transport listener |
-| `8992/tcp` | `992/tcp` | fallback/test SoftEther cascade SSL listener |
-| `8555/tcp` | `5555/tcp` | management, restricted by firewall |
+| `443/tcp` | `443/tcp` | HAProxy SNI route to cascade HTTPS-like transport |
+| `992/tcp` | `992/tcp` | HAProxy SNI route to fallback SoftEther SSL listener |
+| `5555/tcp` | `5555/tcp` | HAProxy SNI route to management, restricted by allowlist |
+
+Retired cascade-only host ports `8443/tcp`, `8992/tcp`, and `8555/tcp` are no
+longer used.
 
 The operator-local cascade secret is ignored by git:
 
@@ -222,8 +227,8 @@ It contains shared hub/user/password values plus directed links used by
       "ingress_alias": "vps5",
       "ingress_host": "vps5.mine-craft.su",
       "egress_alias": "vps4",
-      "egress_host": "vps4.mine-craft.su",
-      "egress_port": 8443
+      "egress_host": "cascade-vps4.mine-craft.su",
+      "egress_port": 443
     },
     {
       "state": "active",
@@ -231,8 +236,8 @@ It contains shared hub/user/password values plus directed links used by
       "ingress_alias": "vps4",
       "ingress_host": "vps4.mine-craft.su",
       "egress_alias": "vps3",
-      "egress_host": "vps3.mine-craft.su",
-      "egress_port": 8443
+      "egress_host": "cascade-vps3.mine-craft.su",
+      "egress_port": 443
     }
   ]
 }
@@ -396,9 +401,9 @@ rerun the same command to replace stale `/32` routes with the current A-records.
 Rollback remains per generated proposal:
 
 ```powershell
-.\tools\egress_policy\apply_selective_fallback_routes.ps1 `
-  -Action rollback `
-  -Id fallback-available-vps4-test-fallback-school-mos-ru-443
+.\tools\egress_policy\egress_policy_remote.ps1 `
+  -Command apply `
+  -Args "-Action rollback -Id fallback-available-vps4-test-fallback-school-mos-ru-443"
 ```
 
 This is not full wildcard policy. `www.<domain>` and related subdomains remain
@@ -412,16 +417,16 @@ is full-auto maintenance for domains that already have accepted proposals; it is
 not auto-discovery for new domains.
 
 ```powershell
-.\tools\egress_policy\refresh_selective_fallback_dns_sets.ps1 `
-  -Apply `
-  -Verify
+.\tools\egress_policy\egress_policy_remote.ps1 `
+  -Command refresh `
+  -Args "-Apply -Verify"
 ```
 
-For continuous maintenance, run the same refresh from an operator-side scheduler
+For continuous maintenance, run the same wrapper from an operator-side scheduler
 about once per hour:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\egress_policy\refresh_selective_fallback_dns_sets.ps1 -Apply -Verify
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\egress_policy\egress_policy_remote.ps1 -Command refresh -Args "-Apply -Verify"
 ```
 
 Schedule this on the operator host only. It refreshes accepted/applied domain
@@ -431,10 +436,9 @@ change `profiles.json`, or approve redirect/CDN hosts.
 For one domain:
 
 ```powershell
-.\tools\egress_policy\refresh_selective_fallback_dns_sets.ps1 `
-  -Domain mos.ru `
-  -Apply `
-  -Verify
+.\tools\egress_policy\egress_policy_remote.ps1 `
+  -Command refresh `
+  -Args "-Domain mos.ru -Apply -Verify"
 ```
 
 The refresh command resolves each approved domain from the operator workstation
@@ -464,8 +468,8 @@ Before adding L3 routing or NAT, model every cascade link explicitly:
 - `egress_alias` - where selected traffic is allowed to leave;
 - `egress_host` - the receiver endpoint used by the SoftEther Cascade
   Connection;
-- `egress_port` - the receiver host port, currently `8443` for HTTPS-like
-  transport.
+- `egress_port` - the receiver host port, currently `443` through HAProxy SNI
+  routing with a `cascade-vpsN.mine-craft.su` endpoint.
 
 Each cascade link carries a `state` field:
 
@@ -487,8 +491,8 @@ are made consistently and validated before rollout:
   -IngressAlias vps4 `
   -IngressHost vps4.mine-craft.su `
   -EgressAlias vps5 `
-  -EgressHost vps5.mine-craft.su `
-  -EgressPort 8443 `
+  -EgressHost cascade-vps5.mine-craft.su `
+  -EgressPort 443 `
   -State probe
 .\tools\services\vpn_cascade_link.ps1 list
 ```
@@ -607,8 +611,9 @@ This file is local operator state, not a runtime route table. It may be empty
 when no active fallback policy is currently needed. New v1 profiles use
 `behavior: "fallback_on_ingress_egress_failure"`: probe ingress-local egress
 first and consider cascade only when the ingress-local path fails or degrades.
-Targets, domains, IP addresses, protocols, ports, ingress aliases, and fallback
-egress aliases live in this operator file, not in code. Cascade link names are
+Targets, domains, IP addresses, protocols, ports, and ingress anchor aliases
+live in this operator file, not in code. Migration candidates and fallback
+egress paths are derived from `operator/state.csv`; cascade link names are
 derived from `lab-cascade.json`.
 
 The canonical v1 profile shape is:
@@ -618,8 +623,7 @@ The canonical v1 profile shape is:
   "name": "example_service_fallback",
   "state": "probe",
   "behavior": "fallback_on_ingress_egress_failure",
-  "candidate_ingress_aliases": ["vps5"],
-  "candidate_fallback_egress_aliases": ["vps4"],
+  "ingress_anchor_aliases": ["vps1"],
   "targets": [
     { "type": "domain", "value": "example.org", "protocol": "https", "port": 443, "path": "/" },
     { "type": "domain", "value": "example.org", "protocol": "tcp", "port": 443, "path": "/" },
@@ -631,11 +635,12 @@ The canonical v1 profile shape is:
 }
 ```
 
-Do not use old `desired_region_behavior`, `candidate_egress_aliases`, or
+Do not use old `desired_region_behavior`, `candidate_egress_aliases`,
+`candidate_ingress_aliases`, `candidate_fallback_egress_aliases`, or
 `candidate_fallback_links` fields in new policy files. The v1 contract is
-explicit: `behavior`, `candidate_ingress_aliases`, and
-`candidate_fallback_egress_aliases`. If strict country behavior is ever needed,
-use a separate future behavior such as
+explicit: `behavior` and `ingress_anchor_aliases`; rollout candidates and
+fallback egress aliases come from `operator/state.csv`. If strict country
+behavior is ever needed, use a separate future behavior such as
 `require_non_ru_egress` instead of mixing it with fallback routing.
 
 A tracked, secret-free example is available at:
@@ -711,11 +716,11 @@ protocols that can be checked generically. Use `verify` to repeat that check lat
 `rollback` to remove only persisted exact route/NAT state:
 
 ```powershell
-.\tools\egress_policy\apply_selective_fallback_routes.ps1 -Action plan -Id <proposal-id>
-.\tools\egress_policy\apply_selective_fallback_routes.ps1 -Action apply -Id <proposal-id>
-.\tools\egress_policy\apply_selective_fallback_routes.ps1 -Action verify -Id <proposal-id>
-.\tools\egress_policy\apply_selective_fallback_routes.ps1 -Action rollback -Id <proposal-id>
-.\tools\egress_policy\apply_selective_fallback_routes.ps1 -Action cleanup -Id <proposal-id>
+.\tools\egress_policy\egress_policy_remote.ps1 -Command apply -Args "-Action plan -Id <proposal-id>"
+.\tools\egress_policy\egress_policy_remote.ps1 -Command apply -Args "-Action apply -Id <proposal-id>"
+.\tools\egress_policy\egress_policy_remote.ps1 -Command apply -Args "-Action verify -Id <proposal-id>"
+.\tools\egress_policy\egress_policy_remote.ps1 -Command apply -Args "-Action rollback -Id <proposal-id>"
+.\tools\egress_policy\egress_policy_remote.ps1 -Command apply -Args "-Action cleanup -Id <proposal-id>"
 ```
 
 `-SkipVerify` is available only as an operator escape hatch; normal canaries
@@ -727,20 +732,39 @@ SoftEther config. If a failed canary used a DNS IP that is no longer returned,
 pass it explicitly, for example
 `-Action cleanup -Id <proposal-id> -TargetIp 212.11.151.56`.
 
-Run a dry plan without touching remote nodes:
+Production egress-policy commands should run from the active orchestration node,
+not from the operator Windows shell. This keeps managed-node SSH on the
+orchestration network path, so a local VPN client cannot change the source route
+to `vps2`/`vps3`/other dataplane nodes. Use the remote wrapper by default:
 
 ```powershell
-.\tools\egress_policy\probe_egress_policy.ps1 -DryRun
+.\tools\egress_policy\egress_policy_remote.ps1 `
+  -Command probe `
+  -Args "-Profile public_services_fallback -Alias vps2 -IncludeCascade"
+
+.\tools\egress_policy\egress_policy_remote.ps1 `
+  -Command readiness `
+  -Args "-ProfileName public_services_fallback -Alias vps2"
+
+.\tools\egress_policy\egress_policy_remote.ps1 `
+  -Command suggest `
+  -Args "-ReadinessHistory"
 ```
 
-Run actual probes over SSH from each selected VPS:
+The wrapper uploads fresh egress-policy tools and operator state to the active
+orchestration node, runs the selected command under `/opt/ai-service-platform`,
+then downloads `history`, `proposals`, `applied_routes`, `dns_sets`,
+`default_egress`, and `candidates` back into the local operator directory.
+
+Direct egress-policy scripts are low-level local diagnostics. Use them only when
+you intentionally want the current shell to SSH to managed VPS nodes:
 
 ```powershell
 .\tools\egress_policy\probe_egress_policy.ps1
 ```
 
-If the shell resolves `ssh` to a wrapper instead of OpenSSH, pass the executable
-explicitly:
+For local diagnostics, if the shell resolves `ssh` to a wrapper instead of
+OpenSSH, pass the executable explicitly:
 
 ```powershell
 .\tools\egress_policy\probe_egress_policy.ps1 -SshPath <path-to-ssh>
@@ -823,8 +847,8 @@ unless a specific archived `-HistoryFile` is provided.
 Generate operator-visible proposals from probe history:
 
 ```powershell
-.\tools\egress_policy\suggest_egress_policy.ps1 -DryRun
-.\tools\egress_policy\suggest_egress_policy.ps1
+.\tools\egress_policy\egress_policy_remote.ps1 -Command suggest -Args "-DryRun"
+.\tools\egress_policy\egress_policy_remote.ps1 -Command suggest
 ```
 
 The proposal inbox is exception-only. Successful green observations such as
@@ -981,6 +1005,18 @@ Implementation order:
 2. Keep seed snapshots as backup/debug artifacts, not as the primary workflow.
 3. Add postchecks that verify initiator, receiver, host, port, and status.
 4. Add L3 routing, forwarding, NAT, and rollback only after roles are explicit.
+
+## Provider-NAT VPN Ingress Readiness
+
+Every active non-retired VPS should expose the VPN ingress stack through
+HAProxy: public TCP `443`, `992`, and `5555` must reach the VPS and the expected
+SNI route. If a provider places a VPS behind NAT, SSH access through a custom
+forwarded port does not prove VPN readiness; the three VPN TCP ports need their
+own provider forwarding.
+
+A SoftEther NAT Traversal warning means the client used UDP hole punching
+instead of the intended TCP/SNI path. Treat that as failed production ingress
+readiness until public TCP checks and HAProxy counters prove the normal path.
 
 To intentionally replace an installed cascade node config with its operator
 seed, use explicit reseed and a single alias:

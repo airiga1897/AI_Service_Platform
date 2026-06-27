@@ -40,7 +40,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedHeader = "current_alias,endpoint,connection,root_password"
+$ExpectedHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 $PublicKeyBeginMarker = "__ANSIBLE_CONTROL_PUBLIC_KEY_BEGIN__"
 $PublicKeyEndMarker = "__ANSIBLE_CONTROL_PUBLIC_KEY_END__"
@@ -65,6 +65,48 @@ function Assert-NoUtf8Bom($Path, $Label) {
     }
 }
 
+function Write-AsciiNoBomLines($Path, $Lines) {
+    $text = (($Lines | ForEach-Object { [string]$_ }) -join "`n") + "`n"
+    $encoding = New-Object System.Text.ASCIIEncoding
+    [System.IO.File]::WriteAllText((Resolve-Path -LiteralPath $Path), $text, $encoding)
+}
+
+function Format-HexPrefix($Bytes, $Count) {
+    if (-not $Bytes -or $Bytes.Length -eq 0) {
+        return ""
+    }
+    $last = [Math]::Min($Bytes.Length, $Count) - 1
+    return (($Bytes[0..$last] | ForEach-Object { "{0:X2}" -f $_ }) -join " ")
+}
+
+function Assert-SanitizedNodesFile($Path) {
+    $firstLine = Get-Content -LiteralPath $Path -TotalCount 1
+    if ($firstLine -eq $ExpectedHeader) {
+        return
+    }
+
+    $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $Path))
+    Write-Host ("Sanitized nodes.csv diagnostic: path={0}" -f $Path)
+    Write-Host ("Sanitized nodes.csv diagnostic: first_line_length={0}" -f ([string]$firstLine).Length)
+    Write-Host ("Sanitized nodes.csv diagnostic: first_bytes={0}" -f (Format-HexPrefix $bytes 32))
+    Fail "sanitized nodes.csv header must be exactly: $ExpectedHeader"
+}
+
+function New-SanitizedNodesFileFromRows($Rows) {
+    $tempFile = (New-TemporaryFile).FullName
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add($ExpectedHeader)
+
+    foreach ($item in $Rows) {
+        $itemSshPort = Get-NodeSshPort $item
+        $lines.Add(("{0},{1},{2},{3},{4}," -f $item.current_alias,$item.endpoint,$item.expected_ip,$item.connection,$itemSshPort))
+    }
+
+    Write-AsciiNoBomLines $tempFile $lines
+    Assert-SanitizedNodesFile $tempFile
+    return $tempFile
+}
+
 function Clear-RootPasswordForAlias($Path, $AliasToClear) {
     $lines = Get-Content -LiteralPath $Path
     if (-not $lines -or $lines.Count -eq 0) {
@@ -84,13 +126,13 @@ function Clear-RootPasswordForAlias($Path, $AliasToClear) {
             continue
         }
 
-        $fields = $line -split ",", 5
-        if ($fields.Count -ne 4) {
+        $fields = $line -split ",", 7
+        if ($fields.Count -ne 6) {
             Fail "nodes.csv row has invalid column count: $line"
         }
 
         if ($fields[0] -eq $AliasToClear) {
-            $fields[3] = ""
+            $fields[5] = ""
             $foundAlias = $true
         }
         $updated.Add(($fields -join ","))
@@ -100,13 +142,25 @@ function Clear-RootPasswordForAlias($Path, $AliasToClear) {
         Fail "Alias not found while clearing root_password: $AliasToClear"
     }
 
-    Set-Content -LiteralPath $Path -Value $updated -Encoding ascii
+    Write-AsciiNoBomLines $Path $updated
     Write-Host "Cleared root_password in local nodes.csv for $AliasToClear"
 }
 
 function Split-AliasList($Value) {
     if (-not $Value) { return @() }
     return @($Value -split "\+" | Where-Object { $_ })
+}
+
+function Get-NodeSshPort($Node) {
+    $port = [string]$Node.ssh_port
+    if (-not $port) {
+        return "22"
+    }
+    $portNumber = 0
+    if (-not [int]::TryParse($port, [ref]$portNumber) -or $portNumber -lt 1 -or $portNumber -gt 65535) {
+        Fail "Invalid ssh_port for $($Node.current_alias): $port"
+    }
+    return [string]$portNumber
 }
 
 function Is-OrchestrationCapableNode($StateRows, $AliasToCheck) {
@@ -250,7 +304,61 @@ function Test-BootstrapLocalMutationExpected($AliasToSave, $IsManagement, $BaseO
     return $false
 }
 
-function New-OperatorBackupSnapshot($ClearRootPasswordAlias) {
+function Get-FullPath($Path) {
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $Path))
+}
+
+function Copy-StagedBootstrapKeysToSnapshot($SnapshotOperatorDir, $StagedAlias, $StagedKeyRoot, $StagedIsManagement, $StagedPublicKeyPath) {
+    if ([string]::IsNullOrWhiteSpace($StagedAlias)) {
+        return
+    }
+
+    if ([string]::IsNullOrWhiteSpace($StagedKeyRoot)) {
+        Fail "Staged bootstrap key root is empty before operator backup snapshot for $StagedAlias"
+    }
+
+    $sourceAliasDir = Join-Path $StagedKeyRoot $StagedAlias
+    if (-not (Test-Path -LiteralPath $sourceAliasDir -PathType Container)) {
+        Fail "Staged bootstrap key directory missing before operator backup snapshot: $sourceAliasDir"
+    }
+
+    $snapshotAliasDir = Join-Path $SnapshotOperatorDir $StagedAlias
+    New-Item -ItemType Directory -Force -Path $snapshotAliasDir | Out-Null
+
+    $keyNames = @("deploy_key", "admin_key")
+    if ($StagedIsManagement) {
+        $keyNames += @("ansible_control_key", "ansible_control.managed_nodes.pub")
+    }
+
+    foreach ($name in $keyNames) {
+        $source = Join-Path $sourceAliasDir $name
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            Fail "Staged bootstrap key missing before operator backup snapshot: $source"
+        }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $snapshotAliasDir $name) -Force
+    }
+
+    if ($StagedIsManagement -and -not [string]::IsNullOrWhiteSpace($StagedPublicKeyPath)) {
+        $operatorFullPath = Get-FullPath $OperatorDir
+        if (-not $operatorFullPath.EndsWith([System.IO.Path]::DirectorySeparatorChar)) {
+            $operatorFullPath = $operatorFullPath + [System.IO.Path]::DirectorySeparatorChar
+        }
+
+        $publicKeyFullPath = Get-FullPath $StagedPublicKeyPath
+        if ($publicKeyFullPath.StartsWith($operatorFullPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $relativePublicKeyPath = $publicKeyFullPath.Substring($operatorFullPath.Length)
+            $snapshotPublicKeyPath = Join-Path $SnapshotOperatorDir $relativePublicKeyPath
+            $snapshotPublicKeyDir = Split-Path -Parent $snapshotPublicKeyPath
+            New-Item -ItemType Directory -Force -Path $snapshotPublicKeyDir | Out-Null
+            Copy-Item -LiteralPath (Join-Path $sourceAliasDir "ansible_control.managed_nodes.pub") -Destination $snapshotPublicKeyPath -Force
+        }
+    }
+}
+
+function New-OperatorBackupSnapshot($ClearRootPasswordAlias, $StagedAlias = "", $StagedKeyRoot = "", $StagedIsManagement = $false, $StagedPublicKeyPath = "") {
     if ([string]::IsNullOrWhiteSpace($ClearRootPasswordAlias)) {
         return $null
     }
@@ -268,6 +376,7 @@ function New-OperatorBackupSnapshot($ClearRootPasswordAlias) {
 
     Copy-Item -LiteralPath $NodesFile -Destination $snapshotNodesFile -Force
     Copy-Item -LiteralPath $StateFile -Destination $snapshotStateFile -Force
+    Copy-StagedBootstrapKeysToSnapshot $snapshotOperatorDir $StagedAlias $StagedKeyRoot $StagedIsManagement $StagedPublicKeyPath
     Clear-RootPasswordForAlias $snapshotNodesFile $ClearRootPasswordAlias
 
     return [PSCustomObject]@{
@@ -278,7 +387,7 @@ function New-OperatorBackupSnapshot($ClearRootPasswordAlias) {
     }
 }
 
-function Invoke-OperatorBackupIfNeeded($Reason, $ClearRootPasswordAlias = "") {
+function Invoke-OperatorBackupIfNeeded($Reason, $ClearRootPasswordAlias = "", $StagedAlias = "", $StagedKeyRoot = "", $StagedIsManagement = $false, $StagedPublicKeyPath = "") {
     if ($SkipOperatorBackup) {
         Write-Warning "Operator backup skipped before local mutation: $Reason"
         return
@@ -294,7 +403,7 @@ function Invoke-OperatorBackupIfNeeded($Reason, $ClearRootPasswordAlias = "") {
 
         if (-not [string]::IsNullOrWhiteSpace($ClearRootPasswordAlias)) {
             Write-Host "Using sanitized operator backup snapshot with root_password cleared for $ClearRootPasswordAlias"
-            $snapshot = New-OperatorBackupSnapshot $ClearRootPasswordAlias
+            $snapshot = New-OperatorBackupSnapshot $ClearRootPasswordAlias $StagedAlias $StagedKeyRoot $StagedIsManagement $StagedPublicKeyPath
             $backupNodesFile = $snapshot.NodesFile
             $backupStateFile = $snapshot.StateFile
             $backupOperatorDir = $snapshot.OperatorDir
@@ -346,8 +455,10 @@ function Save-BootstrapKeys($Lines, $AliasToSave, $IsManagement, $BaseOperatorDi
         Save-TextFile $ansibleKeyPath $ansibleKey $AllowOverwrite $KeepExisting
         Ensure-OpenSshPrivateKeyAcl $ansibleKeyPath
         Save-TextFile (Join-Path $aliasDir "ansible_control.managed_nodes.pub") $publicKey $AllowOverwrite $KeepExisting
-        Save-TextFile $PublicKeyPath $publicKey $AllowOverwrite $KeepExisting
-        Write-Host "Saved Ansible control public key: $PublicKeyPath"
+        if (-not [string]::IsNullOrWhiteSpace($PublicKeyPath)) {
+            Save-TextFile $PublicKeyPath $publicKey $AllowOverwrite $KeepExisting
+            Write-Host "Saved Ansible control public key: $PublicKeyPath"
+        }
     }
 }
 
@@ -381,7 +492,7 @@ function Install-StagedBootstrapKeys($AliasToSave, $IsManagement, $StagingRoot, 
     }
 }
 
-function Get-PuttyHostKeyFingerprint($Remote, $Password) {
+function Get-PuttyHostKeyFingerprint($Remote, $Password, $Port) {
     if (-not $AutoAcceptHostKey) {
         return ""
     }
@@ -389,7 +500,7 @@ function Get-PuttyHostKeyFingerprint($Remote, $Password) {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $script:ErrorActionPreference = "Continue"
-        $output = & plink -batch -no-antispoof -pw $Password $Remote exit 2>&1
+        $output = & plink -batch -no-antispoof -P $Port -pw $Password $Remote exit 2>&1
     } finally {
         $script:ErrorActionPreference = $previousErrorActionPreference
     }
@@ -404,11 +515,11 @@ function Get-PuttyHostKeyFingerprint($Remote, $Password) {
     return $match.Value
 }
 
-function Invoke-PlinkCommand($Remote, $Password, $Command, $LogPath, $HostKeyFingerprint) {
+function Invoke-PlinkCommand($Remote, $Password, $Port, $Command, $LogPath, $HostKeyFingerprint) {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $script:ErrorActionPreference = "Continue"
-        $plinkArgs = @("-batch", "-no-antispoof", "-pw", $Password, $Remote, $Command)
+        $plinkArgs = @("-batch", "-no-antispoof", "-P", $Port, "-pw", $Password, $Remote, $Command)
         if ($HostKeyFingerprint) {
             $plinkArgs = @("-hostkey", $HostKeyFingerprint) + $plinkArgs
         }
@@ -427,14 +538,31 @@ function Invoke-PlinkCommand($Remote, $Password, $Command, $LogPath, $HostKeyFin
     }
 }
 
-function Invoke-PscpPassword($Password, $Source, $Target, $Label, $HostKeyFingerprint) {
-    $pscpArgs = @("-batch", "-pw", $Password, $Source, $Target)
+function Invoke-PscpPassword($Password, $Port, $Source, $Target, $Label, $HostKeyFingerprint, $AliasToBootstrap, $Endpoint) {
+    $pscpArgs = @("-batch", "-P", $Port, "-pw", $Password, $Source, $Target)
     if ($HostKeyFingerprint) {
         $pscpArgs = @("-hostkey", $HostKeyFingerprint) + $pscpArgs
     }
-    & pscp @pscpArgs
-    if ($LASTEXITCODE -ne 0) {
-        Fail "$Label failed"
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $script:ErrorActionPreference = "Continue"
+        $output = & pscp @pscpArgs 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $script:ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    $outputLines = @($output | ForEach-Object { [string]$_ })
+    foreach ($line in $outputLines) {
+        Write-Host $line
+    }
+    if ($exitCode -ne 0) {
+        $outputText = $outputLines -join "`n"
+        if ($outputText -match "Configured password was not accepted|Access denied") {
+            Fail "Root password rejected for $AliasToBootstrap at ${Endpoint}:$Port while $Label. Check operator/nodes.csv root_password or provider root SSH password/auth state."
+        }
+        Fail "$Label failed with exit code $exitCode"
     }
 }
 
@@ -459,8 +587,44 @@ function Get-OpenSshCommonArgs($KeyFile) {
     return $args
 }
 
-function Invoke-SshKey($KeyFile, $Remote, $Command, $Label, $LogPath = "") {
-    $sshArgs = @("-n", "-T") + @(Get-OpenSshCommonArgs $KeyFile) + @("-o", "RequestTTY=no", $Remote, $Command)
+function Get-OpenSshKnownHostTarget($Endpoint, $Port) {
+    if ([string]$Port -eq "22") {
+        return $Endpoint
+    }
+    return "[$Endpoint]:$Port"
+}
+
+function Clear-OpenSshHostKeyCache($Endpoint, $Port) {
+    if (-not $AutoAcceptHostKey) {
+        return
+    }
+    if (-not (Get-Command ssh-keygen -ErrorAction SilentlyContinue)) {
+        Write-Warning "ssh-keygen not found; cannot remove stale OpenSSH known_hosts entry for ${Endpoint}:$Port"
+        return
+    }
+
+    $targets = New-Object System.Collections.Generic.List[string]
+    $targets.Add((Get-OpenSshKnownHostTarget $Endpoint $Port))
+    if ([string]$Port -ne "22" -and -not $targets.Contains($Endpoint)) {
+        $targets.Add($Endpoint)
+    }
+
+    foreach ($target in $targets) {
+        & ssh-keygen -F $target *> $null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "No existing OpenSSH known_hosts entry for $target; continuing."
+            continue
+        }
+        Write-Host "Removing old OpenSSH known_hosts entry for $target"
+        & ssh-keygen -R $target | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            Fail "ssh-keygen -R failed for $target"
+        }
+    }
+}
+
+function Invoke-SshKey($KeyFile, $Port, $Remote, $Command, $Label, $LogPath = "") {
+    $sshArgs = @("-n", "-T", "-p", $Port) + @(Get-OpenSshCommonArgs $KeyFile) + @("-o", "RequestTTY=no", $Remote, $Command)
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $script:ErrorActionPreference = "Continue"
@@ -482,15 +646,25 @@ function Invoke-SshKey($KeyFile, $Remote, $Command, $Label, $LogPath = "") {
     }
 }
 
-function Invoke-ScpKey($KeyFile, $Source, $Target, $Label) {
-    $scpArgs = @("-B") + @(Get-OpenSshCommonArgs $KeyFile) + @($Source, $Target)
+function Invoke-ScpKey($KeyFile, $Port, $Source, $Target, $Label) {
+    $scpArgs = @("-B", "-P", $Port) + @(Get-OpenSshCommonArgs $KeyFile) + @($Source, $Target)
     & scp @scpArgs
     if ($LASTEXITCODE -ne 0) {
         Fail "$Label failed"
     }
 }
 
-function Test-AdminKeyBootstrapPreflight($KeyFile, $Remote, $IsManagement) {
+function Invoke-RemoteSshHardening($KeyFile, $Port, $Remote) {
+    Invoke-ScpKey $KeyFile $Port $SetupScript "${Remote}:/tmp/setup_vps.sh" "scp setup_vps.sh for SSH hardening"
+    try {
+        Invoke-SshKey $KeyFile $Port $Remote "sudo -n bash /tmp/setup_vps.sh --ssh-hardening-only" "remote SSH hardening"
+    } finally {
+        $cleanupArgs = @("-n", "-T", "-p", $Port) + @(Get-OpenSshCommonArgs $KeyFile) + @("-o", "RequestTTY=no", $Remote, "rm -f /tmp/setup_vps.sh")
+        & ssh @cleanupArgs 2>$null | Out-Null
+    }
+}
+
+function Test-AdminKeyBootstrapPreflight($KeyFile, $Port, $Remote, $IsManagement) {
     $managementCheck = "true"
     if ($IsManagement) {
         $managementCheck = @'
@@ -527,16 +701,16 @@ echo "[OK] admin-key bootstrap preflight passed"
     try {
         $preflightLf = $preflight -replace "`r`n", "`n" -replace "`r", "`n"
         [System.IO.File]::WriteAllText($localPreflight.FullName, $preflightLf, [System.Text.ASCIIEncoding]::new())
-        Invoke-ScpKey $KeyFile $localPreflight.FullName "${Remote}:$remotePreflight" "scp admin-key bootstrap preflight"
-        Invoke-SshKey $KeyFile $Remote "sudo -n bash $remotePreflight" "admin-key bootstrap preflight"
+        Invoke-ScpKey $KeyFile $Port $localPreflight.FullName "${Remote}:$remotePreflight" "scp admin-key bootstrap preflight"
+        Invoke-SshKey $KeyFile $Port $Remote "sudo -n bash $remotePreflight" "admin-key bootstrap preflight"
     } finally {
         Remove-Item -LiteralPath $localPreflight -Force -ErrorAction SilentlyContinue
-        $cleanupArgs = @("-n", "-T") + @(Get-OpenSshCommonArgs $KeyFile) + @("-o", "RequestTTY=no", $Remote, "rm -f $remotePreflight")
+        $cleanupArgs = @("-n", "-T", "-p", $Port) + @(Get-OpenSshCommonArgs $KeyFile) + @("-o", "RequestTTY=no", $Remote, "rm -f $remotePreflight")
         & ssh @cleanupArgs 2>$null | Out-Null
     }
 }
 
-function Clear-PuttyHostKeyCache($Endpoint) {
+function Clear-PuttyHostKeyCache($Endpoint, $Port) {
     if (-not $AutoAcceptHostKey) {
         return
     }
@@ -548,7 +722,7 @@ function Clear-PuttyHostKeyCache($Endpoint) {
 
     $keyItem = Get-Item -LiteralPath $registryPath
     foreach ($property in $keyItem.GetValueNames()) {
-        if ($property -like "*@*:$Endpoint") {
+        if ($property -like "*@$Port`:$Endpoint") {
             Remove-ItemProperty -LiteralPath $registryPath -Name $property -ErrorAction SilentlyContinue
             Write-Host "Removed PuTTY cached host key: $property"
         }
@@ -588,7 +762,9 @@ if ($row.connection -eq "local" -or $row.endpoint -eq "local") {
 }
 Assert-NoUtf8Bom $SetupScript "SetupScript"
 $isManagementNode = Is-OrchestrationCapableNode $stateRows $Alias
+$sshPort = Get-NodeSshPort $row
 $useAdminKeyBootstrap = [string]::IsNullOrWhiteSpace([string]$row.root_password)
+$keepExistingLocalKeys = (-not $useAdminKeyBootstrap)
 $adminKeyFile = Join-Path (Join-Path $OperatorDir $Alias) "admin_key"
 if (-not $isManagementNode -and -not $AnsibleAuthorizedKeyFile) {
     $activeOrchestrationAlias = Get-ActiveOrchestrationAlias $stateRows
@@ -628,70 +804,68 @@ if ($useAdminKeyBootstrap) {
         Fail "pscp not found in PATH"
     }
 }
-Assert-BootstrapKeyPathsAvailable $Alias $isManagementNode $OperatorDir $OutputAnsibleAuthorizedKeyFile $Force $useAdminKeyBootstrap
+Assert-BootstrapKeyPathsAvailable $Alias $isManagementNode $OperatorDir $OutputAnsibleAuthorizedKeyFile $Force ($useAdminKeyBootstrap -or $keepExistingLocalKeys)
 
-$sanitized = New-TemporaryFile
+$sanitized = $null
 $remoteLog = New-TemporaryFile
 $stagedKeyRoot = ""
 try {
-    Set-Content -LiteralPath $sanitized -Value $ExpectedHeader -Encoding ascii
-    foreach ($item in $rows) {
-        Add-Content -LiteralPath $sanitized -Value ("{0},{1},{2}," -f $item.current_alias,$item.endpoint,$item.connection) -Encoding ascii
-    }
+    $sanitized = New-SanitizedNodesFileFromRows $rows
 
     if ($useAdminKeyBootstrap) {
         $remote = "$AdminUser@$($row.endpoint)"
-        Write-Host "Re-bootstrapping $Alias at $($row.endpoint) through admin key"
-        Test-AdminKeyBootstrapPreflight $adminKeyFile $remote $isManagementNode
+        Write-Host "Re-bootstrapping $Alias at $($row.endpoint):$sshPort through admin key"
+        Clear-OpenSshHostKeyCache $row.endpoint $sshPort
+        Test-AdminKeyBootstrapPreflight $adminKeyFile $sshPort $remote $isManagementNode
     } else {
         $remote = "root@$($row.endpoint)"
-        Write-Host "Bootstrapping $Alias at $($row.endpoint) through root password"
-        Clear-PuttyHostKeyCache $row.endpoint
-        $hostKeyFingerprint = Get-PuttyHostKeyFingerprint $remote $row.root_password
+        Write-Host "Bootstrapping $Alias at $($row.endpoint):$sshPort through root password"
+        Clear-PuttyHostKeyCache $row.endpoint $sshPort
+        $hostKeyFingerprint = Get-PuttyHostKeyFingerprint $remote $row.root_password $sshPort
     }
 
     Write-Host "Step 1/4: copy setup_vps.sh"
     if ($useAdminKeyBootstrap) {
-        Invoke-ScpKey $adminKeyFile $SetupScript "${remote}:/tmp/setup_vps.sh" "scp setup_vps.sh"
+        Invoke-ScpKey $adminKeyFile $sshPort $SetupScript "${remote}:/tmp/setup_vps.sh" "scp setup_vps.sh"
     } else {
-        Invoke-PscpPassword $row.root_password $SetupScript "${remote}:/tmp/setup_vps.sh" "pscp setup_vps.sh" $hostKeyFingerprint
+        Invoke-PscpPassword $row.root_password $sshPort $SetupScript "${remote}:/tmp/setup_vps.sh" "pscp setup_vps.sh" $hostKeyFingerprint $Alias $row.endpoint
     }
 
     Write-Host "Step 2/4: copy sanitized nodes.csv"
     if ($useAdminKeyBootstrap) {
-        Invoke-ScpKey $adminKeyFile $sanitized "${remote}:/tmp/nodes.csv" "scp sanitized nodes.csv"
+        Invoke-ScpKey $adminKeyFile $sshPort $sanitized "${remote}:/tmp/nodes.csv" "scp sanitized nodes.csv"
     } else {
-        Invoke-PscpPassword $row.root_password $sanitized "${remote}:/tmp/nodes.csv" "pscp sanitized nodes.csv" $hostKeyFingerprint
+        Invoke-PscpPassword $row.root_password $sshPort $sanitized "${remote}:/tmp/nodes.csv" "pscp sanitized nodes.csv" $hostKeyFingerprint $Alias $row.endpoint
     }
 
     if ($StateFile) {
         Write-Host "Step 2a/4: copy state.csv"
         if ($useAdminKeyBootstrap) {
-            Invoke-ScpKey $adminKeyFile $StateFile "${remote}:/tmp/state.csv" "scp state.csv"
+            Invoke-ScpKey $adminKeyFile $sshPort $StateFile "${remote}:/tmp/state.csv" "scp state.csv"
         } else {
-            Invoke-PscpPassword $row.root_password $StateFile "${remote}:/tmp/state.csv" "pscp state.csv" $hostKeyFingerprint
+            Invoke-PscpPassword $row.root_password $sshPort $StateFile "${remote}:/tmp/state.csv" "pscp state.csv" $hostKeyFingerprint $Alias $row.endpoint
         }
     }
 
     if ($isManagementNode) {
         Write-Host "Step 2b/4: copy control inventory helpers"
         if ($useAdminKeyBootstrap) {
-            Invoke-ScpKey $adminKeyFile $CreateInventoryScript "${remote}:/tmp/create_inventory.sh" "scp create_inventory.sh"
-            Invoke-ScpKey $adminKeyFile $PrepareInventoryScript "${remote}:/tmp/prepare_orchestration_inventory.sh" "scp prepare_orchestration_inventory.sh"
-            Invoke-ScpKey $adminKeyFile $VerifyControlScript "${remote}:/tmp/verify_control_node.sh" "scp verify_control_node.sh"
+            Invoke-ScpKey $adminKeyFile $sshPort $CreateInventoryScript "${remote}:/tmp/create_inventory.sh" "scp create_inventory.sh"
+            Invoke-ScpKey $adminKeyFile $sshPort $PrepareInventoryScript "${remote}:/tmp/prepare_orchestration_inventory.sh" "scp prepare_orchestration_inventory.sh"
+            Invoke-ScpKey $adminKeyFile $sshPort $VerifyControlScript "${remote}:/tmp/verify_control_node.sh" "scp verify_control_node.sh"
         } else {
-            Invoke-PscpPassword $row.root_password $CreateInventoryScript "${remote}:/tmp/create_inventory.sh" "pscp create_inventory.sh" $hostKeyFingerprint
-            Invoke-PscpPassword $row.root_password $PrepareInventoryScript "${remote}:/tmp/prepare_orchestration_inventory.sh" "pscp prepare_orchestration_inventory.sh" $hostKeyFingerprint
-            Invoke-PscpPassword $row.root_password $VerifyControlScript "${remote}:/tmp/verify_control_node.sh" "pscp verify_control_node.sh" $hostKeyFingerprint
+            Invoke-PscpPassword $row.root_password $sshPort $CreateInventoryScript "${remote}:/tmp/create_inventory.sh" "pscp create_inventory.sh" $hostKeyFingerprint $Alias $row.endpoint
+            Invoke-PscpPassword $row.root_password $sshPort $PrepareInventoryScript "${remote}:/tmp/prepare_orchestration_inventory.sh" "pscp prepare_orchestration_inventory.sh" $hostKeyFingerprint $Alias $row.endpoint
+            Invoke-PscpPassword $row.root_password $sshPort $VerifyControlScript "${remote}:/tmp/verify_control_node.sh" "pscp verify_control_node.sh" $hostKeyFingerprint $Alias $row.endpoint
         }
     }
 
     if ($AnsibleAuthorizedKeyFile) {
         Write-Host "Step 2c/4: copy Ansible control public key"
         if ($useAdminKeyBootstrap) {
-            Invoke-ScpKey $adminKeyFile $AnsibleAuthorizedKeyFile "${remote}:/tmp/ansible_control.managed_nodes.pub" "scp Ansible public key"
+            Invoke-ScpKey $adminKeyFile $sshPort $AnsibleAuthorizedKeyFile "${remote}:/tmp/ansible_control.managed_nodes.pub" "scp Ansible public key"
         } else {
-            Invoke-PscpPassword $row.root_password $AnsibleAuthorizedKeyFile "${remote}:/tmp/ansible_control.managed_nodes.pub" "pscp Ansible public key" $hostKeyFingerprint
+            Invoke-PscpPassword $row.root_password $sshPort $AnsibleAuthorizedKeyFile "${remote}:/tmp/ansible_control.managed_nodes.pub" "pscp Ansible public key" $hostKeyFingerprint $Alias $row.endpoint
         }
     }
 
@@ -699,6 +873,9 @@ try {
         $setupCommand = "ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash /tmp/setup_vps.sh --nodes-file /tmp/nodes.csv --state-file /tmp/state.csv --alias '$Alias'"
     } else {
         $setupCommand = "bash /tmp/setup_vps.sh --nodes-file /tmp/nodes.csv --state-file /tmp/state.csv --alias '$Alias'"
+    }
+    if (-not $useAdminKeyBootstrap) {
+        $setupCommand = "APPLY_SSH_HARDENING=0 $setupCommand"
     }
     if ($RegenerateRemoteKeys) {
         $setupCommand = "FORCE_REGENERATE_KEYS=1 $setupCommand"
@@ -727,10 +904,10 @@ try {
     Write-Host "Expected next output: AI Service Platform VPS bootstrap"
     Write-Host "If this step stays silent for a long time, check PuTTY/plink host key cache, SSH banner prompts, and root password auth."
     if ($useAdminKeyBootstrap) {
-        Invoke-SshKey $adminKeyFile $remote $remoteCommand "remote setup_vps.sh" $remoteLog
+        Invoke-SshKey $adminKeyFile $sshPort $remote $remoteCommand "remote setup_vps.sh" $remoteLog
         $remoteExitCode = 0
     } else {
-        $plinkResult = Invoke-PlinkCommand $remote $row.root_password $remoteCommand $remoteLog $hostKeyFingerprint
+        $plinkResult = Invoke-PlinkCommand $remote $row.root_password $sshPort $remoteCommand $remoteLog $hostKeyFingerprint
         $remoteExitCode = $plinkResult.ExitCode
     }
     $remoteOutput = Get-Content -LiteralPath $remoteLog -ErrorAction SilentlyContinue
@@ -741,27 +918,48 @@ try {
         Save-BootstrapKeysToStaging $remoteOutput $Alias $isManagementNode $stagedKeyRoot
     }
 
-    if (Test-BootstrapLocalMutationExpected $Alias $isManagementNode $OperatorDir $OutputAnsibleAuthorizedKeyFile $Force $useAdminKeyBootstrap (-not $useAdminKeyBootstrap)) {
+    if (Test-BootstrapLocalMutationExpected $Alias $isManagementNode $OperatorDir $OutputAnsibleAuthorizedKeyFile $Force ($useAdminKeyBootstrap -or $keepExistingLocalKeys) (-not $useAdminKeyBootstrap)) {
         $sanitizeRootPasswordAlias = ""
+        $backupStagedAlias = ""
+        $backupStagedKeyRoot = ""
+        $backupStagedIsManagement = $false
+        $backupStagedPublicKeyPath = ""
         if (-not $useAdminKeyBootstrap) {
             $sanitizeRootPasswordAlias = $Alias
+            if ($isManagementNode) {
+                $backupStagedAlias = $Alias
+                $backupStagedKeyRoot = $stagedKeyRoot
+                $backupStagedIsManagement = $true
+                $backupStagedPublicKeyPath = $OutputAnsibleAuthorizedKeyFile
+            }
         }
-        Invoke-OperatorBackupIfNeeded "save bootstrap keys or clear root_password for $Alias" $sanitizeRootPasswordAlias
+        Invoke-OperatorBackupIfNeeded "save bootstrap keys or clear root_password for $Alias" $sanitizeRootPasswordAlias $backupStagedAlias $backupStagedKeyRoot $backupStagedIsManagement $backupStagedPublicKeyPath
     }
 
     Write-Host "Step 4/4: save bootstrap keys"
     if ($useAdminKeyBootstrap) {
         Save-BootstrapKeys $remoteOutput $Alias $isManagementNode $OperatorDir $OutputAnsibleAuthorizedKeyFile $Force $useAdminKeyBootstrap
     } else {
-        Install-StagedBootstrapKeys $Alias $isManagementNode $stagedKeyRoot $OperatorDir $OutputAnsibleAuthorizedKeyFile $Force
+        Save-BootstrapKeys $remoteOutput $Alias $isManagementNode $OperatorDir $OutputAnsibleAuthorizedKeyFile $Force $keepExistingLocalKeys
     }
 
     if (-not $useAdminKeyBootstrap) {
+        if ([string]::IsNullOrWhiteSpace($AdminUser)) {
+            Fail "AdminUser must not be empty before fresh bootstrap SSH hardening."
+        }
+        $freshAdminRemote = "$AdminUser@$($row.endpoint)"
+        Write-Host "Step 4b/4: verify fresh admin key login"
+        Clear-OpenSshHostKeyCache $row.endpoint $sshPort
+        Invoke-SshKey $adminKeyFile $sshPort $freshAdminRemote "sudo -n true" "fresh admin key verification"
+        Write-Host "Step 4c/4: apply SSH hardening"
+        Invoke-RemoteSshHardening $adminKeyFile $sshPort $freshAdminRemote
         Clear-RootPasswordForAlias $NodesFile $Alias
     }
     Write-Host "Bootstrap completed for $Alias"
 } finally {
-    Remove-Item -LiteralPath $sanitized -Force -ErrorAction SilentlyContinue
+    if ($sanitized) {
+        Remove-Item -LiteralPath $sanitized -Force -ErrorAction SilentlyContinue
+    }
     Remove-Item -LiteralPath $remoteLog -Force -ErrorAction SilentlyContinue
     if ($stagedKeyRoot -and (Test-Path -LiteralPath $stagedKeyRoot -PathType Container)) {
         Remove-Item -LiteralPath $stagedKeyRoot -Recurse -Force -ErrorAction SilentlyContinue

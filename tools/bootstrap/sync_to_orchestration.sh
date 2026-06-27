@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-EXPECTED_CSV_HEADER="current_alias,endpoint,connection,root_password"
+EXPECTED_CSV_HEADER="current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 EXPECTED_STATE_CSV_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 NODES_FILE="./operator/nodes.csv"
 STATE_FILE="./operator/state.csv"
@@ -293,10 +293,13 @@ fi
 
 control_endpoint=""
 control_connection=""
-while IFS=, read -r current_alias endpoint connection _root_password extra || [ -n "${current_alias:-}" ]; do
+control_ssh_port="22"
+while IFS=, read -r current_alias endpoint expected_ip connection ssh_port _root_password extra || [ -n "${current_alias:-}" ]; do
     current_alias="${current_alias//$'\r'/}"
     endpoint="${endpoint//$'\r'/}"
+    expected_ip="${expected_ip//$'\r'/}"
     connection="${connection//$'\r'/}"
+    ssh_port="${ssh_port//$'\r'/}"
     extra="${extra//$'\r'/}"
 
     [ "$current_alias" != "$EXPECTED_CSV_HEADER" ] || continue
@@ -305,6 +308,7 @@ while IFS=, read -r current_alias endpoint connection _root_password extra || [ 
     if [ "$current_alias" = "$CONTROL_ALIAS" ]; then
         control_endpoint="$endpoint"
         control_connection="$connection"
+        control_ssh_port="${ssh_port:-22}"
         break
     fi
 done < "$NODES_FILE"
@@ -320,6 +324,7 @@ require_file "$SSH_KEY_FILE" "--ssh-key-file"
 SSH_COMMON_ARGS=(
     -n
     -T
+    -p "$control_ssh_port"
     -i "$SSH_KEY_FILE"
     -o BatchMode=yes
     -o ConnectTimeout=10
@@ -332,6 +337,7 @@ SSH_COMMON_ARGS=(
 )
 SCP_COMMON_ARGS=(
     -B
+    -P "$control_ssh_port"
     -i "$SSH_KEY_FILE"
     -o BatchMode=yes
     -o ConnectTimeout=10
@@ -341,7 +347,7 @@ SCP_COMMON_ARGS=(
     -o PreferredAuthentications=publickey
     -o StrictHostKeyChecking=accept-new
 )
-RSYNC_SSH_COMMAND="ssh -n -T -i '$SSH_KEY_FILE' -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -o RequestTTY=no -o KbdInteractiveAuthentication=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey -o StrictHostKeyChecking=accept-new"
+RSYNC_SSH_COMMAND="ssh -n -T -p '$control_ssh_port' -i '$SSH_KEY_FILE' -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -o RequestTTY=no -o KbdInteractiveAuthentication=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey -o StrictHostKeyChecking=accept-new"
 
 sanitized_nodes="$(mktemp)"
 egress_policy_sync_root=""
@@ -349,15 +355,18 @@ trap 'rm -f "$sanitized_nodes"; if [ -n "$egress_policy_sync_root" ]; then rm -r
 
 {
     echo "$EXPECTED_CSV_HEADER"
-    tail -n +2 "$NODES_FILE" | while IFS=, read -r current_alias endpoint connection _root_password extra || [ -n "${current_alias:-}" ]; do
+    tail -n +2 "$NODES_FILE" | while IFS=, read -r current_alias endpoint expected_ip connection ssh_port _root_password extra || [ -n "${current_alias:-}" ]; do
         current_alias="${current_alias//$'\r'/}"
         endpoint="${endpoint//$'\r'/}"
+        expected_ip="${expected_ip//$'\r'/}"
         connection="${connection//$'\r'/}"
+        ssh_port="${ssh_port//$'\r'/}"
         extra="${extra//$'\r'/}"
 
         [ -n "$current_alias" ] || continue
         [ -z "$extra" ] || fail "nodes.csv row for $current_alias has too many columns"
-        printf '%s,%s,%s,\n' "$current_alias" "$endpoint" "$connection"
+        [ -n "$ssh_port" ] || [ "$connection" = "local" ] || ssh_port="22"
+        printf '%s,%s,%s,%s,%s,\n' "$current_alias" "$endpoint" "$expected_ip" "$connection" "$ssh_port"
     done
 } > "$sanitized_nodes"
 

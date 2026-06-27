@@ -30,7 +30,7 @@ REMOTE_JOB_POLL_SECONDS=2
 REMOTE_JOB_RECONNECT_ATTEMPTS=30
 REMOTE_JOB_HEARTBEAT_SECONDS=10
 
-EXPECTED_HEADER="current_alias,endpoint,connection,root_password"
+EXPECTED_HEADER="current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 EXPECTED_STATE_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 
 usage() {
@@ -111,7 +111,14 @@ invoke_retry_transport() {
 }
 
 run_cleanup_ssh() {
-    if ! ssh "${ssh_common_args[@]}" "$remote" "rm -rf $(quote_bash_arg "$remote_bundle_dir") $(quote_bash_arg "$remote_bundle_archive") $(quote_bash_arg "$remote_job_dir")" >/dev/null 2>&1; then
+    local cleanup_command
+    if [ "${DETACHED_REMOTE_JOB:-false}" = "true" ] && [ "${remote_job_completed_successfully:-false}" != "true" ]; then
+        cleanup_command="rm -rf $(quote_bash_arg "$remote_bundle_dir") $(quote_bash_arg "$remote_bundle_archive")"
+        echo "Preserving failed remote job state: $remote_job_dir and log: $remote_job_log" >&2
+    else
+        cleanup_command="rm -rf $(quote_bash_arg "$remote_bundle_dir") $(quote_bash_arg "$remote_bundle_archive") $(quote_bash_arg "$remote_job_dir")"
+    fi
+    if ! ssh "${ssh_common_args[@]}" "$remote" "$cleanup_command" >/dev/null 2>&1; then
         echo "[!] remote service bundle/job cleanup failed; continuing because cleanup is best-effort" >&2
     fi
 }
@@ -298,16 +305,19 @@ esac
 
 control_endpoint=""
 control_connection=""
-while IFS=, read -r current_alias endpoint connection _root_password extra || [ -n "${current_alias:-}" ]; do
+control_ssh_port="22"
+while IFS=, read -r current_alias endpoint expected_ip connection ssh_port _root_password extra || [ -n "${current_alias:-}" ]; do
     current_alias="${current_alias//$'\r'/}"
     endpoint="${endpoint//$'\r'/}"
     connection="${connection//$'\r'/}"
+    ssh_port="${ssh_port//$'\r'/}"
     extra="${extra//$'\r'/}"
     [ -z "$current_alias" ] && continue
     [ -z "$extra" ] || fail "nodes.csv row for $current_alias has too many columns"
     if [ "$current_alias" = "$active_aliases" ]; then
         control_endpoint="$endpoint"
         control_connection="$connection"
+        control_ssh_port="${ssh_port:-22}"
         break
     fi
 done < <(tail -n +2 "$NODES_FILE")
@@ -332,18 +342,23 @@ remote_operator_temp="$remote_bundle_dir/operator"
 remote_operator_dir="$(dirname "$REMOTE_STATE_FILE")"
 remote_nodes_dir="$(dirname "$REMOTE_NODES_FILE")"
 remote_networks_file="$remote_operator_dir/networks.csv"
-remote_job_dir="/tmp/ai-service-platform.service-job.$(date +%s).$$"
+remote_job_id="service-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+remote_job_log_dir="/var/log/ai-service-platform/jobs"
+remote_job_state_root="/var/lib/ai-service-platform/jobs"
+remote_job_dir="$remote_job_state_root/$remote_job_id"
 remote_job_script="$remote_job_dir/run.sh"
-remote_job_log="$remote_job_dir/output.log"
+remote_job_log="$remote_job_log_dir/$remote_job_id.log"
 remote_job_pid="$remote_job_dir/pid"
 remote_job_exit_code="$remote_job_dir/exit_code"
 remote_job_done="$remote_job_dir/done"
+remote_job_completed_successfully="false"
 archive_path="$(mktemp -t ai-service-platform.service-remote.XXXXXX.tar.gz)"
 staging_dir="$(mktemp -d -t ai-service-platform.service-remote.XXXXXX)"
 run_script_path="$(mktemp -t ai-service-platform.service-job.XXXXXX.sh)"
 ssh_common_args=(
     -n
     -T
+    -p "$control_ssh_port"
     -i "$SSH_KEY_FILE"
     -o BatchMode=yes
     -o ConnectTimeout=10
@@ -357,6 +372,7 @@ ssh_common_args=(
 )
 scp_common_args=(
     -B
+    -P "$control_ssh_port"
     -i "$SSH_KEY_FILE"
     -o BatchMode=yes
     -o ConnectTimeout=10
@@ -390,6 +406,7 @@ service_command="set -e; cd $(quote_bash_arg "$REMOTE_REPO_DIR"); if command -v 
 refresh_known_hosts_script="$(cat <<EOF
 set -e
 nodes_file=$(quote_bash_arg "$REMOTE_NODES_FILE")
+control_alias=$(quote_bash_arg "$active_aliases")
 ssh_dir=/home/ansible/.ssh
 known_hosts="\$ssh_dir/known_hosts"
 command -v ssh-keygen >/dev/null 2>&1
@@ -399,18 +416,23 @@ install -d -m 700 -o ansible -g ansible "\$ssh_dir"
 touch "\$known_hosts"
 chown ansible:ansible "\$known_hosts"
 chmod 600 "\$known_hosts"
-tail -n +2 "\$nodes_file" | while IFS=, read -r current_alias endpoint connection _root_password extra || [ -n "\${current_alias:-}" ]; do
+tail -n +2 "\$nodes_file" | while IFS=, read -r current_alias endpoint expected_ip connection ssh_port _root_password extra || [ -n "\${current_alias:-}" ]; do
     current_alias="\${current_alias//$'\r'/}"
     endpoint="\${endpoint//$'\r'/}"
     connection="\${connection//$'\r'/}"
+    ssh_port="\${ssh_port//$'\r'/}"
     extra="\${extra//$'\r'/}"
     [ -n "\$current_alias" ] || continue
+    [ "\$current_alias" != "\$control_alias" ] || continue
     [ -z "\$extra" ] || { echo "[ERROR] nodes.csv row for \$current_alias has too many columns" >&2; exit 1; }
     [ "\$connection" = "ssh" ] || continue
     [ "\$endpoint" != "local" ] || continue
-    echo "Refreshing ansible known_hosts for \$current_alias: \$endpoint"
-    sudo -u ansible ssh-keygen -R "\$endpoint" -f "\$known_hosts" >/dev/null 2>&1 || true
-    ssh-keyscan -T 10 -H "\$endpoint" >> "\$known_hosts" 2>/dev/null || { echo "[ERROR] ssh-keyscan failed for \$current_alias endpoint: \$endpoint" >&2; exit 1; }
+    [ -n "\$ssh_port" ] || ssh_port=22
+    known_host="\$endpoint"
+    if [ "\$ssh_port" != "22" ]; then known_host="[\$endpoint]:\$ssh_port"; fi
+    echo "Refreshing ansible known_hosts for \$current_alias: \$endpoint:\$ssh_port"
+    sudo -u ansible ssh-keygen -R "\$known_host" -f "\$known_hosts" >/dev/null 2>&1 || true
+    ssh-keyscan -T 10 -p "\$ssh_port" -H "\$endpoint" >> "\$known_hosts" 2>/dev/null || { echo "[ERROR] ssh-keyscan failed for \$current_alias endpoint: \$endpoint" >&2; exit 1; }
 done
 sort -u "\$known_hosts" -o "\$known_hosts"
 chown ansible:ansible "\$known_hosts"
@@ -431,6 +453,8 @@ echo "Action:       $ACTION"
 [ "$CHECK" = "true" ] && echo "Check:        true"
 if [ "$DETACHED_REMOTE_JOB" = "true" ]; then
     echo "Mode:         detached remote job"
+    echo "Job id:       $remote_job_id"
+    echo "Remote log:   $remote_job_log"
 else
     echo "Mode:         direct SSH stream"
 fi
@@ -497,8 +521,9 @@ EOF
 fi
 
 if [ "$DETACHED_REMOTE_JOB" = "true" ]; then
-    echo "Creating remote temporary bundle and job directories..."
-    invoke_retry_transport "remote service bundle and job directory creation" ssh "${ssh_common_args[@]}" "$remote" "mkdir -p $(quote_bash_arg "$remote_bundle_dir") $(quote_bash_arg "$remote_job_dir")"
+    echo "Creating remote temporary bundle and durable job directories..."
+    create_remote_job_dirs="set -e; mkdir -p $(quote_bash_arg "$remote_bundle_dir"); sudo mkdir -p $(quote_bash_arg "$remote_job_log_dir") $(quote_bash_arg "$remote_job_dir"); sudo chown \"\$(id -u):\$(id -g)\" $(quote_bash_arg "$remote_job_log_dir") $(quote_bash_arg "$remote_job_dir"); chmod 750 $(quote_bash_arg "$remote_job_dir")"
+    invoke_retry_transport "remote service bundle and job directory creation" ssh "${ssh_common_args[@]}" "$remote" "$create_remote_job_dirs"
 else
     echo "Creating remote temporary bundle directory..."
     invoke_retry_transport "remote service bundle directory creation" ssh "${ssh_common_args[@]}" "$remote" "mkdir -p $(quote_bash_arg "$remote_bundle_dir")"
@@ -523,9 +548,14 @@ if [ "$DETACHED_REMOTE_JOB" = "true" ]; then
 
     echo "Following remote service job log..."
     wait_remote_service_job
+    remote_job_completed_successfully="true"
 else
     echo "Installing service bundle and running remote service command..."
     ssh "${ssh_common_args[@]}" "$remote" "$install_and_run_command" || fail "remote service command failed with exit code $?"
 fi
 
-echo "Cleaning remote temporary service bundle..."
+if [ "$DETACHED_REMOTE_JOB" = "true" ]; then
+    echo "Cleaning remote temporary service bundle and completed job state; preserving rotated job log: $remote_job_log"
+else
+    echo "Cleaning remote temporary service bundle..."
+fi

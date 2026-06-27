@@ -29,7 +29,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedNodesHeader = "current_alias,endpoint,connection,root_password"
+$ExpectedNodesHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 $SupportedServices = @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector")
 $ReservedServices = @()
@@ -45,6 +45,36 @@ function Require-File($Path, $Label) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         Fail "$Label not found: $Path"
     }
+}
+
+function Resolve-ExistingFilePath($Path, $Label) {
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        return (Resolve-Path -LiteralPath $Path).Path
+    }
+
+    if (-not [System.IO.Path]::IsPathRooted($Path)) {
+        $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+        $repoRelativePath = Join-Path $repoRoot $Path
+        if (Test-Path -LiteralPath $repoRelativePath -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $repoRelativePath).Path
+        }
+    }
+
+    Fail "$Label not found: $Path"
+}
+
+function Resolve-OperatorDirPath($Path, $NodesFilePath) {
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
+
+    $nodesDir = Split-Path -Parent $NodesFilePath
+    if ((Split-Path -Leaf $nodesDir) -eq "operator") {
+        return $nodesDir
+    }
+
+    $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    return [System.IO.Path]::GetFullPath((Join-Path $repoRoot $Path))
 }
 
 function Split-AliasList($Value) {
@@ -193,6 +223,19 @@ function Write-StateCsv($Path, $Rows) {
             $row.state))
     }
     Set-Content -LiteralPath $Path -Value $lines -Encoding ascii
+}
+
+function Write-AsciiLinesLf($Path, $Lines) {
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $parent = Split-Path -Parent $fullPath
+    if ($parent -and -not (Test-Path -LiteralPath $parent -PathType Container)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
+    $content = [string]::Join("`n", @($Lines))
+    if (@($Lines).Count -gt 0) {
+        $content += "`n"
+    }
+    [System.IO.File]::WriteAllText($fullPath, $content, [System.Text.Encoding]::ASCII)
 }
 
 function Normalize-StateRows($Rows, $NodeRows, $StatePath) {
@@ -935,7 +978,7 @@ function Update-VpnManagementAllowlist($AllowlistPath, $NodeRows) {
     }
 
     Invoke-OperatorBackupIfNeeded "refresh VPN management allowlist from nodes.csv"
-    Set-Content -LiteralPath $AllowlistPath -Value $newLines -Encoding ascii
+    Write-AsciiLinesLf $AllowlistPath $newLines
     Write-Host "Updated VPN management allowlist with node endpoint IPs: $($resolved -join ', ')"
 }
 
@@ -1089,13 +1132,16 @@ function Invoke-Postcheck($Service, $State, $Alias) {
     }
 }
 
-Require-File $NodesFile "NodesFile"
-Require-File $StateFile "StateFile"
-Require-File $SyncScript "SyncScript"
+$NodesFile = Resolve-ExistingFilePath $NodesFile "NodesFile"
+$StateFile = Resolve-ExistingFilePath $StateFile "StateFile"
+$OperatorDir = Resolve-OperatorDirPath $OperatorDir $NodesFile
+$SyncScript = Resolve-ExistingFilePath $SyncScript "SyncScript"
 if (-not $SkipStandbySync) {
-    Require-File $StandbyPrepareScript "StandbyPrepareScript"
+    $StandbyPrepareScript = Resolve-ExistingFilePath $StandbyPrepareScript "StandbyPrepareScript"
 }
-Require-File $ServiceRemoteScript "ServiceRemoteScript"
+$ServiceRemoteScript = Resolve-ExistingFilePath $ServiceRemoteScript "ServiceRemoteScript"
+$OperatorBackupScript = Resolve-ExistingFilePath $OperatorBackupScript "OperatorBackupScript"
+$SecureBackupScript = Resolve-ExistingFilePath $SecureBackupScript "SecureBackupScript"
 
 $nodesHeader = Get-Content -LiteralPath $NodesFile -TotalCount 1
 if ($nodesHeader -ne $ExpectedNodesHeader) {

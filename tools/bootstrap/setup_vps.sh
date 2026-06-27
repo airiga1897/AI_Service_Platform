@@ -7,7 +7,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
-EXPECTED_CSV_HEADER="current_alias,endpoint,connection,root_password"
+EXPECTED_CSV_HEADER="current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 EXPECTED_STATE_CSV_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 
 print_header() {
@@ -35,6 +35,7 @@ usage() {
 Usage:
   sudo bash tools/bootstrap/setup_vps.sh --nodes-file /tmp/nodes.csv --state-file /tmp/state.csv --alias <orchestration-alias>
   sudo ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub bash tools/bootstrap/setup_vps.sh --nodes-file /tmp/nodes.csv --state-file /tmp/state.csv --alias vps2
+  sudo bash tools/bootstrap/setup_vps.sh --ssh-hardening-only
 
 Fallback target mode:
   sudo bash tools/bootstrap/setup_vps.sh orchestration-management
@@ -47,6 +48,7 @@ Environment overrides:
   ANSIBLE_USER=ansible
   ANSIBLE_AUTHORIZED_KEY='ssh-ed25519 ... ansible-control@orchestration'
   ANSIBLE_AUTHORIZED_KEY_FILE=/tmp/ansible_control.managed_nodes.pub
+  APPLY_SSH_HARDENING=1
   FORCE_REGENERATE_KEYS=0
   SSH_PORT=22
 
@@ -57,7 +59,7 @@ Supported targets:
   ai-retail-dev-preprod Temporary alias for GitHub Actions deploy access to VPS2.
 
 CSV columns:
-  current_alias,endpoint,connection,root_password
+  current_alias,endpoint,expected_ip,connection,ssh_port,root_password
 
 State CSV columns:
   kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state
@@ -68,6 +70,7 @@ NODES_FILE=""
 STATE_FILE=""
 NODE_ALIAS=""
 TARGET=""
+SSH_HARDENING_ONLY="false"
 
 split_aliases_has() {
     local aliases="$1"
@@ -76,6 +79,35 @@ split_aliases_has() {
         *"+$wanted+"*) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+validate_expected_ip() {
+    local alias="$1"
+    local endpoint="$2"
+    local expected_ip="$3"
+    local line_number="$4"
+    local resolved_ip
+
+    [ -n "$expected_ip" ] || return 0
+    [ "$endpoint" != "local" ] || return 0
+    if command -v getent >/dev/null 2>&1; then
+        resolved_ip="$(getent ahostsv4 "$endpoint" | awk '{print $1; exit}')"
+    elif command -v python >/dev/null 2>&1; then
+        resolved_ip="$(python -c 'import socket,sys; print(socket.gethostbyname(sys.argv[1]))' "$endpoint" 2>/dev/null || true)"
+    elif command -v python3 >/dev/null 2>&1; then
+        resolved_ip="$(python3 -c 'import socket,sys; print(socket.gethostbyname(sys.argv[1]))' "$endpoint" 2>/dev/null || true)"
+    else
+        print_warning "getent/python not found; skipping expected_ip check for $alias"
+        return 0
+    fi
+    if [ -z "$resolved_ip" ]; then
+        print_error "nodes.csv line $line_number could not resolve endpoint for expected_ip check: $endpoint"
+        exit 1
+    fi
+    if [ "$resolved_ip" != "$expected_ip" ]; then
+        print_error "nodes.csv line $line_number expected_ip mismatch for $alias: endpoint $endpoint resolved to $resolved_ip, expected $expected_ip"
+        exit 1
+    fi
 }
 
 resolve_behavior_from_state() {
@@ -149,19 +181,21 @@ resolve_target_from_nodes_file() {
 
     local line_number=0
     local header_seen="false"
-    local current_alias endpoint connection root_password extra
+    local current_alias endpoint expected_ip connection ssh_port root_password extra
 
-    while IFS=, read -r current_alias endpoint connection root_password extra || [ -n "${current_alias:-}" ]; do
+    while IFS=, read -r current_alias endpoint expected_ip connection ssh_port root_password extra || [ -n "${current_alias:-}" ]; do
         line_number=$((line_number + 1))
         current_alias="${current_alias//$'\r'/}"
         endpoint="${endpoint//$'\r'/}"
+        expected_ip="${expected_ip//$'\r'/}"
         connection="${connection//$'\r'/}"
+        ssh_port="${ssh_port//$'\r'/}"
         root_password="${root_password//$'\r'/}"
         extra="${extra//$'\r'/}"
 
         if [ "$line_number" -eq 1 ]; then
             local header
-            header="$current_alias,$endpoint,$connection,$root_password"
+            header="$current_alias,$endpoint,$expected_ip,$connection,$ssh_port,$root_password"
             if [ "$header" != "$EXPECTED_CSV_HEADER" ] || [ -n "$extra" ]; then
                 print_error "nodes.csv header must be exactly:"
                 echo "$EXPECTED_CSV_HEADER"
@@ -172,6 +206,7 @@ resolve_target_from_nodes_file() {
         fi
 
         if [ "$current_alias" = "$NODE_ALIAS" ]; then
+            validate_expected_ip "$current_alias" "$endpoint" "$expected_ip" "$line_number"
             resolve_behavior_from_state
             return
         fi
@@ -199,6 +234,10 @@ while [ "$#" -gt 0 ]; do
         --alias)
             NODE_ALIAS="${2:-}"
             shift 2
+            ;;
+        --ssh-hardening-only)
+            SSH_HARDENING_ONLY="true"
+            shift
             ;;
         -h|--help)
             usage
@@ -237,12 +276,16 @@ if [ -n "$NODES_FILE" ] || [ -n "$NODE_ALIAS" ]; then
     resolve_target_from_nodes_file
 fi
 
+if [ -z "$TARGET" ] && [ "$SSH_HARDENING_ONLY" = "true" ]; then
+    TARGET="ssh-hardening"
+fi
+
 if [ -z "$TARGET" ]; then
     usage
     exit 1
 fi
 
-if [ "$CSV_MODE" != "true" ]; then
+if [ "$SSH_HARDENING_ONLY" != "true" ] && [ "$CSV_MODE" != "true" ]; then
     case "$TARGET" in
         orchestration-management)
             NODE_ROLE="management"
@@ -282,6 +325,8 @@ ANSIBLE_USER="${ANSIBLE_USER:-ansible}"
 ANSIBLE_AUTHORIZED_KEY="${ANSIBLE_AUTHORIZED_KEY:-}"
 ANSIBLE_AUTHORIZED_KEY_FILE="${ANSIBLE_AUTHORIZED_KEY_FILE:-}"
 SSH_PORT="${SSH_PORT:-22}"
+APPLY_SSH_HARDENING="${APPLY_SSH_HARDENING:-1}"
+APT_LOCK_WAIT_SECONDS="${APT_LOCK_WAIT_SECONDS:-600}"
 FORCE_REGENERATE_KEYS="${FORCE_REGENERATE_KEYS:-0}"
 DEPLOY_KEY_NAME="github_deploy"
 ADMIN_KEY_NAME="admin_key"
@@ -291,20 +336,6 @@ if [ "$(id -u)" -ne 0 ]; then
     print_error "This script must be run as root. Use sudo."
     exit 1
 fi
-
-print_header "AI Service Platform VPS bootstrap: $TARGET"
-
-echo "Parameters:"
-echo "  GitHub Environment: $GITHUB_ENVIRONMENT"
-echo "  Node role:          $NODE_ROLE"
-echo "  Deploy directory:   $DEPLOY_DIR"
-echo "  Runtime env file:   ${RUNTIME_ENV_FILE:-not applicable}"
-echo "  Deploy user:        $DEPLOY_USER"
-echo "  Admin user:         $ADMIN_USER"
-echo "  Ansible user:       $ANSIBLE_USER"
-echo "  SSH port:           $SSH_PORT"
-echo "  Regenerate keys:    $FORCE_REGENERATE_KEYS"
-echo ""
 
 ensure_command() {
     local command_name="$1"
@@ -329,8 +360,76 @@ docker_compose_available() {
     docker compose version >/dev/null 2>&1
 }
 
+apt_lock_is_held() {
+    local lock_file
+    if ! command -v fuser >/dev/null 2>&1; then
+        return 1
+    fi
+
+    for lock_file in \
+        /var/lib/dpkg/lock-frontend \
+        /var/lib/dpkg/lock \
+        /var/lib/apt/lists/lock \
+        /var/cache/apt/archives/lock
+    do
+        if [ -e "$lock_file" ] && fuser "$lock_file" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+print_apt_lock_holders() {
+    local lock_file
+    local printed="false"
+
+    if command -v fuser >/dev/null 2>&1; then
+        for lock_file in \
+            /var/lib/dpkg/lock-frontend \
+            /var/lib/dpkg/lock \
+            /var/lib/apt/lists/lock \
+            /var/cache/apt/archives/lock
+        do
+            if [ -e "$lock_file" ] && fuser "$lock_file" >/dev/null 2>&1; then
+                echo "Apt lock holder for $lock_file:"
+                fuser -v "$lock_file" 2>&1 || true
+                printed="true"
+            fi
+        done
+    fi
+
+    echo "Apt/dpkg related processes:"
+    ps -eo pid,ppid,stat,etime,comm,args | grep -E 'apt|apt-get|dpkg|unattended-upgr' | grep -v grep || true
+
+    if [ "$printed" != "true" ]; then
+        echo "No apt lock holder could be detected with fuser."
+    fi
+}
+
+wait_for_apt_locks() {
+    local waited=0
+    local interval=5
+
+    while apt_lock_is_held; do
+        if [ "$waited" -ge "$APT_LOCK_WAIT_SECONDS" ]; then
+            print_warning "Timed out waiting ${APT_LOCK_WAIT_SECONDS}s for apt/dpkg locks"
+            print_apt_lock_holders
+            print_error "VPS is busy with apt/dpkg or unattended upgrades. Retry bootstrap after package maintenance finishes."
+            exit 1
+        fi
+
+        if [ "$waited" -eq 0 ] || [ $((waited % 30)) -eq 0 ]; then
+            print_warning "Waiting for apt/dpkg lock holders to finish (${waited}/${APT_LOCK_WAIT_SECONDS}s)"
+            print_apt_lock_holders
+        fi
+        sleep "$interval"
+        waited=$((waited + interval))
+    done
+}
+
 run_apt_get() {
-    DEBIAN_FRONTEND=noninteractive LC_ALL=C LANG=C LANGUAGE=C apt-get "$@"
+    wait_for_apt_locks
+    DEBIAN_FRONTEND=noninteractive LC_ALL=C LANG=C LANGUAGE=C apt-get -o "DPkg::Lock::Timeout=$APT_LOCK_WAIT_SECONDS" "$@"
 }
 
 apt_candidate() {
@@ -355,6 +454,9 @@ print_docker_package_diagnostics() {
 
     print_warning "Docker package candidates:"
     LC_ALL=C LANG=C LANGUAGE=C apt-cache policy docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io docker-compose-v2 || true
+
+    print_warning "Docker package installed state:"
+    dpkg-query -W -f='${Package} ${Status} ${Version}\n' docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io docker-compose-v2 2>/dev/null || true
 }
 
 enable_universe_if_available() {
@@ -421,16 +523,18 @@ install_distro_compose_plugin() {
 
     if [ -n "$compose_v2_candidate" ] && [ "$compose_v2_candidate" != "(none)" ]; then
         print_warning "Installing Docker Compose plugin from docker-compose-v2"
-        run_apt_get install -y docker-compose-v2
-        docker_compose_available
-        return
+        if run_apt_get install -y docker-compose-v2 && docker_compose_available; then
+            return 0
+        fi
+        print_warning "docker-compose-v2 installation did not provide a working 'docker compose'"
     fi
 
     if [ -n "$compose_plugin_candidate" ] && [ "$compose_plugin_candidate" != "(none)" ]; then
         print_warning "Installing Docker Compose plugin from docker-compose-plugin"
-        run_apt_get install -y docker-compose-plugin
-        docker_compose_available
-        return
+        if run_apt_get install -y docker-compose-plugin && docker_compose_available; then
+            return 0
+        fi
+        print_warning "docker-compose-plugin installation did not provide a working 'docker compose'"
     fi
 
     print_warning "No Docker Compose plugin package candidate is available"
@@ -452,10 +556,20 @@ try_install_distro_docker() {
     print_warning "Installing Docker from Ubuntu distro packages"
     if ! run_apt_get install -y docker.io; then
         print_warning "Ubuntu distro Docker package installation failed"
+        print_docker_package_diagnostics
+        return 1
+    fi
+    if ! docker_command_available; then
+        print_warning "docker.io installed but docker CLI is still unavailable"
+        print_docker_package_diagnostics
         return 1
     fi
 
-    install_distro_compose_plugin
+    if ! install_distro_compose_plugin; then
+        print_warning "Ubuntu distro Docker Compose plugin installation failed"
+        print_docker_package_diagnostics
+        return 1
+    fi
 }
 
 install_docker_runtime() {
@@ -744,6 +858,13 @@ EOF
     print_success "Root SSH login and password authentication are disabled"
 }
 
+if [ "$SSH_HARDENING_ONLY" = "true" ]; then
+    print_header "AI Service Platform SSH hardening"
+    apply_ssh_hardening
+    print_success "SSH hardening complete"
+    exit 0
+fi
+
 resolve_ansible_authorized_key() {
     local key_line
     ANSIBLE_AUTHORIZED_KEYS=""
@@ -790,6 +911,21 @@ if [ "$NODE_ROLE" = "managed" ] && [ -z "$ANSIBLE_AUTHORIZED_KEYS" ]; then
     fi
     exit 1
 fi
+
+print_header "AI Service Platform VPS bootstrap: $TARGET"
+
+echo "Parameters:"
+echo "  GitHub Environment: $GITHUB_ENVIRONMENT"
+echo "  Node role:          $NODE_ROLE"
+echo "  Deploy directory:   $DEPLOY_DIR"
+echo "  Runtime env file:   ${RUNTIME_ENV_FILE:-not applicable}"
+echo "  Deploy user:        $DEPLOY_USER"
+echo "  Admin user:         $ADMIN_USER"
+echo "  Ansible user:       $ANSIBLE_USER"
+echo "  SSH port:           $SSH_PORT"
+echo "  SSH hardening:      $APPLY_SSH_HARDENING"
+echo "  Regenerate keys:    $FORCE_REGENERATE_KEYS"
+echo ""
 
 print_header "1/7 - Base packages"
 ensure_command sudo sudo
@@ -906,7 +1042,11 @@ print_header "5/7 - Docker runtime baseline"
 install_docker_runtime
 
 print_header "6/7 - SSH hardening"
-apply_ssh_hardening
+if [ "$APPLY_SSH_HARDENING" = "1" ]; then
+    apply_ssh_hardening
+else
+    print_warning "SSH hardening deferred by APPLY_SSH_HARDENING=0"
+fi
 
 print_header "7/7 - Values for GitHub Environment"
 SERVER_IP="$(curl -fsS https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"

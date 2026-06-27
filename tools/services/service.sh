@@ -13,7 +13,7 @@ POLICY_ROUTER_IMAGE_REF=""
 BUILD_POLICY_ROUTER_IMAGE="false"
 CHECK="false"
 CONFIRM_PURGE="false"
-EXPECTED_HEADER="current_alias,endpoint,connection,root_password"
+EXPECTED_HEADER="current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 EXPECTED_STATE_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 EXPECTED_NETWORKS_HEADER="alias,policy_subnet,edge_ip,cascade_ip,cascade_router_ip,policy_gateway_ip"
 NETWORKS_FILE="$(dirname "$STATE_FILE")/networks.csv"
@@ -312,7 +312,6 @@ fi
 if [ "$BUILD_POLICY_ROUTER_IMAGE" = "true" ] && [ -n "$POLICY_ROUTER_IMAGE_REF" ]; then
     fail "--build-policy-router-image and --policy-router-image-ref are mutually exclusive"
 fi
-
 [ -f "$NODES_FILE" ] || fail "nodes file not found: $NODES_FILE"
 [ -f "$STATE_FILE" ] || fail "state file not found: $STATE_FILE"
 first_line="$(head -n 1 "$NODES_FILE" | tr -d '\r')"
@@ -397,7 +396,7 @@ if [ "$ACTION" = "plan" ] && [ -z "$LIMIT" ]; then
         IFS='|' read -r plan_group plan_active_aliases plan_candidate_aliases plan_old_aliases plan_row_state <<< "$row"
         echo "Service state: $plan_row_state"
         echo "Ansible group: $plan_group"
-        tail -n +2 "$NODES_FILE" | while IFS=, read -r current_alias _endpoint _connection _root_password _extra || [ -n "${current_alias:-}" ]; do
+        tail -n +2 "$NODES_FILE" | while IFS=, read -r current_alias _endpoint _expected_ip _connection _ssh_port _root_password _extra || [ -n "${current_alias:-}" ]; do
             current_alias="${current_alias//$'\r'/}"
             [ -n "$current_alias" ] || continue
             if [ "$plan_row_state" = "present" ] && alias_in_list "$current_alias" "$plan_active_aliases"; then
@@ -441,7 +440,7 @@ if [ "$ACTION" = "plan" ]; then
     echo "Ansible group: $service_group"
     echo "Nodes file: $NODES_FILE"
     echo ""
-    tail -n +2 "$NODES_FILE" | while IFS=, read -r current_alias _endpoint _connection _root_password _extra || [ -n "${current_alias:-}" ]; do
+    tail -n +2 "$NODES_FILE" | while IFS=, read -r current_alias _endpoint _expected_ip _connection _ssh_port _root_password _extra || [ -n "${current_alias:-}" ]; do
         current_alias="${current_alias//$'\r'/}"
         [ -n "$current_alias" ] || continue
         if [ "$service_row_state" = "present" ] && alias_in_list "$current_alias" "$service_active_aliases"; then
@@ -508,7 +507,6 @@ check_args=()
 if [ "$CHECK" = "true" ]; then
     check_args=(--check)
 fi
-
 mapfile -t extra_vars < <(service_extra_vars "$SERVICE" "$service_state" "$service_purge_data" "$service_reseed_config" "$POLICY_ROUTER_IMAGE_REF" "$BUILD_POLICY_ROUTER_IMAGE")
 
 list_hosts_output="$(

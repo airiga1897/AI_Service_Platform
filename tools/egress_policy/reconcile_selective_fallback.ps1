@@ -72,6 +72,64 @@ function Split-ListValue($Value) {
     return @(([string]$Value).Split("+", [System.StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 }
 
+function Get-ObjectArray($Object, $PropertyName) {
+    if ($null -eq $Object -or -not ($Object.PSObject.Properties.Name -contains $PropertyName)) {
+        return @()
+    }
+    return @($Object.$PropertyName | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
+function Get-StateExpandedAliases($StateRows, $Kind, $Name, $AnchorAliases) {
+    $aliases = New-Object System.Collections.ArrayList
+    $anchorSet = @{}
+    foreach ($aliasName in @($AnchorAliases | Where-Object { $_ })) {
+        $anchorSet[[string]$aliasName] = $true
+        [void]$aliases.Add([string]$aliasName)
+    }
+    foreach ($row in @($StateRows | Where-Object { $_.kind -eq $Kind -and $_.name -eq $Name -and $_.state -eq "present" })) {
+        $activeAliases = @(Split-ListValue $row.active_aliases)
+        $candidateAliases = @(Split-ListValue $row.candidate_aliases)
+        if ($anchorSet.Count -eq 0) {
+            foreach ($aliasName in @($activeAliases + $candidateAliases)) {
+                [void]$aliases.Add($aliasName)
+            }
+            continue
+        }
+        $matchesAnchor = $false
+        foreach ($aliasName in $activeAliases) {
+            if ($anchorSet.ContainsKey($aliasName)) {
+                $matchesAnchor = $true
+                break
+            }
+        }
+        if ($matchesAnchor) {
+            foreach ($aliasName in $candidateAliases) {
+                [void]$aliases.Add($aliasName)
+            }
+        }
+    }
+    return @($aliases.ToArray() | Sort-Object -Unique)
+}
+
+function Get-StateCascadeFallbackEgressAliases($Topology, $IngressAliases) {
+    $ingressSet = @{}
+    foreach ($aliasName in @($IngressAliases | Where-Object { $_ })) {
+        $ingressSet[[string]$aliasName] = $true
+    }
+    $aliases = New-Object System.Collections.ArrayList
+    foreach ($edge in @($Topology.ActiveEdges)) {
+        if ($edge -notmatch '^([^>]+)>([^>]+)$') {
+            continue
+        }
+        $ingress = $Matches[1]
+        $egress = $Matches[2]
+        if ($ingressSet.Count -eq 0 -or $ingressSet.ContainsKey($ingress)) {
+            [void]$aliases.Add($egress)
+        }
+    }
+    return @($aliases.ToArray() | Sort-Object -Unique)
+}
+
 function Get-CascadeTopology($StateRows) {
     $rows = @($StateRows | Where-Object { $_.kind -eq "cascade_topology" -and $_.state -eq "present" })
     if ($rows.Count -eq 0) {
@@ -121,10 +179,25 @@ function Find-PolicyProfile($Policy, $Name) {
     return $matches[0]
 }
 
-function Get-ActiveProfileEdges($Profile, $Topology) {
+function Get-PolicyIngressAnchorAliases($Profile) {
+    $anchorAliases = @(Get-ObjectArray $Profile "ingress_anchor_aliases")
+    return @($anchorAliases | Sort-Object -Unique)
+}
+
+function Get-PolicyIngressAliases($Profile, $StateRows) {
+    $anchorAliases = @(Get-PolicyIngressAnchorAliases $Profile)
+    return @(Get-StateExpandedAliases $StateRows "edge_route" "vpn_ingress" $anchorAliases)
+}
+
+function Get-PolicyFallbackEgressAliases($Profile, $StateRows, $Topology) {
+    $ingressAliases = @(Get-PolicyIngressAliases $Profile $StateRows)
+    return @(Get-StateCascadeFallbackEgressAliases $Topology $ingressAliases)
+}
+
+function Get-ActiveProfileEdges($Profile, $Topology, $StateRows) {
     $edges = New-Object System.Collections.Generic.List[string]
-    foreach ($ingress in @($Profile.candidate_ingress_aliases)) {
-        foreach ($egress in @($Profile.candidate_fallback_egress_aliases)) {
+    foreach ($ingress in @(Get-PolicyIngressAliases $Profile $StateRows)) {
+        foreach ($egress in @(Get-PolicyFallbackEgressAliases $Profile $StateRows $Topology)) {
             $edge = "$ingress>$egress"
             if (($Topology.ActiveEdges -contains $edge) -or $Topology.ActiveSet.ContainsKey($edge)) {
                 [void]$edges.Add($edge)
@@ -524,7 +597,8 @@ foreach ($profile in $profileFilter) {
     }
 }
 
-$topology = Initialize-TopologySets (Get-CascadeTopology (Read-StateRows $StateFile))
+$stateRows = Read-StateRows $StateFile
+$topology = Initialize-TopologySets (Get-CascadeTopology $stateRows)
 $appliedRouteIdSet = Get-AppliedRouteIdSet $AppliedRoutesDir
 $staleRoutes = @(Get-StaleAppliedRoutes $AppliedRoutesDir $topology $profileFilter $targetFilter)
 $plan = New-Object System.Collections.Generic.List[object]
@@ -533,7 +607,7 @@ foreach ($route in $staleRoutes) {
     foreach ($profileName in $route.Profiles) {
         $profile = Find-PolicyProfile $policy $profileName
         if ($profile) {
-            foreach ($edge in @(Get-ActiveProfileEdges $profile $topology)) {
+            foreach ($edge in @(Get-ActiveProfileEdges $profile $topology $stateRows)) {
                 [void]$activeCandidates.Add($edge)
             }
         }
@@ -621,6 +695,7 @@ if (-not $skipProbe) {
         Require-ChildScript $ProbeScript $label
         & $ProbeScript `
             -PolicyFile $PolicyFile `
+            -StateFile $StateFile `
             -Profile $profile `
             -IncludeCascade `
             -SshPath $SshPath `
@@ -632,7 +707,7 @@ if (-not $skipProbe) {
 
     $label = "suggest egress policy from latest probes"
     Require-ChildScript $SuggestScript $label
-    & $SuggestScript -PolicyFile $PolicyFile -ProposalDir $ProposalDir -Latest -Force
+    & $SuggestScript -PolicyFile $PolicyFile -StateFile $StateFile -ProposalDir $ProposalDir -Latest -Force
     Assert-LastExitCode $label
 
     $replacementProposals = @(Get-ApplicableReplacementProposals $ProposalDir $staleRoutes $topology)

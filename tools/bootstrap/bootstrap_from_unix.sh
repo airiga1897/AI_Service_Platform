@@ -7,7 +7,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
-EXPECTED_CSV_HEADER="current_alias,endpoint,connection,root_password"
+EXPECTED_CSV_HEADER="current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 EXPECTED_STATE_CSV_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 PUBLIC_KEY_BEGIN_MARKER="__ANSIBLE_CONTROL_PUBLIC_KEY_BEGIN__"
 PUBLIC_KEY_END_MARKER="__ANSIBLE_CONTROL_PUBLIC_KEY_END__"
@@ -172,17 +172,19 @@ clear_root_password_for_alias() {
     local found_alias="false"
 
     tmp_file="$(mktemp)"
-    while IFS=, read -r csv_alias csv_endpoint csv_connection csv_root_password extra || [ -n "${csv_alias:-}" ]; do
+    while IFS=, read -r csv_alias csv_endpoint csv_expected_ip csv_connection csv_ssh_port csv_root_password extra || [ -n "${csv_alias:-}" ]; do
         line_number=$((line_number + 1))
         csv_alias="${csv_alias//$'\r'/}"
         csv_endpoint="${csv_endpoint//$'\r'/}"
+        csv_expected_ip="${csv_expected_ip//$'\r'/}"
         csv_connection="${csv_connection//$'\r'/}"
+        csv_ssh_port="${csv_ssh_port//$'\r'/}"
         csv_root_password="${csv_root_password//$'\r'/}"
         extra="${extra//$'\r'/}"
 
         if [ "$line_number" -eq 1 ]; then
             local header
-            header="$csv_alias,$csv_endpoint,$csv_connection,$csv_root_password"
+            header="$csv_alias,$csv_endpoint,$csv_expected_ip,$csv_connection,$csv_ssh_port,$csv_root_password"
             if [ "$header" != "$EXPECTED_CSV_HEADER" ] || [ -n "$extra" ]; then
                 rm -f "$tmp_file"
                 print_error "nodes.csv header must be exactly:"
@@ -203,7 +205,7 @@ clear_root_password_for_alias() {
             csv_root_password=""
             found_alias="true"
         fi
-        printf '%s,%s,%s,%s\n' "$csv_alias" "$csv_endpoint" "$csv_connection" "$csv_root_password" >> "$tmp_file"
+        printf '%s,%s,%s,%s,%s,%s\n' "$csv_alias" "$csv_endpoint" "$csv_expected_ip" "$csv_connection" "$csv_ssh_port" "$csv_root_password" >> "$tmp_file"
     done < "$path"
 
     if [ "$found_alias" != "true" ]; then
@@ -368,17 +370,20 @@ current_alias=""
 endpoint=""
 connection=""
 root_password=""
+ssh_port="22"
 
-while IFS=, read -r csv_alias csv_endpoint csv_connection csv_root_password extra || [ -n "${csv_alias:-}" ]; do
+while IFS=, read -r csv_alias csv_endpoint csv_expected_ip csv_connection csv_ssh_port csv_root_password extra || [ -n "${csv_alias:-}" ]; do
     line_number=$((line_number + 1))
     csv_alias="${csv_alias//$'\r'/}"
     csv_endpoint="${csv_endpoint//$'\r'/}"
+    csv_expected_ip="${csv_expected_ip//$'\r'/}"
     csv_connection="${csv_connection//$'\r'/}"
+    csv_ssh_port="${csv_ssh_port//$'\r'/}"
     csv_root_password="${csv_root_password//$'\r'/}"
     extra="${extra//$'\r'/}"
 
     if [ "$line_number" -eq 1 ]; then
-        header="$csv_alias,$csv_endpoint,$csv_connection,$csv_root_password"
+        header="$csv_alias,$csv_endpoint,$csv_expected_ip,$csv_connection,$csv_ssh_port,$csv_root_password"
         if [ "$header" != "$EXPECTED_CSV_HEADER" ] || [ -n "$extra" ]; then
             print_error "nodes.csv header must be exactly:"
             echo "$EXPECTED_CSV_HEADER"
@@ -391,6 +396,7 @@ while IFS=, read -r csv_alias csv_endpoint csv_connection csv_root_password extr
         current_alias="$csv_alias"
         endpoint="$csv_endpoint"
         connection="$csv_connection"
+        ssh_port="${csv_ssh_port:-22}"
         root_password="$csv_root_password"
         found="true"
         break
@@ -481,24 +487,27 @@ remote_log="$(mktemp)"
 trap 'rm -f "$sanitized_nodes" "$remote_log"' EXIT
 {
     echo "$EXPECTED_CSV_HEADER"
-    tail -n +2 "$NODES_FILE" | while IFS=, read -r csv_alias csv_endpoint csv_connection _csv_root_password extra || [ -n "${csv_alias:-}" ]; do
+    tail -n +2 "$NODES_FILE" | while IFS=, read -r csv_alias csv_endpoint csv_expected_ip csv_connection csv_ssh_port _csv_root_password extra || [ -n "${csv_alias:-}" ]; do
         csv_alias="${csv_alias//$'\r'/}"
         csv_endpoint="${csv_endpoint//$'\r'/}"
+        csv_expected_ip="${csv_expected_ip//$'\r'/}"
         csv_connection="${csv_connection//$'\r'/}"
+        csv_ssh_port="${csv_ssh_port//$'\r'/}"
         if [ -n "$csv_alias" ]; then
-            printf '%s,%s,%s,\n' "$csv_alias" "$csv_endpoint" "$csv_connection"
+            [ -n "$csv_ssh_port" ] || [ "$csv_connection" = "local" ] || csv_ssh_port="22"
+            printf '%s,%s,%s,%s,%s,\n' "$csv_alias" "$csv_endpoint" "$csv_expected_ip" "$csv_connection" "$csv_ssh_port"
         fi
     done
 } > "$sanitized_nodes"
 
 if [ "$access_mode" = "admin-key" ]; then
     remote="$ADMIN_USER@$endpoint"
-    ssh_base=(ssh -n -T -i "$admin_key_file" -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -o RequestTTY=no -o KbdInteractiveAuthentication=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey -o StrictHostKeyChecking=accept-new "$remote")
-    scp_base=(scp -B -i "$admin_key_file" -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -o KbdInteractiveAuthentication=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey -o StrictHostKeyChecking=accept-new)
+    ssh_base=(ssh -n -T -p "$ssh_port" -i "$admin_key_file" -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -o RequestTTY=no -o KbdInteractiveAuthentication=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey -o StrictHostKeyChecking=accept-new "$remote")
+    scp_base=(scp -B -P "$ssh_port" -i "$admin_key_file" -o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes -o KbdInteractiveAuthentication=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey -o StrictHostKeyChecking=accept-new)
 else
     remote="root@$endpoint"
-    ssh_base=(sshpass -p "$root_password" ssh -o StrictHostKeyChecking=accept-new "$remote")
-    scp_base=(sshpass -p "$root_password" scp -o StrictHostKeyChecking=accept-new)
+    ssh_base=(sshpass -p "$root_password" ssh -p "$ssh_port" -o StrictHostKeyChecking=accept-new "$remote")
+    scp_base=(sshpass -p "$root_password" scp -P "$ssh_port" -o StrictHostKeyChecking=accept-new)
 fi
 
 run_admin_preflight() {

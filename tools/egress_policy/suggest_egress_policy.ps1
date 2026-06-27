@@ -1,5 +1,6 @@
 ﻿param(
     [string]$PolicyFile = ".\operator\egress_policy\profiles.json",
+    [string]$StateFile = ".\operator\state.csv",
     [string]$HistoryDir = ".\operator\egress_policy\history",
     [string]$HistoryFile = "",
     [string]$ProposalDir = ".\operator\egress_policy\proposals",
@@ -361,11 +362,11 @@ function Get-ProfileBehavior($Profile) {
     return ""
 }
 
-function Get-ProfileFallbackEgressAliases($Profile) {
-    if (-not $Profile -or $null -eq $Profile.candidate_fallback_egress_aliases) {
-        return @()
-    }
-    return @($Profile.candidate_fallback_egress_aliases | Where-Object { $_ })
+function Get-ObservedFallbackEgressAliases($Records) {
+    return @($Records |
+        Where-Object { (Get-RecordPathMode $_) -eq "cascade" -and -not [string]::IsNullOrWhiteSpace([string]$_.egress_alias) } |
+        ForEach-Object { [string]$_.egress_alias } |
+        Sort-Object -Unique)
 }
 
 function Get-RecordHttpStatus($Record) {
@@ -422,7 +423,7 @@ function Test-DeterministicFallbackAutoAccept($Profile, $Records, $BestRecord, [
         return $false
     }
 
-    $configuredFallbackEgressAliases = @(Get-ProfileFallbackEgressAliases $Profile)
+    $configuredFallbackEgressAliases = @(Get-ObservedFallbackEgressAliases $Records)
     if ($configuredFallbackEgressAliases.Count -eq 0) {
         return $false
     }

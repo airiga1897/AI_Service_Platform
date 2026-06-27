@@ -1,6 +1,7 @@
 param(
     [string]$PolicyFile = ".\operator\egress_policy\profiles.json",
     [string]$NodesFile = ".\operator\nodes.csv",
+    [string]$StateFile = ".\operator\state.csv",
     [string]$NetworksFile = ".\operator\networks.csv",
     [string]$OperatorDir = ".\operator",
     [string]$CascadeSecretDir = ".\operator\softether\cascade\secrets",
@@ -17,7 +18,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedNodesHeader = "current_alias,endpoint,connection,root_password"
+$ExpectedNodesHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
+$ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 $ExpectedNetworksHeader = "alias,policy_subnet,edge_ip,cascade_ip,cascade_router_ip,policy_gateway_ip"
 $PolicyGatewayContainer = "policy-gateway"
 $CascadeContainer = "softether-cascade"
@@ -78,8 +80,18 @@ function Get-OpenSshCommonArgs($KeyFile) {
     return $args
 }
 
-function Invoke-SshText($KeyFile, $Remote, $Command) {
-    $sshArgs = @("-n", "-T") + @(Get-OpenSshCommonArgs $KeyFile) + @($Remote, $Command)
+function Get-NodeSshPort($Node) {
+    $port = [string]$Node.ssh_port
+    if (-not $port) { return "22" }
+    $portNumber = 0
+    if (-not [int]::TryParse($port, [ref]$portNumber) -or $portNumber -lt 1 -or $portNumber -gt 65535) {
+        Fail "Invalid ssh_port for $($Node.current_alias): $port"
+    }
+    return [string]$portNumber
+}
+
+function Invoke-SshText($KeyFile, $Remote, $Command, $Port = "22") {
+    $sshArgs = @("-n", "-T", "-p", $Port) + @(Get-OpenSshCommonArgs $KeyFile) + @($Remote, $Command)
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $script:ErrorActionPreference = "Continue"
@@ -124,19 +136,105 @@ function Load-NetworkPlan($Path, $Nodes) {
     return $map
 }
 
+function Read-StateRows($Path) {
+    Require-File $Path "state.csv"
+    $lines = @(Get-Content -LiteralPath $Path)
+    if ($lines.Count -eq 0 -or $lines[0] -ne $ExpectedStateHeader) {
+        Fail "state.csv header must be exactly: $ExpectedStateHeader"
+    }
+    return @(Import-Csv -LiteralPath $Path)
+}
+
+function Split-AliasList($Value) {
+    if ([string]::IsNullOrWhiteSpace([string]$Value)) {
+        return @()
+    }
+    return @(([string]$Value).Split("+", [System.StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+function Get-ObjectArray($Object, $PropertyName) {
+    if ($null -eq $Object -or -not ($Object.PSObject.Properties.Name -contains $PropertyName)) {
+        return @()
+    }
+    return @($Object.$PropertyName | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
+function Get-StateExpandedAliases($StateRows, $Kind, $Name, $AnchorAliases) {
+    $aliases = New-Object System.Collections.ArrayList
+    $anchorSet = @{}
+    foreach ($aliasName in @($AnchorAliases | Where-Object { $_ })) {
+        $anchorSet[[string]$aliasName] = $true
+    }
+    foreach ($row in @($StateRows | Where-Object { $_.kind -eq $Kind -and $_.name -eq $Name -and $_.state -eq "present" })) {
+        $activeAliases = @(Split-AliasList $row.active_aliases)
+        $candidateAliases = @(Split-AliasList $row.candidate_aliases)
+        if ($anchorSet.Count -eq 0) {
+            foreach ($aliasName in @($activeAliases + $candidateAliases)) {
+                [void]$aliases.Add($aliasName)
+            }
+            continue
+        }
+        $matchesAnchor = $false
+        foreach ($aliasName in $activeAliases) {
+            if ($anchorSet.ContainsKey($aliasName)) {
+                $matchesAnchor = $true
+                [void]$aliases.Add($aliasName)
+                break
+            }
+        }
+        if ($matchesAnchor) {
+            foreach ($aliasName in $candidateAliases) {
+                [void]$aliases.Add($aliasName)
+            }
+            continue
+        }
+        foreach ($aliasName in $candidateAliases) {
+            if ($anchorSet.ContainsKey($aliasName)) {
+                [void]$aliases.Add($aliasName)
+            }
+        }
+    }
+    return @($aliases.ToArray() | Sort-Object -Unique)
+}
+
+function Get-StateCascadeFallbackEgressAliases($StateRows, $IngressAliases) {
+    $ingressSet = @{}
+    foreach ($aliasName in @($IngressAliases | Where-Object { $_ })) {
+        $ingressSet[[string]$aliasName] = $true
+    }
+    $aliases = New-Object System.Collections.ArrayList
+    foreach ($row in @($StateRows | Where-Object { $_.kind -eq "cascade_topology" -and $_.state -eq "present" })) {
+        foreach ($edge in @(Split-AliasList $row.active_aliases)) {
+            if ($edge -notmatch '^([^>]+)>([^>]+)$') {
+                continue
+            }
+            $ingress = $Matches[1]
+            $egress = $Matches[2]
+            if ($ingressSet.Count -eq 0 -or $ingressSet.ContainsKey($ingress)) {
+                [void]$aliases.Add($egress)
+            }
+        }
+    }
+    return @($aliases.ToArray() | Sort-Object -Unique)
+}
+
 function Get-PolicyBehavior($Profile) {
     return [string]$Profile.behavior
 }
 
-function Get-PolicyIngressAliases($Profile) {
-    return @($Profile.candidate_ingress_aliases | Where-Object { $_ })
+function Get-PolicyIngressAnchorAliases($Profile) {
+    $anchorAliases = @(Get-ObjectArray $Profile "ingress_anchor_aliases")
+    return @($anchorAliases | Sort-Object -Unique)
 }
 
-function Get-PolicyFallbackEgressAliases($Profile) {
-    if ($null -eq $Profile.candidate_fallback_egress_aliases) {
-        return @()
-    }
-    return @($Profile.candidate_fallback_egress_aliases | Where-Object { $_ })
+function Get-PolicyIngressAliases($Profile, $StateRows) {
+    $anchorAliases = @(Get-PolicyIngressAnchorAliases $Profile)
+    return @(Get-StateExpandedAliases $StateRows "edge_route" "vpn_ingress" $anchorAliases)
+}
+
+function Get-PolicyFallbackEgressAliases($Profile, $StateRows) {
+    $ingressAliases = @(Get-PolicyIngressAliases $Profile $StateRows)
+    return @(Get-StateCascadeFallbackEgressAliases $StateRows $ingressAliases)
 }
 
 function Get-TextPreview($Text, [int]$MaxLength = 160) {
@@ -346,7 +444,7 @@ print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     $scriptB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($python))
     $payloadB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($targetPayload))
     $command = "python3 -c $(Quote-BashArg "import base64,sys; exec(base64.b64decode('$scriptB64'))") $(Quote-BashArg $payloadB64) $(Quote-BashArg ([string]$TargetTimeoutSeconds))"
-    $result = Invoke-SshText $keyFile $remote $command
+    $result = Invoke-SshText $keyFile $remote $command (Get-NodeSshPort $node)
     if (-not $result.ok) {
         return [pscustomobject]@{ ok = $false; error = $result.output }
     }
@@ -367,7 +465,7 @@ function Test-IngressPolicyNetwork($AliasName) {
         Fail "networks.csv has no row for alias: $AliasName"
     }
     $command = "sudo docker network inspect ai_service_vpn_policy --format '{{json .Containers}}'"
-    $result = Invoke-SshText $keyFile $remote $command
+    $result = Invoke-SshText $keyFile $remote $command (Get-NodeSshPort $node)
     $text = [string]$result.output
     $edgeExpected = [regex]::Escape([string]$network.edge_ip)
     $gatewayExpected = [regex]::Escape([string]$network.policy_gateway_ip)
@@ -418,7 +516,7 @@ printf 'container_present=%s\ngateway_ip_present=%s\nip_forward=%s\nroute_table_
 [ "`$container_present" = true ] && [ "`$gateway_ip_present" = true ] && [ "`$route_table_available" = true ] && [ "`$nat_available" = true ]
 "@
     $command = "sh -c $(Quote-BashArg $probe)"
-    $result = Invoke-SshText $keyFile $remote $command
+    $result = Invoke-SshText $keyFile $remote $command (Get-NodeSshPort $node)
     $flags = @{}
     foreach ($line in @([string]$result.output -split "`n")) {
         if ($line -match '^([^=]+)=(true|false)$') {
@@ -444,7 +542,7 @@ function Test-PolicyGatewayNatCapability($AliasName) {
     Require-File $keyFile "admin key for $AliasName"
     $remote = "${SshUser}@$($node.endpoint)"
     $command = "sudo docker exec -u 0 $(Quote-BashArg $PolicyGatewayContainer) sh -c $(Quote-BashArg "iptables -t nat -S POSTROUTING >/dev/null && iptables -t nat -L POSTROUTING -v -n -x >/dev/null")"
-    $result = Invoke-SshText $keyFile $remote $command
+    $result = Invoke-SshText $keyFile $remote $command (Get-NodeSshPort $node)
     return [pscustomobject]@{
         ok = $result.ok
         postrouting_available = $result.ok
@@ -487,7 +585,7 @@ printf 'container_present=%s\ntap_present=%s\nrouter_ip_present=%s\nroute_table_
 [ "`$container_present" = true ] && [ "`$tap_present" = true ] && [ "`$router_ip_present" = true ] && [ "`$route_table_available" = true ] && [ "`$nat_available" = true ]
 "@
     $command = "sh -c $(Quote-BashArg $probe)"
-    $result = Invoke-SshText $keyFile $remote $command
+    $result = Invoke-SshText $keyFile $remote $command (Get-NodeSshPort $node)
     $flags = @{}
     foreach ($line in @([string]$result.output -split "`n")) {
         if ($line -match '^([^=]+)=(true|false)$') {
@@ -514,13 +612,14 @@ function Test-CascadeTcp($Link) {
     Require-File $keyFile "admin key for $($Link.ingress_alias)"
     $remote = "${SshUser}@$($node.endpoint)"
     $command = "python3 -c $(Quote-BashArg 'import socket,sys; socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=float(sys.argv[3])).close()') $(Quote-BashArg $Link.egress_host) $(Quote-BashArg ([string]$Link.egress_port)) $(Quote-BashArg ([string]$TimeoutSeconds))"
-    $result = Invoke-SshText $keyFile $remote $command
+    $result = Invoke-SshText $keyFile $remote $command (Get-NodeSshPort $node)
     return [pscustomobject]@{ reachable = $result.ok; error = if ($result.ok) { $null } else { $result.output } }
 }
 
 Require-File $PolicyFile "egress policy registry"
 $script:SshExecutablePath = if ($DryRun) { $SshPath } else { Resolve-SshExecutable $SshPath }
 $nodes = Load-Nodes $NodesFile
+$stateRows = Read-StateRows $StateFile
 $networkPlan = Load-NetworkPlan $NetworksFile $nodes
 $policy = Read-JsonFile $PolicyFile "egress policy registry"
 $links = Load-CascadeLinks $CascadeSecretDir $nodes
@@ -542,10 +641,10 @@ foreach ($profile in $profiles) {
     if ($behavior -ne "fallback_on_ingress_egress_failure") {
         Fail "profile $($profile.name) behavior is not supported by readiness check: $behavior"
     }
-    $ingressAliases = @(Get-PolicyIngressAliases $profile | Where-Object { $aliasFilter.Count -eq 0 -or $aliasFilter -contains $_ })
-    $fallbackEgressAliases = @(Get-PolicyFallbackEgressAliases $profile)
+    $ingressAliases = @(Get-PolicyIngressAliases $profile $stateRows | Where-Object { $aliasFilter.Count -eq 0 -or $aliasFilter -contains $_ })
+    $fallbackEgressAliases = @(Get-PolicyFallbackEgressAliases $profile $stateRows)
     if ($fallbackEgressAliases.Count -eq 0) {
-        Fail "profile $($profile.name) must include candidate_fallback_egress_aliases"
+        Fail "profile $($profile.name) must derive fallback egress aliases from state.csv cascade_topology"
     }
     foreach ($target in @($profile.targets)) {
         foreach ($ingressAlias in $ingressAliases) {

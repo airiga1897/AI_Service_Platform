@@ -37,9 +37,9 @@ vpn_cascade_policy_router_ipv4: ""
 vpn_cascade_policy_tap_device: vpnpolicy
 vpn_cascade_policy_tap_interface: tap_vpnpolicy
 
-vpn_cascade_host_https_port: 8443
-vpn_cascade_host_alt_port: 8992
-vpn_cascade_host_management_port: 8555
+vpn_cascade_host_https_port: 443
+vpn_cascade_host_alt_port: 992
+vpn_cascade_host_management_port: 5555
 vpn_cascade_startup_timeout_seconds: 60
 vpn_cascade_vpncmd_timeout_seconds: 20
 vpn_cascade_no_log: true

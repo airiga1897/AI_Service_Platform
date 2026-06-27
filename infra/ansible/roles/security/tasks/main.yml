@@ -7,6 +7,41 @@
     state: present
     update_cache: true
 
+# --- DNS baseline ---
+- name: Ensure systemd-resolved drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/resolved.conf.d
+    state: directory
+    mode: "0755"
+  when: ansible_service_mgr == "systemd"
+
+- name: Install AI Service Platform DNS baseline
+  ansible.builtin.copy:
+    dest: /etc/systemd/resolved.conf.d/10-ai-service-platform-dns.conf
+    mode: "0644"
+    content: |
+      [Resolve]
+      DNS={{ platform_dns_servers | join(" ") }}
+      FallbackDNS={{ platform_fallback_dns_servers | join(" ") }}
+  when: ansible_service_mgr == "systemd"
+  notify: restart systemd-resolved
+
+- name: Flush DNS baseline handler before effective config check
+  ansible.builtin.meta: flush_handlers
+
+- name: Read effective systemd-resolved DNS servers
+  ansible.builtin.command: resolvectl dns
+  changed_when: false
+  register: systemd_resolved_dns
+  when: ansible_service_mgr == "systemd"
+
+- name: Assert priority DNS server is configured
+  ansible.builtin.assert:
+    that:
+      - "'1.1.1.1' in systemd_resolved_dns.stdout"
+    fail_msg: "systemd-resolved effective DNS does not include priority DNS server 1.1.1.1."
+  when: ansible_service_mgr == "systemd"
+
 # --- ufw ---
 - name: Reset ufw to defaults
   community.general.ufw:

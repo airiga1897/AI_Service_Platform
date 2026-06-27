@@ -10,7 +10,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedNodesHeader = "current_alias,endpoint,connection,root_password"
+$ExpectedNodesHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 
 function Fail($Message) {
@@ -213,7 +213,7 @@ check_text has_blocked_ips 'blocked_ips\.lst' "$cfg"
 check_text has_vpn_mgmt_allowlist 'vpn_mgmt_ips\.lst' "$cfg"
 check_text mgmt_allowlist_only 'tcp-request[[:space:]]+connection[[:space:]]+reject[[:space:]]+if[[:space:]]+!\{[[:space:]]+src[[:space:]]+-f[[:space:]]+/usr/local/etc/haproxy/lists/vpn_mgmt_ips\.lst[[:space:]]+\}' "$cfg"
 check ufw_active sh -c 'sudo -n ufw status | grep -qi "^Status: active"'
-for port in 22 80 443 992 5555 8443 8555 8992 25565 25575; do
+for port in 22 80 443 992 5555 25565 25575; do
   check "ufw_allow_tcp_$port" sh -c "sudo -n ufw status numbered | grep -Eq '(^|[^0-9])$port/tcp[[:space:]]+ALLOW'"
 done
 scanner_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1/.env 2>/tmp/ai-sp-netcheck.out || true)"

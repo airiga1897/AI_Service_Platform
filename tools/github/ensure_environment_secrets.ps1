@@ -98,7 +98,7 @@ if ($NodesFile -or $Alias) {
         Fail "NodesFile and Alias must be provided together"
     }
     Require-File $NodesFile "NodesFile"
-    $expectedHeader = "current_alias,endpoint,connection,root_password"
+    $expectedHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
     $firstLine = Get-Content -LiteralPath $NodesFile -TotalCount 1
     if ($firstLine -ne $expectedHeader) {
         Fail "nodes.csv header must be exactly: $expectedHeader"
