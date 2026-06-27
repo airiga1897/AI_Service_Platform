@@ -57,6 +57,30 @@ An orchestration candidate may also run normal edge services. For example,
 ingress node when `state.csv` contains the matching `edge_haproxy`, `vpn_edge`,
 and `edge_route,vpn_ingress` rows.
 
+### Current Verified Role Map
+
+As of 2026-06-27, standby is manual. No role in this map implies automatic
+failover, active-active routing, or automatic movement of service rows.
+
+- `vps6` is the active orchestration node; `vps5` is its standby orchestration
+  candidate and also an active VPN ingress node.
+- `vps3` is the active cascade receiver and egress anchor; `vps7` is the manual
+  duplicate/standby candidate for `vps3`, currently VPN ingress only and with no
+  active cascade links.
+- `vps2` is the active public/service edge target, including the current
+  `minecraft` route. `vps1` and `vps4` are manual duplicate/standby candidates
+  for `vps2`; both are active VPN ingress nodes, and both currently have active
+  cascade links to `vps3`.
+- Every active VPS alias from `vps1` through `vps7` has the full VPN ingress
+  stack in `state.csv`: `edge_haproxy`, `vpn_edge`, and
+  `edge_route,vpn_ingress`.
+- Every manual standby candidate must keep that VPN ingress stack healthy before
+  it is considered promotable.
+- Current cascade service aliases are `vps1`, `vps2`, `vps3`, and `vps4`. Do not
+  treat `vps5` or `vps7` as cascade nodes until a separate rollout adds explicit
+  `service,vpn_cascade`, `edge_route,vpn_cascade`, HAProxy SNI, and
+  `lab-cascade.json` link state.
+
 ## state.csv
 
 Real файл хранится вне git:

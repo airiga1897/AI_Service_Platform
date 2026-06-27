@@ -202,6 +202,26 @@ entrypoints.
 Retired cascade-only host ports `8443/tcp`, `8992/tcp`, and `8555/tcp` are no
 longer used.
 
+### Current Verified Status
+
+As of 2026-06-27, staged VPN rollout is verified:
+
+- `edge_haproxy` and `vpn_edge` are present on `vps1` through `vps7`.
+- `vpn_cascade` is present only on `vps1`, `vps2`, `vps3`, and `vps4`.
+- Active cascade links are online with `Connection Completed`:
+  `vps1-to-vps3`, `vps2-to-vps3`, and `vps4-to-vps3`.
+- Active cascade receivers use `cascade-vps3.mine-craft.su:443` through HAProxy
+  SNI; `softether-cascade` must not publish direct host ports in this mode.
+- `vps5` and `vps7` are VPN ingress nodes only for now; they have no active
+  cascade links in the shared `lab-cascade` fabric.
+
+The current standby design is manual. It does not enable active-active routing
+or automatic failover. `vps1` and `vps4` already have active cascade ingress
+links to `vps3`, but that does not automatically make them replacements for all
+`vps2` edge duties. `vps5` and `vps7` are not cascade nodes until `state.csv`,
+`operator/haproxy/routes.yml`, and `lab-cascade.json` all contain explicit
+`vpn_cascade` service, route, SNI, and link entries for those aliases.
+
 The operator-local cascade secret is ignored by git:
 
 ```text

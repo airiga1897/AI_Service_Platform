@@ -235,6 +235,131 @@ If the same `PermissionError` persists inside Codex sandbox, rerun the check
 outside the sandbox/ACL restriction before treating it as a `render-edge`
 regression.
 
+---
+
+## VPN And Cascade Staged Rollout Verification
+
+Use this after bootstrap or after changing VPN/cascade operator state. Long
+PowerShell rollout commands are run manually by the operator.
+
+1. Apply edge routes:
+   ```powershell
+   .\tools\services\rollout_from_state.ps1 `
+     -NodesFile .\operator\nodes.csv `
+     -StateFile .\operator\state.csv `
+     -OnlyService edge_haproxy
+   ```
+2. Apply user VPN ingress:
+   ```powershell
+   .\tools\services\rollout_from_state.ps1 `
+     -NodesFile .\operator\nodes.csv `
+     -StateFile .\operator\state.csv `
+     -OnlyService vpn_edge
+   ```
+3. Apply cascade transport only after VPN ingress is healthy:
+   ```powershell
+   .\tools\services\rollout_from_state.ps1 `
+     -NodesFile .\operator\nodes.csv `
+     -StateFile .\operator\state.csv `
+     -OnlyService vpn_cascade
+   ```
+4. Verify active cascade links:
+   ```powershell
+   .\tools\services\check_vpn_cascade_links.ps1 -Json
+   ```
+
+Current verified status as of 2026-06-27:
+
+- VPN ingress works on `vps1` through `vps7`.
+- `vpn_cascade` is active on `vps1`, `vps2`, `vps3`, and `vps4`.
+- Verified online cascade links are `vps1-to-vps3`, `vps2-to-vps3`, and
+  `vps4-to-vps3`; all use `cascade-vps3.mine-craft.su:443` via HAProxy SNI.
+- `vps5` remains an orchestration candidate and VPN ingress node; `vps7` remains
+  VPN ingress only and a future `vps3` duplicate/standby candidate.
+
+Stop before any broader rollout if any active cascade link reports `tcp=false`,
+`online=false`, or a status other than `Connection Completed`.
+
+---
+
+## Manual Standby Promotion
+
+Use this when a verified standby candidate must temporarily replace an active
+role. These procedures are manual by design: edit local `operator/state.csv`,
+run only the affected rollout, verify, then decide whether to continue. Do not
+expect automatic failover or active-active traffic distribution.
+
+Before any promotion:
+
+- Confirm public TCP `443`, `992`, and `5555` for the target alias.
+- Confirm SoftEther Manager access on `5555` from an allowlisted operator IP.
+- Confirm the target alias has `edge_haproxy`, `vpn_edge`, and
+  `edge_route,vpn_ingress` present.
+- If cascade is involved, run:
+  ```powershell
+  .\tools\services\check_vpn_cascade_links.ps1 -Json
+  ```
+
+### Promote `vps5` To Active Orchestration
+
+Change the orchestration row from:
+
+```csv
+platform_role,orchestration,orchestration,vps6,vps5,,present
+```
+
+to:
+
+```csv
+platform_role,orchestration,orchestration,vps5,,vps6,present
+```
+
+Then run the normal state rollout from the operator machine. The runner will
+sync to the new active orchestration alias and future remote service commands
+will use `vps5`.
+
+### Promote `vps7` As Future `vps3` Duplicate
+
+Do not make `vps7` a cascade node by documentation alone. First add explicit
+`service,vpn_cascade` and `edge_route,vpn_cascade` rows for `vps7`, add
+`cascade-vps7.mine-craft.su` SNI in `operator/haproxy/routes.yml`, and only then
+add deliberate links in `operator/softether/cascade/secrets/lab-cascade.json`.
+
+Roll out in this order:
+
+```powershell
+.\tools\services\rollout_from_state.ps1 `
+  -NodesFile .\operator\nodes.csv `
+  -StateFile .\operator\state.csv `
+  -OnlyService edge_haproxy
+
+.\tools\services\rollout_from_state.ps1 `
+  -NodesFile .\operator\nodes.csv `
+  -StateFile .\operator\state.csv `
+  -OnlyService vpn_cascade
+```
+
+Stop if the new `vps7` TCP, SNI, admin, or cascade-link checks fail.
+
+### Promote `vps1` Or `vps4` For `vps2` Edge Duties
+
+Move only the affected `state.csv` rows. For example, if `minecraft` must move
+from `vps2` to `vps4`, update the `edge_route,minecraft` active alias and keep
+the VPN ingress rows unchanged. If route-specific HAProxy overrides are needed,
+update `operator/haproxy/routes.yml` before rollout.
+
+Roll out the affected service only:
+
+```powershell
+.\tools\services\rollout_from_state.ps1 `
+  -NodesFile .\operator\nodes.csv `
+  -StateFile .\operator\state.csv `
+  -OnlyService edge_haproxy
+```
+
+`vps1` and `vps4` already have active cascade links to `vps3`; those links do
+not automatically move `minecraft` or any other public edge route from `vps2`.
+
 ## Запланированные runbook'и
 
 Эти процедуры будут добавлены, когда появится соответствующий код или
