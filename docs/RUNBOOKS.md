@@ -268,14 +268,19 @@ PowerShell rollout commands are run manually by the operator.
    .\tools\services\check_vpn_cascade_links.ps1 -Json
    ```
 
-Current verified status as of 2026-06-27:
+Current verified status as of 2026-06-28:
 
 - VPN ingress works on `vps1` through `vps7`.
-- `vpn_cascade` is active on `vps1`, `vps2`, `vps3`, and `vps4`.
-- Verified online cascade links are `vps1-to-vps3`, `vps2-to-vps3`, and
-  `vps4-to-vps3`; all use `cascade-vps3.mine-craft.su:443` via HAProxy SNI.
+- `vpn_cascade` is active on `vps1`, `vps2`, `vps3`, and `vps4`; `vps7` is
+  staged with service/SNI surface and first test receiver link.
+- Verified online cascade link is `vps2-to-vps3`. `vps1-to-vps3`,
+  `vps4-to-vps3`, and staged `vps1-to-vps7` are acceptance-pending until
+  ingress-side SoftEther connection objects are visible and online.
+- The staged `vps1-to-vps7` link uses `cascade-vps7.mine-craft.su:443` via
+  HAProxy SNI. Keep `vps7` in the same `service,vpn_cascade` batch as `vps1`.
 - `vps5` remains an orchestration candidate and VPN ingress node; `vps7` remains
-  VPN ingress only and a future `vps3` duplicate/standby candidate.
+  a future `vps3` duplicate/standby candidate, currently tested only by
+  `vps1-to-vps7`.
 
 Stop before any broader rollout if any active cascade link reports `tcp=false`,
 `online=false`, or a status other than `Connection Completed`.
@@ -318,12 +323,16 @@ Then run the normal state rollout from the operator machine. The runner will
 sync to the new active orchestration alias and future remote service commands
 will use `vps5`.
 
-### Promote `vps7` As Future `vps3` Duplicate
+### Stage `vps7` As Alternate Receiver For `vps3`
 
-Do not make `vps7` a cascade node by documentation alone. First add explicit
-`service,vpn_cascade` and `edge_route,vpn_cascade` rows for `vps7`, add
-`cascade-vps7.mine-craft.su` SNI in `operator/haproxy/routes.yml`, and only then
-add deliberate links in `operator/softether/cascade/secrets/lab-cascade.json`.
+The first safe stage is a single receiver test: keep explicit
+`service,vpn_cascade` and `edge_route,vpn_cascade` rows for `vps7`, keep
+`cascade-vps7.mine-craft.su` SNI in `operator/haproxy/routes.yml`, and add only
+`vps1-to-vps7` to `cascade_topology` and
+`operator/softether/cascade/secrets/lab-cascade.json`.
+
+Do not add `vps7-to-vps3`: that would make `vps7` an ingress/transit toward
+`vps3`, not a duplicate receiver for `vps3`.
 
 Roll out in this order:
 
@@ -340,6 +349,45 @@ Roll out in this order:
 ```
 
 Stop if the new `vps7` TCP, SNI, admin, or cascade-link checks fail.
+
+After staged rollout, check only the public surface:
+
+```powershell
+Test-NetConnection cascade-vps7.mine-craft.su -Port 443
+Test-NetConnection cascade-vps7.mine-craft.su -Port 5555
+.\tools\services\check_vpn_cascade_links.ps1 -Json -OnlyActive
+```
+
+Expected active links are `vps1-to-vps3`, `vps2-to-vps3`, `vps4-to-vps3`, and
+`vps1-to-vps7`; all four must report `online=true`. Do not add broader
+`vps2-to-vps7` or `vps4-to-vps7` until the single `vps1-to-vps7` path is
+stable.
+
+Keep `vps7` in the same `service,vpn_cascade` row/batch as `vps1` while
+`vps1-to-vps7` is active. The role prepares egress-side users before configuring
+ingress-side links within one Ansible play; splitting `vps1` and `vps7` into
+different rollout batches can make `vps1` try the link before `vps7` is ready.
+
+If SoftEther Server Manager on `cascade-vps1` shows an empty Cascade Connections
+list while `lab-cascade.json` contains `vps1-to-vps3` or `vps1-to-vps7`, rerun
+`vpn_cascade` after the role version that verifies `CascadeGet` immediately
+after `CascadeCreate` and after final configure. The acceptance condition is
+that the connections are visible in Server Manager and
+`check_vpn_cascade_links.ps1` reports all four links `online=true`.
+
+Do not treat the connection name appearing in raw `vpncmd /IN` output as proof
+that the object exists: SoftEther can echo the submitted `CascadeGet` command
+before returning an error. The proof is `CascadeGet` exit code `0` plus a live
+connection object in `vpn_server.config` or Server Manager.
+
+For online checks, use the `Session Status` row from `CascadeStatusGet` as the
+canonical status source. `Connection Completed (Session Established)` means the
+cascade link is online; broad raw-output regex matching is only a fallback.
+
+Retired cleanup must never delete a desired active link. Machine lists for
+desired and retired cascade connections are passed as JSON, not YAML-indented
+heredocs, and cleanup must fail before `CascadeDelete` if a candidate appears in
+the desired set.
 
 ### Promote `vps1` Or `vps4` For `vps2` Edge Duties
 

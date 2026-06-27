@@ -207,20 +207,23 @@ longer used.
 As of 2026-06-27, staged VPN rollout is verified:
 
 - `edge_haproxy` and `vpn_edge` are present on `vps1` through `vps7`.
-- `vpn_cascade` is present only on `vps1`, `vps2`, `vps3`, and `vps4`.
+- `vpn_cascade` is active on `vps1`, `vps2`, `vps3`, and `vps4`; `vps7` has
+  staged service/SNI surface plus the first alternate-receiver test link.
 - Active cascade links are online with `Connection Completed`:
-  `vps1-to-vps3`, `vps2-to-vps3`, and `vps4-to-vps3`.
+  `vps1-to-vps3`, `vps2-to-vps3`, `vps4-to-vps3`, and `vps1-to-vps7`.
 - Active cascade receivers use `cascade-vps3.mine-craft.su:443` through HAProxy
   SNI; `softether-cascade` must not publish direct host ports in this mode.
-- `vps5` and `vps7` are VPN ingress nodes only for now; they have no active
-  cascade links in the shared `lab-cascade` fabric.
+- `vps5` remains VPN ingress only. `vps7` is staged for future `vps3`
+  duplicate/standby work and currently receives only the `vps1-to-vps7` test
+  link in the shared `lab-cascade` fabric.
 
 The current standby design is manual. It does not enable active-active routing
 or automatic failover. `vps1` and `vps4` already have active cascade ingress
 links to `vps3`, but that does not automatically make them replacements for all
-`vps2` edge duties. `vps5` and `vps7` are not cascade nodes until `state.csv`,
-`operator/haproxy/routes.yml`, and `lab-cascade.json` all contain explicit
-`vpn_cascade` service, route, SNI, and link entries for those aliases.
+`vps2` edge duties. `vps7` staging includes `vpn_cascade` service, route, SNI,
+and the single deliberate `vps1-to-vps7` test link. It is not a general
+replacement for `vps3` until additional ingress links are added deliberately and
+verified. `vps5` remains outside the cascade fabric for now.
 
 The operator-local cascade secret is ignored by git:
 

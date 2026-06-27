@@ -8,6 +8,7 @@ param(
     [int]$TimeoutSeconds = 20,
     [switch]$OnlyActive,
     [switch]$Json,
+    [switch]$SelfTest,
     [switch]$AutoAcceptHostKey = $true
 )
 
@@ -127,13 +128,27 @@ function Invoke-SshTextCommand($KeyFile, $Remote, $Command) {
 
 function Get-CascadeStatusText($Output) {
     $text = [string]$Output
-    if ($text -match "(Connection Completed|Session Established|Online|Connected)") {
-        return $Matches[1]
-    }
-    if ($text -match "(Offline|Disconnected|Connection Failed|Error)") {
-        return $Matches[1]
+    if ($text -match "(?m)^\s*Session Status\s*\|\s*(.+?)\s*$") {
+        return $Matches[1].Trim()
     }
     return ""
+}
+
+function Test-CascadeStatusOnline($StatusText) {
+    return ([string]$StatusText -match "(Connection Completed|Session Established)")
+}
+
+function Test-CascadeGetOutput($Output, $ConnectionName) {
+    $escapedName = [regex]::Escape([string]$ConnectionName)
+    return ([string]$Output -match "(^|[^A-Za-z0-9_.-])${escapedName}([^A-Za-z0-9_.-]|$)")
+}
+
+function Get-TaggedInt($Output, $Tag) {
+    $escapedTag = [regex]::Escape([string]$Tag)
+    if ([string]$Output -match "${escapedTag}:(-?\d+)") {
+        return [int]$Matches[1]
+    }
+    return $null
 }
 
 function Test-Link($Link, $Secret, $Nodes) {
@@ -172,27 +187,49 @@ function Test-Link($Link, $Secret, $Nodes) {
     }
 
     $remote = "$SshUser@$($Nodes[$ingressAlias].endpoint)"
-    $statusScript = 'in_file="/tmp/ai-sp-cascade-status.$$"; cat > "$in_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$in_file"; rc=$?; rm -f "$in_file"; exit "$rc"'
+    $vpncmdScript = 'in_file="/tmp/ai-sp-cascade-status.$$"; cat > "$in_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$in_file"; rc=$?; rm -f "$in_file"; exit "$rc"'
     $commandLines = @(
-        "set -euo pipefail",
+        "set -uo pipefail",
         "timeout $(Quote-BashArg ([string]$TimeoutSeconds))s python3 -c $(Quote-BashArg 'import socket, sys; s = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=5); s.close()') $(Quote-BashArg $egressHost) $(Quote-BashArg ([string]$egressPort))",
+        "tcp_rc=`$?",
+        "if [ ""`$tcp_rc"" -ne 0 ]; then exit ""`$tcp_rc""; fi",
         "echo __AI_SP_TCP_OK__",
         "tmp_file=`$(mktemp)",
         "trap 'rm -f ""`$tmp_file""' EXIT",
+        "printf 'Hub %s\nCascadeGet %s\n' $(Quote-BashArg $Secret.hub_name) $(Quote-BashArg $connectionName) > ""`$tmp_file""",
+        "get_output=`$(timeout $(Quote-BashArg ([string]$TimeoutSeconds))s sudo docker exec -i -e SERVER_PASSWORD=$(Quote-BashArg $Secret.server_password) softether-cascade sh -c $(Quote-BashArg $vpncmdScript) < ""`$tmp_file"" 2>&1)",
+        "get_rc=`$?",
+        "echo __AI_SP_CASCADE_GET_RC__:`$get_rc",
+        "printf '%s\n' ""`$get_output""",
+        "if [ ""`$get_rc"" -ne 0 ]; then exit 29; fi",
+        "if ! printf '%s\n' ""`$get_output"" | grep -Eq $(Quote-BashArg "(^|[^A-Za-z0-9_.-])${connectionName}([^A-Za-z0-9_.-]|$)"); then echo __AI_SP_CASCADE_MISSING__; exit 29; fi",
+        "echo __AI_SP_CASCADE_GET_OK__",
         "printf 'Hub %s\nCascadeStatusGet %s\n' $(Quote-BashArg $Secret.hub_name) $(Quote-BashArg $connectionName) > ""`$tmp_file""",
-        "timeout $(Quote-BashArg ([string]$TimeoutSeconds))s sudo docker exec -i -e SERVER_PASSWORD=$(Quote-BashArg $Secret.server_password) softether-cascade sh -c $(Quote-BashArg $statusScript) < ""`$tmp_file"""
+        "timeout $(Quote-BashArg ([string]$TimeoutSeconds))s sudo docker exec -i -e SERVER_PASSWORD=$(Quote-BashArg $Secret.server_password) softether-cascade sh -c $(Quote-BashArg $vpncmdScript) < ""`$tmp_file"" 2>&1",
+        "status_rc=`$?",
+        "echo __AI_SP_CASCADE_STATUS_RC__:`$status_rc",
+        "exit ""`$status_rc"""
     )
     $probe = Invoke-SshTextCommand $keyFile $remote ($commandLines -join "`n")
 
     if (-not $probe.ok) {
         $result.tcp = ([string]$probe.output -match "__AI_SP_TCP_OK__")
-        $result.error = "cascade health check failed with exit code $($probe.exit_code); raw preview: $(Get-RawOutputPreview $probe.output)"
+        $getRc = Get-TaggedInt $probe.output "__AI_SP_CASCADE_GET_RC__"
+        if ($result.tcp -and $null -ne $getRc -and $getRc -ne 0) {
+            $result.error = "cascade connection missing on ingress ${ingressAlias}: $connectionName; CascadeGet rc=$getRc; raw preview: $(Get-RawOutputPreview $probe.output)"
+        } elseif ($result.tcp -and $null -ne $getRc -and $getRc -eq 0 -and -not (Test-CascadeGetOutput $probe.output $connectionName)) {
+            $result.error = "cascade connection missing on ingress ${ingressAlias}: $connectionName; raw preview: $(Get-RawOutputPreview $probe.output)"
+        } elseif ($result.tcp -and $probe.exit_code -eq 124) {
+            $result.error = "cascade connection exists but status check timed out for ${connectionName}; raw preview: $(Get-RawOutputPreview $probe.output)"
+        } else {
+            $result.error = "cascade health check failed with exit code $($probe.exit_code); raw preview: $(Get-RawOutputPreview $probe.output)"
+        }
         return [pscustomobject]$result
     }
 
     $result.tcp = $true
     $result.status = Get-CascadeStatusText $probe.output
-    $result.online = ([string]$probe.output -match "(Connection Completed|Session Established|Online|Connected)")
+    $result.online = Test-CascadeStatusOnline $result.status
     if (-not $result.online -and [string]::IsNullOrWhiteSpace($result.status)) {
         $result.status = "unknown"
     }
@@ -201,6 +238,28 @@ function Test-Link($Link, $Secret, $Nodes) {
 
 if ($TimeoutSeconds -lt 1) {
     Fail "-TimeoutSeconds must be at least 1"
+}
+
+if ($SelfTest) {
+    $fixture = @'
+VPN Server/CascadeLab>CascadeStatusGet vps1-to-vps7
+CascadeStatusGet command - Get Current Cascade Connection Status
+Item                                      |Value
+------------------------------------------+--------------------------------------------------------
+VPN Connection Setting Name               |vps1-to-vps7
+Session Status                            |Connection Completed (Session Established)
+VLAN ID                                   |-
+The command completed successfully.
+'@
+    $statusText = Get-CascadeStatusText $fixture
+    if ($statusText -ne "Connection Completed (Session Established)") {
+        Fail "SelfTest failed: unexpected status text: $statusText"
+    }
+    if (-not (Test-CascadeStatusOnline $statusText)) {
+        Fail "SelfTest failed: online parser returned false"
+    }
+    Write-Host "check_vpn_cascade_links parser self-test passed"
+    exit 0
 }
 
 $script:SshExecutablePath = Resolve-SshExecutable $SshPath

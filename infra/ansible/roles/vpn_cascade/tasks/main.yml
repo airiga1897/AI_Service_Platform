@@ -1653,30 +1653,34 @@
   ansible.builtin.shell: |
     set -euo pipefail
     tmp_file="$(mktemp)"
-    desired_file="$(mktemp)"
-    retired_file="$(mktemp)"
-    trap 'rm -f "$tmp_file" "$desired_file" "$retired_file"' EXIT
-    cat > "$desired_file" <<'EOF_DESIRED'
-    {{ vpn_cascade_desired_connection_names | default([]) | join('\n') }}
-    EOF_DESIRED
-    cat > "$retired_file" <<'EOF_RETIRED'
-    {{ vpn_cascade_retired_connection_names | default([]) | join('\n') }}
-    EOF_RETIRED
+    output_file="$(mktemp)"
+    trap 'rm -f "$tmp_file" "$output_file"' EXIT
     printf 'Hub %s\nCascadeList\n' "$HUB_NAME" > "$tmp_file"
-    output="$(timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file"' < "$tmp_file" 2>/dev/null || true)"
-    { printf '%s\n' "$output" |
-      grep -Eo '\b[A-Za-z0-9_.-]+-to-[A-Za-z0-9_.-]+\b' || true; } |
-      sort -u |
-      while IFS= read -r connection_name; do
-        [ -n "$connection_name" ] || continue
-        if grep -Fxq "$connection_name" "$retired_file"; then
-          printf '%s\n' "$connection_name"
-          continue
-        fi
-        if ! grep -Fxq "$connection_name" "$desired_file"; then
-          printf '%s\n' "$connection_name"
-        fi
-      done
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file"' < "$tmp_file" > "$output_file" 2>/dev/null
+    python3 - "$output_file" <<'PY'
+    import json
+    import os
+    import re
+    import sys
+
+    output_path = sys.argv[1]
+
+    def load_names(env_name):
+        raw = os.environ.get(env_name, "[]")
+        try:
+            values = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"invalid JSON in {env_name}: {exc}") from exc
+        return {str(item).strip() for item in values if str(item).strip()}
+
+    desired = load_names("DESIRED_CONNECTION_NAMES_JSON")
+    explicit_retired = load_names("RETIRED_CONNECTION_NAMES_JSON")
+    text = open(output_path, encoding="utf-8", errors="replace").read()
+    actual = set(re.findall(r"\b[A-Za-z0-9_.-]+-to-[A-Za-z0-9_.-]+\b", text))
+    retired = (actual - desired) | explicit_retired
+    for name in sorted(retired):
+        print(name)
+    PY
   args:
     executable: /bin/bash
   environment:
@@ -1684,6 +1688,8 @@
     HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
     SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
     VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+    DESIRED_CONNECTION_NAMES_JSON: "{{ vpn_cascade_desired_connection_names | default([]) | to_json }}"
+    RETIRED_CONNECTION_NAMES_JSON: "{{ vpn_cascade_retired_connection_names | default([]) | to_json }}"
   register: vpn_cascade_retired_connections_command
   changed_when: false
   no_log: "{{ vpn_cascade_no_log | bool }}"
@@ -1723,10 +1729,31 @@
   ansible.builtin.shell: |
     set -euo pipefail
     tmp_file="$(mktemp)"
-    trap 'rm -f "$tmp_file"' EXIT
+    output_file="$(mktemp)"
+    trap 'rm -f "$tmp_file" "$output_file"' EXIT
+    python3 - <<'PY'
+    import json
+    import os
+    import sys
+
+    candidate = os.environ["CONNECTION_NAME"].strip()
+    desired = {str(item).strip() for item in json.loads(os.environ.get("DESIRED_CONNECTION_NAMES_JSON", "[]")) if str(item).strip()}
+    if candidate in desired:
+        print(f"Refusing to delete desired active cascade connection: {candidate}", file=sys.stderr)
+        sys.exit(2)
+    PY
     printf 'Hub %s\nCascadeList\n' "$HUB_NAME" > "$tmp_file"
-    output="$(timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file"' < "$tmp_file" 2>/dev/null || true)"
-    if ! printf '%s\n' "$output" | grep -Eq "(^|[^A-Za-z0-9_.-])${CONNECTION_NAME}([^A-Za-z0-9_.-]|$)"; then
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file"' < "$tmp_file" > "$output_file" 2>/dev/null
+    if ! python3 - "$output_file" "$CONNECTION_NAME" <<'PY'
+    import re
+    import sys
+
+    text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+    name = sys.argv[2]
+    actual = set(re.findall(r"\b[A-Za-z0-9_.-]+-to-[A-Za-z0-9_.-]+\b", text))
+    sys.exit(0 if name in actual else 1)
+    PY
+    then
       printf 'absent\n'
       exit 0
     fi
@@ -1741,6 +1768,7 @@
     CONNECTION_NAME: "{{ item }}"
     SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
     VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+    DESIRED_CONNECTION_NAMES_JSON: "{{ vpn_cascade_desired_connection_names | default([]) | to_json }}"
   loop: "{{ vpn_cascade_retired_connections | default([]) }}"
   no_log: true
   register: vpn_cascade_remove_retired_connections
@@ -1755,20 +1783,24 @@
   ansible.builtin.shell: |
     set -euo pipefail
     tmp_file="$(mktemp)"
-    retired_file="$(mktemp)"
-    trap 'rm -f "$tmp_file" "$retired_file"' EXIT
-    cat > "$retired_file" <<'EOF_RETIRED'
-    {{ vpn_cascade_retired_connections | default([]) | join('\n') }}
-    EOF_RETIRED
+    output_file="$(mktemp)"
+    trap 'rm -f "$tmp_file" "$output_file"' EXIT
     printf 'Hub %s\nCascadeList\n' "$HUB_NAME" > "$tmp_file"
-    output="$(timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file"' < "$tmp_file" 2>/dev/null || true)"
-    while IFS= read -r connection_name; do
-      [ -n "$connection_name" ] || continue
-      if printf '%s\n' "$output" | grep -Eq "(^|[^A-Za-z0-9_.-])${connection_name}([^A-Za-z0-9_.-]|$)"; then
-        echo "Retired cascade connection still exists: $connection_name" >&2
-        exit 1
-      fi
-    done < "$retired_file"
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file"' < "$tmp_file" > "$output_file" 2>/dev/null
+    python3 - "$output_file" <<'PY'
+    import json
+    import os
+    import re
+    import sys
+
+    text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+    actual = set(re.findall(r"\b[A-Za-z0-9_.-]+-to-[A-Za-z0-9_.-]+\b", text))
+    retired = {str(item).strip() for item in json.loads(os.environ.get("RETIRED_CONNECTION_NAMES_JSON", "[]")) if str(item).strip()}
+    remaining = sorted(actual & retired)
+    if remaining:
+        print("Retired cascade connection(s) still exist: " + ", ".join(remaining), file=sys.stderr)
+        sys.exit(1)
+    PY
   args:
     executable: /bin/bash
   environment:
@@ -1776,6 +1808,7 @@
     HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
     SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
     VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+    RETIRED_CONNECTION_NAMES_JSON: "{{ vpn_cascade_retired_connections | default([]) | to_json }}"
   changed_when: false
   when:
     - vpn_cascade_state == 'present'
