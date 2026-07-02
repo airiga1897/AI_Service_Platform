@@ -12,6 +12,7 @@ bootstrap_converge_base_packages:
   - gnupg
   - lsb-release
   - ufw
+  - fail2ban
 bootstrap_converge_firewall_enabled: true
 bootstrap_converge_firewall_allowed_tcp_ports:
   - 22
@@ -21,3 +22,11 @@ bootstrap_converge_firewall_allowed_tcp_ports:
   - 5555
   - 25565
   - 25575
+bootstrap_converge_firewall_retired_tcp_ports:
+  - 8443
+  - 8555
+  - 8992
+bootstrap_converge_fail2ban_enabled: true
+bootstrap_converge_fail2ban_bantime: 86400
+bootstrap_converge_fail2ban_findtime: 600
+bootstrap_converge_fail2ban_maxretry: 3

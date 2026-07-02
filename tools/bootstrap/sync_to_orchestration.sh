@@ -18,6 +18,8 @@ HAPROXY_DIR="./operator/haproxy"
 REMOTE_HAPROXY_DIR="/tmp/ai-service-platform.haproxy"
 EGRESS_POLICY_DIR="./operator/egress_policy"
 REMOTE_EGRESS_POLICY_DIR="/tmp/ai-service-platform.egress_policy"
+EDGE_BANLIST_DIR="./operator/edge_banlist"
+REMOTE_EDGE_BANLIST_DIR="/tmp/ai-service-platform.edge_banlist"
 NETWORKS_FILE="./operator/networks.csv"
 NETWORKS_OVERRIDE_FILE="./operator/networks.override.csv"
 GENERATE_NETWORK_PLAN_SCRIPT="tools/network/generate_vpn_network_plan.sh"
@@ -385,6 +387,9 @@ fi
 if [ -d "$HAPROXY_DIR" ]; then
     sync_directory "$HAPROXY_DIR" "$remote" "$REMOTE_HAPROXY_DIR" "HAProxy operator directory"
 fi
+if [ -d "$EDGE_BANLIST_DIR" ]; then
+    sync_directory "$EDGE_BANLIST_DIR" "$remote" "$REMOTE_EDGE_BANLIST_DIR" "edge_banlist operator directory"
+fi
 if [ -f "$EGRESS_POLICY_DIR/profiles.json" ]; then
     egress_policy_sync_root="$(mktemp -d)"
     mkdir -p "$egress_policy_sync_root/egress_policy"
@@ -420,6 +425,10 @@ if [ -d "$HAPROXY_DIR" ]; then
     haproxy_command="sudo mkdir -p /opt/ai-service-platform/operator; if [ -d '$REMOTE_HAPROXY_DIR/haproxy' ]; then sudo rm -rf /opt/ai-service-platform/operator/haproxy && sudo cp -a '$REMOTE_HAPROXY_DIR/haproxy' /opt/ai-service-platform/operator/haproxy; else sudo rm -rf /opt/ai-service-platform/operator/haproxy && sudo cp -a '$REMOTE_HAPROXY_DIR' /opt/ai-service-platform/operator/haproxy; fi;"
     remote_command="set -e; $softether_command $haproxy_command $prepare_command; rm -rf '$REMOTE_SOFTETHER_DIR' '$REMOTE_HAPROXY_DIR'; rm -f '$REMOTE_NODES_FILE' '$REMOTE_STATE_FILE'"
 fi
+edge_banlist_command=""
+if [ -d "$EDGE_BANLIST_DIR" ]; then
+    edge_banlist_command="sudo mkdir -p /opt/ai-service-platform/operator; if [ -d '$REMOTE_EDGE_BANLIST_DIR/edge_banlist' ]; then sudo rm -rf /opt/ai-service-platform/operator/edge_banlist && sudo cp -a '$REMOTE_EDGE_BANLIST_DIR/edge_banlist' /opt/ai-service-platform/operator/edge_banlist; else sudo rm -rf /opt/ai-service-platform/operator/edge_banlist && sudo cp -a '$REMOTE_EDGE_BANLIST_DIR' /opt/ai-service-platform/operator/edge_banlist; fi;"
+fi
 egress_policy_command=""
 if [ -f "$EGRESS_POLICY_DIR/profiles.json" ]; then
     egress_policy_command="sudo mkdir -p /opt/ai-service-platform/operator; if [ -d '$REMOTE_EGRESS_POLICY_DIR/egress_policy' ]; then sudo rm -rf /opt/ai-service-platform/operator/egress_policy && sudo cp -a '$REMOTE_EGRESS_POLICY_DIR/egress_policy' /opt/ai-service-platform/operator/egress_policy; else sudo rm -rf /opt/ai-service-platform/operator/egress_policy && sudo cp -a '$REMOTE_EGRESS_POLICY_DIR' /opt/ai-service-platform/operator/egress_policy; fi;"
@@ -427,9 +436,9 @@ fi
 networks_command="sudo mkdir -p /opt/ai-service-platform/operator; sudo install -m 600 '$REMOTE_NETWORKS_FILE' /opt/ai-service-platform/operator/networks.csv;"
 if [ "$RUN_VERIFY" = "true" ]; then
     verify_command="sudo mkdir -p \"\$(dirname '$REMOTE_VERIFY_SCRIPT')\"; sudo install -m 700 '$REMOTE_VERIFY_TEMP' '$REMOTE_VERIFY_SCRIPT'; sudo bash '$REMOTE_VERIFY_SCRIPT' --retries '$VERIFY_RETRIES' --retry-delay '$VERIFY_RETRY_DELAY' --ansible-timeout '$VERIFY_ANSIBLE_TIMEOUT';"
-    remote_command="set -e; sudo mkdir -p /opt/ai-service-platform/tools/bootstrap; sudo install -m 700 '$REMOTE_CREATE_INVENTORY_TEMP' /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; sudo install -m 700 '$REMOTE_PREPARE_INVENTORY_TEMP' '$REMOTE_PREPARE_SCRIPT'; sudo install -m 700 '$REMOTE_VERIFY_TEMP' '$REMOTE_VERIFY_SCRIPT'; $softether_command $haproxy_command $egress_policy_command $networks_command $prepare_command; $verify_command rm -rf '$REMOTE_SOFTETHER_DIR' '$REMOTE_HAPROXY_DIR' '$REMOTE_EGRESS_POLICY_DIR'; rm -f '$REMOTE_NODES_FILE' '$REMOTE_STATE_FILE' '$REMOTE_NETWORKS_FILE' '$REMOTE_CREATE_INVENTORY_TEMP' '$REMOTE_PREPARE_INVENTORY_TEMP' '$REMOTE_VERIFY_TEMP'"
+    remote_command="set -e; sudo mkdir -p /opt/ai-service-platform/tools/bootstrap; sudo install -m 700 '$REMOTE_CREATE_INVENTORY_TEMP' /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; sudo install -m 700 '$REMOTE_PREPARE_INVENTORY_TEMP' '$REMOTE_PREPARE_SCRIPT'; sudo install -m 700 '$REMOTE_VERIFY_TEMP' '$REMOTE_VERIFY_SCRIPT'; $softether_command $haproxy_command $edge_banlist_command $egress_policy_command $networks_command $prepare_command; $verify_command rm -rf '$REMOTE_SOFTETHER_DIR' '$REMOTE_HAPROXY_DIR' '$REMOTE_EDGE_BANLIST_DIR' '$REMOTE_EGRESS_POLICY_DIR'; rm -f '$REMOTE_NODES_FILE' '$REMOTE_STATE_FILE' '$REMOTE_NETWORKS_FILE' '$REMOTE_CREATE_INVENTORY_TEMP' '$REMOTE_PREPARE_INVENTORY_TEMP' '$REMOTE_VERIFY_TEMP'"
 else
-    remote_command="set -e; sudo mkdir -p /opt/ai-service-platform/tools/bootstrap; sudo install -m 700 '$REMOTE_CREATE_INVENTORY_TEMP' /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; sudo install -m 700 '$REMOTE_PREPARE_INVENTORY_TEMP' '$REMOTE_PREPARE_SCRIPT'; sudo install -m 700 '$REMOTE_VERIFY_TEMP' '$REMOTE_VERIFY_SCRIPT'; $softether_command $haproxy_command $egress_policy_command $networks_command $prepare_command; rm -rf '$REMOTE_SOFTETHER_DIR' '$REMOTE_HAPROXY_DIR' '$REMOTE_EGRESS_POLICY_DIR'; rm -f '$REMOTE_NODES_FILE' '$REMOTE_STATE_FILE' '$REMOTE_NETWORKS_FILE' '$REMOTE_CREATE_INVENTORY_TEMP' '$REMOTE_PREPARE_INVENTORY_TEMP' '$REMOTE_VERIFY_TEMP'"
+    remote_command="set -e; sudo mkdir -p /opt/ai-service-platform/tools/bootstrap; sudo install -m 700 '$REMOTE_CREATE_INVENTORY_TEMP' /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; sudo install -m 700 '$REMOTE_PREPARE_INVENTORY_TEMP' '$REMOTE_PREPARE_SCRIPT'; sudo install -m 700 '$REMOTE_VERIFY_TEMP' '$REMOTE_VERIFY_SCRIPT'; $softether_command $haproxy_command $edge_banlist_command $egress_policy_command $networks_command $prepare_command; rm -rf '$REMOTE_SOFTETHER_DIR' '$REMOTE_HAPROXY_DIR' '$REMOTE_EDGE_BANLIST_DIR' '$REMOTE_EGRESS_POLICY_DIR'; rm -f '$REMOTE_NODES_FILE' '$REMOTE_STATE_FILE' '$REMOTE_NETWORKS_FILE' '$REMOTE_CREATE_INVENTORY_TEMP' '$REMOTE_PREPARE_INVENTORY_TEMP' '$REMOTE_VERIFY_TEMP'"
 fi
 
 echo "Running orchestration inventory preparation"

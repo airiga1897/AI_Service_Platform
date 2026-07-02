@@ -151,7 +151,7 @@ function New-TarGzBundle($ServiceRunnerScript, $CreateInventoryScript, $AnsibleD
         Copy-Item -LiteralPath $StateFile -Destination (Join-Path $operatorStagingDir "state.csv")
         Copy-Item -LiteralPath $NetworksFile -Destination (Join-Path $operatorStagingDir "networks.csv")
         $operatorSourceDir = Split-Path -Parent (Resolve-Path -LiteralPath $NodesFile).Path
-        foreach ($operatorSubdir in @("haproxy", "softether")) {
+        foreach ($operatorSubdir in @("haproxy", "softether", "edge_banlist")) {
             $sourceSubdir = Join-Path $operatorSourceDir $operatorSubdir
             if (Test-Path -LiteralPath $sourceSubdir -PathType Container) {
                 Copy-Item -LiteralPath $sourceSubdir -Destination (Join-Path $operatorStagingDir $operatorSubdir) -Recurse
@@ -348,7 +348,7 @@ function Read-BatchPlan($Path) {
         if (-not $step.service -or -not $step.action) {
             Fail "BatchPlanFile step $index must include service and action"
         }
-        if ($step.service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector")) {
+        if ($step.service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist")) {
             Fail "BatchPlanFile step $index has unsupported service: $($step.service)"
         }
         if ($step.action -notin @("plan", "apply", "absent", "purge", "reseed")) {
@@ -713,6 +713,7 @@ if (-not $isBatch) {
         "sudo bash $(Quote-BashArg "$RemoteRepoDir/tools/bootstrap/create_inventory.sh") --nodes-file $(Quote-BashArg $RemoteNodesFile) --state-file $(Quote-BashArg $RemoteStateFile) --output $(Quote-BashArg $RemoteInventory)",
         "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/haproxy") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/haproxy"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/haproxy") $(Quote-BashArg "$remoteOperatorDir/haproxy"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/haproxy"); fi",
         "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/softether") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/softether"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/softether") $(Quote-BashArg "$remoteOperatorDir/softether"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/softether"); fi",
+        "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/edge_banlist") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/edge_banlist"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/edge_banlist") $(Quote-BashArg "$remoteOperatorDir/edge_banlist"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/edge_banlist"); fi",
         "sudo bash -lc $(Quote-BashArg $serviceCommand)"
     ) -join "; "
 }
@@ -823,7 +824,8 @@ foreach ($line in @(
     "run_stage $(Quote-BashArg "refresh ansible known_hosts") bash -lc $(Quote-BashArg $refreshKnownHostsCommand)",
     "run_stage $(Quote-BashArg "regenerate Ansible inventory") sudo bash $(Quote-BashArg "$RemoteRepoDir/tools/bootstrap/create_inventory.sh") --nodes-file $(Quote-BashArg $RemoteNodesFile) --state-file $(Quote-BashArg $RemoteStateFile) --output $(Quote-BashArg $RemoteInventory)",
     "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/haproxy") ]; then run_stage $(Quote-BashArg "sync operator haproxy config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/haproxy"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/haproxy") $(Quote-BashArg "$remoteOperatorDir/haproxy"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/haproxy")"); fi",
-    "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/softether") ]; then run_stage $(Quote-BashArg "sync operator softether config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/softether"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/softether") $(Quote-BashArg "$remoteOperatorDir/softether"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/softether")"); fi"
+    "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/softether") ]; then run_stage $(Quote-BashArg "sync operator softether config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/softether"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/softether") $(Quote-BashArg "$remoteOperatorDir/softether"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/softether")"); fi",
+    "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/edge_banlist") ]; then run_stage $(Quote-BashArg "sync operator edge_banlist config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/edge_banlist"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/edge_banlist") $(Quote-BashArg "$remoteOperatorDir/edge_banlist"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/edge_banlist")"); fi"
 )) { $runScriptLines.Add($line) | Out-Null }
 
 if ($isBatch) {

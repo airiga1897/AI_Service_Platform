@@ -2,6 +2,7 @@ global
     log stdout format raw local0
     maxconn 4096
     tune.ssl.default-dh-param 2048
+    stats socket /run/haproxy/admin.sock mode 660 level admin expose-fd listeners
 
 defaults
     log global
@@ -26,6 +27,7 @@ frontend http_in
     mode http
     acl is_acme path_beg /.well-known/acme-challenge/
     http-request deny deny_status 403 if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst } !is_acme
+    http-request deny deny_status 403 if { src -f /usr/local/etc/haproxy/lists/generated_blocked_ips.lst } !is_acme
     http-request track-sc1 src table st_http_rates if !is_acme
     acl is_http_banned src_get_gpc0(st_http_rates) gt 0
     http-request deny deny_status 403 if !is_acme is_http_banned
@@ -47,12 +49,12 @@ frontend https_in
     bind *:443
     mode tcp
     option tcplog
-    tcp-request connection reject if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
+    tcp-request connection silent-drop if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
+    tcp-request connection silent-drop if { src -f /usr/local/etc/haproxy/lists/generated_blocked_ips.lst }
     tcp-request inspect-delay 5s
-    tcp-request content accept if { req_ssl_hello_type 1 }
     tcp-request content track-sc0 src table st_tcp_rates
-    tcp-request content reject if { sc0_conn_rate gt {{ edge_haproxy_tcp_rate_limit }} }
-    tcp-request content reject if { sc0_conn_cur gt {{ edge_haproxy_tcp_conn_cur_limit }} }
+    tcp-request content silent-drop if { sc0_conn_rate gt {{ edge_haproxy_tcp_rate_limit }} }
+    tcp-request content silent-drop if { sc0_conn_cur gt {{ edge_haproxy_tcp_conn_cur_limit }} }
 
 {% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
     acl is_softether req_ssl_sni -i {{ edge_haproxy_route_model.vpn_ingress.sni | join(' ') }}
@@ -61,12 +63,13 @@ frontend https_in
     acl is_cascade_https_sni req_ssl_sni -i {{ edge_haproxy_route_model.vpn_cascade.sni | join(' ') }}
 {% endif %}
 {% if (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) and (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) %}
-    tcp-request content reject unless is_softether or is_cascade_https_sni
+    tcp-request content silent-drop unless is_softether or is_cascade_https_sni
 {% elif edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
-    tcp-request content reject unless is_softether
+    tcp-request content silent-drop unless is_softether
 {% elif edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
-    tcp-request content reject unless is_cascade_https_sni
+    tcp-request content silent-drop unless is_cascade_https_sni
 {% endif %}
+    tcp-request content accept if { req_ssl_hello_type 1 }
 {% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
     use_backend be_softether_https if is_softether
 {% endif %}
@@ -91,12 +94,12 @@ frontend softether_tcp_992
     bind *:992
     mode tcp
     option tcplog
-    tcp-request connection reject if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
+    tcp-request connection silent-drop if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
+    tcp-request connection silent-drop if { src -f /usr/local/etc/haproxy/lists/generated_blocked_ips.lst }
     tcp-request inspect-delay 5s
-    tcp-request content accept if { req_ssl_hello_type 1 }
     tcp-request content track-sc0 src table st_tcp_rates
-    tcp-request content reject if { sc0_conn_rate gt {{ edge_haproxy_tcp_rate_limit }} }
-    tcp-request content reject if { sc0_conn_cur gt {{ edge_haproxy_tcp_conn_cur_limit }} }
+    tcp-request content silent-drop if { sc0_conn_rate gt {{ edge_haproxy_tcp_rate_limit }} }
+    tcp-request content silent-drop if { sc0_conn_cur gt {{ edge_haproxy_tcp_conn_cur_limit }} }
 {% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
     acl is_softether_992_sni req_ssl_sni -i {{ edge_haproxy_route_model.vpn_ingress.sni | join(' ') }}
 {% endif %}
@@ -104,12 +107,13 @@ frontend softether_tcp_992
     acl is_cascade_992_sni req_ssl_sni -i {{ edge_haproxy_route_model.vpn_cascade.sni | join(' ') }}
 {% endif %}
 {% if (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) and (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) %}
-    tcp-request content reject unless is_softether_992_sni or is_cascade_992_sni
+    tcp-request content silent-drop unless is_softether_992_sni or is_cascade_992_sni
 {% elif edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
-    tcp-request content reject unless is_softether_992_sni
+    tcp-request content silent-drop unless is_softether_992_sni
 {% elif edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
-    tcp-request content reject unless is_cascade_992_sni
+    tcp-request content silent-drop unless is_cascade_992_sni
 {% endif %}
+    tcp-request content accept if { req_ssl_hello_type 1 }
 {% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
     use_backend be_softether_992 if is_softether_992_sni
 {% endif %}
@@ -134,10 +138,10 @@ frontend softether_mgmt
     bind *:5555
     mode tcp
     option tcplog
-    tcp-request connection reject if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
-    tcp-request connection reject if !{ src -f /usr/local/etc/haproxy/lists/vpn_mgmt_ips.lst }
+    tcp-request connection silent-drop if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
+    tcp-request connection silent-drop if { src -f /usr/local/etc/haproxy/lists/generated_blocked_ips.lst }
+    tcp-request connection silent-drop if !{ src -f /usr/local/etc/haproxy/lists/vpn_mgmt_ips.lst }
     tcp-request inspect-delay 5s
-    tcp-request content accept if { req_ssl_hello_type 1 }
 {% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
     acl is_softether_mgmt_sni req_ssl_sni -i {{ edge_haproxy_route_model.vpn_ingress.sni | join(' ') }}
 {% endif %}
@@ -145,12 +149,13 @@ frontend softether_mgmt
     acl is_cascade_mgmt_sni req_ssl_sni -i {{ edge_haproxy_route_model.vpn_cascade.sni | join(' ') }}
 {% endif %}
 {% if (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) and (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) %}
-    tcp-request content reject unless is_softether_mgmt_sni or is_cascade_mgmt_sni
+    tcp-request content silent-drop unless is_softether_mgmt_sni or is_cascade_mgmt_sni
 {% elif edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
-    tcp-request content reject unless is_softether_mgmt_sni
+    tcp-request content silent-drop unless is_softether_mgmt_sni
 {% elif edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
-    tcp-request content reject unless is_cascade_mgmt_sni
+    tcp-request content silent-drop unless is_cascade_mgmt_sni
 {% endif %}
+    tcp-request content accept if { req_ssl_hello_type 1 }
 {% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
     use_backend be_softether_mgmt if is_softether_mgmt_sni
 {% endif %}
@@ -177,11 +182,12 @@ frontend minecraft_game
     bind *:{{ edge_haproxy_route_model.minecraft.ports.game }}
     mode tcp
     option tcplog
-    tcp-request connection reject if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
+    tcp-request connection silent-drop if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
+    tcp-request connection silent-drop if { src -f /usr/local/etc/haproxy/lists/generated_blocked_ips.lst }
     tcp-request connection track-sc0 src table st_minecraft_game_rates
-    tcp-request connection reject if { sc0_conn_rate gt {{ edge_haproxy_route_model.minecraft.game.rate_limit }} }
+    tcp-request connection silent-drop if { sc0_conn_rate gt {{ edge_haproxy_route_model.minecraft.game.rate_limit }} }
 {% if edge_haproxy_route_model.minecraft.policy.geoip | default('disabled') == 'ru_only' %}
-    tcp-request connection reject if !{ src -f /usr/local/etc/haproxy/lists/ru_networks.lst }
+    tcp-request connection silent-drop if !{ src -f /usr/local/etc/haproxy/lists/ru_networks.lst }
 {% endif %}
     default_backend be_minecraft_game
 
@@ -198,11 +204,12 @@ frontend minecraft_rcon
     bind *:{{ edge_haproxy_route_model.minecraft.ports.rcon }}
     mode tcp
     option tcplog
-    tcp-request connection reject if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
+    tcp-request connection silent-drop if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
+    tcp-request connection silent-drop if { src -f /usr/local/etc/haproxy/lists/generated_blocked_ips.lst }
     tcp-request connection track-sc0 src table st_minecraft_rcon_rates
-    tcp-request connection reject if { sc0_conn_rate gt {{ edge_haproxy_route_model.minecraft.rcon.rate_limit }} }
+    tcp-request connection silent-drop if { sc0_conn_rate gt {{ edge_haproxy_route_model.minecraft.rcon.rate_limit }} }
 {% if edge_haproxy_route_model.minecraft.policy.geoip | default('disabled') == 'ru_only' %}
-    tcp-request connection reject if !{ src -f /usr/local/etc/haproxy/lists/ru_networks.lst }
+    tcp-request connection silent-drop if !{ src -f /usr/local/etc/haproxy/lists/ru_networks.lst }
 {% endif %}
     default_backend be_minecraft_rcon
 

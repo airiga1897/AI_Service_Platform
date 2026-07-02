@@ -18,7 +18,7 @@ param(
     [int]$SecureBackupKeepLatest = 10,
     [string]$VpnIngressDomain = "mine-craft.su",
     [string[]]$ReseedVpnEdge = @(),
-    [ValidateSet("", "edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector")]
+    [ValidateSet("", "edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist")]
     [string]$OnlyService = "",
     [switch]$AutoAcceptHostKey = $true,
     [switch]$SkipSync,
@@ -31,7 +31,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ExpectedNodesHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
-$SupportedServices = @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector")
+$SupportedServices = @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist")
 $ReservedServices = @()
 $script:OperatorBackupCompleted = $false
 $script:BatchSteps = New-Object System.Collections.Generic.List[object]
@@ -304,6 +304,19 @@ function Get-PresentVpnCascadeRouteAliases($Rows) {
     return @($aliases)
 }
 
+function Assert-NoHaproxyCascadeSurface($RoutesPath) {
+    if (-not (Test-Path -LiteralPath $RoutesPath -PathType Leaf)) {
+        return
+    }
+    $content = Get-Content -LiteralPath $RoutesPath -Raw
+    if ($content -match "(?m)^vpn_cascade:\s*$") {
+        Fail "edge_route vpn_cascade has no present aliases, but $RoutesPath still contains a vpn_cascade section. Remove stale cascade routes before sync."
+    }
+    if ($content -match "cascade-vps") {
+        Fail "edge_route vpn_cascade has no present aliases, but $RoutesPath still contains cascade-vps SNI entries. Remove stale cascade routes before sync."
+    }
+}
+
 function Get-VpnCascadeLinkSecretPath() {
     return (Join-Path (Join-Path (Join-Path (Join-Path $OperatorDir "softether") "cascade") "secrets") "lab-cascade.json")
 }
@@ -378,6 +391,69 @@ function Assert-VpnCascadeLinksAreAcyclic($Links) {
     if ($visited -lt $nodes.Count) {
         Fail "vpn_cascade active links contain a directed cycle. Active cascade fabric must be acyclic: $($edgeLabels -join ', ')"
     }
+    Assert-VpnCascadeLinksHaveNoUndirectedCycle $Links
+}
+
+function Assert-CascadeEdgesHaveNoUndirectedCycle($Edges, $Label) {
+    if ($Edges.Count -le 1) {
+        return
+    }
+
+    $parent = @{}
+    $rank = @{}
+
+    function Ensure-DisjointNode($Node) {
+        if (-not $parent.ContainsKey($Node)) {
+            $parent[$Node] = $Node
+            $rank[$Node] = 0
+        }
+    }
+
+    function Find-DisjointRoot($Node) {
+        Ensure-DisjointNode $Node
+        $root = [string]$Node
+        while ([string]$parent[$root] -ne $root) {
+            $root = [string]$parent[$root]
+        }
+        $current = [string]$Node
+        while ([string]$parent[$current] -ne $current) {
+            $next = [string]$parent[$current]
+            $parent[$current] = $root
+            $current = $next
+        }
+        return $root
+    }
+
+    foreach ($edge in @($Edges)) {
+        if ([string]$edge -notmatch '^([^>]+)>([^>]+)$') {
+            Fail "$Label has invalid edge '$edge'; expected alias>alias"
+        }
+        $from = $Matches[1]
+        $to = $Matches[2]
+        if ($from -eq $to) {
+            Fail "$Label active/probe L2 edge cannot point to itself: $edge"
+        }
+
+        $fromRoot = Find-DisjointRoot $from
+        $toRoot = Find-DisjointRoot $to
+        if ($fromRoot -eq $toRoot) {
+            Fail "$Label contains an undirected L2 cycle after adding edge $edge. SoftEther CascadeLab is a shared L2 fabric; keep it tree-shaped or move HA to L3 policy routing."
+        }
+
+        if ([int]$rank[$fromRoot] -lt [int]$rank[$toRoot]) {
+            $parent[$fromRoot] = $toRoot
+        } elseif ([int]$rank[$fromRoot] -gt [int]$rank[$toRoot]) {
+            $parent[$toRoot] = $fromRoot
+        } else {
+            $parent[$toRoot] = $fromRoot
+            $rank[$fromRoot] = [int]$rank[$fromRoot] + 1
+        }
+    }
+}
+
+function Assert-VpnCascadeLinksHaveNoUndirectedCycle($Links) {
+    $edges = @($Links | ForEach-Object { "$($_.ingress_alias)>$($_.egress_alias)" })
+    Assert-CascadeEdgesHaveNoUndirectedCycle $edges "vpn_cascade active/probe links"
 }
 
 function Assert-CascadeEdgeSetIsAcyclic($Edges, $Label) {
@@ -448,6 +524,12 @@ function Get-ActiveVpnCascadeSecretEdges() {
     } else {
         @($secret)
     }
+    $fabricLinks = if ($secret.links) {
+        @($secret.links | Where-Object { (-not $_.state) -or $_.state -in @("active", "probe") })
+    } else {
+        @($secret)
+    }
+    Assert-VpnCascadeLinksHaveNoUndirectedCycle $fabricLinks
     Assert-VpnCascadeLinksAreAcyclic $links
     return @($links | ForEach-Object { "$($_.ingress_alias)>$($_.egress_alias)" } | Sort-Object -Unique)
 }
@@ -508,6 +590,7 @@ function Assert-CascadeTopologyStateMatchesLinks($Rows, $NodeRows) {
         }
     }
     Assert-CascadeEdgeSetIsAcyclic $activeEdges "cascade_topology $($topology.name)"
+    Assert-CascadeEdgesHaveNoUndirectedCycle $activeEdges "cascade_topology $($topology.name) active links"
 
     $secretEdges = @(Get-ActiveVpnCascadeSecretEdges)
     $missingInState = @($secretEdges | Where-Object { $activeEdges -notcontains $_ })
@@ -538,6 +621,12 @@ function Get-VpnCascadeOrderedAliases($Aliases) {
     if ($links.Count -eq 0) {
         Fail "vpn_cascade secret must include at least one active link: $secretPath"
     }
+    $fabricLinks = if ($secret.links) {
+        @($secret.links | Where-Object { (-not $_.state) -or $_.state -in @("active", "probe") })
+    } else {
+        @($secret)
+    }
+    Assert-VpnCascadeLinksHaveNoUndirectedCycle $fabricLinks
     Assert-VpnCascadeLinksAreAcyclic $links
 
     $ordered = New-Object System.Collections.Generic.List[string]
@@ -573,6 +662,12 @@ function Get-VpnCascadeActiveLinkAliases() {
     } else {
         @($secret)
     }
+    $fabricLinks = if ($secret.links) {
+        @($secret.links | Where-Object { (-not $_.state) -or $_.state -in @("active", "probe") })
+    } else {
+        @($secret)
+    }
+    Assert-VpnCascadeLinksHaveNoUndirectedCycle $fabricLinks
     Assert-VpnCascadeLinksAreAcyclic $links
 
     $aliases = New-Object System.Collections.Generic.List[string]
@@ -769,8 +864,69 @@ function Normalize-HaproxyRoutes($RoutesPath, $VpnAliases, $Domain) {
 }
 
 function Normalize-HaproxyCascadeRoutes($RoutesPath, $CascadeAliases, $Domain) {
+    $changedAliases = New-Object System.Collections.Generic.List[string]
+
     if ($CascadeAliases.Count -eq 0) {
-        return
+        if (-not (Test-Path -LiteralPath $RoutesPath -PathType Leaf)) {
+            return @()
+        }
+
+        $lines = New-Object System.Collections.Generic.List[string]
+        foreach ($line in (Get-Content -LiteralPath $RoutesPath)) {
+            $lines.Add([string]$line)
+        }
+
+        $cascadeIndex = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match "^vpn_cascade:\s*$") {
+                $cascadeIndex = $i
+                break
+            }
+        }
+
+        if ($cascadeIndex -lt 0) {
+            return @()
+        }
+
+        $cascadeEnd = Find-TopLevelSectionEnd $lines $cascadeIndex
+        $perAliasIndex = -1
+        for ($i = $cascadeIndex + 1; $i -lt $cascadeEnd; $i++) {
+            if ($lines[$i] -match "^  per_alias:\s*$") {
+                $perAliasIndex = $i
+                break
+            }
+        }
+
+        if ($perAliasIndex -ge 0) {
+            $perAliasEnd = $cascadeEnd
+            for ($i = $perAliasIndex + 1; $i -lt $cascadeEnd; $i++) {
+                if ($lines[$i] -match "^  \S") {
+                    $perAliasEnd = $i
+                    break
+                }
+            }
+
+            for ($i = $perAliasIndex + 1; $i -lt $perAliasEnd; $i++) {
+                $match = [regex]::Match($lines[$i], "^    ([A-Za-z0-9_.-]+):\s*$")
+                if ($match.Success) {
+                    Add-UniqueAlias $changedAliases $match.Groups[1].Value
+                }
+            }
+        }
+
+        $lines.RemoveRange($cascadeIndex, ($cascadeEnd - $cascadeIndex))
+        while ($cascadeIndex -lt $lines.Count -and $cascadeIndex -gt 0 -and $lines[$cascadeIndex] -eq "" -and $lines[$cascadeIndex - 1] -eq "") {
+            $lines.RemoveAt($cascadeIndex)
+        }
+
+        Invoke-OperatorBackupIfNeeded "remove vpn_cascade route config"
+        Set-Content -LiteralPath $RoutesPath -Value $lines -Encoding ascii
+        if ($changedAliases.Count -gt 0) {
+            Write-Host "Removed vpn_cascade route config for aliases: $($changedAliases.ToArray() -join ', ')"
+        } else {
+            Write-Host "Removed vpn_cascade route config"
+        }
+        return @($changedAliases.ToArray())
     }
 
     $routesDir = Split-Path -Parent $RoutesPath
@@ -783,7 +939,7 @@ function Normalize-HaproxyCascadeRoutes($RoutesPath, $CascadeAliases, $Domain) {
         Invoke-OperatorBackupIfNeeded "create HAProxy routes.yml"
         Set-Content -LiteralPath $RoutesPath -Value (New-VpnCascadeRoutesBlock $CascadeAliases $Domain) -Encoding ascii
         Write-Host "Created HAProxy routes.yml with vpn_cascade aliases: $($CascadeAliases -join ', ')"
-        return
+        return @($CascadeAliases)
     }
 
     $lines = New-Object System.Collections.Generic.List[string]
@@ -813,7 +969,7 @@ function Normalize-HaproxyCascadeRoutes($RoutesPath, $CascadeAliases, $Domain) {
         Invoke-OperatorBackupIfNeeded "add vpn_cascade route config"
         Set-Content -LiteralPath $RoutesPath -Value $newLines -Encoding ascii
         Write-Host "Added vpn_cascade route config for aliases: $($CascadeAliases -join ', ')"
-        return
+        return @($CascadeAliases)
     }
 
     $cascadeEnd = Find-TopLevelSectionEnd $lines $cascadeIndex
@@ -836,7 +992,7 @@ function Normalize-HaproxyCascadeRoutes($RoutesPath, $CascadeAliases, $Domain) {
         Invoke-OperatorBackupIfNeeded "add vpn_cascade.per_alias route config"
         Set-Content -LiteralPath $RoutesPath -Value $lines -Encoding ascii
         Write-Host "Added vpn_cascade.per_alias for aliases: $($CascadeAliases -join ', ')"
-        return
+        return @($CascadeAliases)
     }
 
     $perAliasEnd = $cascadeEnd
@@ -855,15 +1011,54 @@ function Normalize-HaproxyCascadeRoutes($RoutesPath, $CascadeAliases, $Domain) {
         }
     }
 
+    $stale = @($existing | Where-Object { $CascadeAliases -notcontains $_ })
+    if ($stale.Count -gt 0) {
+        $ranges = New-Object System.Collections.Generic.List[object]
+        for ($i = $perAliasIndex + 1; $i -lt $perAliasEnd; $i++) {
+            $match = [regex]::Match($lines[$i], "^    ([A-Za-z0-9_.-]+):\s*$")
+            if (-not $match.Success) {
+                continue
+            }
+            $alias = $match.Groups[1].Value
+            $start = $i
+            $end = $perAliasEnd
+            for ($j = $i + 1; $j -lt $perAliasEnd; $j++) {
+                if ($lines[$j] -match "^    [A-Za-z0-9_.-]+:\s*$") {
+                    $end = $j
+                    break
+                }
+            }
+            if ($stale -contains $alias) {
+                $ranges.Add([pscustomobject]@{ Start = $start; Count = ($end - $start) }) | Out-Null
+            }
+            $i = $end - 1
+        }
+
+        foreach ($range in @($ranges | Sort-Object Start -Descending)) {
+            $lines.RemoveRange([int]$range.Start, [int]$range.Count)
+        }
+        Invoke-OperatorBackupIfNeeded "remove stale vpn_cascade route aliases"
+        Set-Content -LiteralPath $RoutesPath -Value $lines -Encoding ascii
+        Write-Host "Removed stale vpn_cascade routes for aliases: $($stale -join ', ')"
+        foreach ($alias in $stale) {
+            Add-UniqueAlias $changedAliases $alias
+        }
+        foreach ($alias in @(Normalize-HaproxyCascadeRoutes $RoutesPath $CascadeAliases $Domain)) {
+            Add-UniqueAlias $changedAliases $alias
+        }
+        return @($changedAliases.ToArray())
+    }
+
     $missing = @($CascadeAliases | Where-Object { $existing -notcontains $_ })
     if ($missing.Count -eq 0) {
-        return
+        return @()
     }
 
     $lines.InsertRange($perAliasEnd, [string[]](New-VpnCascadeAliasBlock $missing $Domain))
     Invoke-OperatorBackupIfNeeded "add missing vpn_cascade aliases"
     Set-Content -LiteralPath $RoutesPath -Value $lines -Encoding ascii
     Write-Host "Added vpn_cascade routes for aliases: $($missing -join ', ')"
+    return @($missing)
 }
 
 function Resolve-EndpointIpAddresses($Endpoint, $Alias) {
@@ -1156,8 +1351,13 @@ $nodeRows = Import-Csv -LiteralPath $NodesFile
 $stateRows = Import-Csv -LiteralPath $StateFile
 $stateRows = @(Normalize-StateRows $stateRows $nodeRows $StateFile)
 Update-VpnManagementAllowlist (Join-Path (Join-Path (Join-Path $OperatorDir "haproxy") "lists") "vpn_mgmt_ips.lst") $nodeRows
-Normalize-HaproxyRoutes (Join-Path (Join-Path $OperatorDir "haproxy") "routes.yml") (Get-PresentVpnIngressAliases $stateRows) $VpnIngressDomain
-Normalize-HaproxyCascadeRoutes (Join-Path (Join-Path $OperatorDir "haproxy") "routes.yml") (Get-PresentVpnCascadeRouteAliases $stateRows) $VpnIngressDomain
+$haproxyRoutesPath = Join-Path (Join-Path $OperatorDir "haproxy") "routes.yml"
+$presentVpnCascadeRouteAliases = @(Get-PresentVpnCascadeRouteAliases $stateRows)
+Normalize-HaproxyRoutes $haproxyRoutesPath (Get-PresentVpnIngressAliases $stateRows) $VpnIngressDomain
+$haproxyCascadeRouteChangedAliases = @(Normalize-HaproxyCascadeRoutes $haproxyRoutesPath $presentVpnCascadeRouteAliases $VpnIngressDomain)
+if ($presentVpnCascadeRouteAliases.Count -eq 0) {
+    Assert-NoHaproxyCascadeSurface $haproxyRoutesPath
+}
 $reseedVpnEdgeAliases = @(Split-OperatorAliasList $ReseedVpnEdge)
 $standbyOrchestrationAliases = @(Get-OrchestrationCandidateAliases $stateRows $ControlRole)
 
@@ -1177,10 +1377,14 @@ if ($OnlyService) {
 $edgeRouteRows = @($stateRows | Where-Object { $_.kind -eq "edge_route" })
 $edgeHaproxyAliases = @(Get-PresentServiceAliases $stateRows "edge_haproxy")
 $vpnEdgeAliases = @(Get-PresentServiceAliases $stateRows "vpn_edge")
+$vpnCascadeAliases = @(Get-PresentServiceAliases $stateRows "vpn_cascade")
 $vpnIngressAliases = @(Get-EdgeRouteAliasesByState $stateRows "vpn_ingress" @("present"))
 $presentEdgeRouteAliases = @(Get-AnyEdgeRouteAliasesByState $stateRows @("present"))
 $edgeRouteApplyAliases = New-Object System.Collections.Generic.List[string]
 $edgeRouteRemovalAliases = New-Object System.Collections.Generic.List[string]
+foreach ($alias in $haproxyCascadeRouteChangedAliases) {
+    Add-UniqueAlias $edgeRouteApplyAliases $alias
+}
 
 $nodeAliases = @($nodeRows | ForEach-Object { $_.current_alias } | Where-Object { $_ })
 foreach ($alias in $reseedVpnEdgeAliases) {
@@ -1209,6 +1413,9 @@ foreach ($routeRow in $edgeRouteRows) {
         }
         if ($routeRow.name -eq "vpn_ingress" -and ($vpnEdgeAliases -notcontains $alias)) {
             Fail "edge_route vpn_ingress is present on $alias, but service vpn_edge is not present on the same alias"
+        }
+        if ($routeRow.name -eq "vpn_cascade" -and ($vpnCascadeAliases -notcontains $alias)) {
+            Fail "edge_route vpn_cascade is present on $alias, but service vpn_cascade is not present on the same alias"
         }
         Add-UniqueAlias $edgeRouteApplyAliases $alias
     }

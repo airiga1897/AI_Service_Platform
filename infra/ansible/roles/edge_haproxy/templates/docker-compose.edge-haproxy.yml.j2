@@ -21,6 +21,7 @@ services:
 {% endif %}
     volumes:
       - ./haproxy:/usr/local/etc/haproxy:ro
+      - ./run:/run/haproxy
       - /etc/localtime:/etc/localtime:ro
     restart: always
     networks:

@@ -256,34 +256,92 @@ PowerShell rollout commands are run manually by the operator.
      -StateFile .\operator\state.csv `
      -OnlyService vpn_edge
    ```
-3. Apply cascade transport only after VPN ingress is healthy:
+3. Apply cascade transport only when desired state intentionally changes it.
+   During the L2 freeze this removes/keeps absent the cascade runtime:
    ```powershell
    .\tools\services\rollout_from_state.ps1 `
      -NodesFile .\operator\nodes.csv `
      -StateFile .\operator\state.csv `
      -OnlyService vpn_cascade
    ```
-4. Verify active cascade links:
+4. Verify that there are no active cascade links:
    ```powershell
    .\tools\services\check_vpn_cascade_links.ps1 -Json
    ```
 
 Current verified status as of 2026-06-28:
 
-- VPN ingress works on `vps1` through `vps7`.
-- `vpn_cascade` is active on `vps1`, `vps2`, `vps3`, and `vps4`; `vps7` is
-  staged with service/SNI surface and first test receiver link.
-- Verified online cascade link is `vps2-to-vps3`. `vps1-to-vps3`,
-  `vps4-to-vps3`, and staged `vps1-to-vps7` are acceptance-pending until
-  ingress-side SoftEther connection objects are visible and online.
-- The staged `vps1-to-vps7` link uses `cascade-vps7.mine-craft.su:443` via
-  HAProxy SNI. Keep `vps7` in the same `service,vpn_cascade` batch as `vps1`.
+- VPN ingress works on `vps1` through `vps8` after `vps8` ingress rollout.
+- SoftEther L2 `vpn_cascade` is frozen and absent from desired state on
+  `vps1`, `vps2`, `vps3`, and `vps4`.
+- No shared `CascadeLab` links are active. Historical links are preserved in
+  `lab-cascade.json` only as disabled audit material.
+- No public `cascade-vpsN` SNI surface should be published by HAProxy.
+- `vps7` has no active shared `CascadeLab` links after the CPU storm incident.
 - `vps5` remains an orchestration candidate and VPN ingress node; `vps7` remains
-  a future `vps3` duplicate/standby candidate, currently tested only by
-  `vps1-to-vps7`.
+  a future `vps3` duplicate/standby candidate for L3 HA work.
+- `vps8` is a Selectel RU services standby with mandatory VPN ingress only; no
+  production service route is moved to it yet. Provider names such as
+  `adminvps` and `selectel` are placement metadata, not runtime roles.
 
-Stop before any broader rollout if any active cascade link reports `tcp=false`,
-`online=false`, or a status other than `Connection Completed`.
+Stop before any broader rollout if `check_vpn_cascade_links.ps1 -Json` reports
+any active links, if live HAProxy still contains `cascade-vps`, or if
+`softether-cascade` is running on `vps1`, `vps2`, `vps3`, or `vps4`.
+
+Incident note: adding alternate `vps7` receiver links to the shared `CascadeLab`
+fabric on 2026-06-28 caused sustained CPU spikes on `vps1`, `vps2`, `vps4`, and
+`vps7`. Mitigation was to stop `vpn_cascade` on affected nodes and freeze the
+entire shared L2 cascade layer in desired state. Do not use multiple active L2
+receiver paths as HA; future HA must be L3 policy routing.
+
+`service,vpn_cascade` and `edge_route,vpn_cascade` are intentionally separate,
+but both are absent during the freeze. `service,vpn_cascade` means the node runs
+local cascade runtime and may manage outgoing links. `edge_route,vpn_cascade`
+means HAProxy publishes public `cascade-vpsN` SNI on `443/992/5555`.
+When `edge_route,vpn_cascade` is absent, HAProxy must not contain
+`cascade-vpsN`, `is_cascade*`, or `be_cascade*` on any of those ports; the
+shared `5555` listener may remain only for `vpn-vpsN` SoftEther edge
+management.
+
+When all public cascade aliases are retired, remove the whole
+`vpn_cascade` section from `operator/haproxy/routes.yml` and rerun only
+`edge_haproxy`. Otherwise HAProxy can keep a stale `cascade-vpsN` SNI route on
+`443/992/5555` even when the public route is no longer desired.
+`cascade-vpsN:5555` must not route anywhere while the freeze is active.
+
+If SoftEther Server Manager reports "Source IP Restriction List of the Virtual
+Hub", first verify which SNI target was used. `vpn-vpsN:5555` should reach
+`softether-edge`; `cascade-vpsN:5555` should not be published while the
+SoftEther L2 freeze is active. Keep management allowlisting centralized in HAProxy
+`vpn_mgmt_ips.lst`; hub-level Source IP restrictions must not drift between VPS
+unless that is an explicit emergency lockout.
+
+### Edge Banlist Canary
+
+`edge_banlist` first proved `vps2` in `observe`, then `enforce`, with scanner
+IPs written to `generated_blocked_ips.lst` and no socket errors. The next
+fleet rollout intentionally returns the shared config to `observe` and enables
+the timer on all active edge aliases `vps1..vps8`. In `observe`, it reads
+HAProxy stick-tables and writes `/var/log/ai-service-platform/edge_banlist.log`,
+but it must not write generated bans or restart HAProxy.
+
+Verify the canary after rollout:
+
+```powershell
+ssh -i .\operator\vps2\admin_key useradmin@vps2.mine-craft.su `
+  "systemctl is-active edge-banlist.timer; systemctl is-enabled edge-banlist.timer; sudo tail -20 /var/log/ai-service-platform/edge_banlist.log"
+```
+
+Verify the socket lifecycle separately:
+
+```powershell
+ssh -i .\operator\vps2\admin_key useradmin@vps2.mine-craft.su `
+  "test -S /opt/ai-service-platform/edge_haproxy/run/admin.sock && echo 'show table st_tcp_rates' | sudo socat - UNIX-CONNECT:/opt/ai-service-platform/edge_haproxy/run/admin.sock | head -20"
+```
+
+Only switch `operator/edge_banlist/config.yml` back to `enforce` after reviewing
+the fleet observe logs from every edge alias and confirming that candidates do
+not include operator, VPN, node, or service IPs.
 
 ---
 
@@ -325,16 +383,14 @@ will use `vps5`.
 
 ### Stage `vps7` As Alternate Receiver For `vps3`
 
-The first safe stage is a single receiver test: keep explicit
-`service,vpn_cascade` and `edge_route,vpn_cascade` rows for `vps7`, keep
-`cascade-vps7.mine-craft.su` SNI in `operator/haproxy/routes.yml`, and add only
-`vps1-to-vps7` to `cascade_topology` and
-`operator/softether/cascade/secrets/lab-cascade.json`.
+The safe post-incident stage is no active `vps7` receiver link in shared
+`CascadeLab`. Keep `vps7` as VPN ingress and future L3 HA candidate only.
 
 Do not add `vps7-to-vps3`: that would make `vps7` an ingress/transit toward
 `vps3`, not a duplicate receiver for `vps3`.
 
-Roll out in this order:
+If a future isolated or loop-free design makes `vps7` an active cascade
+receiver again, roll out in this order:
 
 ```powershell
 .\tools\services\rollout_from_state.ps1 `
@@ -348,32 +404,31 @@ Roll out in this order:
   -OnlyService vpn_cascade
 ```
 
-Stop if the new `vps7` TCP, SNI, admin, or cascade-link checks fail.
+Stop if the new `vps7` TCP, SNI, admin, or cascade-link checks fail. Do not
+publish `cascade-vps7` SNI routes unless a separate, loop-free rollout
+explicitly makes `vps7` an active cascade alias again.
 
-After staged rollout, check only the public surface:
+For the current post-incident state, check only the safe active links:
 
 ```powershell
-Test-NetConnection cascade-vps7.mine-craft.su -Port 443
-Test-NetConnection cascade-vps7.mine-craft.su -Port 5555
 .\tools\services\check_vpn_cascade_links.ps1 -Json -OnlyActive
 ```
 
-Expected active links are `vps1-to-vps3`, `vps2-to-vps3`, `vps4-to-vps3`, and
-`vps1-to-vps7`; all four must report `online=true`. Do not add broader
-`vps2-to-vps7` or `vps4-to-vps7` until the single `vps1-to-vps7` path is
-stable.
+Expected active links after the freeze are none. Do not add `vps1-to-vps3`,
+`vps2-to-vps3`, `vps4-to-vps3`, `vps1-to-vps7`, `vps2-to-vps7`, or
+`vps4-to-vps7` in the shared `CascadeLab` L2 fabric.
 
-Keep `vps7` in the same `service,vpn_cascade` row/batch as `vps1` while
-`vps1-to-vps7` is active. The role prepares egress-side users before configuring
-ingress-side links within one Ansible play; splitting `vps1` and `vps7` into
-different rollout batches can make `vps1` try the link before `vps7` is ready.
+If `vps7` is ever reintroduced as a loop-free cascade receiver after explicit
+design review, keep `vps7` in the same `service,vpn_cascade` row/batch as
+ingress aliases while they have active links to `vps7`. The role prepares
+egress-side users before configuring ingress-side links within one Ansible play;
+splitting receiver and ingress aliases into different rollout batches can make
+an ingress try the link before `vps7` is ready.
 
-If SoftEther Server Manager on `cascade-vps1` shows an empty Cascade Connections
-list while `lab-cascade.json` contains `vps1-to-vps3` or `vps1-to-vps7`, rerun
-`vpn_cascade` after the role version that verifies `CascadeGet` immediately
-after `CascadeCreate` and after final configure. The acceptance condition is
-that the connections are visible in Server Manager and
-`check_vpn_cascade_links.ps1` reports all four links `online=true`.
+While the L2 freeze is active, SoftEther Server Manager should not show active
+Cascade Connections on the former cascade nodes. Historical connection
+definitions may remain in `lab-cascade.json`, but they must stay disabled and
+must not be recreated by automation.
 
 Do not treat the connection name appearing in raw `vpncmd /IN` output as proof
 that the object exists: SoftEther can echo the submitted `CascadeGet` command
@@ -388,6 +443,62 @@ Retired cleanup must never delete a desired active link. Machine lists for
 desired and retired cascade connections are passed as JSON, not YAML-indented
 heredocs, and cleanup must fail before `CascadeDelete` if a candidate appears in
 the desired set.
+
+Active/probe cascade links in the same `CascadeLab` must also be loop-free as an
+undirected graph. Directed acyclic graphs are not enough for SoftEther L2 bridge
+fabric safety: `vps1>vps3 + vps2>vps3 + vps1>vps7 + vps2>vps7` is directed
+acyclic, but it forms the undirected loop `vps1 -- vps3 -- vps2 -- vps7 --
+vps1`.
+
+### Future `vps1` Dual-Cascade HA
+
+Keep SoftEther cascade as loop-free L2 transport only. Future active-active HA
+for `vps1` must live at L3: GeoIP selects a destination pool, the pool contains
+healthy receiver candidates such as `vps3` and `vps7`, and `policy_gateway`
+chooses a path by destination hash with health fallback. The first canary must
+apply only exact target IP routes and must include rollback before any default
+or broad country routing is considered.
+
+### Reinstall `vps1` As Provider Diagnostic
+
+Use this only as a controlled provider/OS residue experiment. Before reinstall,
+`vps1` must be present only in `edge_haproxy`, `vpn_edge`, and
+`edge_route,vpn_ingress`. It must not be present in `policy_gateway`,
+`minecraft`, or any present `vpn_cascade`/`cascade_topology` row. Historical
+`vps1` fallback/cascade files are audit material only and must not be
+reactivated.
+
+After reinstalling `vps1` in the provider panel, update `operator/nodes.csv`
+if the public IP changed, add the temporary `root_password`, and bootstrap as a
+fresh provider instance with local key overwrite:
+
+```powershell
+.\tools\bootstrap\bootstrap_all_from_windows.ps1 `
+  -AutoAcceptHostKey `
+  -ForceOverwriteKeys
+```
+
+Then restore only mandatory VPN ingress:
+
+```powershell
+.\tools\services\rollout_from_state.ps1 `
+  -NodesFile .\operator\nodes.csv `
+  -StateFile .\operator\state.csv `
+  -OnlyService edge_haproxy
+
+.\tools\services\rollout_from_state.ps1 `
+  -NodesFile .\operator\nodes.csv `
+  -StateFile .\operator\state.csv `
+  -OnlyService vpn_edge
+```
+
+Acceptance: `vps1` root password is cleared, admin-key SSH works, platform
+baseline directories/logrotate exist, `vpn-vps1:443/992/5555` is reachable,
+`softether-cascade` and `policy-router` are not running, and live HAProxy has
+no `cascade-vps`, `is_cascade`, or `be_cascade`. If `cascade-vps1` still
+TCP-connects but TLS/SNI fails, that is expected shared-IP HAProxy behavior; to
+force timeout, remove or disable the `cascade-vps1` DNS record during the L2
+freeze.
 
 ### Promote `vps1` Or `vps4` For `vps2` Edge Duties
 
@@ -405,8 +516,9 @@ Roll out the affected service only:
   -OnlyService edge_haproxy
 ```
 
-`vps1` and `vps4` already have active cascade links to `vps3`; those links do
-not automatically move `minecraft` or any other public edge route from `vps2`.
+The L2 cascade freeze does not automatically move `minecraft` or any other
+public edge route from `vps2`; edge duties still move only through explicit
+`state.csv` route changes.
 
 ## Запланированные runbook'и
 

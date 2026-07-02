@@ -82,6 +82,7 @@ function Get-ServicePlaybook($Name) {
         "vpn_cascade" { return "infra\ansible\vpn_cascade.yml" }
         "policy_gateway" { return "infra\ansible\policy_gateway.yml" }
         "edge_candidate_collector" { return "infra\ansible\edge_candidate_collector.yml" }
+        "edge_banlist" { return "infra\ansible\edge_banlist.yml" }
         default { Fail "No default playbook for service: $Name" }
     }
 }
@@ -110,8 +111,11 @@ function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false"
         "edge_candidate_collector" {
             return @("-e", "edge_candidate_collector_state=$State", "-e", "edge_candidate_collector_purge_data=$PurgeData")
         }
+        "edge_banlist" {
+            return @("-e", "edge_banlist_state=$State", "-e", "edge_banlist_purge_data=$PurgeData")
+        }
         default {
-            Fail "Unsupported service '$Name'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector."
+            Fail "Unsupported service '$Name'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist."
         }
     }
 }
@@ -119,8 +123,8 @@ function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false"
 if ($Service -eq "vpn") {
     Fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 }
-if ($Service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector")) {
-    Fail "Unsupported service '$Service'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector."
+if ($Service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist")) {
+    Fail "Unsupported service '$Service'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist."
 }
 if ($PolicyRouterImageRef -and $Service -ne "vpn_cascade") {
     Fail "-PolicyRouterImageRef is supported only for service vpn_cascade"

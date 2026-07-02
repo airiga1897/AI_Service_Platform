@@ -5,3 +5,7 @@ platform_dns_servers:
 platform_fallback_dns_servers:
   - 1.0.0.1
   - 8.8.4.4
+ufw_retired_ports:
+  - "8443"
+  - "8555"
+  - "8992"

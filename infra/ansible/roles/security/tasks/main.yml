@@ -68,6 +68,17 @@
   community.general.ufw:
     state: enabled
 
+- name: Verify ufw is active
+  ansible.builtin.command: ufw status
+  changed_when: false
+  register: security_ufw_status
+
+- name: Assert ufw is active
+  ansible.builtin.assert:
+    that:
+      - "'Status: active' in security_ufw_status.stdout"
+    fail_msg: "UFW did not become active after security role."
+
 # --- SSH key-only hardening ---
 - name: Ensure sshd drop-in directory exists
   ansible.builtin.file:

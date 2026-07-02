@@ -286,7 +286,7 @@ function Invoke-BootstrapConverge($Aliases, $AuthorizedKeyFile) {
         "-RemoteJobHeartbeatSeconds", $BootstrapConvergeHeartbeatSeconds
     )
 
-    Write-Host "Step 3b/5: bootstrap converge existing managed nodes through Ansible: $($Aliases -join ', ')"
+    Write-Host "Step 3b/5: bootstrap converge selected nodes through Ansible: $($Aliases -join ', ')"
     Invoke-ChildScript $BootstrapConvergeRunner $args
 }
 
@@ -839,13 +839,25 @@ if (-not $SkipManaged) {
     }
 }
 
-if ($managedConvergeAliases.Count -gt 0 -and -not $SkipBootstrapConverge) {
+$bootstrapConvergeAliases = New-Object System.Collections.Generic.List[string]
+foreach ($alias in @($managedConvergeAliases)) {
+    if ($alias -and -not $bootstrapConvergeAliases.Contains($alias)) {
+        $bootstrapConvergeAliases.Add($alias)
+    }
+}
+foreach ($alias in @($orchestrationCapableAliases)) {
+    if ($alias -and (Has-AdminKey $alias $OperatorDir) -and -not $bootstrapConvergeAliases.Contains($alias)) {
+        $bootstrapConvergeAliases.Add($alias)
+    }
+}
+
+if ($bootstrapConvergeAliases.Count -gt 0 -and -not $SkipBootstrapConverge) {
     if (-not $SkipSync) {
         Invoke-SyncRunner "Step 3a/5: sync sanitized nodes.csv to control node for bootstrap converge" -SkipVerifyForSync -SkipServicePlanForSync
     }
-    Invoke-BootstrapConverge $managedConvergeAliases $managedAnsibleAuthorizedKeyFile
-} elseif ($managedConvergeAliases.Count -gt 0) {
-    Write-Host "Step 3b/5: bootstrap converge skipped by -SkipBootstrapConverge for: $($managedConvergeAliases -join ', ')"
+    Invoke-BootstrapConverge $bootstrapConvergeAliases $managedAnsibleAuthorizedKeyFile
+} elseif ($bootstrapConvergeAliases.Count -gt 0) {
+    Write-Host "Step 3b/5: bootstrap converge skipped by -SkipBootstrapConverge for: $($bootstrapConvergeAliases -join ', ')"
 }
 } finally {
     if ($temporaryAnsibleAuthorizedKeyFile -and (Test-Path -LiteralPath $temporaryAnsibleAuthorizedKeyFile -PathType Leaf)) {

@@ -30,3 +30,4 @@ vpn_edge_policy_gateway_ipv4: ""
 vpn_edge_retired_tcp_listeners:
   - 1194
 vpn_edge_retired_tcp_listeners_marker_file: "{{ vpn_edge_root_dir }}/.retired_tcp_listeners_applied"
+vpn_edge_main_srv01_checkip_marker_file: "{{ vpn_edge_root_dir }}/.main_srv01_group_checkip_disabled"

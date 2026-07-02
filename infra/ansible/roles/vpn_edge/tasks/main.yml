@@ -306,6 +306,114 @@
     - vpn_state == 'present'
     - vpn_edge_retired_tcp_listeners | length > 0
 
+- name: Check MainSrv01 group CheckIP migration marker
+  ansible.builtin.stat:
+    path: "{{ vpn_edge_main_srv01_checkip_marker_file }}"
+  register: vpn_edge_main_srv01_checkip_marker_stat
+  when: vpn_state == 'present'
+
+- name: Disable MainSrv01 AllowAccess group CheckIP in live config
+  ansible.builtin.shell: |
+    set -euo pipefail
+    config="{{ vpn_edge_data_dir }}/vpn_server.config"
+    if [ ! -f "$config" ]; then
+      exit 0
+    fi
+    if ! grep -q "bool[[:space:]]\+CheckIP[[:space:]]\+true" "$config"; then
+      exit 0
+    fi
+    if ! CONFIG_PATH="$config" python3 - <<'PY'
+    import os
+    import re
+    from pathlib import Path
+
+    path = Path(os.environ["CONFIG_PATH"])
+    lines = path.read_text(encoding="utf-8").splitlines()
+    stack = []
+    pending = None
+    for line in lines:
+        match = re.match(r"^\s*declare\s+([A-Za-z0-9_.-]+)\s*$", line)
+        if match:
+            pending = match.group(1)
+            continue
+        stripped = line.strip()
+        if stripped == "{":
+            stack.append(pending or "{")
+            pending = None
+            continue
+        if stripped == "}":
+            if stack:
+                stack.pop()
+            pending = None
+            continue
+        if (
+            len(stack) >= 6
+            and stack[-5:] == ["MainSrv01", "SecurityAccountDatabase", "GroupList", "AllowAccess", "Policy"]
+            and re.match(r"^\s*bool\s+CheckIP\s+true\s*$", line)
+        ):
+            raise SystemExit(0)
+    raise SystemExit(1)
+    PY
+    then
+      exit 0
+    fi
+    docker compose -f "{{ vpn_edge_compose_file }}" stop "{{ vpn_edge_container_name }}" >/dev/null 2>&1 || true
+    backup="{{ vpn_edge_backup_dir }}/vpn_server.config.pre-main-srv01-checkip-$(date -u +%Y%m%dT%H%M%SZ)"
+    cp "$config" "$backup"
+    chmod 0600 "$backup"
+    CONFIG_PATH="$config" python3 - <<'PY'
+    import os
+    import re
+    from pathlib import Path
+
+    path = Path(os.environ["CONFIG_PATH"])
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    stack = []
+    pending = None
+    changed = False
+    out = []
+
+    for line in lines:
+        match = re.match(r"^\s*declare\s+([A-Za-z0-9_.-]+)\s*$", line)
+        if match:
+            pending = match.group(1)
+            out.append(line)
+            continue
+        stripped = line.strip()
+        if stripped == "{":
+            stack.append(pending or "{")
+            pending = None
+            out.append(line)
+            continue
+        if stripped == "}":
+            if stack:
+                stack.pop()
+            pending = None
+            out.append(line)
+            continue
+        if (
+            len(stack) >= 6
+            and stack[-5:] == ["MainSrv01", "SecurityAccountDatabase", "GroupList", "AllowAccess", "Policy"]
+            and re.match(r"^\s*bool\s+CheckIP\s+true\s*$", line)
+        ):
+            out.append(re.sub(r"\btrue\b", "false", line, count=1))
+            changed = True
+            continue
+        out.append(line)
+
+    if changed:
+        path.write_text("".join(out), encoding="utf-8")
+        print("disabled")
+    PY
+  args:
+    executable: /bin/bash
+  register: vpn_edge_main_srv01_checkip_migration
+  changed_when: "'disabled' in vpn_edge_main_srv01_checkip_migration.stdout"
+  when:
+    - vpn_state == 'present'
+    - not vpn_edge_main_srv01_checkip_marker_stat.stat.exists
+    - not ansible_check_mode
+
 - name: Remove retired SoftEther edge TCP listeners from live config
   ansible.builtin.shell: |
     set -euo pipefail
@@ -468,6 +576,56 @@
     - vpn_state == 'present'
     - not ansible_check_mode
 
+- name: Verify MainSrv01 AllowAccess group CheckIP is disabled
+  ansible.builtin.shell: |
+    set -euo pipefail
+    config="{{ vpn_edge_data_dir }}/vpn_server.config"
+    [ -f "$config" ] || exit 0
+    CONFIG_PATH="$config" python3 - <<'PY'
+    import os
+    import re
+    from pathlib import Path
+
+    path = Path(os.environ["CONFIG_PATH"])
+    lines = path.read_text(encoding="utf-8").splitlines()
+    stack = []
+    pending = None
+    found = False
+
+    for line in lines:
+        match = re.match(r"^\s*declare\s+([A-Za-z0-9_.-]+)\s*$", line)
+        if match:
+            pending = match.group(1)
+            continue
+        stripped = line.strip()
+        if stripped == "{":
+            stack.append(pending or "{")
+            pending = None
+            continue
+        if stripped == "}":
+            if stack:
+                stack.pop()
+            pending = None
+            continue
+        if (
+            len(stack) >= 6
+            and stack[-5:] == ["MainSrv01", "SecurityAccountDatabase", "GroupList", "AllowAccess", "Policy"]
+            and re.match(r"^\s*bool\s+CheckIP\s+(true|false)\s*$", line)
+        ):
+            found = True
+            if " true" in line:
+                raise SystemExit("MainSrv01 AllowAccess CheckIP is still true")
+
+    if not found:
+        raise SystemExit("MainSrv01 AllowAccess CheckIP policy was not found")
+    PY
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+
 - name: Verify retired SoftEther edge TCP listeners are absent from config
   ansible.builtin.shell: |
     set -euo pipefail
@@ -484,6 +642,18 @@
   when:
     - vpn_state == 'present'
     - vpn_edge_retired_tcp_listeners | length > 0
+    - not ansible_check_mode
+
+- name: Mark MainSrv01 group CheckIP migration complete
+  ansible.builtin.copy:
+    dest: "{{ vpn_edge_main_srv01_checkip_marker_file }}"
+    content: |
+      MainSrv01 AllowAccess group CheckIP has been disabled.
+      Management access is controlled by HAProxy vpn_mgmt_ips.lst.
+    mode: "0644"
+  when:
+    - vpn_state == 'present'
+    - not vpn_edge_main_srv01_checkip_marker_stat.stat.exists
     - not ansible_check_mode
 
 - name: Mark retired SoftEther edge listener migration complete

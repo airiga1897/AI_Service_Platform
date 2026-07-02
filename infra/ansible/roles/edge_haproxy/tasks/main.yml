@@ -299,6 +299,13 @@
     - "{{ edge_haproxy_lists_dir }}"
   when: edge_haproxy_state == 'present'
 
+- name: Ensure edge_haproxy runtime socket directory is writable by container
+  ansible.builtin.file:
+    path: "{{ edge_haproxy_run_dir }}"
+    state: directory
+    mode: "0777"
+  when: edge_haproxy_state == 'present'
+
 - name: Install VPN management allowlist when provided
   ansible.builtin.copy:
     src: "{{ edge_haproxy_operator_vpn_mgmt_ips }}"
@@ -340,6 +347,15 @@
   when:
     - edge_haproxy_state == 'present'
     - not edge_haproxy_blacklist_stat.stat.exists or not edge_haproxy_blacklist_stat.stat.isreg
+
+- name: Ensure generated blacklist exists for edge_banlist
+  ansible.builtin.copy:
+    dest: "{{ edge_haproxy_lists_dir }}/{{ edge_haproxy_generated_blocked_ips_file }}"
+    content: ""
+    force: false
+    mode: "0644"
+  register: edge_haproxy_generated_blocked_ips_seed
+  when: edge_haproxy_state == 'present'
 
 - name: Install GeoIP RU network list when provided
   ansible.builtin.copy:
@@ -461,6 +477,28 @@
     - edge_haproxy_state == 'present'
     - not ansible_check_mode
 
+- name: Inspect existing edge_haproxy container status before start
+  ansible.builtin.command:
+    cmd: docker inspect -f {% raw %}'{{.State.Status}}'{% endraw %} "{{ edge_haproxy_container_name }}"
+  register: edge_haproxy_existing_status
+  changed_when: false
+  failed_when: false
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+
+- name: Remove stale edge_haproxy admin socket before container start
+  ansible.builtin.file:
+    path: "{{ edge_haproxy_run_dir }}/admin.sock"
+    state: absent
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+    - >
+      (edge_haproxy_existing_status.rc | default(1)) != 0
+      or (edge_haproxy_existing_status.stdout | default('') | trim) != 'running'
+      or (edge_haproxy_compose_template.changed | default(false))
+
 - name: Start edge_haproxy container
   ansible.builtin.command:
     cmd: docker compose -f "{{ edge_haproxy_compose_file }}" up -d
@@ -472,6 +510,24 @@
   when:
     - edge_haproxy_state == 'present'
     - not ansible_check_mode
+
+- name: Remove stale edge_haproxy admin socket before runtime-file restart
+  ansible.builtin.file:
+    path: "{{ edge_haproxy_run_dir }}/admin.sock"
+    state: absent
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+    - not edge_haproxy_compose_up.changed
+    - >
+      (edge_haproxy_vpn_mgmt_ips_copy.changed | default(false))
+      or (edge_haproxy_vpn_mgmt_ips_empty.changed | default(false))
+      or (edge_haproxy_blocked_ips_copy.changed | default(false))
+      or (edge_haproxy_blocked_ips_empty.changed | default(false))
+      or (edge_haproxy_generated_blocked_ips_seed.changed | default(false))
+      or (edge_haproxy_ru_networks_copy.changed | default(false))
+      or (edge_haproxy_ru_networks_empty.changed | default(false))
+      or (edge_haproxy_config_template.changed | default(false))
 
 - name: Restart edge_haproxy when bind-mounted runtime files changed
   ansible.builtin.command:
@@ -487,6 +543,7 @@
       or (edge_haproxy_vpn_mgmt_ips_empty.changed | default(false))
       or (edge_haproxy_blocked_ips_copy.changed | default(false))
       or (edge_haproxy_blocked_ips_empty.changed | default(false))
+      or (edge_haproxy_generated_blocked_ips_seed.changed | default(false))
       or (edge_haproxy_ru_networks_copy.changed | default(false))
       or (edge_haproxy_ru_networks_empty.changed | default(false))
       or (edge_haproxy_config_template.changed | default(false))
@@ -572,6 +629,18 @@
   changed_when: false
   when:
     - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify cascade SNI surface is absent when vpn_cascade route is disabled
+  ansible.builtin.shell: |
+    set -euo pipefail
+    ! docker exec "{{ edge_haproxy_container_name }}" grep -nE 'cascade-vps|is_cascade|be_cascade' /usr/local/etc/haproxy/haproxy.cfg
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - edge_haproxy_state == 'present'
+    - not (edge_haproxy_route_model.vpn_cascade_enabled | default(false))
     - not ansible_check_mode
 
 - name: Verify edge_haproxy published VPN ports when vpn_ingress is enabled

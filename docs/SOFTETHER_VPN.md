@@ -110,6 +110,12 @@ normal rollout continuously enforces. After the first successful start, the
 remote `/opt/ai-service-platform/vpn_edge/softether_data/vpn_server.config`
 belongs to SoftEther runtime state and may be changed by SoftEther itself.
 
+SoftEther Server Manager access is allowlisted at HAProxy
+`vpn_mgmt_ips.lst`. The `MainSrv01` hub group `AllowAccess` must keep
+`CheckIP=false`; enabling hub-level source IP checks adds a second, drifting
+allowlist layer and can produce Source IP Restriction popups even when HAProxy
+allowed the operator IP.
+
 Normal `vpn_edge present` rollout copies the seed only when the remote config is
 missing. It does not overwrite the live config and does not restart
 `softether-edge` because of the seed.
@@ -181,16 +187,18 @@ This network is the internal L3 dataplane handoff for selected fallback routing.
 It does not enable NAT, forwarding, or non-local egress by itself; routes are
 added later only from active policy profiles and accepted proposals.
 
-To enable it, add or update a `state.csv` service row with explicit aliases:
+Before the L2 freeze, enabling it meant adding a `state.csv` service row with
+explicit aliases:
 
 ```csv
 service,vpn_cascade,vpn_cascades,vps5+vps4+vps3,,,present
 ```
 
-The current lab cascade fabric uses directed links declared in a shared operator
-secret. Cascade receivers are reached through HAProxy SNI names such as
+The frozen lab cascade fabric used directed links declared in a shared operator
+secret. If a future explicit design review reintroduces public cascade
+receivers, they must be reached through HAProxy SNI names such as
 `cascade-vps3.mine-craft.su` on shared public port `443/tcp`; the
-`vpn_cascade` container does not publish direct host ports when HAProxy owns the
+`vpn_cascade` container must not publish direct host ports when HAProxy owns the
 entrypoints.
 
 | Host port | Container port | Purpose |
@@ -204,26 +212,32 @@ longer used.
 
 ### Current Verified Status
 
-As of 2026-06-27, staged VPN rollout is verified:
+As of 2026-06-28, VPN ingress is verified and the shared SoftEther L2 cascade
+layer is frozen:
 
-- `edge_haproxy` and `vpn_edge` are present on `vps1` through `vps7`.
-- `vpn_cascade` is active on `vps1`, `vps2`, `vps3`, and `vps4`; `vps7` has
-  staged service/SNI surface plus the first alternate-receiver test link.
-- Active cascade links are online with `Connection Completed`:
-  `vps1-to-vps3`, `vps2-to-vps3`, `vps4-to-vps3`, and `vps1-to-vps7`.
-- Active cascade receivers use `cascade-vps3.mine-craft.su:443` through HAProxy
-  SNI; `softether-cascade` must not publish direct host ports in this mode.
+- `edge_haproxy` and `vpn_edge` are present on `vps1` through `vps8`.
+- `vpn_cascade` is absent from desired state on `vps1`, `vps2`, `vps3`, and
+  `vps4`.
+- No shared `CascadeLab` links are active; historical links are preserved only
+  as disabled records in `lab-cascade.json`.
+- No public `cascade-vpsN` SNI surface should be published by HAProxy while the
+  freeze is active.
+- `softether-cascade` and `policy-router` should not be running on the former
+  cascade aliases after the absent rollout completes.
 - `vps5` remains VPN ingress only. `vps7` is staged for future `vps3`
-  duplicate/standby work and currently receives only the `vps1-to-vps7` test
-  link in the shared `lab-cascade` fabric.
+  duplicate/standby work through L3 policy routing, not shared L2 cascade.
+  `vps8` is a Selectel RU services standby with VPN ingress only for now.
+- `service,vpn_cascade` controls local cascade runtime and outgoing link
+  management. `edge_route,vpn_cascade` controls public `cascade-vpsN` SNI.
+  Both are absent during the freeze.
+- `cascade-vpsN:5555` is a HAProxy SNI route to `softether-cascade` management
+  and must not route anywhere while the freeze is active. Stale `cascade-vpsN`
+  routes must be removed before `edge_haproxy` rollout.
 
 The current standby design is manual. It does not enable active-active routing
-or automatic failover. `vps1` and `vps4` already have active cascade ingress
-links to `vps3`, but that does not automatically make them replacements for all
-`vps2` edge duties. `vps7` staging includes `vpn_cascade` service, route, SNI,
-and the single deliberate `vps1-to-vps7` test link. It is not a general
-replacement for `vps3` until additional ingress links are added deliberately and
-verified. `vps5` remains outside the cascade fabric for now.
+or automatic failover. `vps1` and `vps4` are not automatic replacements for all
+`vps2` edge duties. `vps7` is not a general replacement for `vps3` until HA
+moves to L3 policy routing. `vps5` remains outside the cascade fabric for now.
 
 The operator-local cascade secret is ignored by git:
 
@@ -237,7 +251,7 @@ It contains shared hub/user/password values plus directed links used by
 ```json
 {
   "version": 1,
-  "state": "active",
+  "state": "disabled",
   "hub_name": "CascadeLab",
   "hub_password": "<store outside chat>",
   "cascade_user": "cascade-peer",
@@ -245,19 +259,19 @@ It contains shared hub/user/password values plus directed links used by
   "server_password": "<store outside chat>",
   "links": [
     {
-      "state": "active",
-      "connection_name": "vps5-to-vps4",
-      "ingress_alias": "vps5",
-      "ingress_host": "vps5.mine-craft.su",
-      "egress_alias": "vps4",
-      "egress_host": "cascade-vps4.mine-craft.su",
+      "state": "disabled",
+      "connection_name": "vps1-to-vps3",
+      "ingress_alias": "vps1",
+      "ingress_host": "vpn-vps1.mine-craft.su",
+      "egress_alias": "vps3",
+      "egress_host": "cascade-vps3.mine-craft.su",
       "egress_port": 443
     },
     {
-      "state": "active",
+      "state": "disabled",
       "connection_name": "vps4-to-vps3",
       "ingress_alias": "vps4",
-      "ingress_host": "vps4.mine-craft.su",
+      "ingress_host": "vpn-vps4.mine-craft.su",
       "egress_alias": "vps3",
       "egress_host": "cascade-vps3.mine-craft.su",
       "egress_port": 443
@@ -282,7 +296,8 @@ If the seed exists, normal `vpn_cascade present` copies it only when the remote
 cascade config is missing. If the seed does not exist and the remote config is
 also missing, rollout starts a clean SoftEther cascade container with an empty
 `softether_data` directory, removes the default `DEFAULT` virtual hub, then
-configures only the lab hub, user, and active cascade links using the JSON above.
+configures only the lab hub, user, and links marked active in the JSON above.
+During the L2 freeze, all saved links are disabled and should not be recreated.
 `hub_password` is used when creating `CascadeLab`; server-admin automation still
 uses `server_password`. The role sets the hub `NoEnum` option so `CascadeLab` is
 not enumerated to anonymous users. Password-bearing tasks are `no_log`.
@@ -486,15 +501,17 @@ Before adding L3 routing or NAT, model every cascade link explicitly:
 - `initiator_alias` - the node that creates the SoftEther Cascade Connection;
 - `receiver_alias` - the node that listens for that connection;
 - `ingress_alias` - where selected client or service traffic enters the policy;
-- `ingress_host` - the public endpoint used by peers and firewall allow rules
-  when the ingress side is also the active local orchestrator;
+- `ingress_host` - the ingress-side VPN/SNI endpoint for that alias, normally
+  `vpn-vpsN.mine-craft.su`. It is descriptive/control metadata; SSH/bootstrap
+  still uses `nodes.csv` endpoint values.
 - `egress_alias` - where selected traffic is allowed to leave;
 - `egress_host` - the receiver endpoint used by the SoftEther Cascade
-  Connection;
+  Connection, normally `cascade-vpsN.mine-craft.su`;
 - `egress_port` - the receiver host port, currently `443` through HAProxy SNI
   routing with a `cascade-vpsN.mine-craft.su` endpoint.
 
-Each cascade link carries a `state` field:
+Each cascade link carries a `state` field. During the L2 freeze, saved links
+must remain `disabled`; `active` requires a separate explicit design review:
 
 - `active` or missing - real lab link included in rollout;
 - `probe` - a read-only candidate used by egress probes and reports only;
@@ -509,7 +526,6 @@ are made consistently and validated before rollout:
 
 ```powershell
 .\tools\services\vpn_cascade_link.ps1 set-state vps5-to-vps4 disabled
-.\tools\services\vpn_cascade_link.ps1 set-state vps5-to-vps4 active
 .\tools\services\vpn_cascade_link.ps1 upsert vps4-to-vps5 `
   -IngressAlias vps4 `
   -IngressHost vps4.mine-craft.su `
@@ -977,12 +993,21 @@ Every routed profile path must be acyclic. The same alias must not appear twice
 in one path, and an active reverse profile for the same traffic class must not
 be enabled at the same time.
 
-Do not create simultaneous active reverse cascade links between the same hubs.
-For example, `vps5 -> vps4` and `vps4 -> vps5` must not both be online as an L2
-pair. If traffic later needs to enter on `vps4` and leave through `vps5`, add a
-separate routed profile and policy instead of a second active L2-style link.
-Rollout and probe tooling reject active/probe cascade graphs that contain a
-directed cycle, including longer loops such as `vps5 -> vps4 -> vps3 -> vps5`.
+Do not create simultaneous active reverse or loop-forming cascade links in the
+same shared hub. SoftEther CascadeLab is an L2 bridge fabric, so active/probe
+links must be safe as an undirected graph, not only as a directed graph. For
+example, `vps1 -> vps3`, `vps2 -> vps3`, `vps1 -> vps7`, and `vps2 -> vps7`
+forms the undirected loop `vps1 -- vps3 -- vps2 -- vps7 -- vps1` and can cause a
+broadcast storm. If traffic later needs active-active HA across receivers, add a
+separate L3 routed policy instead of another active L2-style link.
+Rollout tooling rejects active/probe cascade graphs that contain an undirected
+L2 cycle before syncing service changes.
+
+Future `vps1` dual-cascade HA should use L3 policy routing: GeoIP selects a
+destination pool, the pool contains healthy RU receivers such as `vps3` and
+`vps7`, and `policy_gateway` chooses a concrete path by destination hash with
+health fallback. The first canary must apply only exact target IP routes, with
+rollback, before broad country or default routing is considered.
 
 Current cascade role policy:
 

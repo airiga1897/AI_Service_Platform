@@ -62,24 +62,36 @@ and `edge_route,vpn_ingress` rows.
 As of 2026-06-27, standby is manual. No role in this map implies automatic
 failover, active-active routing, or automatic movement of service rows.
 
+Provider placement is descriptive metadata, not an automation role:
+
+- `adminvps`: `vps1`, `vps2`, `vps4`, `vps5`, `vps7`.
+- `selectel`: `vps3`, `vps6`, `vps8`.
+
+Runtime roles are managed separately through `state.csv`:
+
 - `vps6` is the active orchestration node; `vps5` is its standby orchestration
   candidate and also an active VPN ingress node.
-- `vps3` is the active cascade receiver and egress anchor; `vps7` is the manual
-  duplicate/standby candidate for `vps3`, with staged `vpn_cascade` service/SNI
-  surface and a first test receiver link from `vps1`.
+- `vps3` is the former cascade receiver and remains the primary candidate for
+  future RU egress policy work. `vps7` is the manual duplicate/standby
+  candidate for future L3 `vps3` HA work. Neither has active shared
+  `CascadeLab` links while the L2 freeze is active.
 - `vps2` is the active public/service edge target, including the current
   `minecraft` route. `vps1` and `vps4` are manual duplicate/standby candidates
-  for `vps2`; both are active VPN ingress nodes, and both currently have active
-  cascade links to `vps3`.
-- Every active VPS alias from `vps1` through `vps7` has the full VPN ingress
+  for `vps2`; both are active VPN ingress nodes.
+- `vps8` is a Selectel RU services-standby node. It has the mandatory VPN
+  ingress stack, but no active production service route is moved to it yet.
+- Public cascade SNI and local `vpn_cascade` runtime are both absent while the
+  SoftEther L2 freeze is active. `cascade-vpsN` endpoints must not be published
+  until a separate explicit design review approves a new loop-free topology.
+- Every active VPS alias from `vps1` through `vps8` has the full VPN ingress
   stack in `state.csv`: `edge_haproxy`, `vpn_edge`, and
   `edge_route,vpn_ingress`.
 - Every manual standby candidate must keep that VPN ingress stack healthy before
   it is considered promotable.
-- Current active cascade links are `vps1>vps3`, `vps2>vps3`, `vps4>vps3`, and
-  the first alternate-receiver test link `vps1>vps7`. Do not treat `vps7` as a
-  general replacement for `vps3` until broader ingress links such as
-  `vps2>vps7` or `vps4>vps7` are added deliberately and verified.
+- Current verified cascade policy is no active shared `CascadeLab` links. The
+  shared SoftEther L2 cascade fabric is frozen because alternate receiver links
+  caused a likely broadcast storm. Treat `vps7` HA as future L3 policy routing
+  work, not L2 mesh expansion.
 
 ## state.csv
 
@@ -128,7 +140,8 @@ Service naming is semantic, not positional:
 - `minecraft` - HAProxy route для `mainsrv01.mine-craft.su`, Minecraft game и RCON.
 - `vpn_cascade` - SoftEther cascade/site-to-site lab transport service. It is
   separate from `vpn_edge`, uses its own runtime data, and does not create an
-  HAProxy public route by itself.
+  HAProxy public route by itself. Public `cascade-vpsN` SNI is controlled only
+  by `edge_route,vpn_cascade`.
 - `edge_candidate_collector` - per-VPS timer service that gathers sanitized
   HAProxy/policy/cascade candidate facts and writes local JSONL evidence. It
   does not apply routes, NAT, firewall, HAProxy, Docker, or SoftEther changes.

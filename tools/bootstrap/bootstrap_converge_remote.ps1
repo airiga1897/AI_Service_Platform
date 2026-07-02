@@ -331,7 +331,7 @@ $runScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-service-platfo
 $remoteJobCompletedSuccessfully = $false
 $playbookPath = "$RemoteRepoDir/$($Playbook.Replace('\', '/'))"
 $remoteAnsiblePath = "$RemoteRepoDir/infra/ansible"
-$ansibleSshCommonArgs = "-o BatchMode=yes -o KbdInteractiveAuthentication=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey -o RequestTTY=no"
+$ansibleSshCommonArgs = "-o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=2 -o KbdInteractiveAuthentication=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey -o RequestTTY=no -o ServerAliveInterval=15 -o ServerAliveCountMax=2"
 $ansibleCommand = "sudo -u ansible env ANSIBLE_TIMEOUT=20 ANSIBLE_SSH_COMMON_ARGS=$(Quote-BashArg $ansibleSshCommonArgs) ansible-playbook -i $(Quote-BashArg $RemoteInventory) $(Quote-BashArg $playbookPath) --limit $(Quote-BashArg $Limit) -e bootstrap_converge_authorized_keys_file=$(Quote-BashArg $remoteAuthorizedKeyFile)"
 $runScriptLines = @(
     "#!/usr/bin/env bash",
@@ -340,7 +340,7 @@ $runScriptLines = @(
     "export ANSIBLE_FORCE_COLOR=0",
     "export ANSIBLE_DISPLAY_SKIPPED_HOSTS=true",
     "export ANSIBLE_TIMEOUT=20",
-    "export ANSIBLE_SSH_COMMON_ARGS='-o BatchMode=yes -o KbdInteractiveAuthentication=no -o PasswordAuthentication=no -o PreferredAuthentications=publickey -o RequestTTY=no'",
+    "export ANSIBLE_SSH_COMMON_ARGS='$ansibleSshCommonArgs'",
     "exec > $(Quote-BashArg $remoteJobLog) 2>&1",
     "printf '[bootstrap] install Ansible bundle\n'",
     "sudo mkdir -p $(Quote-BashArg "$RemoteRepoDir/infra")",

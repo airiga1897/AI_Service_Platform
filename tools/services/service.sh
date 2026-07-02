@@ -48,6 +48,10 @@ Usage:
   bash tools/services/service.sh edge_candidate_collector apply [options]
   bash tools/services/service.sh edge_candidate_collector absent [options]
   bash tools/services/service.sh edge_candidate_collector purge --confirm-purge [options]
+  bash tools/services/service.sh edge_banlist plan [options]
+  bash tools/services/service.sh edge_banlist apply [options]
+  bash tools/services/service.sh edge_banlist absent [options]
+  bash tools/services/service.sh edge_banlist purge --confirm-purge [options]
 
 Options:
   --nodes-file PATH      Operator nodes.csv. Default: ./operator/nodes.csv
@@ -189,6 +193,7 @@ service_playbook() {
         vpn_cascade) echo "infra/ansible/vpn_cascade.yml" ;;
         policy_gateway) echo "infra/ansible/policy_gateway.yml" ;;
         edge_candidate_collector) echo "infra/ansible/edge_candidate_collector.yml" ;;
+        edge_banlist) echo "infra/ansible/edge_banlist.yml" ;;
         *) return 1 ;;
     esac
 }
@@ -222,6 +227,9 @@ service_extra_vars() {
         edge_candidate_collector)
             printf '%s\n' "-e" "edge_candidate_collector_state=$state" "-e" "edge_candidate_collector_purge_data=$purge"
             ;;
+        edge_banlist)
+            printf '%s\n' "-e" "edge_banlist_state=$state" "-e" "edge_banlist_purge_data=$purge"
+            ;;
         *)
             return 1
             ;;
@@ -245,8 +253,8 @@ if [ "$SERVICE" = "vpn" ]; then
     fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 fi
 case "$SERVICE" in
-    edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector) ;;
-    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector." ;;
+    edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector|edge_banlist) ;;
+    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist." ;;
 esac
 case "$ACTION" in
     plan|apply|absent|purge|reseed) ;;

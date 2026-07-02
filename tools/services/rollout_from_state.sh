@@ -471,6 +471,7 @@ done < <(tail -n +2 "$NODES_FILE")
 
 edge_haproxy_aliases=""
 vpn_edge_aliases=""
+vpn_cascade_aliases=""
 vpn_ingress_aliases=""
 present_edge_route_aliases=""
 standby_orchestration_aliases=""
@@ -485,6 +486,7 @@ while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _
     if [ "$kind" = "service" ] && [ "$row_state" = "present" ]; then
         [ "$name" = "edge_haproxy" ] && append_aliases_to_var edge_haproxy_aliases "$active_aliases"
         [ "$name" = "vpn_edge" ] && append_aliases_to_var vpn_edge_aliases "$active_aliases"
+        [ "$name" = "vpn_cascade" ] && append_aliases_to_var vpn_cascade_aliases "$active_aliases"
     fi
     if { [ "$kind" = "platform_role" ] || [ "$kind" = "role" ]; } && [ "$name" = "$CONTROL_ROLE" ] && [ "$row_state" = "present" ]; then
         append_aliases_to_var standby_orchestration_aliases "$_candidate_aliases"
@@ -548,6 +550,9 @@ while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _
         alias_in_list "$alias" "$edge_haproxy_aliases" || fail "edge_route $name is present on $alias, but service edge_haproxy is not present on the same alias"
         if [ "$name" = "vpn_ingress" ]; then
             alias_in_list "$alias" "$vpn_edge_aliases" || fail "edge_route vpn_ingress is present on $alias, but service vpn_edge is not present on the same alias"
+        fi
+        if [ "$name" = "vpn_cascade" ]; then
+            alias_in_list "$alias" "$vpn_cascade_aliases" || fail "edge_route vpn_cascade is present on $alias, but service vpn_cascade is not present on the same alias"
         fi
         add_unique_alias "$alias"
     done

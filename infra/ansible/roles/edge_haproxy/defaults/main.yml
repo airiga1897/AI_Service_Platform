@@ -2,6 +2,7 @@
 edge_haproxy_root_dir: /opt/ai-service-platform/edge_haproxy
 edge_haproxy_config_dir: "{{ edge_haproxy_root_dir }}/haproxy"
 edge_haproxy_lists_dir: "{{ edge_haproxy_config_dir }}/lists"
+edge_haproxy_run_dir: "{{ edge_haproxy_root_dir }}/run"
 edge_haproxy_compose_file: "{{ edge_haproxy_root_dir }}/docker-compose.yml"
 
 edge_haproxy_operator_dir: "{{ playbook_dir }}/../../operator/haproxy"
@@ -11,6 +12,7 @@ edge_haproxy_operator_state_file: "{{ playbook_dir }}/../../operator/state.csv"
 edge_haproxy_operator_vpn_mgmt_ips: "{{ edge_haproxy_operator_lists_dir }}/vpn_mgmt_ips.lst"
 edge_haproxy_operator_blocked_ips: "{{ edge_haproxy_operator_lists_dir }}/blocked_ips.lst"
 edge_haproxy_operator_ru_networks: "{{ edge_haproxy_operator_lists_dir }}/ru_networks.lst"
+edge_haproxy_generated_blocked_ips_file: generated_blocked_ips.lst
 
 edge_haproxy_image: haproxy:2.9-alpine
 edge_haproxy_container_name: edge-haproxy

@@ -222,7 +222,7 @@
     - vpn_cascade_topology_command.stdout is defined
     - vpn_cascade_topology_command.stdout | length > 0
 
-- name: Resolve vpn_cascade HAProxy entrypoint state
+- name: Resolve vpn_cascade HAProxy runtime mode
   ansible.builtin.shell: |
     set -euo pipefail
     python3 - <<'PY'
@@ -239,8 +239,8 @@
         rows = list(csv.DictReader(handle))
 
     enabled = any(
-        row.get("kind") == "edge_route"
-        and row.get("name") == "vpn_cascade"
+        row.get("kind") == "service"
+        and row.get("name") == "edge_haproxy"
         and row.get("state") == "present"
         and alias in split_aliases(row.get("active_aliases"))
         for row in rows

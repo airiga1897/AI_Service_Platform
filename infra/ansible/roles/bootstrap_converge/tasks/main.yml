@@ -35,6 +35,21 @@
     direction: outgoing
   when: bootstrap_converge_firewall_enabled | bool
 
+- name: Configure host firewall default routed policy
+  ansible.builtin.command: ufw default deny routed
+  register: bootstrap_converge_ufw_default_routed
+  changed_when: "'Default routed policy changed' in (bootstrap_converge_ufw_default_routed.stdout ~ bootstrap_converge_ufw_default_routed.stderr)"
+  when: bootstrap_converge_firewall_enabled | bool
+
+- name: Remove retired platform TCP ports from host firewall
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+    delete: true
+  loop: "{{ bootstrap_converge_firewall_retired_tcp_ports | default([]) | unique | list }}"
+  when: bootstrap_converge_firewall_enabled | bool
+
 - name: Allow platform TCP ports through host firewall
   community.general.ufw:
     rule: allow
@@ -47,6 +62,60 @@
   community.general.ufw:
     state: enabled
   when: bootstrap_converge_firewall_enabled | bool
+
+- name: Verify host firewall is active
+  ansible.builtin.command: ufw status
+  changed_when: false
+  register: bootstrap_converge_ufw_status
+  when: bootstrap_converge_firewall_enabled | bool
+
+- name: Assert host firewall is active
+  ansible.builtin.assert:
+    that:
+      - "'Status: active' in bootstrap_converge_ufw_status.stdout"
+    fail_msg: "UFW did not become active after bootstrap converge."
+  when: bootstrap_converge_firewall_enabled | bool
+
+- name: Install fail2ban sshd jail baseline
+  ansible.builtin.copy:
+    dest: /etc/fail2ban/jail.local
+    mode: "0644"
+    content: |
+      [DEFAULT]
+      bantime  = {{ bootstrap_converge_fail2ban_bantime }}
+      findtime = {{ bootstrap_converge_fail2ban_findtime }}
+      maxretry = {{ bootstrap_converge_fail2ban_maxretry }}
+      backend  = systemd
+      ignoreip = 127.0.0.1/8 ::1
+
+      [sshd]
+      enabled  = true
+      port     = 22
+      logpath  = %(sshd_log)s
+      maxretry = {{ bootstrap_converge_fail2ban_maxretry }}
+      bantime  = {{ bootstrap_converge_fail2ban_bantime }}
+  register: bootstrap_converge_fail2ban_jail
+  when: bootstrap_converge_fail2ban_enabled | bool
+
+- name: Start and enable fail2ban baseline
+  ansible.builtin.systemd:
+    name: fail2ban
+    state: "{{ 'restarted' if (bootstrap_converge_fail2ban_jail.changed | default(false)) else 'started' }}"
+    enabled: true
+  when: bootstrap_converge_fail2ban_enabled | bool
+
+- name: Verify fail2ban baseline is active
+  ansible.builtin.command: systemctl is-active fail2ban
+  changed_when: false
+  register: bootstrap_converge_fail2ban_status
+  when: bootstrap_converge_fail2ban_enabled | bool
+
+- name: Assert fail2ban baseline is active
+  ansible.builtin.assert:
+    that:
+      - "bootstrap_converge_fail2ban_status.stdout | trim == 'active'"
+    fail_msg: "fail2ban did not become active after bootstrap converge."
+  when: bootstrap_converge_fail2ban_enabled | bool
 
 - name: Ensure docker group exists
   ansible.builtin.group:
