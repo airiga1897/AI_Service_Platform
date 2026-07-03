@@ -220,8 +220,8 @@ layer is frozen:
   `vps4`.
 - No shared `CascadeLab` links are active; historical links are preserved only
   as disabled records in `lab-cascade.json`.
-- No public `cascade-vpsN` SNI surface should be published by HAProxy while the
-  freeze is active.
+- No old `edge_route,vpn_cascade` SNI/backend should be published by HAProxy
+  while the freeze is active.
 - `softether-cascade` and `policy-router` should not be running on the former
   cascade aliases after the absent rollout completes.
 - `vps5` remains VPN ingress only. `vps7` is staged for future `vps3`
@@ -230,9 +230,31 @@ layer is frozen:
 - `service,vpn_cascade` controls local cascade runtime and outgoing link
   management. `edge_route,vpn_cascade` controls public `cascade-vpsN` SNI.
   Both are absent during the freeze.
-- `cascade-vpsN:5555` is a HAProxy SNI route to `softether-cascade` management
-  and must not route anywhere while the freeze is active. Stale `cascade-vpsN`
-  routes must be removed before `edge_haproxy` rollout.
+- `cascade-vpsN:5555` is no longer owned by the frozen `vpn_cascade` layer.
+  For the new `softether_l3` layer, `cascade-vps8.mine-craft.su:5555` and
+  `cascade-vps4.mine-craft.su:5555` may route to the local `softether-l3`
+  management listener through HAProxy and `vpn_mgmt_ips.lst`.
+
+### SoftEther L3 Postgres Tunnel
+
+`softether_l3` is a separate runtime for isolated point-to-point L3 tunnels. It
+does not reuse `CascadeLab` and must not create a shared multi-link L2 fabric.
+
+Current staged tunnel:
+
+- `pg-vps8-vps4`
+- listener: `vps8`
+- peer: `vps4`
+- data SNI: `l3-vps8.mine-craft.su:443`
+- management SNI: `cascade-vps8.mine-craft.su:5555` on `vps8`,
+  `cascade-vps4.mine-craft.su:5555` on `vps4`
+- tunnel subnet: `10.88.84.0/30`
+- `vps8`: `10.88.84.1`
+- `vps4`: `10.88.84.2`
+
+The Postgres standby on `vps4` connects to primary at `10.88.84.1:5432`.
+Postgres binds to the local Docker bridge gateway `172.26.0.1:5432`; public
+`5432` must remain closed.
 
 The current standby design is manual. It does not enable active-active routing
 or automatic failover. `vps1` and `vps4` are not automatic replacements for all

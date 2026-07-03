@@ -1,0 +1,22 @@
+---
+postgres_runtime_state: present
+postgres_runtime_purge_data: false
+
+postgres_runtime_operator_config_file: "{{ playbook_dir }}/../../operator/postgres/config.yml"
+postgres_runtime_operator_state_file: "{{ playbook_dir }}/../../operator/state.csv"
+postgres_runtime_operator_nodes_file: "{{ playbook_dir }}/../../operator/nodes.csv"
+
+postgres_runtime_root_dir: /opt/ai-service-platform/postgres
+postgres_runtime_config_dir: "{{ postgres_runtime_root_dir }}/config"
+postgres_runtime_env_file: "{{ postgres_runtime_root_dir }}/postgres.env"
+postgres_runtime_compose_file: "{{ postgres_runtime_root_dir }}/docker-compose.yml"
+postgres_runtime_default_data_volume: ai_service_postgres_data
+postgres_runtime_default_container_name: ai-service-postgres
+postgres_runtime_default_image: postgres:16-alpine
+postgres_runtime_default_port: 5432
+postgres_runtime_default_listen_addresses: "*"
+postgres_runtime_default_wal_keep_size: 512MB
+postgres_runtime_default_max_wal_senders: 5
+postgres_runtime_default_max_replication_slots: 5
+postgres_runtime_startup_retries: 30
+postgres_runtime_startup_delay: 2

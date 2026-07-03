@@ -12,6 +12,7 @@ from pathlib import Path
 
 
 TABLES = ("st_http_rates", "st_tcp_rates")
+STATE_RETENTION_AFTER_EXPIRY = dt.timedelta(days=30)
 
 
 def utcnow():
@@ -122,6 +123,49 @@ def load_state(path):
     return data if isinstance(data, dict) else {}
 
 
+def calculate_ttl_seconds(count, base_ttl_seconds, max_ttl_seconds):
+    count = max(1, int(count))
+    base_ttl_seconds = max(1, int(base_ttl_seconds))
+    max_ttl_seconds = max(base_ttl_seconds, int(max_ttl_seconds))
+    ttl = base_ttl_seconds * (2 ** (count - 1))
+    return min(ttl, max_ttl_seconds)
+
+
+def prune_state(bans, now, excluded_networks, candidate_ips, retention_after_expiry=STATE_RETENTION_AFTER_EXPIRY):
+    active = {}
+    history = {}
+    for ip, info in bans.items():
+        if is_excluded(ip, excluded_networks):
+            continue
+        expires_at = parse_time(info.get("expires_at"))
+        if not expires_at:
+            continue
+        if expires_at > now:
+            active[ip] = info
+            history[ip] = info
+            continue
+        if ip in candidate_ips or expires_at + retention_after_expiry > now:
+            history[ip] = info
+    return active, history
+
+
+def build_ban_record(ip, previous, reasons, now, base_ttl_seconds, max_ttl_seconds, mode):
+    first_seen = previous.get("first_seen") or iso(now)
+    count = int(previous.get("count", 0)) + 1
+    ttl_seconds = calculate_ttl_seconds(count, base_ttl_seconds, max_ttl_seconds)
+    combined_reasons = sorted(set(previous.get("reasons", [])) | set(reasons))
+    return {
+        "ip": ip,
+        "first_seen": first_seen,
+        "last_seen": iso(now),
+        "expires_at": iso(now + dt.timedelta(seconds=ttl_seconds)),
+        "count": count,
+        "reasons": combined_reasons,
+        "ttl_seconds": ttl_seconds,
+        "mode": mode,
+    }
+
+
 def write_lines(path, lines):
     path.parent.mkdir(parents=True, exist_ok=True)
     content = "".join(f"{line}\n" for line in lines)
@@ -145,6 +189,7 @@ def main():
     parser.add_argument("--mgmt-allowlist-file", required=True)
     parser.add_argument("--reload-command", default="")
     parser.add_argument("--ban-ttl-seconds", type=int, default=3600)
+    parser.add_argument("--max-ban-ttl-seconds", type=int, default=86400)
     parser.add_argument("--min-score", type=int, default=1)
     parser.add_argument("--http-req-rate-threshold", type=int, default=50)
     parser.add_argument("--http-err-rate-threshold", type=int, default=5)
@@ -185,31 +230,32 @@ def main():
             item["score"] += len(reasons)
             item["reasons"].update(reasons)
 
+    candidate_ips = set(candidates)
     bans = load_state(state_path)
-    active = {}
-    for ip, info in bans.items():
-        expires_at = parse_time(info.get("expires_at"))
-        if expires_at and expires_at > now and not is_excluded(ip, excluded):
-            active[ip] = info
+    active, history = prune_state(bans, now, excluded, candidate_ips)
+    candidate_details = {}
 
     for ip, item in sorted(candidates.items()):
         if item["score"] < args.min_score:
             continue
-        previous = active.get(ip, {})
-        first_seen = previous.get("first_seen") or iso(now)
-        count = int(previous.get("count", 0)) + 1
-        reasons = sorted(set(previous.get("reasons", [])) | item["reasons"])
-        active[ip] = {
-            "ip": ip,
-            "first_seen": first_seen,
-            "last_seen": iso(now),
-            "expires_at": iso(now + dt.timedelta(seconds=args.ban_ttl_seconds)),
-            "count": count,
-            "reasons": reasons,
-            "mode": args.mode,
+        previous = history.get(ip, {})
+        updated = build_ban_record(
+            ip,
+            previous,
+            item["reasons"],
+            now,
+            args.ban_ttl_seconds,
+            args.max_ban_ttl_seconds,
+            args.mode,
+        )
+        active[ip] = updated
+        history[ip] = updated
+        candidate_details[ip] = {
+            "count": updated["count"],
+            "ttl_seconds": updated["ttl_seconds"],
         }
 
-    state_path.write_text(json.dumps(active, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    state_path.write_text(json.dumps(history, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     desired_ips = sorted(active) if args.mode == "enforce" else []
     changed = write_lines(generated_path, desired_ips)
@@ -224,9 +270,15 @@ def main():
             "active_ban_count": len(active),
             "generated_count": len(desired_ips),
             "generated_changed": changed,
+            "max_ban_ttl_seconds": args.max_ban_ttl_seconds,
             "errors": errors,
             "candidates": {
-                ip: {"score": data["score"], "reasons": sorted(data["reasons"])}
+                ip: {
+                    "score": data["score"],
+                    "reasons": sorted(data["reasons"]),
+                    "count": candidate_details.get(ip, {}).get("count"),
+                    "ttl_seconds": candidate_details.get(ip, {}).get("ttl_seconds"),
+                }
                 for ip, data in sorted(candidates.items())
             },
         }

@@ -52,6 +52,14 @@ Usage:
   bash tools/services/service.sh edge_banlist apply [options]
   bash tools/services/service.sh edge_banlist absent [options]
   bash tools/services/service.sh edge_banlist purge --confirm-purge [options]
+  bash tools/services/service.sh postgres_runtime plan [options]
+  bash tools/services/service.sh postgres_runtime apply [options]
+  bash tools/services/service.sh postgres_runtime absent [options]
+  bash tools/services/service.sh postgres_runtime purge --confirm-purge [options]
+  bash tools/services/service.sh softether_l3 plan [options]
+  bash tools/services/service.sh softether_l3 apply [options]
+  bash tools/services/service.sh softether_l3 absent [options]
+  bash tools/services/service.sh softether_l3 purge --confirm-purge [options]
 
 Options:
   --nodes-file PATH      Operator nodes.csv. Default: ./operator/nodes.csv
@@ -194,6 +202,8 @@ service_playbook() {
         policy_gateway) echo "infra/ansible/policy_gateway.yml" ;;
         edge_candidate_collector) echo "infra/ansible/edge_candidate_collector.yml" ;;
         edge_banlist) echo "infra/ansible/edge_banlist.yml" ;;
+        postgres_runtime) echo "infra/ansible/postgres_runtime.yml" ;;
+        softether_l3) echo "infra/ansible/softether_l3.yml" ;;
         *) return 1 ;;
     esac
 }
@@ -230,6 +240,12 @@ service_extra_vars() {
         edge_banlist)
             printf '%s\n' "-e" "edge_banlist_state=$state" "-e" "edge_banlist_purge_data=$purge"
             ;;
+        postgres_runtime)
+            printf '%s\n' "-e" "postgres_runtime_state=$state" "-e" "postgres_runtime_purge_data=$purge"
+            ;;
+        softether_l3)
+            printf '%s\n' "-e" "softether_l3_state=$state" "-e" "softether_l3_purge_data=$purge"
+            ;;
         *)
             return 1
             ;;
@@ -253,8 +269,8 @@ if [ "$SERVICE" = "vpn" ]; then
     fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 fi
 case "$SERVICE" in
-    edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector|edge_banlist) ;;
-    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist." ;;
+    edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector|edge_banlist|postgres_runtime|softether_l3) ;;
+    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3." ;;
 esac
 case "$ACTION" in
     plan|apply|absent|purge|reseed) ;;
@@ -326,7 +342,7 @@ first_line="$(head -n 1 "$NODES_FILE" | tr -d '\r')"
 [ "$first_line" = "$EXPECTED_HEADER" ] || fail "nodes.csv header must be exactly: $EXPECTED_HEADER"
 state_first_line="$(head -n 1 "$STATE_FILE" | tr -d '\r')"
 [ "$state_first_line" = "$EXPECTED_STATE_HEADER" ] || fail "state.csv header must be exactly: $EXPECTED_STATE_HEADER"
-if [ "$SERVICE" = "vpn_edge" ] || [ "$SERVICE" = "vpn_cascade" ] || [ "$SERVICE" = "policy_gateway" ]; then
+if [ "$SERVICE" = "vpn_edge" ] || [ "$SERVICE" = "vpn_cascade" ] || [ "$SERVICE" = "policy_gateway" ] || [ "$SERVICE" = "softether_l3" ]; then
     [ -f "$NETWORKS_FILE" ] || fail "networks.csv not found next to state.csv: $NETWORKS_FILE. Run sync_to_orchestration before $SERVICE $ACTION."
     networks_first_line="$(head -n 1 "$NETWORKS_FILE" | tr -d '\r')"
     [ "$networks_first_line" = "$EXPECTED_NETWORKS_HEADER" ] || fail "networks.csv header must be exactly: $EXPECTED_NETWORKS_HEADER. Run sync_to_orchestration before $SERVICE $ACTION."
@@ -356,7 +372,11 @@ while IFS=, read -r kind name ansible_group active_aliases candidate_aliases old
     service_plan_rows+=("$ansible_group|$active_aliases|$candidate_aliases|$old_aliases|$row_state")
 
     if [ -n "$LIMIT" ]; then
-        selected_aliases="$(limit_aliases_in_row "$LIMIT" "$active_aliases")"
+        target_aliases="$active_aliases"
+        if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3" ]; } && [ -n "$candidate_aliases" ]; then
+            target_aliases="$(append_aliases_unique "$target_aliases" "$candidate_aliases")"
+        fi
+        selected_aliases="$(limit_aliases_in_row "$LIMIT" "$target_aliases")"
         [ -n "$selected_aliases" ] || continue
 
         while IFS= read -r selected_alias; do
@@ -427,9 +447,13 @@ fi
 [ "$service_total_count" -gt 0 ] || fail "state.csv must contain a service row for $SERVICE"
 [ "$service_found" = "true" ] || fail "state.csv must contain a service row for $SERVICE matching --limit $(limit_display_for_error "$LIMIT")"
 if [ -n "$LIMIT" ]; then
+    limit_match_aliases="$service_active_aliases"
+    if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3" ]; } && [ -n "$service_candidate_aliases" ]; then
+        limit_match_aliases="$(append_aliases_unique "$limit_match_aliases" "$service_candidate_aliases")"
+    fi
     while IFS= read -r limit_alias; do
         [ -n "$limit_alias" ] || continue
-        alias_in_list "$limit_alias" "$service_active_aliases" || fail "state.csv must contain a service row for $SERVICE alias $limit_alias matching --limit $(limit_display_for_error "$LIMIT")"
+        alias_in_list "$limit_alias" "$limit_match_aliases" || fail "state.csv must contain a service row for $SERVICE alias $limit_alias matching --limit $(limit_display_for_error "$LIMIT")"
     done < <(split_limit_to_lines "$LIMIT")
 else
     [ "$service_match_count" -eq 1 ] || fail "state.csv has multiple $SERVICE rows matching --limit $(limit_display_for_error "$LIMIT"); keep one target row per alias group"
@@ -451,7 +475,11 @@ if [ "$ACTION" = "plan" ]; then
     tail -n +2 "$NODES_FILE" | while IFS=, read -r current_alias _endpoint _expected_ip _connection _ssh_port _root_password _extra || [ -n "${current_alias:-}" ]; do
         current_alias="${current_alias//$'\r'/}"
         [ -n "$current_alias" ] || continue
-        if [ "$service_row_state" = "present" ] && alias_in_list "$current_alias" "$service_active_aliases"; then
+        plan_present_aliases="$service_active_aliases"
+        if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3" ]; } && [ -n "$service_candidate_aliases" ]; then
+            plan_present_aliases="$(append_aliases_unique "$plan_present_aliases" "$service_candidate_aliases")"
+        fi
+        if [ "$service_row_state" = "present" ] && alias_in_list "$current_alias" "$plan_present_aliases"; then
             echo "$current_alias: desired present"
         else
             echo "$current_alias: desired absent"
@@ -489,8 +517,12 @@ fi
 if [ "$ACTION" = "apply" ] && [ "$service_row_state" != "present" ]; then
     fail "$SERVICE apply requires state=present in $STATE_FILE"
 fi
-if [ "$ACTION" = "apply" ] && [ -z "$service_active_aliases" ]; then
-    fail "No active aliases for $SERVICE found in $STATE_FILE"
+service_target_aliases="$service_active_aliases"
+if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3" ]; } && [ "$service_row_state" = "present" ] && [ -n "$service_candidate_aliases" ]; then
+    service_target_aliases="$(append_aliases_unique "$service_target_aliases" "$service_candidate_aliases")"
+fi
+if [ "$ACTION" = "apply" ] && [ -z "$service_target_aliases" ]; then
+    fail "No active/candidate aliases for $SERVICE found in $STATE_FILE"
 fi
 
 service_state="present"
@@ -508,6 +540,8 @@ fi
 
 if [ -n "$LIMIT" ]; then
     limit_args=(--limit "$(ansible_limit_pattern "$LIMIT")")
+elif { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3" ]; } && [ "$service_row_state" = "present" ] && [ -n "$service_candidate_aliases" ]; then
+    limit_args=(--limit "$service_group:candidate_$service_group")
 else
     limit_args=(--limit "$service_group")
 fi
@@ -530,7 +564,13 @@ printf '%s\n' "$list_hosts_output"
 if [ "$list_hosts_rc" -ne 0 ]; then
     fail "ansible --list-hosts failed before $SERVICE $ACTION with exit code $list_hosts_rc"
 fi
-list_hosts_count="$(printf '%s\n' "$list_hosts_output" | sed -n 's/.*hosts (\([0-9][0-9]*\)).*/\1/p' | head -n 1)"
+list_hosts_count=""
+while IFS= read -r list_hosts_line; do
+    if [[ "$list_hosts_line" =~ hosts[[:space:]]+\(([0-9]+)\) ]]; then
+        list_hosts_count="${BASH_REMATCH[1]}"
+        break
+    fi
+done <<< "$list_hosts_output"
 [ -n "$list_hosts_count" ] || fail "Could not determine Ansible host count before $SERVICE $ACTION"
 [ "$list_hosts_count" -gt 0 ] || fail "Ansible selected 0 hosts for $SERVICE $ACTION with limit $(limit_display_for_error "$LIMIT"). Regenerate inventory from nodes.csv/state.csv."
 

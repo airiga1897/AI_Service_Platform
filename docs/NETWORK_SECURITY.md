@@ -86,6 +86,12 @@ invariant is the HAProxy runtime socket lifecycle, not the client implementation
 permissions, the collector logs `edge_banlist_error` and does not fail the
 systemd timer.
 
+Repeated scanner IPs use exponential TTL backoff. The default first ban is one
+hour, and each later reappearance doubles the TTL up to a 24 hour cap. Because
+generated-banned IPs are dropped before HAProxy stick-table tracking, repeats
+during an active ban are usually not visible; repeat history is therefore kept
+in `bans.json` and pruned after 30 days past expiry.
+
 ## Bootstrap SSH Direction
 
 Bootstrap and converge should avoid managed-node-to-orchestration SSH paths.

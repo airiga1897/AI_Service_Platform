@@ -1,0 +1,51 @@
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ postgres_runtime_model.app_user | replace("'", "''") }}') THEN
+    EXECUTE format(
+      'CREATE ROLE %I LOGIN PASSWORD %L',
+      '{{ postgres_runtime_model.app_user | replace("'", "''") }}',
+      '{{ postgres_runtime_secret_map.POSTGRES_APP_PASSWORD | replace("'", "''") }}'
+    );
+  ELSE
+    EXECUTE format(
+      'ALTER ROLE %I WITH LOGIN PASSWORD %L',
+      '{{ postgres_runtime_model.app_user | replace("'", "''") }}',
+      '{{ postgres_runtime_secret_map.POSTGRES_APP_PASSWORD | replace("'", "''") }}'
+    );
+  END IF;
+END$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_database WHERE datname = '{{ postgres_runtime_model.database | replace("'", "''") }}') THEN
+    EXECUTE format(
+      'CREATE DATABASE %I OWNER %I',
+      '{{ postgres_runtime_model.database | replace("'", "''") }}',
+      '{{ postgres_runtime_model.app_user | replace("'", "''") }}'
+    );
+  END IF;
+END$$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ postgres_runtime_model.replication_user | replace("'", "''") }}') THEN
+    EXECUTE format(
+      'CREATE ROLE %I WITH REPLICATION LOGIN PASSWORD %L',
+      '{{ postgres_runtime_model.replication_user | replace("'", "''") }}',
+      '{{ postgres_runtime_secret_map.POSTGRES_REPLICATION_PASSWORD | replace("'", "''") }}'
+    );
+  ELSE
+    EXECUTE format(
+      'ALTER ROLE %I WITH REPLICATION LOGIN PASSWORD %L',
+      '{{ postgres_runtime_model.replication_user | replace("'", "''") }}',
+      '{{ postgres_runtime_secret_map.POSTGRES_REPLICATION_PASSWORD | replace("'", "''") }}'
+    );
+  END IF;
+END$$;
+
+{% for _standby_alias, slot in postgres_runtime_model.replication_slots.items() %}
+SELECT pg_create_physical_replication_slot('{{ slot | replace("'", "''") }}')
+WHERE NOT EXISTS (
+  SELECT 1 FROM pg_replication_slots WHERE slot_name = '{{ slot | replace("'", "''") }}'
+);
+{% endfor %}

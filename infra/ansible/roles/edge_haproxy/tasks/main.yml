@@ -97,6 +97,7 @@
     default_softether_management_host = os.environ["DEFAULT_SOFTETHER_MANAGEMENT_HOST"]
     default_cascade_host = os.environ["DEFAULT_CASCADE_HOST"]
     default_cascade_management_host = os.environ["DEFAULT_CASCADE_MANAGEMENT_HOST"]
+    default_l3_host = os.environ["DEFAULT_L3_HOST"]
     default_sni_domain = os.environ["DEFAULT_SNI_DOMAIN"]
     default_game_rate = int(os.environ["DEFAULT_GAME_RATE"])
     default_rcon_rate = int(os.environ["DEFAULT_RCON_RATE"])
@@ -115,13 +116,15 @@
         rows = list(csv.DictReader(handle))
 
     def present_on(kind, name, node_alias):
-        return any(
-            row.get("kind") == kind
-            and row.get("name") == name
-            and row.get("state") == "present"
-            and node_alias in split_aliases(row.get("active_aliases"))
-            for row in rows
-        )
+        for row in rows:
+            if row.get("kind") != kind or row.get("name") != name or row.get("state") != "present":
+                continue
+            aliases = split_aliases(row.get("active_aliases"))
+            if name == "softether_l3":
+                aliases += split_aliases(row.get("candidate_aliases"))
+            if node_alias in aliases:
+                return True
+        return False
 
     present_routes = [
         row.get("name")
@@ -137,6 +140,8 @@
         fail(f"edge_route vpn_ingress is present on {alias}, but service vpn_edge is not present on the same alias")
     if "vpn_cascade" in present_routes and not present_on("service", "vpn_cascade", alias):
         fail(f"edge_route vpn_cascade is present on {alias}, but service vpn_cascade is not present on the same alias")
+    if "softether_l3" in present_routes and not present_on("service", "softether_l3", alias):
+        fail(f"edge_route softether_l3 is present on {alias}, but service softether_l3 is not present on the same alias")
 
     route_config = {}
     if present_routes:
@@ -149,6 +154,7 @@
         "present_routes": present_routes,
         "vpn_ingress_enabled": False,
         "vpn_cascade_enabled": False,
+        "softether_l3_enabled": False,
         "minecraft_enabled": False,
     }
 
@@ -214,6 +220,33 @@
             },
         })
 
+    if "softether_l3" in present_routes:
+        cfg = route_config.get("softether_l3") or {}
+        per_alias = (cfg.get("per_alias") or {}).get(alias) or {}
+        sni = unique_strings(per_alias.get("sni") or [])
+        if not sni:
+            sni = [f"l3-{alias}.{default_sni_domain}"]
+        management_sni = unique_strings(per_alias.get("management_sni") or [])
+        ports = {
+            "https": 443,
+            "management": 5555,
+            "backend_https": 443,
+            "backend_management": 5555,
+        }
+        ports.update(cfg.get("ports") or {})
+        backend_host = (cfg.get("backend") or {}).get("host") or default_l3_host
+        management_backend_host = (cfg.get("backend") or {}).get("management_host") or backend_host
+        model.update({
+            "softether_l3_enabled": True,
+            "softether_l3": {
+                "sni": sni,
+                "management_sni": management_sni,
+                "backend_host": backend_host,
+                "backend_management_host": management_backend_host,
+                "ports": ports,
+            },
+        })
+
     if "minecraft" in present_routes:
         cfg = route_config.get("minecraft") or {}
         per_alias = (cfg.get("per_alias") or {}).get(alias) or {}
@@ -270,6 +303,7 @@
     DEFAULT_SOFTETHER_MANAGEMENT_HOST: "{{ edge_haproxy_softether_management_host }}"
     DEFAULT_CASCADE_HOST: "{{ edge_haproxy_softether_cascade_host }}"
     DEFAULT_CASCADE_MANAGEMENT_HOST: "{{ edge_haproxy_softether_cascade_management_host }}"
+    DEFAULT_L3_HOST: "{{ edge_haproxy_softether_l3_host }}"
     DEFAULT_SNI_DOMAIN: "{{ edge_haproxy_default_sni_domain }}"
     DEFAULT_GAME_RATE: "{{ edge_haproxy_minecraft_game_rate_limit }}"
     DEFAULT_RCON_RATE: "{{ edge_haproxy_minecraft_rcon_rate_limit }}"
@@ -469,6 +503,19 @@
     - edge_haproxy_route_model.vpn_cascade_enabled | default(false)
     - not ansible_check_mode
 
+- name: Ensure SoftEther L3 Docker network exists for HAProxy route
+  ansible.builtin.command:
+    cmd: docker network create --subnet "{{ edge_haproxy_l3_network_subnet }}" "{{ edge_haproxy_l3_network_name }}"
+  register: edge_haproxy_l3_network_create
+  changed_when: edge_haproxy_l3_network_create.rc == 0
+  failed_when:
+    - edge_haproxy_l3_network_create.rc != 0
+    - "'already exists' not in (edge_haproxy_l3_network_create.stderr | default(''))"
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.softether_l3_enabled | default(false)
+    - not ansible_check_mode
+
 - name: Validate edge_haproxy config
   ansible.builtin.command:
     cmd: docker run --rm -v "{{ edge_haproxy_config_dir }}:/usr/local/etc/haproxy:ro" "{{ edge_haproxy_image }}" haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
@@ -623,6 +670,25 @@
     - edge_haproxy_route_model.vpn_cascade_enabled | default(false)
     - not ansible_check_mode
 
+- name: Verify running edge_haproxy SoftEther L3 network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ edge_haproxy_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ edge_haproxy_l3_network_name }}"
+    EXPECTED_IP: "{{ edge_haproxy_l3_container_ipv4 }}"
+  changed_when: false
+  register: edge_haproxy_l3_container_ready
+  until: edge_haproxy_l3_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.softether_l3_enabled | default(false)
+    - not ansible_check_mode
+
 - name: Verify edge_haproxy config inside running container
   ansible.builtin.command:
     cmd: docker exec "{{ edge_haproxy_container_name }}" haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
@@ -634,7 +700,7 @@
 - name: Verify cascade SNI surface is absent when vpn_cascade route is disabled
   ansible.builtin.shell: |
     set -euo pipefail
-    ! docker exec "{{ edge_haproxy_container_name }}" grep -nE 'cascade-vps|is_cascade|be_cascade' /usr/local/etc/haproxy/haproxy.cfg
+    ! docker exec "{{ edge_haproxy_container_name }}" grep -nE 'is_cascade|be_cascade' /usr/local/etc/haproxy/haproxy.cfg
   args:
     executable: /bin/bash
   changed_when: false

@@ -15,6 +15,7 @@ ExecStart={{ edge_banlist_script }} \
   --mgmt-allowlist-file {{ edge_banlist_mgmt_allowlist_file }} \
   --reload-command '{{ edge_banlist_reload_command }}' \
   --ban-ttl-seconds {{ edge_banlist_effective_config.ban_ttl_seconds | default(edge_banlist_ban_ttl_seconds) }} \
+  --max-ban-ttl-seconds {{ edge_banlist_effective_config.max_ban_ttl_seconds | default(edge_banlist_max_ban_ttl_seconds) }} \
   --min-score {{ edge_banlist_effective_config.min_score | default(edge_banlist_min_score) }} \
   --http-req-rate-threshold {{ edge_banlist_effective_config.http_req_rate_threshold | default(edge_banlist_http_req_rate_threshold) }} \
   --http-err-rate-threshold {{ edge_banlist_effective_config.http_err_rate_threshold | default(edge_banlist_http_err_rate_threshold) }} \

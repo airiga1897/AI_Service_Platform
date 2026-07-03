@@ -1,0 +1,20 @@
+---
+- name: PostgreSQL runtime primary rollout
+  hosts: postgres_runtimes
+  become: true
+  gather_facts: false
+  vars:
+    postgres_runtime_state: present
+    postgres_runtime_purge_data: false
+  roles:
+    - postgres_runtime
+
+- name: PostgreSQL runtime standby rollout
+  hosts: candidate_postgres_runtimes
+  become: true
+  gather_facts: false
+  vars:
+    postgres_runtime_state: present
+    postgres_runtime_purge_data: false
+  roles:
+    - postgres_runtime

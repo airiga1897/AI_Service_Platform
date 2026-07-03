@@ -15,11 +15,12 @@ edge_banlist_haproxy_lists_dir: "{{ edge_banlist_haproxy_root_dir }}/haproxy/lis
 edge_banlist_manual_blocked_file: "{{ edge_banlist_haproxy_lists_dir }}/blocked_ips.lst"
 edge_banlist_generated_blocked_file: "{{ edge_banlist_haproxy_lists_dir }}/generated_blocked_ips.lst"
 edge_banlist_mgmt_allowlist_file: "{{ edge_banlist_haproxy_lists_dir }}/vpn_mgmt_ips.lst"
-edge_banlist_reload_command: "docker compose -f {{ edge_banlist_haproxy_root_dir }}/docker-compose.yml restart {{ edge_banlist_haproxy_container }}"
+edge_banlist_reload_command: "cd {{ edge_banlist_haproxy_root_dir }} && docker compose -f docker-compose.yml stop {{ edge_banlist_haproxy_container }} && rm -f run/admin.sock && docker compose -f docker-compose.yml up -d {{ edge_banlist_haproxy_container }}"
 
 edge_banlist_mode: observe
 edge_banlist_interval: 1min
 edge_banlist_ban_ttl_seconds: 3600
+edge_banlist_max_ban_ttl_seconds: 86400
 edge_banlist_min_score: 1
 edge_banlist_http_req_rate_threshold: 50
 edge_banlist_http_err_rate_threshold: 5

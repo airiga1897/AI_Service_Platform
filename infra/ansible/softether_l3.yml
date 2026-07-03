@@ -1,0 +1,20 @@
+---
+- name: SoftEther L3 tunnel rollout
+  hosts: softether_l3s
+  become: true
+  gather_facts: false
+  vars:
+    softether_l3_state: present
+    softether_l3_purge_data: false
+  roles:
+    - softether_l3
+
+- name: SoftEther L3 tunnel candidate rollout
+  hosts: candidate_softether_l3s
+  become: true
+  gather_facts: false
+  vars:
+    softether_l3_state: present
+    softether_l3_purge_data: false
+  roles:
+    - softether_l3

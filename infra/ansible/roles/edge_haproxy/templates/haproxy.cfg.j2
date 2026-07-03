@@ -44,7 +44,7 @@ frontend http_in
     http-request redirect scheme https code 301 unless is_acme
     use_backend be_acme_placeholder if is_acme
 
-{% if (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) or (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) %}
+{% if (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) or (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) or (edge_haproxy_route_model.softether_l3_enabled | default(false)) %}
 frontend https_in
     bind *:443
     mode tcp
@@ -62,12 +62,23 @@ frontend https_in
 {% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
     acl is_cascade_https_sni req_ssl_sni -i {{ edge_haproxy_route_model.vpn_cascade.sni | join(' ') }}
 {% endif %}
-{% if (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) and (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) %}
+{% if edge_haproxy_route_model.softether_l3_enabled | default(false) %}
+    acl is_softether_l3_https_sni req_ssl_sni -i {{ edge_haproxy_route_model.softether_l3.sni | join(' ') }}
+{% endif %}
+{% if (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) and (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) and (edge_haproxy_route_model.softether_l3_enabled | default(false)) %}
+    tcp-request content silent-drop unless is_softether or is_cascade_https_sni or is_softether_l3_https_sni
+{% elif (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) and (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) %}
     tcp-request content silent-drop unless is_softether or is_cascade_https_sni
+{% elif (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) and (edge_haproxy_route_model.softether_l3_enabled | default(false)) %}
+    tcp-request content silent-drop unless is_softether or is_softether_l3_https_sni
+{% elif (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) and (edge_haproxy_route_model.softether_l3_enabled | default(false)) %}
+    tcp-request content silent-drop unless is_cascade_https_sni or is_softether_l3_https_sni
 {% elif edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
     tcp-request content silent-drop unless is_softether
 {% elif edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
     tcp-request content silent-drop unless is_cascade_https_sni
+{% elif edge_haproxy_route_model.softether_l3_enabled | default(false) %}
+    tcp-request content silent-drop unless is_softether_l3_https_sni
 {% endif %}
     tcp-request content accept if { req_ssl_hello_type 1 }
 {% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
@@ -75,6 +86,9 @@ frontend https_in
 {% endif %}
 {% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
     use_backend be_cascade_https if is_cascade_https_sni
+{% endif %}
+{% if edge_haproxy_route_model.softether_l3_enabled | default(false) %}
+    use_backend be_softether_l3_https if is_softether_l3_https_sni
 {% endif %}
 
 {% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
@@ -88,6 +102,12 @@ backend be_cascade_https
     mode tcp
     option tcp-check
     server softether-cascade {{ edge_haproxy_route_model.vpn_cascade.backend_host }}:{{ edge_haproxy_route_model.vpn_cascade.ports.backend_https }} check inter 5s fall 3 rise 2
+{% endif %}
+{% if edge_haproxy_route_model.softether_l3_enabled | default(false) %}
+backend be_softether_l3_https
+    mode tcp
+    option tcp-check
+    server softether-l3 {{ edge_haproxy_route_model.softether_l3.backend_host }}:{{ edge_haproxy_route_model.softether_l3.ports.backend_https }} check inter 5s fall 3 rise 2
 {% endif %}
 
 frontend softether_tcp_992
@@ -148,12 +168,23 @@ frontend softether_mgmt
 {% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
     acl is_cascade_mgmt_sni req_ssl_sni -i {{ edge_haproxy_route_model.vpn_cascade.sni | join(' ') }}
 {% endif %}
-{% if (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) and (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) %}
+{% if (edge_haproxy_route_model.softether_l3_enabled | default(false)) and ((edge_haproxy_route_model.softether_l3.management_sni | default([])) | length > 0) %}
+    acl is_softether_l3_mgmt_sni req_ssl_sni -i {{ edge_haproxy_route_model.softether_l3.management_sni | join(' ') }}
+{% endif %}
+{% if (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) and (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) and (edge_haproxy_route_model.softether_l3_enabled | default(false)) and ((edge_haproxy_route_model.softether_l3.management_sni | default([])) | length > 0) %}
+    tcp-request content silent-drop unless is_softether_mgmt_sni or is_cascade_mgmt_sni or is_softether_l3_mgmt_sni
+{% elif (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) and (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) %}
     tcp-request content silent-drop unless is_softether_mgmt_sni or is_cascade_mgmt_sni
+{% elif (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) and (edge_haproxy_route_model.softether_l3_enabled | default(false)) and ((edge_haproxy_route_model.softether_l3.management_sni | default([])) | length > 0) %}
+    tcp-request content silent-drop unless is_softether_mgmt_sni or is_softether_l3_mgmt_sni
+{% elif (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) and (edge_haproxy_route_model.softether_l3_enabled | default(false)) and ((edge_haproxy_route_model.softether_l3.management_sni | default([])) | length > 0) %}
+    tcp-request content silent-drop unless is_cascade_mgmt_sni or is_softether_l3_mgmt_sni
 {% elif edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
     tcp-request content silent-drop unless is_softether_mgmt_sni
 {% elif edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
     tcp-request content silent-drop unless is_cascade_mgmt_sni
+{% elif (edge_haproxy_route_model.softether_l3_enabled | default(false)) and ((edge_haproxy_route_model.softether_l3.management_sni | default([])) | length > 0) %}
+    tcp-request content silent-drop unless is_softether_l3_mgmt_sni
 {% endif %}
     tcp-request content accept if { req_ssl_hello_type 1 }
 {% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
@@ -161,6 +192,9 @@ frontend softether_mgmt
 {% endif %}
 {% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
     use_backend be_cascade_mgmt if is_cascade_mgmt_sni
+{% endif %}
+{% if (edge_haproxy_route_model.softether_l3_enabled | default(false)) and ((edge_haproxy_route_model.softether_l3.management_sni | default([])) | length > 0) %}
+    use_backend be_softether_l3_mgmt if is_softether_l3_mgmt_sni
 {% endif %}
 
 {% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
@@ -174,6 +208,12 @@ backend be_cascade_mgmt
     mode tcp
     option tcp-check
     server softether-cascade {{ edge_haproxy_route_model.vpn_cascade.backend_management_host }}:{{ edge_haproxy_route_model.vpn_cascade.ports.backend_management }} check inter 5s fall 3 rise 2
+{% endif %}
+{% if (edge_haproxy_route_model.softether_l3_enabled | default(false)) and ((edge_haproxy_route_model.softether_l3.management_sni | default([])) | length > 0) %}
+backend be_softether_l3_mgmt
+    mode tcp
+    option tcp-check
+    server softether-l3 {{ edge_haproxy_route_model.softether_l3.backend_management_host }}:{{ edge_haproxy_route_model.softether_l3.ports.backend_management }} check inter 5s fall 3 rise 2
 {% endif %}
 {% endif %}
 

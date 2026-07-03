@@ -83,6 +83,8 @@ function Get-ServicePlaybook($Name) {
         "policy_gateway" { return "infra\ansible\policy_gateway.yml" }
         "edge_candidate_collector" { return "infra\ansible\edge_candidate_collector.yml" }
         "edge_banlist" { return "infra\ansible\edge_banlist.yml" }
+        "postgres_runtime" { return "infra\ansible\postgres_runtime.yml" }
+        "softether_l3" { return "infra\ansible\softether_l3.yml" }
         default { Fail "No default playbook for service: $Name" }
     }
 }
@@ -114,8 +116,14 @@ function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false"
         "edge_banlist" {
             return @("-e", "edge_banlist_state=$State", "-e", "edge_banlist_purge_data=$PurgeData")
         }
+        "postgres_runtime" {
+            return @("-e", "postgres_runtime_state=$State", "-e", "postgres_runtime_purge_data=$PurgeData")
+        }
+        "softether_l3" {
+            return @("-e", "softether_l3_state=$State", "-e", "softether_l3_purge_data=$PurgeData")
+        }
         default {
-            Fail "Unsupported service '$Name'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist."
+            Fail "Unsupported service '$Name'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3."
         }
     }
 }
@@ -123,8 +131,8 @@ function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false"
 if ($Service -eq "vpn") {
     Fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 }
-if ($Service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist")) {
-    Fail "Unsupported service '$Service'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist."
+if ($Service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3")) {
+    Fail "Unsupported service '$Service'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3."
 }
 if ($PolicyRouterImageRef -and $Service -ne "vpn_cascade") {
     Fail "-PolicyRouterImageRef is supported only for service vpn_cascade"
@@ -147,7 +155,7 @@ $stateFirstLine = Get-Content -LiteralPath $StateFile -TotalCount 1
 if ($stateFirstLine -ne $ExpectedStateHeader) {
     Fail "state.csv header must be exactly: $ExpectedStateHeader"
 }
-if ($Service -in @("vpn_edge", "vpn_cascade", "policy_gateway")) {
+if ($Service -in @("vpn_edge", "vpn_cascade", "policy_gateway", "softether_l3")) {
     $networksFile = Join-Path (Split-Path -Parent $StateFile) "networks.csv"
     Require-File $networksFile "NetworksFile"
     $networksFirstLine = Get-Content -LiteralPath $networksFile -TotalCount 1
@@ -172,7 +180,12 @@ if ($Limit) {
 
     foreach ($row in $serviceRows) {
         $active = @(Split-AliasList $row.active_aliases)
-        $rowSelectedAliases = @($limitAliases | Where-Object { $active -contains $_ })
+        $candidate = @(Split-AliasList $row.candidate_aliases)
+        $targetAliases = @($active)
+        if ($Service -in @("postgres_runtime", "softether_l3")) {
+            $targetAliases += $candidate
+        }
+        $rowSelectedAliases = @($limitAliases | Where-Object { $targetAliases -contains $_ })
         if ($rowSelectedAliases.Count -eq 0) {
             continue
         }
@@ -232,6 +245,10 @@ if (-not $serviceRow.ansible_group) {
 }
 
 $desiredNodes = @(Split-AliasList $serviceRow.active_aliases)
+if ($Service -in @("postgres_runtime", "softether_l3") -and $serviceRow.state -eq "present") {
+    $desiredNodes += @(Split-AliasList $serviceRow.candidate_aliases)
+    $desiredNodes = @($desiredNodes | Where-Object { $_ } | Select-Object -Unique)
+}
 
 if ($Action -eq "plan") {
     Write-Host "Service: $Service"
@@ -268,7 +285,7 @@ if ($Action -eq "apply" -and $serviceRow.state -ne "present") {
     Fail "$Service apply requires state=present in $StateFile"
 }
 if ($Action -eq "apply" -and $desiredNodes.Count -eq 0) {
-    Fail "No active aliases for $Service found in $StateFile"
+    Fail "No active/candidate aliases for $Service found in $StateFile"
 }
 if ($Action -eq "purge" -and -not $ConfirmPurge) {
     Fail "purge requires -ConfirmPurge"
@@ -304,6 +321,8 @@ $args += Get-ServiceExtraVars $Service $serviceState $servicePurgeData $serviceR
 
 if ($Limit) {
     $args += @("--limit", (ConvertTo-AnsibleLimit $Limit))
+} elseif ($Service -in @("postgres_runtime", "softether_l3") -and $serviceRow.state -eq "present" -and $serviceRow.candidate_aliases) {
+    $args += @("--limit", "$($serviceRow.ansible_group):candidate_$($serviceRow.ansible_group)")
 } else {
     $args += @("--limit", $serviceRow.ansible_group)
 }

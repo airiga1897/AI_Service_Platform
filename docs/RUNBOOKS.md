@@ -276,7 +276,7 @@ Current verified status as of 2026-06-28:
   `vps1`, `vps2`, `vps3`, and `vps4`.
 - No shared `CascadeLab` links are active. Historical links are preserved in
   `lab-cascade.json` only as disabled audit material.
-- No public `cascade-vpsN` SNI surface should be published by HAProxy.
+- No old `edge_route,vpn_cascade` SNI/backend should be published by HAProxy.
 - `vps7` has no active shared `CascadeLab` links after the CPU storm incident.
 - `vps5` remains an orchestration candidate and VPN ingress node; `vps7` remains
   a future `vps3` duplicate/standby candidate for L3 HA work.
@@ -285,8 +285,9 @@ Current verified status as of 2026-06-28:
   `adminvps` and `selectel` are placement metadata, not runtime roles.
 
 Stop before any broader rollout if `check_vpn_cascade_links.ps1 -Json` reports
-any active links, if live HAProxy still contains `cascade-vps`, or if
-`softether-cascade` is running on `vps1`, `vps2`, `vps3`, or `vps4`.
+any active L2 links, if live HAProxy still contains `is_cascade` or
+`be_cascade`, or if `softether-cascade` is running on `vps1`, `vps2`, `vps3`,
+or `vps4`.
 
 Incident note: adding alternate `vps7` receiver links to the shared `CascadeLab`
 fabric on 2026-06-28 caused sustained CPU spikes on `vps1`, `vps2`, `vps4`, and
@@ -298,32 +299,110 @@ receiver paths as HA; future HA must be L3 policy routing.
 but both are absent during the freeze. `service,vpn_cascade` means the node runs
 local cascade runtime and may manage outgoing links. `edge_route,vpn_cascade`
 means HAProxy publishes public `cascade-vpsN` SNI on `443/992/5555`.
-When `edge_route,vpn_cascade` is absent, HAProxy must not contain
-`cascade-vpsN`, `is_cascade*`, or `be_cascade*` on any of those ports; the
-shared `5555` listener may remain only for `vpn-vpsN` SoftEther edge
-management.
+When `edge_route,vpn_cascade` is absent, HAProxy must not contain `is_cascade*`
+or `be_cascade*`. The names `cascade-vps8.mine-craft.su` and
+`cascade-vps4.mine-craft.su` are allowed only as `softether_l3` management SNI
+on `5555`, guarded by `vpn_mgmt_ips.lst`.
 
 When all public cascade aliases are retired, remove the whole
 `vpn_cascade` section from `operator/haproxy/routes.yml` and rerun only
 `edge_haproxy`. Otherwise HAProxy can keep a stale `cascade-vpsN` SNI route on
 `443/992/5555` even when the public route is no longer desired.
-`cascade-vpsN:5555` must not route anywhere while the freeze is active.
+Do not re-add a `vpn_cascade` section to `operator/haproxy/routes.yml` while the
+freeze is active.
 
 If SoftEther Server Manager reports "Source IP Restriction List of the Virtual
 Hub", first verify which SNI target was used. `vpn-vpsN:5555` should reach
-`softether-edge`; `cascade-vpsN:5555` should not be published while the
-SoftEther L2 freeze is active. Keep management allowlisting centralized in HAProxy
-`vpn_mgmt_ips.lst`; hub-level Source IP restrictions must not drift between VPS
-unless that is an explicit emergency lockout.
+`softether-edge`; `cascade-vps8/4:5555` should reach `softether-l3`; other
+`cascade-vpsN` names should not route anywhere while the L2 freeze is active.
+Keep management allowlisting centralized in HAProxy `vpn_mgmt_ips.lst`.
+
+### SoftEther L3 Postgres Tunnel
+
+The first L3 tunnel is `pg-vps8-vps4`: `vps8` listens at
+`l3-vps8.mine-craft.su:443`, `vps4` connects as peer, and the private tunnel
+addresses are `10.88.84.1/30` and `10.88.84.2/30`.
+
+Rollout order:
+
+```powershell
+.\tools\services\rollout_from_state.ps1 -NodesFile .\operator\nodes.csv -StateFile .\operator\state.csv -OnlyService edge_haproxy
+.\tools\services\rollout_from_state.ps1 -NodesFile .\operator\nodes.csv -StateFile .\operator\state.csv -OnlyService softether_l3
+.\tools\services\rollout_from_state.ps1 -NodesFile .\operator\nodes.csv -StateFile .\operator\state.csv -OnlyService postgres_runtime
+```
+
+Acceptance:
+
+- `vps4` can reach `10.88.84.1:5432`.
+- `vps8` sees standby streaming in `pg_stat_replication`.
+- Public `5432` is not open.
+- `check_vpn_cascade_links.ps1 -Json` still reports no selected L2 links.
+
+### Infrastructure Runtime Layer Plan
+
+Placement is driven by `state.csv`, not by hardcoded VPS names. Concrete aliases
+are current placement only. Use `active_aliases` for the current active runtime
+and `candidate_aliases` for prepared manual standby candidates.
+
+Target runtime split:
+
+- `postgres_runtime` - persistent DB runtime, active primary plus manual
+  standby candidates.
+- `redis_runtime` - cache/broker/result-backend runtime, active Redis plus
+  manual standby candidates.
+- `flower_runtime` - Celery observability/control runtime. It can run without
+  any public route.
+- project web/API runtime - project image and public/user HTTP route.
+- project worker runtime - project image running Celery workers.
+- project scheduler runtime - project image running Celery beat or another
+  singleton scheduler.
+
+Example state shape:
+
+```csv
+service,postgres_runtime,postgres_runtimes,<primary>,<standby+standby>,,present
+service,redis_runtime,redis_runtimes,<active>,<standby+standby>,,present
+service,flower_runtime,flower_runtimes,<active>,,,present
+service,ai_retail_worker,ai_retail_workers,<worker aliases>,,,present
+service,ai_retail_scheduler,ai_retail_schedulers,<singleton>,,,present
+edge_route,flower_mgmt,flower_mgmt,,,,absent
+```
+
+Flower default is VPN-only/internal. Do not publish it just because
+`flower_runtime` is present. If temporary external access is needed, add an
+explicit `edge_route,flower_mgmt` row for the target aliases and route
+`https://flower-vpsN.mine-craft.su` on public `443` through HAProxy to the
+internal Flower backend on `8080`. Protect the route with HAProxy management
+allowlists and Flower/basic auth. Remove the route when sharing is no longer
+needed.
+
+Implementation order:
+
+1. Finish `postgres_runtime` and its `softether_l3` replication path.
+2. Add `redis_runtime` with no public port and with exact app/worker allowlists.
+3. Add project worker and scheduler runtimes that consume Postgres and Redis
+   endpoints from platform config.
+4. Add `flower_runtime` as internal management UI.
+5. Add optional `flower_mgmt` public route only after internal Flower access and
+   auth are verified.
+
+Acceptance for each runtime layer:
+
+- A present `service` row starts only the runtime it owns.
+- Public exposure appears only when the matching `edge_route` row is present.
+- `edge_route,flower_mgmt` absent means no public Flower SNI/backend in HAProxy.
+- Worker runtimes can scale horizontally; scheduler runtimes remain singleton
+  unless the project explicitly supports distributed scheduling.
+- No runtime stores placement logic in role code; changing placement is a
+  `state.csv` edit plus targeted rollout.
 
 ### Edge Banlist Canary
 
-`edge_banlist` first proved `vps2` in `observe`, then `enforce`, with scanner
-IPs written to `generated_blocked_ips.lst` and no socket errors. The next
-fleet rollout intentionally returns the shared config to `observe` and enables
-the timer on all active edge aliases `vps1..vps8`. In `observe`, it reads
-HAProxy stick-tables and writes `/var/log/ai-service-platform/edge_banlist.log`,
-but it must not write generated bans or restart HAProxy.
+`edge_banlist` first proved `vps2` in `observe`, then `enforce`, and then
+rolled out to all active edge aliases `vps1..vps8`. Current verified status:
+fleet `enforce` is active, `edge-haproxy` is running on every edge alias, and
+the latest logs show `errors: []`. Generated TTL bans are expected and live in
+`/opt/ai-service-platform/edge_haproxy/haproxy/lists/generated_blocked_ips.lst`.
 
 Verify the canary after rollout:
 
@@ -339,9 +418,18 @@ ssh -i .\operator\vps2\admin_key useradmin@vps2.mine-craft.su `
   "test -S /opt/ai-service-platform/edge_haproxy/run/admin.sock && echo 'show table st_tcp_rates' | sudo socat - UNIX-CONNECT:/opt/ai-service-platform/edge_haproxy/run/admin.sock | head -20"
 ```
 
-Only switch `operator/edge_banlist/config.yml` back to `enforce` after reviewing
-the fleet observe logs from every edge alias and confirming that candidates do
-not include operator, VPN, node, or service IPs.
+Before expanding thresholds or changing ban TTL, review logs from every edge
+alias and confirm that candidates do not include operator, VPN, node, or service
+IPs.
+
+Repeated scanner IPs should show `count` and `ttl_seconds` in the JSON log.
+Expected defaults are 3600 seconds for the first ban, doubling on later
+reappearances, capped at 86400 seconds.
+
+In `enforce`, generated-list changes must reload HAProxy through a stop,
+`run/admin.sock` cleanup, and `up -d` sequence. Do not replace this with plain
+`docker compose restart edge-haproxy`: HAProxy can otherwise fail to start while
+trying to preserve a stale `/run/haproxy/admin.sock`.
 
 ---
 
@@ -495,10 +583,11 @@ Then restore only mandatory VPN ingress:
 Acceptance: `vps1` root password is cleared, admin-key SSH works, platform
 baseline directories/logrotate exist, `vpn-vps1:443/992/5555` is reachable,
 `softether-cascade` and `policy-router` are not running, and live HAProxy has
-no `cascade-vps`, `is_cascade`, or `be_cascade`. If `cascade-vps1` still
-TCP-connects but TLS/SNI fails, that is expected shared-IP HAProxy behavior; to
-force timeout, remove or disable the `cascade-vps1` DNS record during the L2
-freeze.
+no old `vpn_cascade` ACL/backend (`is_cascade` or `be_cascade`) and no
+`cascade-vps1` route. `cascade-vps8` and `cascade-vps4` are reserved for the
+new `softether_l3` management SNI on `5555`. If `cascade-vps1` still TCP-connects
+but TLS/SNI fails, that is expected shared-IP HAProxy behavior; to force
+timeout, remove or disable the `cascade-vps1` DNS record during the L2 freeze.
 
 ### Promote `vps1` Or `vps4` For `vps2` Edge Duties
 

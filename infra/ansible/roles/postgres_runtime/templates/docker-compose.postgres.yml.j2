@@ -1,0 +1,24 @@
+---
+services:
+  postgres:
+    image: "{{ postgres_runtime_model.image }}"
+    container_name: "{{ postgres_runtime_model.container_name }}"
+    restart: unless-stopped
+    env_file:
+      - "{{ postgres_runtime_env_file }}"
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+    ports:
+      - "{{ postgres_runtime_model.bind_host }}:{{ postgres_runtime_model.port }}:5432"
+    volumes:
+      - "{{ postgres_runtime_model.volume_name }}:/var/lib/postgresql/data"
+      - "{{ postgres_runtime_config_dir }}/postgresql.conf:/etc/postgresql/postgresql.conf:ro"
+      - "{{ postgres_runtime_config_dir }}/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro"
+
+volumes:
+  {{ postgres_runtime_model.volume_name }}:
+    external: true

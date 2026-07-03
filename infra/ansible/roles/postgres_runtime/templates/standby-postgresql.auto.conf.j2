@@ -1,0 +1,2 @@
+primary_conninfo = 'host={{ postgres_runtime_model.primary_expected_ip | replace("'", "''") }} port={{ postgres_runtime_model.port }} user={{ postgres_runtime_model.replication_user | replace("'", "''") }} password={{ postgres_runtime_secret_map.POSTGRES_REPLICATION_PASSWORD | replace("'", "''") }} application_name={{ postgres_runtime_model.replication_slot | replace("'", "''") }} sslmode=prefer'
+primary_slot_name = '{{ postgres_runtime_model.replication_slot | replace("'", "''") }}'

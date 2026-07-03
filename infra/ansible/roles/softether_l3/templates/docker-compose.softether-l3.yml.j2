@@ -1,0 +1,38 @@
+---
+services:
+  softether-l3:
+    image: {{ softether_l3_image }}
+    container_name: {{ softether_l3_container_name }}
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    expose:
+      - "443/tcp"
+      - "5555/tcp"
+    volumes:
+      - ./softether_data:/mnt
+      - ./softether_logs:/usr/local/bin/server_log
+      - ./adminip.txt:/usr/local/bin/adminip.txt:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: always
+    networks:
+      {{ softether_l3_network_name }}:
+        ipv4_address: {{ softether_l3_container_ipv4 }}
+
+  softether-l3-router:
+    image: {{ softether_l3_router_image }}
+    container_name: {{ softether_l3_router_container_name }}
+    network_mode: "service:softether-l3"
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - softether-l3
+    command: ["sleep", "infinity"]
+    restart: always
+
+networks:
+  {{ softether_l3_network_name }}:
+    external: true

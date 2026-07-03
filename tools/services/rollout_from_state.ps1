@@ -18,7 +18,7 @@ param(
     [int]$SecureBackupKeepLatest = 10,
     [string]$VpnIngressDomain = "mine-craft.su",
     [string[]]$ReseedVpnEdge = @(),
-    [ValidateSet("", "edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist")]
+    [ValidateSet("", "edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3")]
     [string]$OnlyService = "",
     [switch]$AutoAcceptHostKey = $true,
     [switch]$SkipSync,
@@ -31,7 +31,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ExpectedNodesHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
-$SupportedServices = @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist")
+$SupportedServices = @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3")
 $ReservedServices = @()
 $script:OperatorBackupCompleted = $false
 $script:BatchSteps = New-Object System.Collections.Generic.List[object]
@@ -107,6 +107,19 @@ function Get-PresentServiceAliases($Rows, $Name) {
     $rows = @($Rows | Where-Object { $_.kind -eq "service" -and $_.name -eq $Name -and $_.state -eq "present" })
     foreach ($row in $rows) {
         foreach ($alias in (Split-AliasList $row.active_aliases)) {
+            Add-UniqueAlias $aliases $alias
+        }
+    }
+    return @($aliases)
+}
+
+function Get-ServiceApplyAliases($Row) {
+    $aliases = New-Object System.Collections.Generic.List[string]
+    foreach ($alias in (Split-AliasList $Row.active_aliases)) {
+        Add-UniqueAlias $aliases $alias
+    }
+    if ($Row.name -in @("postgres_runtime", "softether_l3") -and $Row.state -eq "present") {
+        foreach ($alias in (Split-AliasList $Row.candidate_aliases)) {
             Add-UniqueAlias $aliases $alias
         }
     }
@@ -312,13 +325,95 @@ function Assert-NoHaproxyCascadeSurface($RoutesPath) {
     if ($content -match "(?m)^vpn_cascade:\s*$") {
         Fail "edge_route vpn_cascade has no present aliases, but $RoutesPath still contains a vpn_cascade section. Remove stale cascade routes before sync."
     }
-    if ($content -match "cascade-vps") {
-        Fail "edge_route vpn_cascade has no present aliases, but $RoutesPath still contains cascade-vps SNI entries. Remove stale cascade routes before sync."
-    }
 }
 
 function Get-VpnCascadeLinkSecretPath() {
     return (Join-Path (Join-Path (Join-Path (Join-Path $OperatorDir "softether") "cascade") "secrets") "lab-cascade.json")
+}
+
+function Assert-SoftetherL3SecretsPresent($Rows, $ServiceFilter) {
+    if ($ServiceFilter -and $ServiceFilter -ne "softether_l3") {
+        return
+    }
+
+    $serviceRows = @($Rows | Where-Object {
+        $_.kind -eq "service" -and $_.name -eq "softether_l3" -and $_.state -eq "present"
+    })
+    if ($serviceRows.Count -eq 0) {
+        return
+    }
+
+    $tunnelsPath = Join-Path (Join-Path (Join-Path $OperatorDir "softether") "l3") "tunnels.yml"
+    if (-not (Test-Path -LiteralPath $tunnelsPath -PathType Leaf)) {
+        Fail "softether_l3 requires tunnels.yml before rollout: $tunnelsPath"
+    }
+
+    $secretsDir = Join-Path (Join-Path (Join-Path (Join-Path $OperatorDir "softether") "l3") "secrets") ""
+    $checkScript = @'
+import json
+import os
+import sys
+
+try:
+    import yaml
+except Exception as exc:
+    print(f"PyYAML is required to validate softether_l3 secrets: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+tunnels_path = os.environ["TUNNELS_FILE"]
+secrets_dir = os.environ["SECRETS_DIR"]
+required = {"server_password", "hub_password", "peer_user", "peer_password"}
+
+with open(tunnels_path, encoding="utf-8") as handle:
+    config = yaml.safe_load(handle) or {}
+
+missing = []
+invalid = []
+for tunnel in config.get("tunnels", []):
+    if str(tunnel.get("state", "present")).strip().lower() != "present":
+        continue
+    name = str(tunnel.get("name") or "").strip()
+    if not name:
+        invalid.append("softether_l3 tunnel without name")
+        continue
+    secret_path = os.path.join(secrets_dir, name + ".json")
+    if not os.path.isfile(secret_path):
+        missing.append(secret_path)
+        continue
+    try:
+        with open(secret_path, encoding="utf-8") as secret_handle:
+            secret = json.load(secret_handle)
+    except Exception as exc:
+        invalid.append(f"{secret_path}: invalid JSON: {exc}")
+        continue
+    absent_keys = sorted(key for key in required if not str(secret.get(key) or "").strip())
+    if absent_keys:
+        invalid.append(f"{secret_path}: missing required keys: {', '.join(absent_keys)}")
+
+if missing or invalid:
+    for path in missing:
+        print(f"missing softether_l3 secret file: {path}", file=sys.stderr)
+    for item in invalid:
+        print(f"invalid softether_l3 secret: {item}", file=sys.stderr)
+    sys.exit(1)
+
+print("softether_l3 secret preflight passed")
+'@
+
+    $tempScript = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-sp-softether-l3-secret-check-" + [guid]::NewGuid().ToString("N") + ".py")
+    try {
+        [System.IO.File]::WriteAllText($tempScript, $checkScript, [System.Text.Encoding]::ASCII)
+        $env:TUNNELS_FILE = $tunnelsPath
+        $env:SECRETS_DIR = $secretsDir
+        & python $tempScript
+        if ($LASTEXITCODE -ne 0) {
+            Fail "softether_l3 secret preflight failed; create the required JSON secret files under $secretsDir"
+        }
+    } finally {
+        Remove-Item -LiteralPath $tempScript -Force -ErrorAction SilentlyContinue
+        Remove-Item Env:TUNNELS_FILE -ErrorAction SilentlyContinue
+        Remove-Item Env:SECRETS_DIR -ErrorAction SilentlyContinue
+    }
 }
 
 function Assert-VpnCascadeLinksAreAcyclic($Links) {
@@ -758,6 +853,35 @@ function New-VpnCascadeRoutesBlock($Aliases, $Domain) {
     return @($lines)
 }
 
+function New-SoftetherL3AliasBlock($Aliases, $Domain) {
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($alias in $Aliases) {
+        $lines.Add("    ${alias}:")
+        $lines.Add("      sni:")
+        $lines.Add("        - l3-${alias}.${Domain}")
+        $lines.Add("      management_sni:")
+        $lines.Add("        - cascade-${alias}.${Domain}")
+    }
+    return @($lines)
+}
+
+function New-SoftetherL3RoutesBlock($Aliases, $Domain) {
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("softether_l3:")
+    $lines.Add("  per_alias:")
+    foreach ($line in (New-SoftetherL3AliasBlock $Aliases $Domain)) {
+        $lines.Add($line)
+    }
+    $lines.Add("  backend:")
+    $lines.Add("    host: 172.26.0.2")
+    $lines.Add("  ports:")
+    $lines.Add("    https: 443")
+    $lines.Add("    management: 5555")
+    $lines.Add("    backend_https: 443")
+    $lines.Add("    backend_management: 5555")
+    return @($lines)
+}
+
 function Find-TopLevelSectionEnd($Lines, $StartIndex) {
     for ($i = $StartIndex + 1; $i -lt $Lines.Count; $i++) {
         if ($Lines[$i] -match "^\S") {
@@ -1061,6 +1185,203 @@ function Normalize-HaproxyCascadeRoutes($RoutesPath, $CascadeAliases, $Domain) {
     return @($missing)
 }
 
+function Normalize-HaproxySoftetherL3Routes($RoutesPath, $L3Aliases, $Domain) {
+    $changedAliases = New-Object System.Collections.Generic.List[string]
+    $sectionName = "softether_l3"
+
+    if ($L3Aliases.Count -eq 0) {
+        if (-not (Test-Path -LiteralPath $RoutesPath -PathType Leaf)) {
+            return @()
+        }
+
+        $lines = New-Object System.Collections.Generic.List[string]
+        foreach ($line in (Get-Content -LiteralPath $RoutesPath)) {
+            $lines.Add([string]$line)
+        }
+
+        $sectionIndex = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match "^${sectionName}:\s*$") {
+                $sectionIndex = $i
+                break
+            }
+        }
+
+        if ($sectionIndex -lt 0) {
+            return @()
+        }
+
+        $sectionEnd = Find-TopLevelSectionEnd $lines $sectionIndex
+        $perAliasIndex = -1
+        for ($i = $sectionIndex + 1; $i -lt $sectionEnd; $i++) {
+            if ($lines[$i] -match "^  per_alias:\s*$") {
+                $perAliasIndex = $i
+                break
+            }
+        }
+
+        if ($perAliasIndex -ge 0) {
+            $perAliasEnd = $sectionEnd
+            for ($i = $perAliasIndex + 1; $i -lt $sectionEnd; $i++) {
+                if ($lines[$i] -match "^  \S") {
+                    $perAliasEnd = $i
+                    break
+                }
+            }
+            for ($i = $perAliasIndex + 1; $i -lt $perAliasEnd; $i++) {
+                $match = [regex]::Match($lines[$i], "^    ([A-Za-z0-9_.-]+):\s*$")
+                if ($match.Success) {
+                    Add-UniqueAlias $changedAliases $match.Groups[1].Value
+                }
+            }
+        }
+
+        $lines.RemoveRange($sectionIndex, ($sectionEnd - $sectionIndex))
+        while ($sectionIndex -lt $lines.Count -and $sectionIndex -gt 0 -and $lines[$sectionIndex] -eq "" -and $lines[$sectionIndex - 1] -eq "") {
+            $lines.RemoveAt($sectionIndex)
+        }
+
+        Invoke-OperatorBackupIfNeeded "remove softether_l3 route config"
+        Set-Content -LiteralPath $RoutesPath -Value $lines -Encoding ascii
+        if ($changedAliases.Count -gt 0) {
+            Write-Host "Removed softether_l3 route config for aliases: $($changedAliases.ToArray() -join ', ')"
+        } else {
+            Write-Host "Removed softether_l3 route config"
+        }
+        return @($changedAliases.ToArray())
+    }
+
+    $routesDir = Split-Path -Parent $RoutesPath
+    if ($routesDir -and -not (Test-Path -LiteralPath $routesDir -PathType Container)) {
+        Invoke-OperatorBackupIfNeeded "create HAProxy routes directory"
+        New-Item -ItemType Directory -Force -Path $routesDir | Out-Null
+    }
+
+    if (-not (Test-Path -LiteralPath $RoutesPath -PathType Leaf)) {
+        Invoke-OperatorBackupIfNeeded "create HAProxy routes.yml"
+        Set-Content -LiteralPath $RoutesPath -Value (New-SoftetherL3RoutesBlock $L3Aliases $Domain) -Encoding ascii
+        Write-Host "Created HAProxy routes.yml with softether_l3 aliases: $($L3Aliases -join ', ')"
+        return @($L3Aliases)
+    }
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($line in (Get-Content -LiteralPath $RoutesPath)) {
+        $lines.Add([string]$line)
+    }
+
+    $sectionIndex = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match "^${sectionName}:\s*$") {
+            $sectionIndex = $i
+            break
+        }
+    }
+
+    if ($sectionIndex -lt 0) {
+        $newLines = New-Object System.Collections.Generic.List[string]
+        foreach ($line in $lines) {
+            $newLines.Add($line)
+        }
+        if ($newLines.Count -gt 0 -and $newLines[$newLines.Count - 1] -ne "") {
+            $newLines.Add("")
+        }
+        foreach ($line in (New-SoftetherL3RoutesBlock $L3Aliases $Domain)) {
+            $newLines.Add($line)
+        }
+        Invoke-OperatorBackupIfNeeded "add softether_l3 route config"
+        Set-Content -LiteralPath $RoutesPath -Value $newLines -Encoding ascii
+        Write-Host "Added softether_l3 route config for aliases: $($L3Aliases -join ', ')"
+        return @($L3Aliases)
+    }
+
+    $sectionEnd = Find-TopLevelSectionEnd $lines $sectionIndex
+    $perAliasIndex = -1
+    for ($i = $sectionIndex + 1; $i -lt $sectionEnd; $i++) {
+        if ($lines[$i] -match "^  per_alias:\s*$") {
+            $perAliasIndex = $i
+            break
+        }
+    }
+
+    if ($perAliasIndex -lt 0) {
+        $insertLines = New-Object System.Collections.Generic.List[string]
+        $insertLines.Add("  per_alias:")
+        foreach ($line in (New-SoftetherL3AliasBlock $L3Aliases $Domain)) {
+            $insertLines.Add($line)
+        }
+        $lines.InsertRange(($sectionIndex + 1), [string[]]$insertLines)
+        Invoke-OperatorBackupIfNeeded "add softether_l3.per_alias route config"
+        Set-Content -LiteralPath $RoutesPath -Value $lines -Encoding ascii
+        Write-Host "Added softether_l3.per_alias for aliases: $($L3Aliases -join ', ')"
+        return @($L3Aliases)
+    }
+
+    $perAliasEnd = $sectionEnd
+    for ($i = $perAliasIndex + 1; $i -lt $sectionEnd; $i++) {
+        if ($lines[$i] -match "^  \S") {
+            $perAliasEnd = $i
+            break
+        }
+    }
+
+    $existing = @()
+    for ($i = $perAliasIndex + 1; $i -lt $perAliasEnd; $i++) {
+        $match = [regex]::Match($lines[$i], "^    ([A-Za-z0-9_.-]+):\s*$")
+        if ($match.Success) {
+            $existing += $match.Groups[1].Value
+        }
+    }
+
+    $stale = @($existing | Where-Object { $L3Aliases -notcontains $_ })
+    if ($stale.Count -gt 0) {
+        $ranges = New-Object System.Collections.Generic.List[object]
+        for ($i = $perAliasIndex + 1; $i -lt $perAliasEnd; $i++) {
+            $match = [regex]::Match($lines[$i], "^    ([A-Za-z0-9_.-]+):\s*$")
+            if (-not $match.Success) {
+                continue
+            }
+            $alias = $match.Groups[1].Value
+            $start = $i
+            $end = $perAliasEnd
+            for ($j = $i + 1; $j -lt $perAliasEnd; $j++) {
+                if ($lines[$j] -match "^    [A-Za-z0-9_.-]+:\s*$") {
+                    $end = $j
+                    break
+                }
+            }
+            if ($stale -contains $alias) {
+                $ranges.Add([pscustomobject]@{ Start = $start; Count = ($end - $start) }) | Out-Null
+            }
+            $i = $end - 1
+        }
+
+        foreach ($range in @($ranges | Sort-Object Start -Descending)) {
+            $lines.RemoveRange([int]$range.Start, [int]$range.Count)
+        }
+        Invoke-OperatorBackupIfNeeded "remove stale softether_l3 route aliases"
+        Set-Content -LiteralPath $RoutesPath -Value $lines -Encoding ascii
+        Write-Host "Removed stale softether_l3 routes for aliases: $($stale -join ', ')"
+        foreach ($alias in $stale) {
+            Add-UniqueAlias $changedAliases $alias
+        }
+        foreach ($alias in @(Normalize-HaproxySoftetherL3Routes $RoutesPath $L3Aliases $Domain)) {
+            Add-UniqueAlias $changedAliases $alias
+        }
+        return @($changedAliases.ToArray())
+    }
+
+    $missing = @($L3Aliases | Where-Object { $existing -notcontains $_ })
+    if ($missing.Count -eq 0) {
+        return @()
+    }
+
+    $lines.InsertRange($perAliasEnd, [string[]](New-SoftetherL3AliasBlock $missing $Domain))
+    Invoke-OperatorBackupIfNeeded "add missing softether_l3 aliases"
+    Set-Content -LiteralPath $RoutesPath -Value $lines -Encoding ascii
+    Write-Host "Added softether_l3 routes for aliases: $($missing -join ', ')"
+    return @($missing)
+}
+
 function Resolve-EndpointIpAddresses($Endpoint, $Alias) {
     if (-not $Endpoint) {
         return @()
@@ -1353,8 +1674,10 @@ $stateRows = @(Normalize-StateRows $stateRows $nodeRows $StateFile)
 Update-VpnManagementAllowlist (Join-Path (Join-Path (Join-Path $OperatorDir "haproxy") "lists") "vpn_mgmt_ips.lst") $nodeRows
 $haproxyRoutesPath = Join-Path (Join-Path $OperatorDir "haproxy") "routes.yml"
 $presentVpnCascadeRouteAliases = @(Get-PresentVpnCascadeRouteAliases $stateRows)
+$presentSoftetherL3RouteAliases = @(Get-EdgeRouteAliasesByState $stateRows "softether_l3" @("present"))
 Normalize-HaproxyRoutes $haproxyRoutesPath (Get-PresentVpnIngressAliases $stateRows) $VpnIngressDomain
 $haproxyCascadeRouteChangedAliases = @(Normalize-HaproxyCascadeRoutes $haproxyRoutesPath $presentVpnCascadeRouteAliases $VpnIngressDomain)
+$haproxySoftetherL3RouteChangedAliases = @(Normalize-HaproxySoftetherL3Routes $haproxyRoutesPath $presentSoftetherL3RouteAliases $VpnIngressDomain)
 if ($presentVpnCascadeRouteAliases.Count -eq 0) {
     Assert-NoHaproxyCascadeSurface $haproxyRoutesPath
 }
@@ -1367,6 +1690,7 @@ if ($serviceRows.Count -eq 0) {
 }
 Assert-CascadeTopologyStateMatchesLinks $stateRows $nodeRows
 Assert-VpnCascadeStateMatchesLinks $stateRows
+Assert-SoftetherL3SecretsPresent $stateRows $OnlyService
 if ($OnlyService) {
     $onlyServiceRows = @($serviceRows | Where-Object { $_.name -eq $OnlyService })
     if ($onlyServiceRows.Count -eq 0) {
@@ -1378,11 +1702,20 @@ $edgeRouteRows = @($stateRows | Where-Object { $_.kind -eq "edge_route" })
 $edgeHaproxyAliases = @(Get-PresentServiceAliases $stateRows "edge_haproxy")
 $vpnEdgeAliases = @(Get-PresentServiceAliases $stateRows "vpn_edge")
 $vpnCascadeAliases = @(Get-PresentServiceAliases $stateRows "vpn_cascade")
+$softetherL3Aliases = @(
+    $stateRows |
+        Where-Object { $_.kind -eq "service" -and $_.name -eq "softether_l3" -and $_.state -eq "present" } |
+        ForEach-Object { Get-ServiceApplyAliases $_ } |
+        Select-Object -Unique
+)
 $vpnIngressAliases = @(Get-EdgeRouteAliasesByState $stateRows "vpn_ingress" @("present"))
 $presentEdgeRouteAliases = @(Get-AnyEdgeRouteAliasesByState $stateRows @("present"))
 $edgeRouteApplyAliases = New-Object System.Collections.Generic.List[string]
 $edgeRouteRemovalAliases = New-Object System.Collections.Generic.List[string]
 foreach ($alias in $haproxyCascadeRouteChangedAliases) {
+    Add-UniqueAlias $edgeRouteApplyAliases $alias
+}
+foreach ($alias in $haproxySoftetherL3RouteChangedAliases) {
     Add-UniqueAlias $edgeRouteApplyAliases $alias
 }
 
@@ -1416,6 +1749,9 @@ foreach ($routeRow in $edgeRouteRows) {
         }
         if ($routeRow.name -eq "vpn_cascade" -and ($vpnCascadeAliases -notcontains $alias)) {
             Fail "edge_route vpn_cascade is present on $alias, but service vpn_cascade is not present on the same alias"
+        }
+        if ($routeRow.name -eq "softether_l3" -and ($softetherL3Aliases -notcontains $alias)) {
+            Fail "edge_route softether_l3 is present on $alias, but service softether_l3 is not present on the same alias"
         }
         Add-UniqueAlias $edgeRouteApplyAliases $alias
     }
@@ -1501,7 +1837,7 @@ foreach ($serviceRow in $orderedServiceRows) {
         continue
     }
     $state = $serviceRow.state
-    $aliases = @(Split-AliasList $serviceRow.active_aliases)
+    $aliases = @(Get-ServiceApplyAliases $serviceRow)
     $retiredAliases = @(Get-RetiredServiceAliases $serviceRow | Where-Object { $nodeAliases -contains $_ })
     if ($service -eq "vpn_cascade" -and $state -eq "present") {
         $aliases = @(Get-VpnCascadeOrderedAliases $aliases)

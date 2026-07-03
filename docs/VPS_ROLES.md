@@ -78,11 +78,14 @@ Runtime roles are managed separately through `state.csv`:
 - `vps2` is the active public/service edge target, including the current
   `minecraft` route. `vps1` and `vps4` are manual duplicate/standby candidates
   for `vps2`; both are active VPN ingress nodes.
-- `vps8` is a Selectel RU services-standby node. It has the mandatory VPN
-  ingress stack, but no active production service route is moved to it yet.
-- Public cascade SNI and local `vpn_cascade` runtime are both absent while the
-  SoftEther L2 freeze is active. `cascade-vpsN` endpoints must not be published
-  until a separate explicit design review approves a new loop-free topology.
+- `vps8` is the staged services-active/Postgres primary node for the first
+  active/standby DB pair. `vps4` is the services-standby/Postgres standby node.
+  Their replication path is the isolated `softether_l3` tunnel
+  `pg-vps8-vps4`, not the frozen shared L2 cascade.
+- Public `vpn_cascade` SNI/backends and local `vpn_cascade` runtime are both
+  absent while the SoftEther L2 freeze is active. `cascade-vps8` and
+  `cascade-vps4` may be used only as management SNI for the new `softether_l3`
+  containers on `5555`.
 - Every active VPS alias from `vps1` through `vps8` has the full VPN ingress
   stack in `state.csv`: `edge_haproxy`, `vpn_edge`, and
   `edge_route,vpn_ingress`.
@@ -134,6 +137,23 @@ service,edge_candidate_collector,edge_candidate_collectors,vps1+vps2+vps3+vps4+v
 
 Service naming is semantic, not positional:
 
+- `postgres_runtime` - infrastructure PostgreSQL runtime. `active_aliases`
+  means current primary, and `candidate_aliases` means manual standby
+  candidates.
+- `redis_runtime` - infrastructure Redis runtime for cache, broker, or result
+  backend use. `active_aliases` means current active Redis placement, and
+  `candidate_aliases` means prepared standby candidates.
+- `flower_runtime` - infrastructure/control runtime for Celery observability.
+  It may run without any public HAProxy route.
+- `flower_mgmt` - optional HAProxy management route for Flower. Runtime
+  placement and public exposure are intentionally separate: this route is
+  absent by default.
+- Project worker services, for example `ai_retail_worker`, run Celery workers
+  from project images. They consume infrastructure endpoints but are not shared
+  infrastructure themselves.
+- Project scheduler services, for example `ai_retail_scheduler`, run Celery
+  beat or other singleton schedulers from project images. They normally have
+  exactly one active alias.
 - `edge_haproxy` - edge proxy implemented with HAProxy.
 - `vpn_edge` - SoftEther user VPN ingress behind the edge proxy.
 - `vpn_ingress` - HAProxy route к `vpn_edge`.
@@ -169,6 +189,36 @@ Generated proposals remain `suggested` until the operator accepts or rejects
 them through the normal egress proposal review tools.
 
 `ansible_group` задаёт inventory-группу. `active_aliases`, `candidate_aliases`, `old_aliases` разделяются через `+`.
+
+### Runtime Placement Contract
+
+Runtime placement is role-driven by `state.csv`. `active_aliases` and
+`candidate_aliases` describe the current deployment, not hardcoded architecture.
+Documentation may mention concrete VPS aliases as current status or examples,
+but roles and automation must not bake in `vpsN` placement.
+
+Infrastructure runtimes provide shared endpoints and lifecycle:
+
+- `postgres_runtime` owns persistent database placement and manual standby.
+- `redis_runtime` owns cache, broker, and result-backend placement plus manual
+  standby.
+- `flower_runtime` owns Celery observability/control placement.
+
+Application runtimes consume infrastructure endpoints:
+
+- web/API services serve project traffic;
+- worker services run project-specific Celery workers from project images;
+- scheduler services run project-specific singleton beat/cron processes.
+
+Public exposure is controlled only by `edge_route` rows. A `service` row may
+run a runtime internally without publishing it. For example,
+`service,flower_runtime,...,present` does not publish Flower; only
+`edge_route,flower_mgmt,...,present` may expose it through HAProxy.
+
+Flower is VPN-only/internal by default. If temporary publication is needed, the
+route uses `https://flower-vpsN.mine-craft.su` on public `443`, protected by
+HAProxy management allowlists and application/basic auth, and forwards to the
+internal Flower backend on `8080`.
 
 ## Network Policy
 
