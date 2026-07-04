@@ -319,34 +319,31 @@ point-to-point SoftEther server; `cascade-vpsN` names should not route anywhere
 while the L2 freeze is active. Keep management allowlisting centralized in
 HAProxy `vpn_mgmt_ips.lst`.
 
-### Reset vps4/vps8 To Platform Network Baseline
+### Roll Out Platform Network Baseline
 
-`vps4` and `vps8` are the first nodes moved to explicit per-node platform
-networks. During this reset, `softether_p2p`, `softether_l3`, and
+All active VPS aliases `vps1` through `vps8` use explicit per-node platform
+networks. During this baseline, `softether_p2p`, `softether_l3`, and
 `postgres_runtime` are absent. `vpn_cascade` remains frozen/absent.
 
-Rollout order:
+The operator runs the long remote rollout commands manually:
 
 ```powershell
-.\tools\services\rollout_from_state.ps1 -NodesFile .\operator\nodes.csv -StateFile .\operator\state.csv -OnlyService edge_haproxy
-.\tools\services\rollout_from_state.ps1 -NodesFile .\operator\nodes.csv -StateFile .\operator\state.csv -OnlyService softether_p2p
-.\tools\services\rollout_from_state.ps1 -NodesFile .\operator\nodes.csv -StateFile .\operator\state.csv -OnlyService softether_l3
-.\tools\services\rollout_from_state.ps1 -NodesFile .\operator\nodes.csv -StateFile .\operator\state.csv -OnlyService postgres_runtime
 .\tools\services\rollout_from_state.ps1 -NodesFile .\operator\nodes.csv -StateFile .\operator\state.csv -OnlyService vpn_edge
 .\tools\services\rollout_from_state.ps1 -NodesFile .\operator\nodes.csv -StateFile .\operator\state.csv -OnlyService platform_networks
 ```
 
 Acceptance:
 
-- On `vps4` and `vps8`, running containers are limited to `edge-haproxy` and
-  `softether-edge` for the baseline. `edge-banlist` remains a systemd timer.
+- On `vps1` through `vps8`, VPN ingress remains healthy through `edge-haproxy`
+  and `softether-edge`. `edge-banlist` remains a systemd timer.
 - No `softether-p2p-*`, `softether-l3-*`, `softether-cascade`, or
   `ai-service-postgres` containers are running.
 - No `cascade-vps`, `l3-vps8`, or `l3-mgmt-vps8` routes exist in HAProxy.
-- `ai_service_data_vps4`, `ai_service_app_vps4`, `ai_service_data_vps8`, and
-  `ai_service_app_vps8` exist with the expected `172.30/172.31` subnets.
+- For each `vpsN`, `ai_service_data_vpsN` exists at `172.30.N.0/24` and
+  `ai_service_app_vpsN` exists at `172.31.N.0/24`.
 - Empty retired managed networks are removed; non-empty retired networks must
   be investigated instead of force-removed.
+- On `vps1`, Minecraft edge continues to publish `25565/25575`.
 - `check_vpn_cascade_links.ps1 -Json` still reports no selected L2 links.
 
 SoftEther Virtual Layer-3 Switch is a documented future option, not the current
@@ -395,7 +392,7 @@ needed.
 
 Implementation order:
 
-1. Verify `platform_networks` on `vps4` and `vps8`.
+1. Verify `platform_networks` on `vps1` through `vps8`.
 2. Add `postgres_runtime` on the explicit per-node data networks.
 3. Add `redis_runtime` with no public port and with exact app/worker allowlists.
 4. Add project worker and scheduler runtimes that consume Postgres and Redis

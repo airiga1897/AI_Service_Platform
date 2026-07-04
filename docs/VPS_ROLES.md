@@ -79,8 +79,8 @@ Runtime roles are managed separately through `state.csv`:
   `minecraft` route. `vps1` and `vps4` are manual duplicate/standby candidates
   for `vps2`; both are active VPN ingress nodes.
 - `vps8` is the staged services-active node and `vps4` is the services-standby
-  node. Both are being reset to the minimal VPN/HAProxy baseline plus explicit
-  platform networks before Postgres, Redis, or nginx are deployed.
+  node. All active VPS aliases now use the minimal VPN/HAProxy baseline plus
+  explicit platform networks before Postgres, Redis, or nginx are deployed.
 - Public `vpn_cascade` SNI/backends, local `vpn_cascade` runtime, experimental
   `softether_l3`, experimental `softether_p2p`, and `postgres_runtime` are
   absent while the network baseline is being cleaned up.
@@ -164,9 +164,8 @@ Service naming is semantic, not positional:
   HAProxy/policy/cascade candidate facts and writes local JSONL evidence. It
   does not apply routes, NAT, firewall, HAProxy, Docker, or SoftEther changes.
 - `platform_networks` - explicit per-node Docker network baseline for future
-  service runtimes. Current first targets are `vps8` and `vps4`: data networks
-  `172.30.8.0/24` and `172.30.4.0/24`, app networks `172.31.8.0/24` and
-  `172.31.4.0/24`.
+  service runtimes. For each active `vpsN`, the data network is
+  `172.30.N.0/24` and the app network is `172.31.N.0/24`.
 
 Every active, non-retired VPS in `nodes.csv` is expected to have the full VPN
 ingress stack in `state.csv`: `service,edge_haproxy`,
@@ -246,21 +245,17 @@ cascade-router        172.23.0.X
 
 `platform_networks` is the new owner of per-node service networks. It is
 separate from VPN policy/cascade networks and is the baseline for future
-Postgres, Redis, nginx, and application runtimes. Current first targets:
+Postgres, Redis, nginx, and application runtimes. The fleet convention is:
 
 ```text
-vps4:
-  ai_service_data_vps4 172.30.4.0/24
-  ai_service_app_vps4  172.31.4.0/24
-
-vps8:
-  ai_service_data_vps8 172.30.8.0/24
-  ai_service_app_vps8  172.31.8.0/24
+vpsN:
+  ai_service_data_vpsN 172.30.N.0/24
+  ai_service_app_vpsN  172.31.N.0/24
 ```
 
-The current cleanup intentionally disables `ai_service_vpn_policy` only on
-`vps4` and `vps8`. Other nodes keep their existing VPN policy network unless a
-separate rollout changes their `vpn_edge` mode.
+The current cleanup disables `ai_service_vpn_policy` for all active aliases
+`vps1` through `vps8`. If a policy network is non-empty during cleanup, stop and
+investigate the attached endpoint instead of force-removing the network.
 
 `ai_service_vpn_policy` генерируется в `operator/networks.csv`. Для обычных
 алиасов `vpsN` используется `X = 255 - N`: например, `vps1` получает

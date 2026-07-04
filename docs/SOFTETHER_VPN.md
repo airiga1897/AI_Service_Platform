@@ -238,22 +238,18 @@ layer is frozen:
 ### SoftEther P2P Status
 
 `softether_p2p` was tested as a possible Postgres transport, but the current
-desired state is `absent` while `vps4` and `vps8` are reset to a clean
-VPN/HAProxy baseline. No `l3-vps8` or `l3-mgmt-vps8` HAProxy SNI should be
-published during this cleanup.
+desired state is `absent` while all active VPS aliases use a clean VPN/HAProxy
+baseline. No `l3-vps8` or `l3-mgmt-vps8` HAProxy SNI should be published during
+this cleanup.
 
 Future inter-VPS transport should route between explicit per-node platform
 networks rather than creating intermediate HAProxy service endpoint networks as
-the primary contract. The current per-node platform network baseline is:
+the primary contract. The current per-node platform network convention is:
 
 ```text
-vps4:
-  ai_service_data_vps4 172.30.4.0/24
-  ai_service_app_vps4  172.31.4.0/24
-
-vps8:
-  ai_service_data_vps8 172.30.8.0/24
-  ai_service_app_vps8  172.31.8.0/24
+vpsN:
+  ai_service_data_vpsN 172.30.N.0/24
+  ai_service_app_vpsN  172.31.N.0/24
 ```
 
 Only empty managed experiment networks may be removed during cleanup. Do not
