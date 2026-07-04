@@ -33,12 +33,22 @@ edge_haproxy_cascade_management_container_ipv4: 172.25.0.3
 edge_haproxy_l3_network_name: ai_service_softether_l3
 edge_haproxy_l3_network_subnet: 172.26.0.0/24
 edge_haproxy_l3_container_ipv4: 172.26.0.3
+edge_haproxy_p2p_network_name: ai_service_softether_p2p_pg84_transport
+edge_haproxy_p2p_network_subnet: 172.27.84.0/24
+edge_haproxy_p2p_container_ipv4: 172.27.84.3
+edge_haproxy_p2p_service_network_name: ai_service_softether_p2p_pg84_services
+edge_haproxy_p2p_service_network_subnet: 172.29.84.0/24
+edge_haproxy_p2p_service_container_ipv4: 172.29.84.3
+edge_haproxy_postgres_network_name: ai_service_postgres_runtime
+edge_haproxy_postgres_network_subnet: 172.27.0.0/24
+edge_haproxy_postgres_container_ipv4: 172.27.0.3
 
 edge_haproxy_softether_host: 172.20.0.2
 edge_haproxy_softether_management_host: 172.24.0.2
 edge_haproxy_softether_cascade_host: 172.21.0.2
 edge_haproxy_softether_cascade_management_host: 172.25.0.2
 edge_haproxy_softether_l3_host: 172.26.0.2
+edge_haproxy_softether_p2p_host: 172.27.84.2
 edge_haproxy_default_sni_domain: mine-craft.su
 edge_haproxy_stats_bind: 127.0.0.1:8404
 

@@ -1,0 +1,159 @@
+---
+- name: Validate platform_networks state
+  ansible.builtin.assert:
+    that:
+      - platform_networks_state in ['present', 'absent']
+    fail_msg: "platform_networks_state must be present|absent."
+
+- name: Check platform_networks operator config on control node
+  ansible.builtin.stat:
+    path: "{{ platform_networks_operator_config_file }}"
+  delegate_to: localhost
+  become: false
+  register: platform_networks_config_stat
+  when: platform_networks_state == 'present'
+
+- name: Require platform_networks operator config
+  ansible.builtin.assert:
+    that:
+      - platform_networks_config_stat.stat.exists
+      - platform_networks_config_stat.stat.isreg
+    fail_msg: "Missing platform_networks config: {{ platform_networks_operator_config_file }}"
+  when: platform_networks_state == 'present'
+
+- name: Build platform_networks model
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - <<'PY'
+    import ipaddress
+    import json
+    import os
+    import sys
+
+    try:
+        import yaml
+    except Exception as exc:
+        print(f"PyYAML is required to read platform_networks config: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    alias = os.environ["INVENTORY_HOSTNAME"]
+    path = os.environ["CONFIG_FILE"]
+
+    def fail(message):
+        print(message, file=sys.stderr)
+        sys.exit(1)
+
+    with open(path, encoding="utf-8") as handle:
+        config = yaml.safe_load(handle) or {}
+    node = (config.get("nodes") or {}).get(alias)
+    if not node:
+        fail(f"platform_networks config has no node entry for {alias}")
+
+    networks = []
+    seen_names = set()
+    seen_subnets = []
+    for role in ("data", "app"):
+        item = node.get(role) or {}
+        name = str(item.get("name") or "").strip()
+        subnet_text = str(item.get("subnet") or "").strip()
+        if not name or not subnet_text:
+            fail(f"platform_networks {alias}.{role} requires name and subnet")
+        subnet = ipaddress.ip_network(subnet_text, strict=True)
+        if name in seen_names:
+            fail(f"platform_networks {alias} repeats network name {name}")
+        for prior in seen_subnets:
+            if subnet.overlaps(prior):
+                fail(f"platform_networks {alias} subnet {subnet} overlaps {prior}")
+        seen_names.add(name)
+        seen_subnets.append(subnet)
+        networks.append({"role": role, "name": name, "subnet": str(subnet)})
+
+    cleanup = []
+    for name in node.get("cleanup_empty_networks") or []:
+        text = str(name).strip()
+        if text and text not in seen_names and text not in cleanup:
+            cleanup.append(text)
+
+    print(json.dumps({"alias": alias, "networks": networks, "cleanup_empty_networks": cleanup}, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    INVENTORY_HOSTNAME: "{{ inventory_hostname }}"
+    CONFIG_FILE: "{{ platform_networks_operator_config_file }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  register: platform_networks_model_command
+  when: platform_networks_state == 'present'
+
+- name: Store platform_networks model
+  ansible.builtin.set_fact:
+    platform_networks_model: "{{ platform_networks_model_command.stdout | trim | from_json }}"
+  when: platform_networks_state == 'present'
+
+- name: Ensure Docker runtime baseline for platform_networks
+  ansible.builtin.include_role:
+    name: docker_runtime_baseline
+  when:
+    - platform_networks_state == 'present'
+    - not ansible_check_mode
+
+- name: Ensure platform managed Docker networks exist
+  ansible.builtin.shell: |
+    set -euo pipefail
+    name="{{ item.name }}"
+    subnet="{{ item.subnet }}"
+    current="$(docker network inspect -f {% raw %}'{{ (index .IPAM.Config 0).Subnet }}'{% endraw %} "$name" 2>/dev/null || true)"
+    if [ -n "$current" ] && [ "$current" != "$subnet" ]; then
+      count="$(docker network inspect -f {% raw %}'{{ len .Containers }}'{% endraw %} "$name")"
+      if [ "$count" != "0" ]; then
+        echo "managed network $name has subnet $current but expected $subnet and still has $count endpoint(s)" >&2
+        exit 1
+      fi
+      docker network rm "$name"
+      echo "removed mismatched empty platform network $name ($current != $subnet)"
+      current=""
+    fi
+    if [ -z "$current" ]; then
+      docker network create --subnet "$subnet" "$name"
+      echo "created platform network $name ($subnet)"
+    else
+      echo "platform network already exists: $name ($current)"
+    fi
+  args:
+    executable: /bin/bash
+  loop: "{{ platform_networks_model.networks }}"
+  register: platform_networks_create
+  changed_when: >
+    (platform_networks_create.stdout | default(''))
+    is search('(?i)(created platform network|removed mismatched empty platform network)')
+  when:
+    - platform_networks_state == 'present'
+    - not ansible_check_mode
+
+- name: Remove empty retired managed Docker networks
+  ansible.builtin.shell: |
+    set -euo pipefail
+    name="{{ item }}"
+    if ! docker network inspect "$name" >/dev/null 2>&1; then
+      exit 0
+    fi
+    count="$(docker network inspect -f {% raw %}'{{ len .Containers }}'{% endraw %} "$name")"
+    if [ "$count" = "0" ]; then
+      docker network rm "$name"
+      echo "removed empty retired managed network $name"
+    else
+      echo "retired managed network still has $count endpoint(s): $name"
+    fi
+  args:
+    executable: /bin/bash
+  loop: "{{ platform_networks_model.cleanup_empty_networks }}"
+  register: platform_networks_cleanup
+  changed_when: >
+    (platform_networks_cleanup.stdout | default(''))
+    is search('removed empty retired managed network')
+  when:
+    - platform_networks_state == 'present'
+    - not ansible_check_mode

@@ -1,0 +1,3 @@
+---
+platform_networks_state: present
+platform_networks_operator_config_file: "{{ playbook_dir }}/../../operator/platform_networks/networks.yml"

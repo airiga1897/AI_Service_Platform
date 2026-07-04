@@ -37,6 +37,10 @@ param(
 
     [string]$RemotePostgresDir = "/tmp/ai-service-platform.postgres",
 
+    [string]$PlatformNetworksDir = ".\operator\platform_networks",
+
+    [string]$RemotePlatformNetworksDir = "/tmp/ai-service-platform.platform_networks",
+
     [string]$NetworksFile = ".\operator\networks.csv",
 
     [string]$NetworksOverrideFile = ".\operator\networks.override.csv",
@@ -569,6 +573,11 @@ try {
         Write-Host "Syncing postgres operator directory to control node $($controlNode.current_alias)"
         Invoke-TarDirectoryUpload $SshKeyFile $PostgresDir $remote $RemotePostgresDir "postgres operator directory"
     }
+    $syncPlatformNetworks = Test-Path -LiteralPath $PlatformNetworksDir -PathType Container
+    if ($syncPlatformNetworks) {
+        Write-Host "Syncing platform_networks operator directory to control node $($controlNode.current_alias)"
+        Invoke-TarDirectoryUpload $SshKeyFile $PlatformNetworksDir $remote $RemotePlatformNetworksDir "platform_networks operator directory"
+    }
     $egressPolicySyncDir = New-EgressPolicySyncDirectory $EgressPolicyDir
     $syncEgressPolicy = $null -ne $egressPolicySyncDir
     if ($syncEgressPolicy) {
@@ -606,6 +615,10 @@ try {
     if ($syncPostgres) {
         $postgresCommand = "sudo mkdir -p /opt/ai-service-platform/operator; if [ -d '$RemotePostgresDir/postgres' ]; then sudo rm -rf /opt/ai-service-platform/operator/postgres && sudo cp -a '$RemotePostgresDir/postgres' /opt/ai-service-platform/operator/postgres; else sudo rm -rf /opt/ai-service-platform/operator/postgres && sudo cp -a '$RemotePostgresDir' /opt/ai-service-platform/operator/postgres; fi;"
     }
+    $platformNetworksCommand = ""
+    if ($syncPlatformNetworks) {
+        $platformNetworksCommand = "sudo mkdir -p /opt/ai-service-platform/operator; if [ -d '$RemotePlatformNetworksDir/platform_networks' ]; then sudo rm -rf /opt/ai-service-platform/operator/platform_networks && sudo cp -a '$RemotePlatformNetworksDir/platform_networks' /opt/ai-service-platform/operator/platform_networks; else sudo rm -rf /opt/ai-service-platform/operator/platform_networks && sudo cp -a '$RemotePlatformNetworksDir' /opt/ai-service-platform/operator/platform_networks; fi;"
+    }
     $egressPolicyCommand = ""
     if ($syncEgressPolicy) {
         $egressPolicyCommand = "sudo mkdir -p /opt/ai-service-platform/operator; if [ -d '$RemoteEgressPolicyDir/egress_policy' ]; then sudo rm -rf /opt/ai-service-platform/operator/egress_policy && sudo cp -a '$RemoteEgressPolicyDir/egress_policy' /opt/ai-service-platform/operator/egress_policy; else sudo rm -rf /opt/ai-service-platform/operator/egress_policy && sudo cp -a '$RemoteEgressPolicyDir' /opt/ai-service-platform/operator/egress_policy; fi;"
@@ -616,7 +629,7 @@ try {
     }
     $networksCommand = "sudo mkdir -p /opt/ai-service-platform/operator; sudo install -m 600 '$RemoteNetworksFile' /opt/ai-service-platform/operator/networks.csv;"
     $helperCommand = "sudo mkdir -p /opt/ai-service-platform/tools/bootstrap; sudo install -m 700 '$remoteCreateInventoryTemp' /opt/ai-service-platform/tools/bootstrap/create_inventory.sh; sudo install -m 700 '$remotePrepareInventoryTemp' '$RemotePrepareScript'; sudo install -m 700 '$remoteVerifyTemp' '$RemoteVerifyScript';"
-    $remoteCommand = "set -e; $helperCommand $softetherCommand $haproxyCommand $edgeBanlistCommand $postgresCommand $egressPolicyCommand $networksCommand $prepareCommand; $verifyCommand rm -rf '$RemoteSoftetherDir' '$RemoteHaproxyDir' '$RemoteEdgeBanlistDir' '$RemotePostgresDir' '$RemoteEgressPolicyDir'; rm -f '$RemoteNodesFile' '$remoteStateFile' '$RemoteNetworksFile' '$remoteCreateInventoryTemp' '$remotePrepareInventoryTemp' '$remoteVerifyTemp'"
+    $remoteCommand = "set -e; $helperCommand $softetherCommand $haproxyCommand $edgeBanlistCommand $postgresCommand $platformNetworksCommand $egressPolicyCommand $networksCommand $prepareCommand; $verifyCommand rm -rf '$RemoteSoftetherDir' '$RemoteHaproxyDir' '$RemoteEdgeBanlistDir' '$RemotePostgresDir' '$RemotePlatformNetworksDir' '$RemoteEgressPolicyDir'; rm -f '$RemoteNodesFile' '$remoteStateFile' '$RemoteNetworksFile' '$remoteCreateInventoryTemp' '$remotePrepareInventoryTemp' '$remoteVerifyTemp'"
 
     Write-Host "Running control node inventory preparation"
     Invoke-SshKey $SshKeyFile $remote $remoteCommand "remote prepare inventory"

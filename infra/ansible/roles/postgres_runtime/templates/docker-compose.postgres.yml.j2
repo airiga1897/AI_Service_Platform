@@ -12,8 +12,12 @@ services:
       - config_file=/etc/postgresql/postgresql.conf
       - -c
       - hba_file=/etc/postgresql/pg_hba.conf
+{% if postgres_runtime_model.role == 'standby' and postgres_runtime_model.standby_network_mode %}
+    network_mode: "{{ postgres_runtime_model.standby_network_mode }}"
+{% else %}
     ports:
       - "{{ postgres_runtime_model.bind_host }}:{{ postgres_runtime_model.port }}:5432"
+{% endif %}
     volumes:
       - "{{ postgres_runtime_model.volume_name }}:/var/lib/postgresql/data"
       - "{{ postgres_runtime_config_dir }}/postgresql.conf:/etc/postgresql/postgresql.conf:ro"

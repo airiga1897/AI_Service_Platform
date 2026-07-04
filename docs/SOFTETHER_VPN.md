@@ -230,31 +230,47 @@ layer is frozen:
 - `service,vpn_cascade` controls local cascade runtime and outgoing link
   management. `edge_route,vpn_cascade` controls public `cascade-vpsN` SNI.
   Both are absent during the freeze.
-- `cascade-vpsN:5555` is no longer owned by the frozen `vpn_cascade` layer.
-  For the new `softether_l3` layer, `cascade-vps8.mine-craft.su:5555` and
-  `cascade-vps4.mine-craft.su:5555` may route to the local `softether-l3`
-  management listener through HAProxy and `vpn_mgmt_ips.lst`.
+- `cascade-vpsN:5555` is no longer owned by the frozen `vpn_cascade` layer and
+  must not be reused by new transport layers. New point-to-point transport SNI
+  names use `l3-vpsN.mine-craft.su` for data and `l3-mgmt-vpsN.mine-craft.su`
+  for management when management is explicitly exposed.
 
-### SoftEther L3 Postgres Tunnel
+### SoftEther P2P Status
 
-`softether_l3` is a separate runtime for isolated point-to-point L3 tunnels. It
-does not reuse `CascadeLab` and must not create a shared multi-link L2 fabric.
+`softether_p2p` was tested as a possible Postgres transport, but the current
+desired state is `absent` while `vps4` and `vps8` are reset to a clean
+VPN/HAProxy baseline. No `l3-vps8` or `l3-mgmt-vps8` HAProxy SNI should be
+published during this cleanup.
 
-Current staged tunnel:
+Future inter-VPS transport should route between explicit per-node platform
+networks rather than creating intermediate HAProxy service endpoint networks as
+the primary contract. The current per-node platform network baseline is:
 
-- `pg-vps8-vps4`
-- listener: `vps8`
-- peer: `vps4`
-- data SNI: `l3-vps8.mine-craft.su:443`
-- management SNI: `cascade-vps8.mine-craft.su:5555` on `vps8`,
-  `cascade-vps4.mine-craft.su:5555` on `vps4`
-- tunnel subnet: `10.88.84.0/30`
-- `vps8`: `10.88.84.1`
-- `vps4`: `10.88.84.2`
+```text
+vps4:
+  ai_service_data_vps4 172.30.4.0/24
+  ai_service_app_vps4  172.31.4.0/24
 
-The Postgres standby on `vps4` connects to primary at `10.88.84.1:5432`.
-Postgres binds to the local Docker bridge gateway `172.26.0.1:5432`; public
-`5432` must remain closed.
+vps8:
+  ai_service_data_vps8 172.30.8.0/24
+  ai_service_app_vps8  172.31.8.0/24
+```
+
+Only empty managed experiment networks may be removed during cleanup. Do not
+use global Docker prune or broad network deletion.
+
+#### Future option: SoftEther Virtual Layer-3 Switch
+
+SoftEther has a built-in Virtual Layer-3 Switch feature. It can route between
+separate Virtual Hubs without merging them into one shared L2 fabric. This is a
+possible future option if we need several isolated SoftEther hubs with routing
+inside SoftEther itself.
+
+This option is intentionally not used during the current baseline cleanup.
+`softether_p2p` and `postgres_runtime` are absent until the per-node platform
+networks are verified. If we later evaluate Virtual Layer-3 Switch or a new
+P2P transport, it must be a separate design review with explicit
+hub/subnet/route tables and rollback plan.
 
 The current standby design is manual. It does not enable active-active routing
 or automatic failover. `vps1` and `vps4` are not automatic replacements for all

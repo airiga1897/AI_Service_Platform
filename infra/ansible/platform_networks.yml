@@ -1,0 +1,16 @@
+---
+- name: Platform managed network rollout
+  hosts: platform_networks
+  become: true
+  vars:
+    platform_networks_state: present
+  roles:
+    - platform_networks
+
+- name: Platform managed network candidate rollout
+  hosts: candidate_platform_networks
+  become: true
+  vars:
+    platform_networks_state: present
+  roles:
+    - platform_networks

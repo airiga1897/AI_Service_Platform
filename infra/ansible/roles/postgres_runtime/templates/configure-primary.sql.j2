@@ -15,16 +15,14 @@ BEGIN
   END IF;
 END$$;
 
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT FROM pg_database WHERE datname = '{{ postgres_runtime_model.database | replace("'", "''") }}') THEN
-    EXECUTE format(
-      'CREATE DATABASE %I OWNER %I',
-      '{{ postgres_runtime_model.database | replace("'", "''") }}',
-      '{{ postgres_runtime_model.app_user | replace("'", "''") }}'
-    );
-  END IF;
-END$$;
+SELECT format(
+  'CREATE DATABASE %I OWNER %I',
+  '{{ postgres_runtime_model.database | replace("'", "''") }}',
+  '{{ postgres_runtime_model.app_user | replace("'", "''") }}'
+)
+WHERE NOT EXISTS (
+  SELECT FROM pg_database WHERE datname = '{{ postgres_runtime_model.database | replace("'", "''") }}'
+)\gexec
 
 DO $$
 BEGIN

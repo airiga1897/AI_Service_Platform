@@ -8,6 +8,7 @@ vpn_edge_tls_dir: "{{ vpn_edge_root_dir }}/nginx/ssl"
 vpn_edge_compose_file: "{{ vpn_edge_root_dir }}/docker-compose.yml"
 
 vpn_edge_seed_config: "{{ playbook_dir }}/../../operator/softether/edge/vpn_server.config"
+vpn_edge_operator_config_file: "{{ playbook_dir }}/../../operator/softether/edge/config.yml"
 vpn_edge_local_override_dir: "{{ playbook_dir }}/../../operator/softether/edge/overrides/{{ inventory_hostname }}"
 vpn_edge_operator_networks_file: "{{ playbook_dir }}/../../operator/networks.csv"
 
@@ -26,6 +27,8 @@ vpn_edge_policy_network_name: ai_service_vpn_policy
 vpn_edge_policy_network_subnet: ""
 vpn_edge_policy_container_ipv4: ""
 vpn_edge_policy_gateway_ipv4: ""
+vpn_edge_disable_policy_network_aliases: []
+vpn_edge_policy_network_enabled: true
 
 vpn_edge_retired_tcp_listeners:
   - 1194

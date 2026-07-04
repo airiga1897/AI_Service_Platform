@@ -111,6 +111,8 @@
         "primary_alias": primary_alias,
         "primary_endpoint": config.get("primary_endpoint") or nodes[primary_alias]["endpoint"],
         "primary_expected_ip": config.get("primary_endpoint") or nodes[primary_alias].get("expected_ip") or nodes[primary_alias]["endpoint"],
+        "standby_basebackup_network": config.get("standby_basebackup_network") or "host",
+        "standby_network_mode": config.get("standby_network_mode") or "",
         "standby_aliases": standby_aliases,
         "current_alias": alias,
         "image": config.get("image") or os.environ["DEFAULT_IMAGE"],
@@ -233,7 +235,7 @@
     mode: "{{ item.mode }}"
   loop:
     - { path: "{{ postgres_runtime_root_dir }}", mode: "0755" }
-    - { path: "{{ postgres_runtime_config_dir }}", mode: "0750" }
+    - { path: "{{ postgres_runtime_config_dir }}", mode: "0755" }
   when: postgres_runtime_state == 'present'
 
 - name: Render postgres_runtime environment
@@ -249,7 +251,7 @@
   ansible.builtin.template:
     src: postgresql.conf.j2
     dest: "{{ postgres_runtime_config_dir }}/postgresql.conf"
-    mode: "0640"
+    mode: "0644"
   register: postgres_runtime_conf_template
   when: postgres_runtime_state == 'present'
 
@@ -257,7 +259,7 @@
   ansible.builtin.template:
     src: pg_hba.conf.j2
     dest: "{{ postgres_runtime_config_dir }}/pg_hba.conf"
-    mode: "0640"
+    mode: "0644"
   register: postgres_runtime_hba_template
   when: postgres_runtime_state == 'present'
 
@@ -311,6 +313,11 @@
   when:
     - postgres_runtime_state == 'present'
     - not ansible_check_mode
+
+- name: Store postgres_runtime data initialization state
+  ansible.builtin.set_fact:
+    postgres_runtime_data_initialized: "{{ (postgres_runtime_pg_version_check.rc | default(1)) == 0 }}"
+  when: postgres_runtime_state == 'present'
 
 - name: Inspect postgres_runtime data volume mountpoint
   ansible.builtin.command:
@@ -376,13 +383,50 @@
     - postgres_runtime_model.role == 'primary'
     - not ansible_check_mode
 
+- name: Preflight standby basebackup container network
+  ansible.builtin.shell: |
+    set -euo pipefail
+    network="{{ postgres_runtime_model.standby_basebackup_network }}"
+    primary_host="{{ postgres_runtime_model.primary_expected_ip }}"
+    primary_port="{{ postgres_runtime_model.port }}"
+    case "$network" in
+      container:*)
+        container="${network#container:}"
+        state="$(docker inspect -f {% raw %}'{{ .State.Running }}'{% endraw %} "$container" 2>/dev/null || true)"
+        if [ "$state" != "true" ]; then
+          echo "$container is not running" >&2
+          exit 1
+        fi
+        if ! docker exec "$container" ip route get "$primary_host" >/dev/null 2>&1; then
+          echo "no route to primary endpoint from p2p client: $primary_host" >&2
+          exit 1
+        fi
+        if ! docker run --rm --network "$network" \
+          -e PRIMARY_HOST="$primary_host" \
+          -e PRIMARY_PORT="$primary_port" \
+          "{{ postgres_runtime_model.image }}" \
+          sh -ceu 'pg_isready -h "$PRIMARY_HOST" -p "$PRIMARY_PORT" -d postgres'; then
+          echo "primary endpoint tcp check failed: $primary_host:$primary_port" >&2
+          exit 1
+        fi
+        ;;
+    esac
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'standby'
+    - not (postgres_runtime_data_initialized | default(false))
+    - not ansible_check_mode
+
 - name: Initialize standby data with pg_basebackup
   ansible.builtin.shell: |
     set -euo pipefail
     log="$(mktemp)"
     trap 'rm -f "$log"' EXIT
     docker run --rm \
-      --network host \
+      --network "{{ postgres_runtime_model.standby_basebackup_network }}" \
       -e PGPASSWORD="${POSTGRES_REPLICATION_PASSWORD}" \
       -e PRIMARY_HOST="${PRIMARY_HOST}" \
       -e PRIMARY_PORT="${PRIMARY_PORT}" \
@@ -412,7 +456,7 @@
   when:
     - postgres_runtime_state == 'present'
     - postgres_runtime_model.role == 'standby'
-    - postgres_runtime_pg_version_check.rc != 0
+    - not (postgres_runtime_data_initialized | default(false))
     - not ansible_check_mode
 
 - name: Render standby primary connection info
@@ -424,7 +468,7 @@
   when:
     - postgres_runtime_state == 'present'
     - postgres_runtime_model.role == 'standby'
-    - postgres_runtime_pg_version_check.rc != 0
+    - not (postgres_runtime_data_initialized | default(false))
     - not ansible_check_mode
 
 - name: Ensure standby signal file exists
@@ -435,7 +479,7 @@
   when:
     - postgres_runtime_state == 'present'
     - postgres_runtime_model.role == 'standby'
-    - postgres_runtime_pg_version_check.rc != 0
+    - not (postgres_runtime_data_initialized | default(false))
     - not ansible_check_mode
 
 - name: Normalize standby recovery file ownership
@@ -445,7 +489,7 @@
   when:
     - postgres_runtime_state == 'present'
     - postgres_runtime_model.role == 'standby'
-    - postgres_runtime_pg_version_check.rc != 0
+    - not (postgres_runtime_data_initialized | default(false))
     - not ansible_check_mode
 
 - name: Start postgres_runtime container

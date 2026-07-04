@@ -98,6 +98,7 @@
     default_cascade_host = os.environ["DEFAULT_CASCADE_HOST"]
     default_cascade_management_host = os.environ["DEFAULT_CASCADE_MANAGEMENT_HOST"]
     default_l3_host = os.environ["DEFAULT_L3_HOST"]
+    default_p2p_host = os.environ["DEFAULT_P2P_HOST"]
     default_sni_domain = os.environ["DEFAULT_SNI_DOMAIN"]
     default_game_rate = int(os.environ["DEFAULT_GAME_RATE"])
     default_rcon_rate = int(os.environ["DEFAULT_RCON_RATE"])
@@ -120,7 +121,7 @@
             if row.get("kind") != kind or row.get("name") != name or row.get("state") != "present":
                 continue
             aliases = split_aliases(row.get("active_aliases"))
-            if name == "softether_l3":
+            if name in {"softether_l3", "softether_p2p"}:
                 aliases += split_aliases(row.get("candidate_aliases"))
             if node_alias in aliases:
                 return True
@@ -142,6 +143,8 @@
         fail(f"edge_route vpn_cascade is present on {alias}, but service vpn_cascade is not present on the same alias")
     if "softether_l3" in present_routes and not present_on("service", "softether_l3", alias):
         fail(f"edge_route softether_l3 is present on {alias}, but service softether_l3 is not present on the same alias")
+    if "softether_p2p" in present_routes and not present_on("service", "softether_p2p", alias):
+        fail(f"edge_route softether_p2p is present on {alias}, but service softether_p2p is not present on the same alias")
 
     route_config = {}
     if present_routes:
@@ -155,6 +158,7 @@
         "vpn_ingress_enabled": False,
         "vpn_cascade_enabled": False,
         "softether_l3_enabled": False,
+        "softether_p2p_enabled": False,
         "minecraft_enabled": False,
     }
 
@@ -247,6 +251,44 @@
             },
         })
 
+    if "softether_p2p" in present_routes:
+        cfg = route_config.get("softether_p2p") or {}
+        per_alias = (cfg.get("per_alias") or {}).get(alias) or {}
+        sni = unique_strings(per_alias.get("sni") or [])
+        if not sni:
+            sni = [f"l3-{alias}.{default_sni_domain}"]
+        management_sni = unique_strings(per_alias.get("management_sni") or [])
+        ports = {
+            "https": 443,
+            "management": 5555,
+            "backend_https": 443,
+            "backend_management": 5555,
+        }
+        ports.update(cfg.get("ports") or {})
+        backend_host = (cfg.get("backend") or {}).get("host") or default_p2p_host
+        management_backend_host = (cfg.get("backend") or {}).get("management_host") or backend_host
+        postgres_cfg = cfg.get("postgres") or {}
+        postgres = {
+            "enabled": bool(postgres_cfg),
+            "listen_host": str(postgres_cfg.get("listen_host") or ""),
+            "listen_port": int(postgres_cfg.get("listen_port") or 5432),
+            "backend_host": str(postgres_cfg.get("backend_host") or ""),
+            "backend_port": int(postgres_cfg.get("backend_port") or 5432),
+        }
+        if postgres["enabled"] and (not postgres["listen_host"] or not postgres["backend_host"]):
+            fail(f"routes.yml softether_p2p.postgres requires listen_host and backend_host for alias {alias}")
+        model.update({
+            "softether_p2p_enabled": True,
+            "softether_p2p": {
+                "sni": sni,
+                "management_sni": management_sni,
+                "backend_host": backend_host,
+                "backend_management_host": management_backend_host,
+                "ports": ports,
+                "postgres": postgres,
+            },
+        })
+
     if "minecraft" in present_routes:
         cfg = route_config.get("minecraft") or {}
         per_alias = (cfg.get("per_alias") or {}).get(alias) or {}
@@ -291,6 +333,28 @@
             },
         })
 
+    https_acl_conditions = []
+    if model.get("vpn_ingress_enabled"):
+        https_acl_conditions.append("is_softether")
+    if model.get("vpn_cascade_enabled"):
+        https_acl_conditions.append("is_cascade_https_sni")
+    if model.get("softether_l3_enabled"):
+        https_acl_conditions.append("is_softether_l3_https_sni")
+    if model.get("softether_p2p_enabled"):
+        https_acl_conditions.append("is_softether_p2p_https_sni")
+    model["https_allowed_condition"] = " or ".join(https_acl_conditions)
+
+    management_acl_conditions = []
+    if model.get("vpn_ingress_enabled"):
+        management_acl_conditions.append("is_softether_mgmt_sni")
+    if model.get("vpn_cascade_enabled"):
+        management_acl_conditions.append("is_cascade_mgmt_sni")
+    if model.get("softether_l3_enabled") and model.get("softether_l3", {}).get("management_sni"):
+        management_acl_conditions.append("is_softether_l3_mgmt_sni")
+    if model.get("softether_p2p_enabled") and model.get("softether_p2p", {}).get("management_sni"):
+        management_acl_conditions.append("is_softether_p2p_mgmt_sni")
+    model["management_allowed_condition"] = " or ".join(management_acl_conditions)
+
     print(json.dumps(model, sort_keys=True))
     PY
   args:
@@ -304,6 +368,7 @@
     DEFAULT_CASCADE_HOST: "{{ edge_haproxy_softether_cascade_host }}"
     DEFAULT_CASCADE_MANAGEMENT_HOST: "{{ edge_haproxy_softether_cascade_management_host }}"
     DEFAULT_L3_HOST: "{{ edge_haproxy_softether_l3_host }}"
+    DEFAULT_P2P_HOST: "{{ edge_haproxy_softether_p2p_host }}"
     DEFAULT_SNI_DOMAIN: "{{ edge_haproxy_default_sni_domain }}"
     DEFAULT_GAME_RATE: "{{ edge_haproxy_minecraft_game_rate_limit }}"
     DEFAULT_RCON_RATE: "{{ edge_haproxy_minecraft_rcon_rate_limit }}"
@@ -516,6 +581,100 @@
     - edge_haproxy_route_model.softether_l3_enabled | default(false)
     - not ansible_check_mode
 
+- name: Ensure SoftEther P2P Docker network exists for HAProxy route
+  ansible.builtin.shell: |
+    set -euo pipefail
+    name="{{ edge_haproxy_p2p_network_name }}"
+    subnet="{{ edge_haproxy_p2p_network_subnet }}"
+    current="$(docker network inspect -f {% raw %}'{{ (index .IPAM.Config 0).Subnet }}'{% endraw %} "$name" 2>/dev/null || true)"
+    if [ -n "$current" ] && [ "$current" != "$subnet" ]; then
+      if [ -f "{{ edge_haproxy_compose_file }}" ]; then
+        docker compose -f "{{ edge_haproxy_compose_file }}" down
+      fi
+      docker network rm "$name"
+      echo "removed mismatched edge_haproxy p2p network $name ($current != $subnet)"
+      current=""
+    fi
+    if [ -z "$current" ]; then
+      docker network create --subnet "$subnet" "$name"
+      echo "created edge_haproxy p2p network $name ($subnet)"
+    else
+      echo "edge_haproxy p2p network already exists: $name ($current)"
+    fi
+  args:
+    executable: /bin/bash
+  register: edge_haproxy_p2p_network_create
+  changed_when: >
+    (edge_haproxy_p2p_network_create.stdout | default(''))
+    is search('(?i)(created edge_haproxy p2p network|removed mismatched edge_haproxy p2p network)')
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.softether_p2p_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Ensure SoftEther P2P service Docker network exists for HAProxy route
+  ansible.builtin.shell: |
+    set -euo pipefail
+    name="{{ edge_haproxy_p2p_service_network_name }}"
+    subnet="{{ edge_haproxy_p2p_service_network_subnet }}"
+    current="$(docker network inspect -f {% raw %}'{{ (index .IPAM.Config 0).Subnet }}'{% endraw %} "$name" 2>/dev/null || true)"
+    if [ -n "$current" ] && [ "$current" != "$subnet" ]; then
+      if [ -f "{{ edge_haproxy_compose_file }}" ]; then
+        docker compose -f "{{ edge_haproxy_compose_file }}" down
+      fi
+      docker network rm "$name"
+      echo "removed mismatched edge_haproxy p2p service network $name ($current != $subnet)"
+      current=""
+    fi
+    if [ -z "$current" ]; then
+      docker network create --subnet "$subnet" "$name"
+      echo "created edge_haproxy p2p service network $name ($subnet)"
+    else
+      echo "edge_haproxy p2p service network already exists: $name ($current)"
+    fi
+  args:
+    executable: /bin/bash
+  register: edge_haproxy_p2p_service_network_create
+  changed_when: >
+    (edge_haproxy_p2p_service_network_create.stdout | default(''))
+    is search('(?i)(created edge_haproxy p2p service network|removed mismatched edge_haproxy p2p service network)')
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.softether_p2p_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Ensure Postgres runtime Docker network exists for HAProxy backend
+  ansible.builtin.shell: |
+    set -euo pipefail
+    name="{{ edge_haproxy_postgres_network_name }}"
+    subnet="{{ edge_haproxy_postgres_network_subnet }}"
+    current="$(docker network inspect -f {% raw %}'{{ (index .IPAM.Config 0).Subnet }}'{% endraw %} "$name" 2>/dev/null || true)"
+    if [ -n "$current" ] && [ "$current" != "$subnet" ]; then
+      if [ -f "{{ edge_haproxy_compose_file }}" ]; then
+        docker compose -f "{{ edge_haproxy_compose_file }}" down
+      fi
+      docker network rm "$name"
+      echo "removed mismatched edge_haproxy postgres network $name ($current != $subnet)"
+      current=""
+    fi
+    if [ -z "$current" ]; then
+      docker network create --subnet "$subnet" "$name"
+      echo "created edge_haproxy postgres network $name ($subnet)"
+    else
+      echo "edge_haproxy postgres network already exists: $name ($current)"
+    fi
+  args:
+    executable: /bin/bash
+  register: edge_haproxy_postgres_network_create
+  changed_when: >
+    (edge_haproxy_postgres_network_create.stdout | default(''))
+    is search('(?i)(created edge_haproxy postgres network|removed mismatched edge_haproxy postgres network)')
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.softether_p2p_enabled | default(false)
+    - edge_haproxy_route_model.softether_p2p.postgres.enabled | default(false)
+    - not ansible_check_mode
+
 - name: Validate edge_haproxy config
   ansible.builtin.command:
     cmd: docker run --rm -v "{{ edge_haproxy_config_dir }}:/usr/local/etc/haproxy:ro" "{{ edge_haproxy_image }}" haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
@@ -687,6 +846,25 @@
   when:
     - edge_haproxy_state == 'present'
     - edge_haproxy_route_model.softether_l3_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Verify running edge_haproxy SoftEther P2P network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ edge_haproxy_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ edge_haproxy_p2p_network_name }}"
+    EXPECTED_IP: "{{ edge_haproxy_p2p_container_ipv4 }}"
+  changed_when: false
+  register: edge_haproxy_p2p_container_ready
+  until: edge_haproxy_p2p_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.softether_p2p_enabled | default(false)
     - not ansible_check_mode
 
 - name: Verify edge_haproxy config inside running container

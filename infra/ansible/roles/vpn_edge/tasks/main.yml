@@ -15,6 +15,25 @@
   register: vpn_edge_networks_file_stat
   when: vpn_state == 'present'
 
+- name: Check vpn_edge operator config on control node
+  ansible.builtin.stat:
+    path: "{{ vpn_edge_operator_config_file }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_edge_operator_config_stat
+  when: vpn_state == 'present'
+
+- name: Load vpn_edge operator config
+  ansible.builtin.set_fact:
+    vpn_edge_operator_config: "{{ (lookup('file', vpn_edge_operator_config_file) | from_yaml) if (vpn_edge_operator_config_stat.stat.exists | default(false)) else {} }}"
+  when: vpn_state == 'present'
+
+- name: Store vpn_edge policy network mode
+  ansible.builtin.set_fact:
+    vpn_edge_disable_policy_network_aliases: "{{ vpn_edge_operator_config.disable_policy_network_aliases | default(vpn_edge_disable_policy_network_aliases) }}"
+    vpn_edge_policy_network_enabled: "{{ inventory_hostname not in (vpn_edge_operator_config.disable_policy_network_aliases | default(vpn_edge_disable_policy_network_aliases)) }}"
+  when: vpn_state == 'present'
+
 - name: Require VPN network plan for vpn_edge
   ansible.builtin.assert:
     that:
@@ -260,6 +279,7 @@
   changed_when: "'recreated' in vpn_edge_policy_network_recreate.stdout"
   when:
     - vpn_state == 'present'
+    - vpn_edge_policy_network_enabled | bool
     - not ansible_check_mode
 
 - name: Ensure shared edge Docker network exists
@@ -296,6 +316,7 @@
     - "'already exists' not in (vpn_edge_policy_network_create.stderr | default(''))"
   when:
     - vpn_state == 'present'
+    - vpn_edge_policy_network_enabled | bool
     - not ansible_check_mode
 
 - name: Check retired SoftEther edge listener migration marker
@@ -548,6 +569,32 @@
   delay: 2
   when:
     - vpn_state == 'present'
+    - vpn_edge_policy_network_enabled | bool
+    - not ansible_check_mode
+
+- name: Remove empty disabled VPN policy Docker network
+  ansible.builtin.shell: |
+    set -euo pipefail
+    name="{{ vpn_edge_policy_network_name }}"
+    if ! docker network inspect "$name" >/dev/null 2>&1; then
+      exit 0
+    fi
+    count="$(docker network inspect -f {% raw %}'{{ len .Containers }}'{% endraw %} "$name")"
+    if [ "$count" = "0" ]; then
+      docker network rm "$name"
+      echo "removed empty disabled vpn_edge policy network $name"
+    else
+      echo "disabled vpn_edge policy network still has $count endpoint(s): $name"
+    fi
+  args:
+    executable: /bin/bash
+  register: vpn_edge_disabled_policy_network_cleanup
+  changed_when: >
+    (vpn_edge_disabled_policy_network_cleanup.stdout | default(''))
+    is search('removed empty disabled vpn_edge policy network')
+  when:
+    - vpn_state == 'present'
+    - not (vpn_edge_policy_network_enabled | bool)
     - not ansible_check_mode
 
 - name: Verify running vpn_edge management network attachment

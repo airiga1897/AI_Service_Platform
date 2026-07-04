@@ -300,9 +300,10 @@ but both are absent during the freeze. `service,vpn_cascade` means the node runs
 local cascade runtime and may manage outgoing links. `edge_route,vpn_cascade`
 means HAProxy publishes public `cascade-vpsN` SNI on `443/992/5555`.
 When `edge_route,vpn_cascade` is absent, HAProxy must not contain `is_cascade*`
-or `be_cascade*`. The names `cascade-vps8.mine-craft.su` and
-`cascade-vps4.mine-craft.su` are allowed only as `softether_l3` management SNI
-on `5555`, guarded by `vpn_mgmt_ips.lst`.
+or `be_cascade*`. The `cascade-vpsN` names are retired for new transport
+layers. Use `l3-vpsN.mine-craft.su` for point-to-point data SNI and
+`l3-mgmt-vpsN.mine-craft.su` for point-to-point management SNI when management
+is explicitly exposed.
 
 When all public cascade aliases are retired, remove the whole
 `vpn_cascade` section from `operator/haproxy/routes.yml` and rerun only
@@ -313,30 +314,46 @@ freeze is active.
 
 If SoftEther Server Manager reports "Source IP Restriction List of the Virtual
 Hub", first verify which SNI target was used. `vpn-vpsN:5555` should reach
-`softether-edge`; `cascade-vps8/4:5555` should reach `softether-l3`; other
-`cascade-vpsN` names should not route anywhere while the L2 freeze is active.
-Keep management allowlisting centralized in HAProxy `vpn_mgmt_ips.lst`.
+`softether-edge`; `l3-mgmt-vpsN:5555` should reach the explicitly exposed
+point-to-point SoftEther server; `cascade-vpsN` names should not route anywhere
+while the L2 freeze is active. Keep management allowlisting centralized in
+HAProxy `vpn_mgmt_ips.lst`.
 
-### SoftEther L3 Postgres Tunnel
+### Reset vps4/vps8 To Platform Network Baseline
 
-The first L3 tunnel is `pg-vps8-vps4`: `vps8` listens at
-`l3-vps8.mine-craft.su:443`, `vps4` connects as peer, and the private tunnel
-addresses are `10.88.84.1/30` and `10.88.84.2/30`.
+`vps4` and `vps8` are the first nodes moved to explicit per-node platform
+networks. During this reset, `softether_p2p`, `softether_l3`, and
+`postgres_runtime` are absent. `vpn_cascade` remains frozen/absent.
 
 Rollout order:
 
 ```powershell
 .\tools\services\rollout_from_state.ps1 -NodesFile .\operator\nodes.csv -StateFile .\operator\state.csv -OnlyService edge_haproxy
+.\tools\services\rollout_from_state.ps1 -NodesFile .\operator\nodes.csv -StateFile .\operator\state.csv -OnlyService softether_p2p
 .\tools\services\rollout_from_state.ps1 -NodesFile .\operator\nodes.csv -StateFile .\operator\state.csv -OnlyService softether_l3
 .\tools\services\rollout_from_state.ps1 -NodesFile .\operator\nodes.csv -StateFile .\operator\state.csv -OnlyService postgres_runtime
+.\tools\services\rollout_from_state.ps1 -NodesFile .\operator\nodes.csv -StateFile .\operator\state.csv -OnlyService vpn_edge
+.\tools\services\rollout_from_state.ps1 -NodesFile .\operator\nodes.csv -StateFile .\operator\state.csv -OnlyService platform_networks
 ```
 
 Acceptance:
 
-- `vps4` can reach `10.88.84.1:5432`.
-- `vps8` sees standby streaming in `pg_stat_replication`.
-- Public `5432` is not open.
+- On `vps4` and `vps8`, running containers are limited to `edge-haproxy` and
+  `softether-edge` for the baseline. `edge-banlist` remains a systemd timer.
+- No `softether-p2p-*`, `softether-l3-*`, `softether-cascade`, or
+  `ai-service-postgres` containers are running.
+- No `cascade-vps`, `l3-vps8`, or `l3-mgmt-vps8` routes exist in HAProxy.
+- `ai_service_data_vps4`, `ai_service_app_vps4`, `ai_service_data_vps8`, and
+  `ai_service_app_vps8` exist with the expected `172.30/172.31` subnets.
+- Empty retired managed networks are removed; non-empty retired networks must
+  be investigated instead of force-removed.
 - `check_vpn_cascade_links.ps1 -Json` still reports no selected L2 links.
+
+SoftEther Virtual Layer-3 Switch is a documented future option, not the current
+implementation. It is a built-in SoftEther router between isolated Virtual Hubs
+and could be evaluated later if multiple hub-to-hub routed segments are needed.
+Do not enable it without a separate design review. During the current cleanup,
+`softether_p2p` is absent and no Postgres replication transport is active.
 
 ### Infrastructure Runtime Layer Plan
 
@@ -378,12 +395,13 @@ needed.
 
 Implementation order:
 
-1. Finish `postgres_runtime` and its `softether_l3` replication path.
-2. Add `redis_runtime` with no public port and with exact app/worker allowlists.
-3. Add project worker and scheduler runtimes that consume Postgres and Redis
+1. Verify `platform_networks` on `vps4` and `vps8`.
+2. Add `postgres_runtime` on the explicit per-node data networks.
+3. Add `redis_runtime` with no public port and with exact app/worker allowlists.
+4. Add project worker and scheduler runtimes that consume Postgres and Redis
    endpoints from platform config.
-4. Add `flower_runtime` as internal management UI.
-5. Add optional `flower_mgmt` public route only after internal Flower access and
+5. Add `flower_runtime` as internal management UI.
+6. Add optional `flower_mgmt` public route only after internal Flower access and
    auth are verified.
 
 Acceptance for each runtime layer:
@@ -584,10 +602,10 @@ Acceptance: `vps1` root password is cleared, admin-key SSH works, platform
 baseline directories/logrotate exist, `vpn-vps1:443/992/5555` is reachable,
 `softether-cascade` and `policy-router` are not running, and live HAProxy has
 no old `vpn_cascade` ACL/backend (`is_cascade` or `be_cascade`) and no
-`cascade-vps1` route. `cascade-vps8` and `cascade-vps4` are reserved for the
-new `softether_l3` management SNI on `5555`. If `cascade-vps1` still TCP-connects
-but TLS/SNI fails, that is expected shared-IP HAProxy behavior; to force
-timeout, remove or disable the `cascade-vps1` DNS record during the L2 freeze.
+`cascade-vpsN` route. New point-to-point management uses `l3-mgmt-vpsN` names,
+not `cascade-vpsN`. If `cascade-vps1` still TCP-connects but TLS/SNI fails,
+that is expected shared-IP HAProxy behavior; to force timeout, remove or
+disable the `cascade-vps1` DNS record during the L2 freeze.
 
 ### Promote `vps1` Or `vps4` For `vps2` Edge Duties
 

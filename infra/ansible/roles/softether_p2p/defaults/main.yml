@@ -1,0 +1,28 @@
+---
+softether_p2p_state: present
+softether_p2p_purge_data: false
+
+softether_p2p_operator_links_file: "{{ playbook_dir }}/../../operator/softether/p2p/links.yml"
+softether_p2p_operator_secrets_dir: "{{ playbook_dir }}/../../operator/softether/p2p/secrets"
+
+softether_p2p_root_dir: /opt/ai-service-platform/softether_p2p
+softether_p2p_data_dir: "{{ softether_p2p_root_dir }}/softether_data"
+softether_p2p_logs_dir: "{{ softether_p2p_root_dir }}/softether_logs"
+softether_p2p_compose_file: "{{ softether_p2p_root_dir }}/docker-compose.yml"
+softether_p2p_adminip_file: "{{ softether_p2p_root_dir }}/adminip.txt"
+
+softether_p2p_server_image: softethervpn/vpnserver:stable
+softether_p2p_client_image: softethervpn/vpnclient:stable
+softether_p2p_client_build_context: https://github.com/SoftEtherVPN/SoftetherVPN-docker.git#master
+softether_p2p_client_build_target: vpnclient
+softether_p2p_server_container_name: softether-p2p-server
+softether_p2p_client_container_name: softether-p2p-client
+
+softether_p2p_network_name: ai_service_softether_p2p
+softether_p2p_network_subnet: 172.27.0.0/24
+softether_p2p_container_ipv4: 172.27.0.2
+
+softether_p2p_vpncmd_timeout_seconds: 20
+softether_p2p_startup_timeout_seconds: 60
+softether_p2p_client_nic_name: p2p0
+softether_p2p_account_name: p2p-link

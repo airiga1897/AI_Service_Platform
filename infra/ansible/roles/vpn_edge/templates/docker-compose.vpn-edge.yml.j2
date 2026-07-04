@@ -20,13 +20,17 @@ services:
         ipv4_address: {{ vpn_edge_container_ipv4 }}
       {{ vpn_edge_management_network_name }}:
         ipv4_address: {{ vpn_edge_management_container_ipv4 }}
+{% if vpn_edge_policy_network_enabled | bool %}
       {{ vpn_edge_policy_network_name }}:
         ipv4_address: {{ vpn_edge_policy_container_ipv4 }}
+{% endif %}
 
 networks:
   {{ vpn_edge_network_name }}:
     external: true
   {{ vpn_edge_management_network_name }}:
     external: true
+{% if vpn_edge_policy_network_enabled | bool %}
   {{ vpn_edge_policy_network_name }}:
     external: true
+{% endif %}
