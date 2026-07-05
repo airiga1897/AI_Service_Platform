@@ -44,7 +44,7 @@ frontend http_in
     http-request redirect scheme https code 301 unless is_acme
     use_backend be_acme_placeholder if is_acme
 
-{% if (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) or (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) or (edge_haproxy_route_model.softether_l3_enabled | default(false)) or (edge_haproxy_route_model.softether_p2p_enabled | default(false)) %}
+{% if (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) or (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) or (edge_haproxy_route_model.softether_l3_vps_enabled | default(false)) %}
 frontend https_in
     bind *:443
     mode tcp
@@ -62,14 +62,20 @@ frontend https_in
 {% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
     acl is_cascade_https_sni req_ssl_sni -i {{ edge_haproxy_route_model.vpn_cascade.sni | join(' ') }}
 {% endif %}
-{% if edge_haproxy_route_model.softether_l3_enabled | default(false) %}
-    acl is_softether_l3_https_sni req_ssl_sni -i {{ edge_haproxy_route_model.softether_l3.sni | join(' ') }}
-{% endif %}
-{% if edge_haproxy_route_model.softether_p2p_enabled | default(false) %}
-    acl is_softether_p2p_https_sni req_ssl_sni -i {{ edge_haproxy_route_model.softether_p2p.sni | join(' ') }}
+{% if edge_haproxy_route_model.softether_l3_vps_enabled | default(false) %}
+    acl is_softether_l3_vps_https_sni req_ssl_sni -i {{ edge_haproxy_route_model.softether_l3_vps.sni | join(' ') }}
 {% endif %}
 {% if edge_haproxy_route_model.https_allowed_condition | default('') | length > 0 %}
     tcp-request content silent-drop unless {{ edge_haproxy_route_model.https_allowed_condition }}
+{% endif %}
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+    tcp-request content silent-drop if is_softether { nbsrv(be_softether_https) lt 1 }
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    tcp-request content silent-drop if is_cascade_https_sni { nbsrv(be_cascade_https) lt 1 }
+{% endif %}
+{% if edge_haproxy_route_model.softether_l3_vps_enabled | default(false) %}
+    tcp-request content silent-drop if is_softether_l3_vps_https_sni { nbsrv(be_softether_l3_vps_https) lt 1 }
 {% endif %}
     tcp-request content accept if { req_ssl_hello_type 1 }
 {% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
@@ -78,11 +84,8 @@ frontend https_in
 {% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
     use_backend be_cascade_https if is_cascade_https_sni
 {% endif %}
-{% if edge_haproxy_route_model.softether_l3_enabled | default(false) %}
-    use_backend be_softether_l3_https if is_softether_l3_https_sni
-{% endif %}
-{% if edge_haproxy_route_model.softether_p2p_enabled | default(false) %}
-    use_backend be_softether_p2p_https if is_softether_p2p_https_sni
+{% if edge_haproxy_route_model.softether_l3_vps_enabled | default(false) %}
+    use_backend be_softether_l3_vps_https if is_softether_l3_vps_https_sni
 {% endif %}
 
 {% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
@@ -97,17 +100,11 @@ backend be_cascade_https
     option tcp-check
     server softether-cascade {{ edge_haproxy_route_model.vpn_cascade.backend_host }}:{{ edge_haproxy_route_model.vpn_cascade.ports.backend_https }} check inter 5s fall 3 rise 2
 {% endif %}
-{% if edge_haproxy_route_model.softether_l3_enabled | default(false) %}
-backend be_softether_l3_https
+{% if edge_haproxy_route_model.softether_l3_vps_enabled | default(false) %}
+backend be_softether_l3_vps_https
     mode tcp
     option tcp-check
-    server softether-l3 {{ edge_haproxy_route_model.softether_l3.backend_host }}:{{ edge_haproxy_route_model.softether_l3.ports.backend_https }} check inter 5s fall 3 rise 2
-{% endif %}
-{% if edge_haproxy_route_model.softether_p2p_enabled | default(false) %}
-backend be_softether_p2p_https
-    mode tcp
-    option tcp-check
-    server softether-p2p {{ edge_haproxy_route_model.softether_p2p.backend_host }}:{{ edge_haproxy_route_model.softether_p2p.ports.backend_https }} check inter 5s fall 3 rise 2
+    server softether-l3-vps {{ edge_haproxy_route_model.softether_l3_vps.backend_host }}:{{ edge_haproxy_route_model.softether_l3_vps.ports.backend_https }} check inter 5s fall 3 rise 2
 {% endif %}
 
 frontend softether_tcp_992
@@ -132,6 +129,12 @@ frontend softether_tcp_992
     tcp-request content silent-drop unless is_softether_992_sni
 {% elif edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
     tcp-request content silent-drop unless is_cascade_992_sni
+{% endif %}
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+    tcp-request content silent-drop if is_softether_992_sni { nbsrv(be_softether_992) lt 1 }
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    tcp-request content silent-drop if is_cascade_992_sni { nbsrv(be_cascade_992) lt 1 }
 {% endif %}
     tcp-request content accept if { req_ssl_hello_type 1 }
 {% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
@@ -168,14 +171,20 @@ frontend softether_mgmt
 {% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
     acl is_cascade_mgmt_sni req_ssl_sni -i {{ edge_haproxy_route_model.vpn_cascade.sni | join(' ') }}
 {% endif %}
-{% if (edge_haproxy_route_model.softether_l3_enabled | default(false)) and ((edge_haproxy_route_model.softether_l3.management_sni | default([])) | length > 0) %}
-    acl is_softether_l3_mgmt_sni req_ssl_sni -i {{ edge_haproxy_route_model.softether_l3.management_sni | join(' ') }}
-{% endif %}
-{% if (edge_haproxy_route_model.softether_p2p_enabled | default(false)) and ((edge_haproxy_route_model.softether_p2p.management_sni | default([])) | length > 0) %}
-    acl is_softether_p2p_mgmt_sni req_ssl_sni -i {{ edge_haproxy_route_model.softether_p2p.management_sni | join(' ') }}
+{% if (edge_haproxy_route_model.softether_l3_vps_enabled | default(false)) and ((edge_haproxy_route_model.softether_l3_vps.management_sni | default([])) | length > 0) %}
+    acl is_softether_l3_vps_mgmt_sni req_ssl_sni -i {{ edge_haproxy_route_model.softether_l3_vps.management_sni | join(' ') }}
 {% endif %}
 {% if edge_haproxy_route_model.management_allowed_condition | default('') | length > 0 %}
     tcp-request content silent-drop unless {{ edge_haproxy_route_model.management_allowed_condition }}
+{% endif %}
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+    tcp-request content silent-drop if is_softether_mgmt_sni { nbsrv(be_softether_mgmt) lt 1 }
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    tcp-request content silent-drop if is_cascade_mgmt_sni { nbsrv(be_cascade_mgmt) lt 1 }
+{% endif %}
+{% if (edge_haproxy_route_model.softether_l3_vps_enabled | default(false)) and ((edge_haproxy_route_model.softether_l3_vps.management_sni | default([])) | length > 0) %}
+    tcp-request content silent-drop if is_softether_l3_vps_mgmt_sni { nbsrv(be_softether_l3_vps_mgmt) lt 1 }
 {% endif %}
     tcp-request content accept if { req_ssl_hello_type 1 }
 {% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
@@ -184,11 +193,8 @@ frontend softether_mgmt
 {% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
     use_backend be_cascade_mgmt if is_cascade_mgmt_sni
 {% endif %}
-{% if (edge_haproxy_route_model.softether_l3_enabled | default(false)) and ((edge_haproxy_route_model.softether_l3.management_sni | default([])) | length > 0) %}
-    use_backend be_softether_l3_mgmt if is_softether_l3_mgmt_sni
-{% endif %}
-{% if (edge_haproxy_route_model.softether_p2p_enabled | default(false)) and ((edge_haproxy_route_model.softether_p2p.management_sni | default([])) | length > 0) %}
-    use_backend be_softether_p2p_mgmt if is_softether_p2p_mgmt_sni
+{% if (edge_haproxy_route_model.softether_l3_vps_enabled | default(false)) and ((edge_haproxy_route_model.softether_l3_vps.management_sni | default([])) | length > 0) %}
+    use_backend be_softether_l3_vps_mgmt if is_softether_l3_vps_mgmt_sni
 {% endif %}
 
 {% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
@@ -203,23 +209,17 @@ backend be_cascade_mgmt
     option tcp-check
     server softether-cascade {{ edge_haproxy_route_model.vpn_cascade.backend_management_host }}:{{ edge_haproxy_route_model.vpn_cascade.ports.backend_management }} check inter 5s fall 3 rise 2
 {% endif %}
-{% if (edge_haproxy_route_model.softether_l3_enabled | default(false)) and ((edge_haproxy_route_model.softether_l3.management_sni | default([])) | length > 0) %}
-backend be_softether_l3_mgmt
+{% if (edge_haproxy_route_model.softether_l3_vps_enabled | default(false)) and ((edge_haproxy_route_model.softether_l3_vps.management_sni | default([])) | length > 0) %}
+backend be_softether_l3_vps_mgmt
     mode tcp
     option tcp-check
-    server softether-l3 {{ edge_haproxy_route_model.softether_l3.backend_management_host }}:{{ edge_haproxy_route_model.softether_l3.ports.backend_management }} check inter 5s fall 3 rise 2
-{% endif %}
-{% if (edge_haproxy_route_model.softether_p2p_enabled | default(false)) and ((edge_haproxy_route_model.softether_p2p.management_sni | default([])) | length > 0) %}
-backend be_softether_p2p_mgmt
-    mode tcp
-    option tcp-check
-    server softether-p2p {{ edge_haproxy_route_model.softether_p2p.backend_management_host }}:{{ edge_haproxy_route_model.softether_p2p.ports.backend_management }} check inter 5s fall 3 rise 2
+    server softether-l3-vps {{ edge_haproxy_route_model.softether_l3_vps.backend_management_host }}:{{ edge_haproxy_route_model.softether_l3_vps.ports.backend_management }} check inter 5s fall 3 rise 2
 {% endif %}
 {% endif %}
 
-{% if (edge_haproxy_route_model.softether_p2p_enabled | default(false)) and (edge_haproxy_route_model.softether_p2p.postgres.enabled | default(false)) %}
+{% if (edge_haproxy_route_model.softether_l3_vps_enabled | default(false)) and (edge_haproxy_route_model.softether_l3_vps.postgres.enabled | default(false)) %}
 frontend postgres_p2p_replication
-    bind {{ edge_haproxy_route_model.softether_p2p.postgres.listen_host }}:{{ edge_haproxy_route_model.softether_p2p.postgres.listen_port }}
+    bind {{ edge_haproxy_route_model.softether_l3_vps.postgres.listen_host }}:{{ edge_haproxy_route_model.softether_l3_vps.postgres.listen_port }}
     mode tcp
     option tcplog
     default_backend be_postgres_p2p_primary
@@ -227,7 +227,7 @@ frontend postgres_p2p_replication
 backend be_postgres_p2p_primary
     mode tcp
     option tcp-check
-    server postgres-primary {{ edge_haproxy_route_model.softether_p2p.postgres.backend_host }}:{{ edge_haproxy_route_model.softether_p2p.postgres.backend_port }} check inter 5s fall 3 rise 2
+    server postgres-primary {{ edge_haproxy_route_model.softether_l3_vps.postgres.backend_host }}:{{ edge_haproxy_route_model.softether_l3_vps.postgres.backend_port }} check inter 5s fall 3 rise 2
 {% endif %}
 
 {% if edge_haproxy_route_model.minecraft_enabled | default(false) %}

@@ -79,11 +79,13 @@ Runtime roles are managed separately through `state.csv`:
   `minecraft` route. `vps1` and `vps4` are manual duplicate/standby candidates
   for `vps2`; both are active VPN ingress nodes.
 - `vps8` is the staged services-active node and `vps4` is the services-standby
-  node. All active VPS aliases now use the minimal VPN/HAProxy baseline plus
-  explicit platform networks before Postgres, Redis, or nginx are deployed.
-- Public `vpn_cascade` SNI/backends, local `vpn_cascade` runtime, experimental
-  `softether_l3`, experimental `softether_p2p`, and `postgres_runtime` are
-  absent while the network baseline is being cleaned up.
+  node. PostgreSQL is first rolled out as two independent standalone runtimes on
+  those aliases to validate the role before P2P transport and standby
+  conversion.
+- Public `vpn_cascade` SNI/backends and local `vpn_cascade` runtime remain
+  absent. `softether_l3_vps` may be present
+  only as transport-only P2P; service reachability still belongs to the planned
+  `platform_router` layer.
 - Every active VPS alias from `vps1` through `vps8` has the full VPN ingress
   stack in `state.csv`: `edge_haproxy`, `vpn_edge`, and
   `edge_route,vpn_ingress`.
@@ -135,9 +137,13 @@ service,edge_candidate_collector,edge_candidate_collectors,vps1+vps2+vps3+vps4+v
 
 Service naming is semantic, not positional:
 
-- `postgres_runtime` - infrastructure PostgreSQL runtime. `active_aliases`
-  means current primary, and `candidate_aliases` means manual standby
-  candidates.
+- `postgres_runtime` - infrastructure PostgreSQL runtime. In `standalone` mode,
+  `active_aliases` are independent primaries used to validate the runtime. In
+  `async_standby` mode, `active_aliases` contains one primary and
+  `candidate_aliases` contains manual standby candidates. Converting an
+  initialized standalone primary into a standby requires explicit targeted
+  reinitialization; ordinary rollout must not silently overwrite data. Promotion
+  is a manual operation after fencing, not automatic failover.
 - `redis_runtime` - infrastructure Redis runtime for cache, broker, or result
   backend use. `active_aliases` means current active Redis placement, and
   `candidate_aliases` means prepared standby candidates.
@@ -166,6 +172,10 @@ Service naming is semantic, not positional:
 - `platform_networks` - explicit per-node Docker network baseline for future
   service runtimes. For each active `vpsN`, the data network is
   `172.30.N.0/24` and the app network is `172.31.N.0/24`.
+- `platform_router` - planned controlled L3 routing layer between VPN/P2P and
+  platform networks. It is not implemented yet. Future inter-VPS service access
+  should use `platform_router -> L3/P2P transport -> platform_router`, not
+  direct attachment of service containers to transport networks.
 
 Every active, non-retired VPS in `nodes.csv` is expected to have the full VPN
 ingress stack in `state.csv`: `service,edge_haproxy`,
@@ -204,6 +214,9 @@ Infrastructure runtimes provide shared endpoints and lifecycle:
 - `redis_runtime` owns cache, broker, and result-backend placement plus manual
   standby.
 - `flower_runtime` owns Celery observability/control placement.
+- `platform_router` will own explicit service reachability policy when
+  implemented. It should route only approved source/destination/port tuples and
+  keep VPN/P2P transport separate from data/app container placement.
 
 Application runtimes consume infrastructure endpoints:
 

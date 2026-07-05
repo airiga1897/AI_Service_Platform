@@ -34,6 +34,21 @@ function Read-JsonFile($Path, $Label) {
     }
 }
 
+function Test-PresentVpnCascadeState($Path) {
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
+    }
+    foreach ($row in @(Import-Csv -LiteralPath $Path)) {
+        if ($row.kind -eq "service" -and $row.name -eq "vpn_cascade" -and $row.state -eq "present") {
+            return $true
+        }
+        if ($row.kind -eq "cascade_topology" -and $row.state -eq "present") {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Quote-BashArg($Value) {
     $text = [string]$Value
     return "'" + ($text -replace "'", "'\''") + "'"
@@ -266,6 +281,13 @@ $script:SshExecutablePath = Resolve-SshExecutable $SshPath
 $nodes = Load-Nodes $NodesFile
 if ($StateFile) {
     Require-File $StateFile "StateFile"
+}
+if (-not (Test-Path -LiteralPath $SecretFile -PathType Leaf)) {
+    if (-not (Test-PresentVpnCascadeState $StateFile)) {
+        Write-Host "No vpn_cascade links selected."
+        exit 0
+    }
+    Fail "vpn_cascade secret not found: $SecretFile"
 }
 $secret = Read-JsonFile $SecretFile "vpn_cascade secret"
 if (-not $secret.links -or $secret.links.Count -eq 0) {

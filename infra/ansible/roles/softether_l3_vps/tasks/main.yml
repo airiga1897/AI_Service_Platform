@@ -1,0 +1,642 @@
+---
+- name: Validate softether_l3_vps state
+  ansible.builtin.assert:
+    that:
+      - softether_l3_vps_state in ['present', 'absent']
+      - softether_l3_vps_purge_data in [true, false, 'true', 'false', 'True', 'False']
+    fail_msg: "softether_l3_vps_state must be present|absent and purge flag must be boolean-like."
+
+- name: Check softether_l3_vps compose file
+  ansible.builtin.stat:
+    path: "{{ softether_l3_vps_compose_file }}"
+  register: softether_l3_vps_compose_stat
+  when: softether_l3_vps_state == 'absent'
+
+- name: Build softether_l3_vps model from operator intent
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - <<'PY'
+    import ipaddress
+    import json
+    import os
+    import sys
+
+    try:
+        import yaml
+    except Exception as exc:
+        print(f"PyYAML is required to read softether l3-vps links: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    alias = os.environ["INVENTORY_HOSTNAME"]
+    path = os.environ["LINKS_FILE"]
+    secrets_dir = os.environ["SECRETS_DIR"]
+
+    def fail(message):
+        print(message, file=sys.stderr)
+        sys.exit(1)
+
+    if not os.path.isfile(path):
+        fail(f"softether l3-vps links file not found: {path}")
+    with open(path, encoding="utf-8") as handle:
+        config = yaml.safe_load(handle) or {}
+    links = [link for link in config.get("links", []) if str(link.get("state", "present")).lower() == "present"]
+    selected = [link for link in links if alias in [link.get("server_alias"), link.get("client_alias")]]
+    if len(selected) != 1:
+        fail(f"{alias} must participate in exactly one present softether l3-vps link; found {len(selected)}")
+    link = selected[0]
+    role = "server" if alias == link.get("server_alias") else "client"
+    subnet = ipaddress.ip_network(str(link["subnet"]), strict=True)
+    server_ip = ipaddress.ip_address(str(link["server_ip"]))
+    client_ip = ipaddress.ip_address(str(link["client_ip"]))
+    if server_ip not in subnet or client_ip not in subnet or server_ip == client_ip:
+        fail(f"softether l3-vps link {link['name']} endpoint IPs must be unique and inside subnet {subnet}")
+    network_name = str(link.get(f"{role}_network_name") or link.get("network_name") or os.environ["DEFAULT_NETWORK_NAME"])
+    network_subnet = ipaddress.ip_network(str(link.get(f"{role}_network_subnet") or link.get("network_subnet") or os.environ["DEFAULT_NETWORK_SUBNET"]), strict=True)
+    container_ipv4 = ipaddress.ip_address(str(link.get(f"{role}_container_ipv4") or link.get("container_ipv4") or os.environ["DEFAULT_CONTAINER_IPV4"]))
+    if container_ipv4 not in network_subnet:
+        fail(f"softether l3-vps {role} container IP {container_ipv4} must be inside docker network {network_subnet}")
+    remote_routes = [str(route).strip() for route in link.get("remote_routes", []) if str(route).strip()]
+    if role == "client":
+        for route in remote_routes:
+            if ipaddress.ip_network(route, strict=False).overlaps(network_subnet):
+                fail(f"softether l3-vps client docker network {network_subnet} overlaps remote route {route}; use a non-overlapping client_network_subnet")
+    management_network = {}
+    if role == "server":
+        service_network_name = str(link.get("server_service_network_name") or "")
+        service_network_subnet = str(link.get("server_service_network_subnet") or "")
+        service_container_ipv4 = str(link.get("server_service_container_ipv4") or "")
+        if any([service_network_name, service_network_subnet, service_container_ipv4]):
+            fail("softether l3-vps is transport-only; service/data/app reachability must be implemented through platform_router")
+        management_network_name = str(link.get("server_management_network_name") or "")
+        management_network_subnet = str(link.get("server_management_network_subnet") or "")
+        management_container_ipv4 = str(link.get("server_management_container_ipv4") or "")
+        management_allowed_source_ipv4 = str(link.get("server_management_allowed_source_ipv4") or "")
+        if any([management_network_name, management_network_subnet, management_container_ipv4, management_allowed_source_ipv4]):
+            if not all([management_network_name, management_network_subnet, management_container_ipv4, management_allowed_source_ipv4]):
+                fail("softether l3-vps server management network requires server_management_network_name, server_management_network_subnet, server_management_container_ipv4, and server_management_allowed_source_ipv4")
+            parsed_management_subnet = ipaddress.ip_network(management_network_subnet, strict=True)
+            parsed_management_ip = ipaddress.ip_address(management_container_ipv4)
+            parsed_management_source_ip = ipaddress.ip_address(management_allowed_source_ipv4)
+            if parsed_management_ip not in parsed_management_subnet:
+                fail(f"softether l3-vps server management IP {parsed_management_ip} must be inside docker network {parsed_management_subnet}")
+            if parsed_management_source_ip not in parsed_management_subnet:
+                fail(f"softether l3-vps server management allowed source IP {parsed_management_source_ip} must be inside docker network {parsed_management_subnet}")
+            if parsed_management_subnet.overlaps(network_subnet):
+                fail(f"softether l3-vps server management network {parsed_management_subnet} must not overlap transport network {network_subnet}")
+            management_network = {
+                "name": management_network_name,
+                "subnet": str(parsed_management_subnet),
+                "container_ipv4": str(parsed_management_ip),
+                "allowed_source_ipv4": str(parsed_management_source_ip),
+            }
+    if link.get("tcp_checks"):
+        fail("softether l3-vps does not run service TCP checks; add service reachability checks to platform_router")
+    model = {
+        "name": str(link["name"]),
+        "role": role,
+        "server_alias": str(link["server_alias"]),
+        "client_alias": str(link["client_alias"]),
+        "server_sni": str(link["server_sni"]),
+        "management_sni": str(link.get("management_sni") or ""),
+        "public_port": int(link.get("public_port") or 443),
+        "hub": str(link["hub"]),
+        "subnet": str(subnet),
+        "prefixlen": subnet.prefixlen,
+        "netmask": str(subnet.netmask),
+        "server_ip": str(server_ip),
+        "client_ip": str(client_ip),
+        "network_name": network_name,
+        "network_subnet": str(network_subnet),
+        "container_ipv4": str(container_ipv4),
+        "service_network": {},
+        "management_network": management_network,
+        "remote_routes": remote_routes,
+        "purpose": str(link.get("purpose") or ""),
+        "secret_file": os.path.join(secrets_dir, str(link["name"]) + ".json"),
+    }
+    print(json.dumps(model, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    INVENTORY_HOSTNAME: "{{ inventory_hostname }}"
+    LINKS_FILE: "{{ softether_l3_vps_operator_links_file }}"
+    SECRETS_DIR: "{{ softether_l3_vps_operator_secrets_dir }}"
+    DEFAULT_NETWORK_NAME: "{{ softether_l3_vps_network_name }}"
+    DEFAULT_NETWORK_SUBNET: "{{ softether_l3_vps_network_subnet }}"
+    DEFAULT_CONTAINER_IPV4: "{{ softether_l3_vps_container_ipv4 }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  register: softether_l3_vps_model_command
+  when: softether_l3_vps_state == 'present'
+
+- name: Store softether_l3_vps model
+  ansible.builtin.set_fact:
+    softether_l3_vps_model: "{{ softether_l3_vps_model_command.stdout | trim | from_json }}"
+  when: softether_l3_vps_state == 'present'
+
+- name: Validate softether_l3_vps secret presence on control node
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - <<'PY'
+    import json
+    import os
+    import sys
+    path = os.environ["SECRET_FILE"]
+    required = {"server_password", "hub_password", "client_user", "client_password"}
+    if not os.path.isfile(path):
+        print(f"softether l3-vps secret file not found: {path}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception as exc:
+        print(f"softether l3-vps secret JSON is invalid: {path}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    missing = sorted(key for key in required if not str(data.get(key) or "").strip())
+    if missing:
+        print(f"softether l3-vps secret file {path} is missing required keys: {', '.join(missing)}", file=sys.stderr)
+        sys.exit(1)
+    print(f"softether l3-vps secret file is present and has required keys: {path}")
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    SECRET_FILE: "{{ softether_l3_vps_model.secret_file }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  when: softether_l3_vps_state == 'present'
+
+- name: Load softether_l3_vps secret from control node
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - <<'PY'
+    import json
+    import os
+    path = os.environ["SECRET_FILE"]
+    required = {"server_password", "hub_password", "client_user", "client_password"}
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+    print(json.dumps({key: str(data[key]) for key in sorted(required)}))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    SECRET_FILE: "{{ softether_l3_vps_model.secret_file }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  no_log: true
+  register: softether_l3_vps_secret_command
+  when: softether_l3_vps_state == 'present'
+
+- name: Store softether_l3_vps secret map
+  ansible.builtin.set_fact:
+    softether_l3_vps_secret_map: "{{ softether_l3_vps_secret_command.stdout | from_json }}"
+  no_log: true
+  when: softether_l3_vps_state == 'present'
+
+- name: Ensure softether_l3_vps runtime directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ softether_l3_vps_root_dir }}"
+    - "{{ softether_l3_vps_data_dir }}"
+    - "{{ softether_l3_vps_logs_dir }}"
+  when: softether_l3_vps_state == 'present'
+
+- name: Render softether_l3_vps admin IP allowlist
+  ansible.builtin.copy:
+    dest: "{{ softether_l3_vps_adminip_file }}"
+    content: "{{ (['127.0.0.1'] + ([softether_l3_vps_model.management_network.allowed_source_ipv4] if (softether_l3_vps_model.management_network.allowed_source_ipv4 | default('')) else [])) | join('\n') }}\n"
+    mode: "0644"
+  register: softether_l3_vps_adminip_copy
+  when:
+    - softether_l3_vps_state == 'present'
+    - softether_l3_vps_model.role == 'server'
+
+- name: Render softether_l3_vps Docker Compose
+  ansible.builtin.template:
+    src: "docker-compose.softether-l3-vps-{{ softether_l3_vps_model.role }}.yml.j2"
+    dest: "{{ softether_l3_vps_compose_file }}"
+    mode: "0640"
+  register: softether_l3_vps_compose_template
+  when: softether_l3_vps_state == 'present'
+
+- name: Ensure Docker runtime baseline for softether_l3_vps
+  ansible.builtin.include_role:
+    name: docker_runtime_baseline
+  when:
+    - not ansible_check_mode
+    - softether_l3_vps_state == 'present' or (softether_l3_vps_compose_stat.stat.exists | default(false))
+
+- name: Remove legacy softether_p2p runtime containers and directory
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if [ -f /opt/ai-service-platform/softether_p2p/docker-compose.yml ]; then
+      docker compose -f /opt/ai-service-platform/softether_p2p/docker-compose.yml down || true
+    fi
+    docker rm -f softether-p2p-server softether-p2p-client >/dev/null 2>&1 || true
+    rm -rf /opt/ai-service-platform/softether_p2p
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - softether_l3_vps_state == 'present'
+    - not ansible_check_mode
+
+- name: Remove empty legacy SoftEther P2P Docker networks before canonical L3 VPS network creation
+  ansible.builtin.shell: |
+    set -euo pipefail
+    for name in ai_service_softether_p2p ai_service_softether_p2p_services ai_service_softether_p2p_pg48_transport ai_service_softether_p2p_pg48_mgmt ai_service_softether_p2p_pg48_client ai_service_softether_l3; do
+      case "$name" in
+        "{{ softether_l3_vps_model.network_name }}") continue ;;
+        "{{ softether_l3_vps_model.management_network.name | default('') }}") continue ;;
+      esac
+      if ! docker network inspect "$name" >/dev/null 2>&1; then
+        continue
+      fi
+      count="$(docker network inspect -f {% raw %}'{{ len .Containers }}'{% endraw %} "$name")"
+      holders="$(docker network inspect -f {% raw %}'{{ range $id, $c := .Containers }}{{ $c.Name }} {{ end }}'{% endraw %} "$name" | xargs || true)"
+      if [ "$count" != "0" ] && [ "$holders" = "edge-haproxy" ]; then
+        if [ -f /opt/ai-service-platform/edge_haproxy/docker-compose.yml ]; then
+          docker compose -f /opt/ai-service-platform/edge_haproxy/docker-compose.yml down
+        else
+          docker rm -f edge-haproxy >/dev/null 2>&1 || true
+        fi
+        count="$(docker network inspect -f {% raw %}'{{ len .Containers }}'{% endraw %} "$name")"
+        holders="$(docker network inspect -f {% raw %}'{{ range $id, $c := .Containers }}{{ $c.Name }} {{ end }}'{% endraw %} "$name" | xargs || true)"
+      fi
+      if [ "$count" = "0" ]; then
+        docker network rm "$name"
+        echo "removed empty legacy softether p2p docker network $name"
+      else
+        echo "legacy softether p2p docker network still has $count endpoint(s): $name" >&2
+        echo "$holders" >&2
+        exit 1
+      fi
+    done
+  args:
+    executable: /bin/bash
+  register: softether_l3_vps_pre_network_legacy_cleanup
+  changed_when: >
+    (softether_l3_vps_pre_network_legacy_cleanup.stdout | default(''))
+    is search('removed empty legacy softether p2p docker network')
+  when:
+    - softether_l3_vps_state == 'present'
+    - not ansible_check_mode
+
+- name: Ensure softether_l3_vps Docker network exists with expected subnet
+  ansible.builtin.shell: |
+    set -euo pipefail
+    name="{{ softether_l3_vps_model.network_name }}"
+    subnet="{{ softether_l3_vps_model.network_subnet }}"
+    current="$(docker network inspect -f {% raw %}'{{ (index .IPAM.Config 0).Subnet }}'{% endraw %} "$name" 2>/dev/null || true)"
+    if [ -n "$current" ] && [ "$current" != "$subnet" ]; then
+      if [ -f "{{ softether_l3_vps_compose_file }}" ]; then
+        docker compose -f "{{ softether_l3_vps_compose_file }}" down
+      fi
+      docker network rm "$name"
+      echo "removed mismatched softether_l3_vps docker network $name ($current != $subnet)"
+      current=""
+    fi
+    if [ -z "$current" ]; then
+      docker network create --subnet "$subnet" "$name"
+      echo "created softether_l3_vps docker network $name ($subnet)"
+    else
+      echo "softether_l3_vps docker network already exists: $name ($current)"
+    fi
+  args:
+    executable: /bin/bash
+  register: softether_l3_vps_network_create
+  changed_when: >
+    (softether_l3_vps_network_create.stdout | default(''))
+    is search('(?i)(created softether_l3_vps docker network|removed mismatched softether_l3_vps docker network)')
+  when:
+    - softether_l3_vps_state == 'present'
+    - not ansible_check_mode
+
+- name: Ensure softether_l3_vps server management Docker network exists with expected subnet
+  ansible.builtin.shell: |
+    set -euo pipefail
+    name="{{ softether_l3_vps_model.management_network.name }}"
+    subnet="{{ softether_l3_vps_model.management_network.subnet }}"
+    current="$(docker network inspect -f {% raw %}'{{ (index .IPAM.Config 0).Subnet }}'{% endraw %} "$name" 2>/dev/null || true)"
+    if [ -n "$current" ] && [ "$current" != "$subnet" ]; then
+      if [ -f "{{ softether_l3_vps_compose_file }}" ]; then
+        docker compose -f "{{ softether_l3_vps_compose_file }}" down
+      fi
+      docker network rm "$name"
+      echo "removed mismatched softether_l3_vps server management docker network $name ($current != $subnet)"
+      current=""
+    fi
+    if [ -z "$current" ]; then
+      docker network create --subnet "$subnet" "$name"
+      echo "created softether_l3_vps server management docker network $name ($subnet)"
+    else
+      echo "softether_l3_vps server management docker network already exists: $name ($current)"
+    fi
+  args:
+    executable: /bin/bash
+  register: softether_l3_vps_management_network_create
+  changed_when: >
+    (softether_l3_vps_management_network_create.stdout | default(''))
+    is search('(?i)(created softether_l3_vps server management docker network|removed mismatched softether_l3_vps server management docker network)')
+  when:
+    - softether_l3_vps_state == 'present'
+    - softether_l3_vps_model.role == 'server'
+    - softether_l3_vps_model.management_network.name | default('') | length > 0
+    - not ansible_check_mode
+
+- name: Ensure local softether_l3_vps client image exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    image="{{ softether_l3_vps_client_image }}"
+    context="{{ softether_l3_vps_client_build_context }}"
+    target="{{ softether_l3_vps_client_build_target }}"
+    if docker image inspect "$image" >/dev/null 2>&1; then
+      echo "softether_l3_vps client image already exists: $image"
+      exit 0
+    fi
+    docker build --target "$target" -t "$image" "$context"
+  args:
+    executable: /bin/bash
+  register: softether_l3_vps_client_image_build
+  changed_when: "'client image already exists' not in (softether_l3_vps_client_image_build.stdout | default(''))"
+  when:
+    - softether_l3_vps_state == 'present'
+    - softether_l3_vps_model.role == 'client'
+    - not ansible_check_mode
+
+- name: Start softether_l3_vps container
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ softether_l3_vps_compose_file }}" up -d
+    chdir: "{{ softether_l3_vps_root_dir }}"
+  register: softether_l3_vps_compose_up
+  changed_when: >
+    (softether_l3_vps_compose_up.stdout ~ softether_l3_vps_compose_up.stderr)
+    is search('(?i)(creating|created|recreating|recreated|starting|started|pulling|pulled)')
+  when:
+    - softether_l3_vps_state == 'present'
+    - not ansible_check_mode
+
+- name: Remove empty legacy SoftEther L3 VPS Docker networks
+  ansible.builtin.shell: |
+    set -euo pipefail
+    for name in ai_service_softether_p2p ai_service_softether_p2p_services ai_service_softether_p2p_pg48_transport ai_service_softether_p2p_pg48_mgmt ai_service_softether_p2p_pg48_client ai_service_softether_l3 ai_service_softether_l3_vps ai_service_softether_l3_vps_services; do
+      case "$name" in
+        "{{ softether_l3_vps_model.network_name }}") continue ;;
+        "{{ softether_l3_vps_model.management_network.name | default('') }}") continue ;;
+      esac
+      if ! docker network inspect "$name" >/dev/null 2>&1; then
+        continue
+      fi
+      count="$(docker network inspect -f {% raw %}'{{ len .Containers }}'{% endraw %} "$name")"
+      if [ "$count" = "0" ]; then
+        docker network rm "$name"
+        echo "removed empty legacy softether_l3_vps docker network $name"
+      else
+        echo "legacy softether_l3_vps docker network still has $count endpoint(s): $name"
+      fi
+    done
+  args:
+    executable: /bin/bash
+  register: softether_l3_vps_legacy_network_cleanup
+  changed_when: >
+    (softether_l3_vps_legacy_network_cleanup.stdout | default(''))
+    is search('removed empty legacy softether_l3_vps docker network')
+  when:
+    - softether_l3_vps_state == 'present'
+    - not ansible_check_mode
+
+- name: Configure softether_l3_vps server hub and SecureNAT
+  ansible.builtin.shell: |
+    set -euo pipefail
+    container="{{ softether_l3_vps_server_container_name }}"
+    timeout_s="{{ softether_l3_vps_vpncmd_timeout_seconds }}"
+    password="${SERVER_PASSWORD}"
+    hub="${HUB_NAME}"
+    hub_password="${HUB_PASSWORD}"
+    client_user="${CLIENT_USER}"
+    client_password="${CLIENT_PASSWORD}"
+    server_ip="{{ softether_l3_vps_model.server_ip }}"
+    client_ip="{{ softether_l3_vps_model.client_ip }}"
+    netmask="{{ softether_l3_vps_model.netmask }}"
+    port="{{ softether_l3_vps_model.public_port }}"
+
+    cleanup_vpncmd() {
+      docker exec "$container" sh -c 'pkill -KILL vpncmd 2>/dev/null || true' >/dev/null 2>&1 || true
+    }
+    run_vpncmd() {
+      timeout "${timeout_s}s" docker exec "$container" vpncmd "$@"
+      rc="$?"
+      if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+        cleanup_vpncmd
+      fi
+      return "$rc"
+    }
+    trap cleanup_vpncmd EXIT
+    cleanup_vpncmd
+
+    if ! run_vpncmd localhost:5555 /SERVER /PASSWORD:"$password" /CMD ServerInfoGet >/dev/null 2>&1; then
+      if run_vpncmd localhost:5555 /SERVER /PASSWORD: /CMD ServerInfoGet >/dev/null 2>&1; then
+        run_vpncmd localhost:5555 /SERVER /PASSWORD: /CMD ServerPasswordSet "$password" >/dev/null
+      else
+        echo "softether l3-vps persisted data uses a different server password; run softether_l3_vps purge/reseed for this alias" >&2
+        exit 1
+      fi
+    fi
+
+    listeners="$(run_vpncmd localhost:5555 /SERVER /PASSWORD:"$password" /CMD ListenerList 2>/dev/null || true)"
+    echo "$listeners" | grep -Eq "(^|[^0-9])${port}([^0-9]|$)" || run_vpncmd localhost:5555 /SERVER /PASSWORD:"$password" /CMD ListenerCreate "$port" >/dev/null
+    if echo "$listeners" | grep -Eq '(^|[^0-9])1194([^0-9]|$)'; then
+      run_vpncmd localhost:5555 /SERVER /PASSWORD:"$password" /CMD ListenerDelete 1194 >/dev/null
+    fi
+
+    hubs="$(run_vpncmd localhost:5555 /SERVER /PASSWORD:"$password" /CMD HubList 2>/dev/null || true)"
+    echo "$hubs" | grep -Fq "$hub" || run_vpncmd localhost:5555 /SERVER /PASSWORD:"$password" /CMD HubCreate "$hub" /PASSWORD:"$hub_password" >/dev/null
+    if [ "$hub" != "DEFAULT" ] && echo "$hubs" | grep -Eq '(^|[[:space:]|])DEFAULT([[:space:]|]|$)'; then
+      run_vpncmd localhost:5555 /SERVER /PASSWORD:"$password" /CMD HubDelete DEFAULT >/dev/null
+    fi
+
+    input="$(mktemp)"
+    trap 'rm -f "$input"; cleanup_vpncmd' EXIT
+    users="$(run_vpncmd localhost:5555 /SERVER /PASSWORD:"$password" /HUB:"$hub" /CMD UserList 2>/dev/null || true)"
+    {
+      printf 'Hub %s\n' "$hub"
+      if ! echo "$users" | grep -Fq "$client_user"; then
+        printf 'UserCreate %s /GROUP:none /REALNAME:none /NOTE:none\n' "$client_user"
+      fi
+      printf 'UserPasswordSet %s /PASSWORD:%s\n' "$client_user" "$client_password"
+      printf 'SecureNatEnable\n'
+      printf 'SecureNatHostSet /MAC:none /IP:%s /MASK:%s\n' "$server_ip" "$netmask"
+      printf 'DhcpSet /START:%s /END:%s /MASK:%s /EXPIRE:7200 /GW:%s /DNS:1.1.1.1 /DNS2:8.8.8.8 /DOMAIN:none /LOG:yes\n' "$client_ip" "$client_ip" "$netmask" "$server_ip"
+      printf 'Flush\n'
+    } > "$input"
+    timeout "${timeout_s}s" docker exec -i -e VPNCMD_PASSWORD="$password" "$container" sh -c 'tmp="$(mktemp)"; trap "rm -f \"$tmp\"" EXIT; cat > "$tmp"; timeout "$1" vpncmd localhost:5555 /SERVER /PASSWORD:"$VPNCMD_PASSWORD" /IN:"$tmp"; rc="$?"; if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then pkill -KILL vpncmd 2>/dev/null || true; fi; exit "$rc"' sh "$timeout_s" < "$input" >/tmp/softether-l3-vps-server-config.out 2>&1 || {
+      cleanup_vpncmd
+      sed -E 's#/PASSWORD:[^[:space:]]+#/PASSWORD:<redacted>#g' /tmp/softether-l3-vps-server-config.out >&2
+      exit 1
+    }
+  args:
+    executable: /bin/bash
+  environment:
+    SERVER_PASSWORD: "{{ softether_l3_vps_secret_map.server_password }}"
+    HUB_PASSWORD: "{{ softether_l3_vps_secret_map.hub_password }}"
+    CLIENT_USER: "{{ softether_l3_vps_secret_map.client_user }}"
+    CLIENT_PASSWORD: "{{ softether_l3_vps_secret_map.client_password }}"
+    HUB_NAME: "{{ softether_l3_vps_model.hub }}"
+  when:
+    - softether_l3_vps_state == 'present'
+    - softether_l3_vps_model.role == 'server'
+    - not ansible_check_mode
+
+- name: Configure softether_l3_vps client account
+  ansible.builtin.shell: |
+    set -euo pipefail
+    container="{{ softether_l3_vps_client_container_name }}"
+    timeout_s="{{ softether_l3_vps_vpncmd_timeout_seconds }}"
+    account="{{ softether_l3_vps_account_name }}"
+    nic="{{ softether_l3_vps_client_nic_name }}"
+    server="{{ softether_l3_vps_model.server_sni }}:{{ softether_l3_vps_model.public_port }}"
+    hub="{{ softether_l3_vps_model.hub }}"
+    user="${CLIENT_USER}"
+    password="${CLIENT_PASSWORD}"
+
+    cleanup_vpncmd() {
+      docker exec "$container" sh -c 'pkill -KILL vpncmd 2>/dev/null || true' >/dev/null 2>&1 || true
+    }
+    run_vpncmd() {
+      timeout "${timeout_s}s" docker exec "$container" vpncmd "$@"
+      rc="$?"
+      if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+        cleanup_vpncmd
+      fi
+      return "$rc"
+    }
+    trap cleanup_vpncmd EXIT
+    cleanup_vpncmd
+
+    run_vpncmd localhost /CLIENT /CMD Check >/dev/null
+    nics="$(run_vpncmd localhost /CLIENT /CMD NicList 2>/dev/null || true)"
+    echo "$nics" | grep -Fq "$nic" || run_vpncmd localhost /CLIENT /CMD NicCreate "$nic" >/dev/null
+
+    accounts="$(run_vpncmd localhost /CLIENT /CMD AccountList 2>/dev/null || true)"
+    if echo "$accounts" | grep -Fq "$account"; then
+      run_vpncmd localhost /CLIENT /CMD AccountDisconnect "$account" >/dev/null 2>&1 || true
+      run_vpncmd localhost /CLIENT /CMD AccountDelete "$account" >/dev/null
+    fi
+    run_vpncmd localhost /CLIENT /CMD AccountCreate "$account" /SERVER:"$server" /HUB:"$hub" /USERNAME:"$user" /NICNAME:"$nic" >/dev/null
+    run_vpncmd localhost /CLIENT /CMD AccountPasswordSet "$account" /PASSWORD:"$password" /TYPE:standard >/dev/null
+    run_vpncmd localhost /CLIENT /CMD AccountStartupSet "$account" >/dev/null
+    run_vpncmd localhost /CLIENT /CMD AccountConnect "$account" >/dev/null
+  args:
+    executable: /bin/bash
+  environment:
+    CLIENT_USER: "{{ softether_l3_vps_secret_map.client_user }}"
+    CLIENT_PASSWORD: "{{ softether_l3_vps_secret_map.client_password }}"
+  no_log: true
+  when:
+    - softether_l3_vps_state == 'present'
+    - softether_l3_vps_model.role == 'client'
+    - not ansible_check_mode
+
+- name: Configure softether_l3_vps client static address and remote service routes
+  ansible.builtin.shell: |
+    set -euo pipefail
+    container="{{ softether_l3_vps_client_container_name }}"
+    nic="{{ softether_l3_vps_client_nic_name }}"
+    iface="vpn_${nic}"
+    client_ip="{{ softether_l3_vps_model.client_ip }}"
+    prefix="{{ softether_l3_vps_model.prefixlen }}"
+    server_ip="{{ softether_l3_vps_model.server_ip }}"
+    routes_json='{{ softether_l3_vps_model.remote_routes | to_json }}'
+    docker exec "$container" sh -ceu "
+      ip link set '$iface' up
+      ip addr replace '$client_ip/$prefix' dev '$iface'
+    "
+    python3 - "$routes_json" <<'PY' | while IFS= read -r route; do
+    import json
+    import sys
+    for item in json.loads(sys.argv[1]):
+        text = str(item).strip()
+        if text:
+            print(text)
+    PY
+      docker exec "$container" ip route replace "$route" via "$server_ip" dev "$iface"
+      docker exec "$container" sh -ceu "
+        iptables -t nat -C POSTROUTING -d '$route' -j SNAT --to-source '$client_ip' 2>/dev/null ||
+          iptables -t nat -A POSTROUTING -d '$route' -j SNAT --to-source '$client_ip'
+      "
+      ip route replace "$route" via "{{ softether_l3_vps_model.container_ipv4 }}"
+    done
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - softether_l3_vps_state == 'present'
+    - softether_l3_vps_model.role == 'client'
+    - not ansible_check_mode
+
+- name: Verify softether_l3_vps client can reach remote service route target
+  ansible.builtin.command:
+    cmd: docker exec "{{ softether_l3_vps_client_container_name }}" ping -c 2 -W 2 "{{ (softether_l3_vps_model.remote_routes | first).split('/')[0] }}"
+  changed_when: false
+  register: softether_l3_vps_ping
+  retries: 12
+  delay: 5
+  until: softether_l3_vps_ping.rc == 0
+  when:
+    - softether_l3_vps_state == 'present'
+    - softether_l3_vps_model.role == 'client'
+    - (softether_l3_vps_model.remote_routes | length) > 0
+    - not ansible_check_mode
+
+- name: Verify legacy softether_p2p runtime is absent
+  ansible.builtin.shell: |
+    set -euo pipefail
+    legacy_containers="$(docker ps -a --format {% raw %}'{{.Names}}'{% endraw %} | grep -E '^softether-p2p-(server|client)$' || true)"
+    legacy_networks="$(docker network ls --format {% raw %}'{{.Name}}'{% endraw %} | grep -E '^ai_service_softether_p2p' || true)"
+    if [ -n "$legacy_containers$legacy_networks" ]; then
+      if [ -n "$legacy_containers" ]; then
+        echo "legacy softether_p2p containers remain:" >&2
+        echo "$legacy_containers" >&2
+      fi
+      if [ -n "$legacy_networks" ]; then
+        echo "legacy softether_p2p networks remain:" >&2
+        echo "$legacy_networks" >&2
+      fi
+      exit 1
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - softether_l3_vps_state == 'present'
+    - not ansible_check_mode
+
+- name: Stop softether_l3_vps containers
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ softether_l3_vps_compose_file }}" down
+    chdir: "{{ softether_l3_vps_root_dir }}"
+  changed_when: true
+  when:
+    - softether_l3_vps_state == 'absent'
+    - softether_l3_vps_compose_stat.stat.exists | default(false)
+    - not ansible_check_mode
+
+- name: Purge softether_l3_vps runtime data when explicitly requested
+  ansible.builtin.file:
+    path: "{{ softether_l3_vps_root_dir }}"
+    state: absent
+  when:
+    - softether_l3_vps_state == 'absent'
+    - softether_l3_vps_purge_data in [true, 'true', 'True']
+    - not ansible_check_mode

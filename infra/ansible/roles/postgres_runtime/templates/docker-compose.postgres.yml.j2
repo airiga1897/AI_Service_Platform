@@ -15,8 +15,9 @@ services:
 {% if postgres_runtime_model.role == 'standby' and postgres_runtime_model.standby_network_mode %}
     network_mode: "{{ postgres_runtime_model.standby_network_mode }}"
 {% else %}
-    ports:
-      - "{{ postgres_runtime_model.bind_host }}:{{ postgres_runtime_model.port }}:5432"
+    networks:
+      postgres_data:
+        ipv4_address: "{{ postgres_runtime_model.container_ipv4 }}"
 {% endif %}
     volumes:
       - "{{ postgres_runtime_model.volume_name }}:/var/lib/postgresql/data"
@@ -26,3 +27,10 @@ services:
 volumes:
   {{ postgres_runtime_model.volume_name }}:
     external: true
+
+{% if not (postgres_runtime_model.role == 'standby' and postgres_runtime_model.standby_network_mode) %}
+networks:
+  postgres_data:
+    external: true
+    name: "{{ postgres_runtime_model.docker_network_name }}"
+{% endif %}

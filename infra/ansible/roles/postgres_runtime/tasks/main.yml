@@ -4,7 +4,8 @@
     that:
       - postgres_runtime_state in ['present', 'absent']
       - postgres_runtime_purge_data in [true, false, 'true', 'false', 'True', 'False']
-    fail_msg: "postgres_runtime_state must be present|absent and purge flag must be boolean-like."
+      - postgres_runtime_reinit_standby in [true, false, 'true', 'false', 'True', 'False']
+    fail_msg: "postgres_runtime_state must be present|absent and purge/reinit flags must be boolean-like."
 
 - name: Check operator postgres config on control node
   ansible.builtin.stat:
@@ -65,20 +66,50 @@
     if len(service_rows) != 1:
         fail("postgres_runtime requires exactly one present service row in state.csv")
     row = service_rows[0]
+    replication_mode = str(config.get("replication_mode") or "async_standby").strip()
+    if replication_mode not in {"standalone", "async_standby"}:
+        fail("postgres_runtime.replication_mode must be standalone or async_standby")
+
     primary_aliases = split_aliases(row.get("active_aliases"))
     standby_aliases = split_aliases(row.get("candidate_aliases"))
-    if len(primary_aliases) != 1:
-        fail("postgres_runtime active_aliases must contain exactly one primary alias")
-    primary_alias = primary_aliases[0]
-    if alias == primary_alias:
+    if not primary_aliases:
+        fail("postgres_runtime active_aliases must not be empty")
+
+    if replication_mode == "standalone":
+        if standby_aliases:
+            fail("postgres_runtime standalone mode must not use candidate_aliases")
+        if alias not in primary_aliases:
+            fail(f"{alias} is not listed in postgres_runtime active_aliases")
+        primary_alias = alias
         node_role = "primary"
-    elif alias in standby_aliases:
-        node_role = "standby"
     else:
-        fail(f"{alias} is not active or candidate for postgres_runtime")
-    for required in [primary_alias] + standby_aliases:
+        if len(primary_aliases) != 1:
+            fail("postgres_runtime async_standby mode requires exactly one primary alias in active_aliases")
+        primary_alias = primary_aliases[0]
+        if alias == primary_alias:
+            node_role = "primary"
+        elif alias in standby_aliases:
+            node_role = "standby"
+        else:
+            fail(f"{alias} is not active or candidate for postgres_runtime")
+
+    for required in primary_aliases + standby_aliases:
         if required not in nodes:
             fail(f"postgres_runtime references unknown node alias: {required}")
+
+    alias_match = re.match(r"^vps([0-9]+)$", alias)
+    if not alias_match:
+        fail(f"postgres_runtime platform network addressing requires vpsN alias, got: {alias}")
+    alias_number = int(alias_match.group(1))
+    network_role = str(config.get("network_role") or "data").strip()
+    if network_role not in {"data", "app"}:
+        fail("postgres_runtime.network_role must be data or app")
+    container_ip_suffix = int(config.get("container_ip_suffix") or 10)
+    if container_ip_suffix < 2 or container_ip_suffix > 254:
+        fail("postgres_runtime.container_ip_suffix must be between 2 and 254")
+    network_octet = 30 if network_role == "data" else 31
+    docker_network_name = f"ai_service_{network_role}_{alias}"
+    container_ipv4 = f"172.{network_octet}.{alias_number}.{container_ip_suffix}"
 
     def safe_slot_name(name):
         text = re.sub(r"[^A-Za-z0-9_]", "_", name)
@@ -94,7 +125,9 @@
     }
     configured_replication_cidrs = config.get("replication_cidrs") or []
     replication_cidrs = []
-    if node_role == "primary":
+    if replication_mode == "standalone":
+        replication_cidrs = []
+    elif node_role == "primary":
         if configured_replication_cidrs:
             replication_cidrs = configured_replication_cidrs
         else:
@@ -107,6 +140,7 @@
         replication_cidrs = [f"{nodes[primary_alias].get('expected_ip')}/32"]
 
     model = {
+        "replication_mode": replication_mode,
         "role": node_role,
         "primary_alias": primary_alias,
         "primary_endpoint": config.get("primary_endpoint") or nodes[primary_alias]["endpoint"],
@@ -115,6 +149,9 @@
         "standby_network_mode": config.get("standby_network_mode") or "",
         "standby_aliases": standby_aliases,
         "current_alias": alias,
+        "network_role": network_role,
+        "docker_network_name": docker_network_name,
+        "container_ipv4": container_ipv4,
         "image": config.get("image") or os.environ["DEFAULT_IMAGE"],
         "container_name": config.get("container_name") or os.environ["DEFAULT_CONTAINER_NAME"],
         "volume_name": config.get("volume_name") or os.environ["DEFAULT_DATA_VOLUME"],
@@ -328,6 +365,68 @@
     - postgres_runtime_state == 'present'
     - not ansible_check_mode
 
+- name: Check postgres_runtime standby signal in existing data volume
+  ansible.builtin.command:
+    cmd: docker run --rm -v "{{ postgres_runtime_model.volume_name }}:/var/lib/postgresql/data" "{{ postgres_runtime_model.image }}" sh -c "test -s /var/lib/postgresql/data/standby.signal"
+  register: postgres_runtime_standby_signal_check
+  changed_when: false
+  failed_when: false
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'standby'
+    - postgres_runtime_data_initialized | default(false)
+    - not ansible_check_mode
+
+- name: Fail when initialized primary data would become standby silently
+  ansible.builtin.fail:
+    msg: >-
+      postgres_runtime refuses to convert initialized data volume on {{ inventory_hostname }}
+      into standby without explicit postgres_runtime_reinit_standby=true. Fence/backup
+      the old primary data first, then rerun the targeted standby reinit.
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'standby'
+    - postgres_runtime_data_initialized | default(false)
+    - (postgres_runtime_standby_signal_check.rc | default(1)) != 0
+    - not (postgres_runtime_reinit_standby | bool)
+    - not ansible_check_mode
+
+- name: Stop postgres_runtime before explicit standby reinitialization
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ postgres_runtime_compose_file }}" down
+    chdir: "{{ postgres_runtime_root_dir }}"
+  changed_when: true
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'standby'
+    - postgres_runtime_data_initialized | default(false)
+    - (postgres_runtime_standby_signal_check.rc | default(1)) != 0
+    - postgres_runtime_reinit_standby | bool
+    - not ansible_check_mode
+
+- name: Clear postgres_runtime data volume before explicit standby reinitialization
+  ansible.builtin.command:
+    cmd: docker run --rm -v "{{ postgres_runtime_model.volume_name }}:/var/lib/postgresql/data" "{{ postgres_runtime_model.image }}" sh -c "find /var/lib/postgresql/data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +"
+  changed_when: true
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'standby'
+    - postgres_runtime_data_initialized | default(false)
+    - (postgres_runtime_standby_signal_check.rc | default(1)) != 0
+    - postgres_runtime_reinit_standby | bool
+    - not ansible_check_mode
+
+- name: Mark postgres_runtime standby data as uninitialized after explicit reinit cleanup
+  ansible.builtin.set_fact:
+    postgres_runtime_data_initialized: false
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'standby'
+    - postgres_runtime_data_initialized | default(false)
+    - (postgres_runtime_standby_signal_check.rc | default(1)) != 0
+    - postgres_runtime_reinit_standby | bool
+    - not ansible_check_mode
+
 - name: Start postgres_runtime primary container before standby initialization
   ansible.builtin.command:
     cmd: docker compose -f "{{ postgres_runtime_compose_file }}" up -d
@@ -338,6 +437,7 @@
     is search('(?i)(creating|created|recreating|recreated|starting|started|pulling|pulled|building|built)')
   when:
     - postgres_runtime_state == 'present'
+    - postgres_runtime_model.replication_mode == 'async_standby'
     - postgres_runtime_model.role == 'primary'
     - not ansible_check_mode
 
@@ -351,6 +451,7 @@
   delay: "{{ postgres_runtime_startup_delay }}"
   when:
     - postgres_runtime_state == 'present'
+    - postgres_runtime_model.replication_mode == 'async_standby'
     - postgres_runtime_model.role == 'primary'
     - not ansible_check_mode
 
@@ -363,6 +464,7 @@
   register: postgres_runtime_primary_sql_template_before_standby
   when:
     - postgres_runtime_state == 'present'
+    - postgres_runtime_model.replication_mode == 'async_standby'
     - postgres_runtime_model.role == 'primary'
     - not ansible_check_mode
 
@@ -380,6 +482,7 @@
   no_log: true
   when:
     - postgres_runtime_state == 'present'
+    - postgres_runtime_model.replication_mode == 'async_standby'
     - postgres_runtime_model.role == 'primary'
     - not ansible_check_mode
 

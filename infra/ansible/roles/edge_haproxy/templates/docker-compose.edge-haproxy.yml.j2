@@ -12,10 +12,7 @@ services:
       - "443:443/tcp"
       - "992:992/tcp"
       - "5555:5555/tcp"
-{% elif edge_haproxy_route_model.softether_l3_enabled | default(false) %}
-      - "443:443/tcp"
-      - "5555:5555/tcp"
-{% elif edge_haproxy_route_model.softether_p2p_enabled | default(false) %}
+{% elif edge_haproxy_route_model.softether_l3_vps_enabled | default(false) %}
       - "443:443/tcp"
       - "5555:5555/tcp"
 {% endif %}
@@ -43,18 +40,12 @@ services:
       {{ edge_haproxy_cascade_management_network_name }}:
         ipv4_address: {{ edge_haproxy_cascade_management_container_ipv4 }}
 {% endif %}
-{% if edge_haproxy_route_model.softether_l3_enabled | default(false) %}
-      {{ edge_haproxy_l3_network_name }}:
-        ipv4_address: {{ edge_haproxy_l3_container_ipv4 }}
-{% endif %}
-{% if edge_haproxy_route_model.softether_p2p_enabled | default(false) %}
+{% if edge_haproxy_route_model.softether_l3_vps_enabled | default(false) %}
       {{ edge_haproxy_p2p_network_name }}:
         ipv4_address: {{ edge_haproxy_p2p_container_ipv4 }}
-      {{ edge_haproxy_p2p_service_network_name }}:
-        ipv4_address: {{ edge_haproxy_p2p_service_container_ipv4 }}
-{% if edge_haproxy_route_model.softether_p2p.postgres.enabled | default(false) %}
-      {{ edge_haproxy_postgres_network_name }}:
-        ipv4_address: {{ edge_haproxy_postgres_container_ipv4 }}
+{% if (edge_haproxy_route_model.softether_l3_vps.management_sni | default([]) | length) > 0 %}
+      {{ edge_haproxy_p2p_management_network_name }}:
+        ipv4_address: {{ edge_haproxy_p2p_management_container_ipv4 }}
 {% endif %}
 {% endif %}
 
@@ -71,17 +62,11 @@ networks:
   {{ edge_haproxy_cascade_management_network_name }}:
     external: true
 {% endif %}
-{% if edge_haproxy_route_model.softether_l3_enabled | default(false) %}
-  {{ edge_haproxy_l3_network_name }}:
-    external: true
-{% endif %}
-{% if edge_haproxy_route_model.softether_p2p_enabled | default(false) %}
+{% if edge_haproxy_route_model.softether_l3_vps_enabled | default(false) %}
   {{ edge_haproxy_p2p_network_name }}:
     external: true
-  {{ edge_haproxy_p2p_service_network_name }}:
-    external: true
-{% if edge_haproxy_route_model.softether_p2p.postgres.enabled | default(false) %}
-  {{ edge_haproxy_postgres_network_name }}:
+{% if (edge_haproxy_route_model.softether_l3_vps.management_sni | default([]) | length) > 0 %}
+  {{ edge_haproxy_p2p_management_network_name }}:
     external: true
 {% endif %}
 {% endif %}

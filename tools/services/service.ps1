@@ -20,6 +20,8 @@ param(
 
     [switch]$BuildPolicyRouterImage,
 
+    [switch]$ReinitStandby,
+
     [switch]$Check,
 
     [switch]$ConfirmPurge
@@ -84,14 +86,13 @@ function Get-ServicePlaybook($Name) {
         "edge_candidate_collector" { return "infra\ansible\edge_candidate_collector.yml" }
         "edge_banlist" { return "infra\ansible\edge_banlist.yml" }
         "postgres_runtime" { return "infra\ansible\postgres_runtime.yml" }
-        "softether_l3" { return "infra\ansible\softether_l3.yml" }
-        "softether_p2p" { return "infra\ansible\softether_p2p.yml" }
+        "softether_l3_vps" { return "infra\ansible\softether_l3_vps.yml" }
         "platform_networks" { return "infra\ansible\platform_networks.yml" }
         default { Fail "No default playbook for service: $Name" }
     }
 }
 
-function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false", $PolicyRouterImageRef = "", $BuildPolicyRouterImage = $false) {
+function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false", $PolicyRouterImageRef = "", $BuildPolicyRouterImage = $false, $ReinitStandby = $false) {
     switch ($Name) {
         "edge_haproxy" {
             return @("-e", "edge_haproxy_state=$State", "-e", "edge_haproxy_purge_data=$PurgeData")
@@ -119,19 +120,17 @@ function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false"
             return @("-e", "edge_banlist_state=$State", "-e", "edge_banlist_purge_data=$PurgeData")
         }
         "postgres_runtime" {
-            return @("-e", "postgres_runtime_state=$State", "-e", "postgres_runtime_purge_data=$PurgeData")
+            $reinitValue = if ($ReinitStandby) { "true" } else { "false" }
+            return @("-e", "postgres_runtime_state=$State", "-e", "postgres_runtime_purge_data=$PurgeData", "-e", "postgres_runtime_reinit_standby=$reinitValue")
         }
-        "softether_l3" {
-            return @("-e", "softether_l3_state=$State", "-e", "softether_l3_purge_data=$PurgeData")
-        }
-        "softether_p2p" {
-            return @("-e", "softether_p2p_state=$State", "-e", "softether_p2p_purge_data=$PurgeData")
+        "softether_l3_vps" {
+            return @("-e", "softether_l3_vps_state=$State", "-e", "softether_l3_vps_purge_data=$PurgeData")
         }
         "platform_networks" {
             return @("-e", "platform_networks_state=$State")
         }
         default {
-            Fail "Unsupported service '$Name'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3, softether_p2p, platform_networks."
+            Fail "Unsupported service '$Name'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks."
         }
     }
 }
@@ -139,14 +138,23 @@ function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false"
 if ($Service -eq "vpn") {
     Fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 }
-if ($Service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3", "softether_p2p", "platform_networks")) {
-    Fail "Unsupported service '$Service'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3, softether_p2p, platform_networks."
+if ($Service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks")) {
+    Fail "Unsupported service '$Service'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks."
 }
 if ($PolicyRouterImageRef -and $Service -ne "vpn_cascade") {
     Fail "-PolicyRouterImageRef is supported only for service vpn_cascade"
 }
 if ($BuildPolicyRouterImage -and $Service -ne "vpn_cascade") {
     Fail "-BuildPolicyRouterImage is supported only for service vpn_cascade"
+}
+if ($ReinitStandby -and $Service -ne "postgres_runtime") {
+    Fail "-ReinitStandby is supported only for service postgres_runtime"
+}
+if ($ReinitStandby -and $Action -ne "apply") {
+    Fail "-ReinitStandby requires action apply"
+}
+if ($ReinitStandby -and -not $Limit) {
+    Fail "-ReinitStandby requires -Limit for the intended standby alias"
 }
 if ($BuildPolicyRouterImage -and $PolicyRouterImageRef) {
     Fail "-BuildPolicyRouterImage and -PolicyRouterImageRef are mutually exclusive"
@@ -163,7 +171,7 @@ $stateFirstLine = Get-Content -LiteralPath $StateFile -TotalCount 1
 if ($stateFirstLine -ne $ExpectedStateHeader) {
     Fail "state.csv header must be exactly: $ExpectedStateHeader"
 }
-if ($Service -in @("vpn_edge", "vpn_cascade", "policy_gateway", "softether_l3", "softether_p2p")) {
+if ($Service -in @("vpn_edge", "vpn_cascade", "policy_gateway", "softether_l3_vps")) {
     $networksFile = Join-Path (Split-Path -Parent $StateFile) "networks.csv"
     Require-File $networksFile "NetworksFile"
     $networksFirstLine = Get-Content -LiteralPath $networksFile -TotalCount 1
@@ -190,7 +198,7 @@ if ($Limit) {
         $active = @(Split-AliasList $row.active_aliases)
         $candidate = @(Split-AliasList $row.candidate_aliases)
         $targetAliases = @($active)
-        if ($Service -in @("postgres_runtime", "softether_l3", "softether_p2p", "platform_networks")) {
+        if ($Service -in @("postgres_runtime", "softether_l3_vps", "platform_networks")) {
             $targetAliases += $candidate
         }
         $rowSelectedAliases = @($limitAliases | Where-Object { $targetAliases -contains $_ })
@@ -253,7 +261,7 @@ if (-not $serviceRow.ansible_group) {
 }
 
 $desiredNodes = @(Split-AliasList $serviceRow.active_aliases)
-if ($Service -in @("postgres_runtime", "softether_l3", "softether_p2p", "platform_networks")) {
+if ($Service -in @("postgres_runtime", "softether_l3_vps", "platform_networks")) {
     $desiredNodes += @(Split-AliasList $serviceRow.candidate_aliases)
     $desiredNodes = @($desiredNodes | Where-Object { $_ } | Select-Object -Unique)
 }
@@ -325,11 +333,11 @@ $args = @(
     "-i", $Inventory,
     $Playbook
 )
-$args += Get-ServiceExtraVars $Service $serviceState $servicePurgeData $serviceReseedConfig $PolicyRouterImageRef ([bool]$BuildPolicyRouterImage)
+$args += Get-ServiceExtraVars $Service $serviceState $servicePurgeData $serviceReseedConfig $PolicyRouterImageRef ([bool]$BuildPolicyRouterImage) ([bool]$ReinitStandby)
 
 if ($Limit) {
     $args += @("--limit", (ConvertTo-AnsibleLimit $Limit))
-} elseif ($Service -in @("postgres_runtime", "softether_l3", "softether_p2p", "platform_networks") -and $serviceRow.candidate_aliases) {
+} elseif ($Service -in @("postgres_runtime", "softether_l3_vps", "platform_networks") -and $serviceRow.candidate_aliases) {
     $args += @("--limit", "$($serviceRow.ansible_group):candidate_$($serviceRow.ansible_group)")
 } else {
     $args += @("--limit", $serviceRow.ansible_group)

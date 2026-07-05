@@ -1,6 +1,7 @@
 ---
 postgres_runtime_state: present
 postgres_runtime_purge_data: false
+postgres_runtime_reinit_standby: false
 
 postgres_runtime_operator_config_file: "{{ playbook_dir }}/../../operator/postgres/config.yml"
 postgres_runtime_operator_state_file: "{{ playbook_dir }}/../../operator/state.csv"
@@ -18,5 +19,5 @@ postgres_runtime_default_listen_addresses: "*"
 postgres_runtime_default_wal_keep_size: 512MB
 postgres_runtime_default_max_wal_senders: 5
 postgres_runtime_default_max_replication_slots: 5
-postgres_runtime_startup_retries: 30
+postgres_runtime_startup_retries: 90
 postgres_runtime_startup_delay: 2

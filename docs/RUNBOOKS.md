@@ -301,9 +301,14 @@ local cascade runtime and may manage outgoing links. `edge_route,vpn_cascade`
 means HAProxy publishes public `cascade-vpsN` SNI on `443/992/5555`.
 When `edge_route,vpn_cascade` is absent, HAProxy must not contain `is_cascade*`
 or `be_cascade*`. The `cascade-vpsN` names are retired for new transport
-layers. Use `l3-vpsN.mine-craft.su` for point-to-point data SNI and
-`l3-mgmt-vpsN.mine-craft.su` for point-to-point management SNI when management
-is explicitly exposed.
+layers. New point-to-point transport uses `l3-vpsN.mine-craft.su` as the only
+public SNI: port `443` is the transport path and port `5555` is the management
+path when management is explicitly exposed. HAProxy must route those ports to
+separate internal Docker networks so SoftEther management cannot be reached
+through the transport source IP. For SoftEther public routes on `443`, `992`,
+and `5555`, HAProxy must silent-drop not only unknown SNI and non-allowlisted
+sources, but also allowed SNI whose selected backend is down; clients should see
+a timeout, not a HAProxy reject or SoftEther error dialog.
 
 When all public cascade aliases are retired, remove the whole
 `vpn_cascade` section from `operator/haproxy/routes.yml` and rerun only
@@ -314,7 +319,7 @@ freeze is active.
 
 If SoftEther Server Manager reports "Source IP Restriction List of the Virtual
 Hub", first verify which SNI target was used. `vpn-vpsN:5555` should reach
-`softether-edge`; `l3-mgmt-vpsN:5555` should reach the explicitly exposed
+`softether-edge`; `l3-vpsN:5555` should reach the explicitly exposed
 point-to-point SoftEther server; `cascade-vpsN` names should not route anywhere
 while the L2 freeze is active. Keep management allowlisting centralized in
 HAProxy `vpn_mgmt_ips.lst`.
@@ -322,8 +327,9 @@ HAProxy `vpn_mgmt_ips.lst`.
 ### Roll Out Platform Network Baseline
 
 All active VPS aliases `vps1` through `vps8` use explicit per-node platform
-networks. During this baseline, `softether_p2p`, `softether_l3`, and
-`postgres_runtime` are absent. `vpn_cascade` remains frozen/absent.
+networks. `vpn_cascade` remains frozen/absent. PostgreSQL is
+first rolled out in standalone mode on selected service aliases; `softether_l3_vps`
+is then added as a separate transport test before any standby conversion.
 
 The operator runs the long remote rollout commands manually:
 
@@ -336,21 +342,139 @@ Acceptance:
 
 - On `vps1` through `vps8`, VPN ingress remains healthy through `edge-haproxy`
   and `softether-edge`. `edge-banlist` remains a systemd timer.
-- No `softether-p2p-*`, `softether-l3-*`, `softether-cascade`, or
-  `ai-service-postgres` containers are running.
-- No `cascade-vps`, `l3-vps8`, or `l3-mgmt-vps8` routes exist in HAProxy.
+- No `softether-l3-*` or `softether-cascade` containers are running.
+- `ai-service-postgres` may run only on aliases selected by
+  `service,postgres_runtime`.
+- `softether-l3-vps-*` may run only for explicitly present `softether_l3_vps` links.
+- No `cascade-vps` or `l3-mgmt-vps` routes exist in HAProxy.
 - For each `vpsN`, `ai_service_data_vpsN` exists at `172.30.N.0/24` and
   `ai_service_app_vpsN` exists at `172.31.N.0/24`.
 - Empty retired managed networks are removed; non-empty retired networks must
-  be investigated instead of force-removed.
+  stop the rollout and be investigated instead of force-removed.
 - On `vps1`, Minecraft edge continues to publish `25565/25575`.
 - `check_vpn_cascade_links.ps1 -Json` still reports no selected L2 links.
 
 SoftEther Virtual Layer-3 Switch is a documented future option, not the current
 implementation. It is a built-in SoftEther router between isolated Virtual Hubs
 and could be evaluated later if multiple hub-to-hub routed segments are needed.
-Do not enable it without a separate design review. During the current cleanup,
-`softether_p2p` is absent and no Postgres replication transport is active.
+Do not enable it without a separate design review. `softether_l3_vps` may be
+present only as transport-only P2P; no Postgres replication/service route is
+active until `platform_router` is implemented and verified.
+
+### Future Platform Router Plan
+
+`platform_networks` owns local service networks only. It must not become the
+router between VPN, P2P, and application/data networks. Add a separate
+`platform_router` service before exposing platform services across VPN or
+between VPS aliases.
+
+Intended responsibility:
+
+```text
+local VPN/P2P/client side
+  -> local platform_router
+  -> explicit allowed target route
+  -> local or remote platform data/app endpoint
+```
+
+For inter-VPS traffic, the preferred path is:
+
+```text
+vps4 platform data/app
+  -> vps4 platform_router
+  -> L3/P2P transport
+  -> vps8 platform_router
+  -> vps8 platform data/app
+```
+
+The transport layer (`softether_l3_vps`, future WireGuard/IPsec, or another L3
+tunnel) should only move packets between routers. It should not connect
+Postgres, Redis, nginx, or app containers directly to transport namespaces.
+This keeps the service contract stable if the transport implementation changes.
+
+Guardrails for the future role:
+
+- Routes are target-specific, for example `172.30.8.10:5432`, not broad access
+  to all `172.30.8.0/24`.
+- `ai_service_data_vpsN` and `ai_service_app_vpsN` remain per-node local
+  networks. Inter-node reachability appears only through explicit router rules.
+- VPN clients do not get direct adjacency to data networks. Access to data
+  services must be mediated by router policy or a service proxy.
+- Router policy must be auditable: source, destination, port, purpose, and
+  owning service.
+- First implementation should be canary-only, likely `vps4 <-> vps8` for
+  PostgreSQL transport testing, before any fleet rollout.
+
+### Staged PostgreSQL Runtime
+
+First deploy PostgreSQL as independent standalone runtimes to prove the role,
+container, secrets, volume, and per-node data networks:
+
+```csv
+service,postgres_runtime,postgres_runtimes,vps8+vps4,,,present
+```
+
+In `standalone` mode every alias in `active_aliases` is an independent primary.
+It is not HA and must not be treated as replicated data. The current standard
+container addresses are:
+
+```text
+vps8: ai_service_data_vps8 172.30.8.0/24 -> ai-service-postgres 172.30.8.10
+vps4: ai_service_data_vps4 172.30.4.0/24 -> ai-service-postgres 172.30.4.10
+```
+
+Public or host `5432` must not be published. P2P routing and async standby are
+separate later steps. Only after `172.30.8.10:5432` is reachable from the future
+standby path should `postgres_runtime.replication_mode` move to
+`async_standby`, with `vps8` as primary and `vps4` as standby.
+
+The P2P address convention is link-scoped. Link ids follow traffic direction:
+`<client/source vps><server/target vps>`. For the first PostgreSQL transport
+from future standby `vps4` to primary `vps8`, link id `48` is used:
+
+```text
+172.27.48.0/24  P2P transport on vps8: HAProxy 172.27.48.3 -> P2P server 172.27.48.2
+172.28.48.0/24  P2P client on vps4: P2P client 172.28.48.2
+172.29.48.0/24  P2P management on vps8: HAProxy 172.29.48.3 -> P2P server 172.29.48.2
+172.30.8.0/24   vps8 data: standalone Postgres 172.30.8.10
+172.30.4.0/24   vps4 data: standalone Postgres 172.30.4.10
+172.31.8.0/24   vps8 app: future nginx/app/worker
+172.31.4.0/24   vps4 app: future nginx/app/worker
+10.88.48.0/30   SoftEther virtual VPN: server 10.88.48.1, client 10.88.48.2
+```
+
+`l3-vps8.mine-craft.su:443` is the SoftEther P2P transport SNI.
+`l3-vps8.mine-craft.su:5555` is the management SNI for the same server. Do not
+add `l3-mgmt-vps8` names. The two public ports must terminate on different
+internal Docker networks so management can be restricted by `adminip.txt` to the
+HAProxy management-side address only.
+
+The desired link intent and secrets for this new non-cascade L3 transport live
+under `operator/softether/l3-vps`. Keep non-secret JSON examples in
+`operator/softether/l3-vps/secrets/template.json`; do not create new source of
+truth paths for this layer.
+
+P2P management is public only for aliases that run a P2P server. In this link,
+`vps8` has `softether-l3-vps-server`. `vps4` has `softether-l3-vps-client`; client
+management remains local through SSH and `vpncmd /CLIENT`.
+
+The transition from standalone `vps4` to standby is intentionally destructive
+and must be explicit. A normal rollout must fail if it sees initialized primary
+data on a node that is now declared as standby. After fencing and backup review,
+run the targeted standby reinit only for that alias:
+
+```bash
+bash tools/services/service.sh postgres_runtime apply --limit vps4 --reinit-standby
+```
+
+or, from Windows on a prepared control environment:
+
+```powershell
+.\tools\services\service.ps1 postgres_runtime apply -Limit vps4 -ReinitStandby
+```
+
+Do not pass standby reinit through broad fleet rollout commands. Reinit clears
+the target data volume contents and rebuilds it from `pg_basebackup`.
 
 ### Infrastructure Runtime Layer Plan
 
@@ -465,6 +589,47 @@ Before any promotion:
   ```powershell
   .\tools\services\check_vpn_cascade_links.ps1 -Json
   ```
+
+### PostgreSQL `vps8` Primary / `vps4` Standby
+
+Current target role is `vps8` as preferred PostgreSQL primary and `vps4` as
+manual async standby. `state.csv` describes desired topology; it does not
+promote PostgreSQL by itself. Promotion is an operational action and must be
+paired with fencing of the old primary.
+
+To build the standby after P2P transport is verified:
+
+1. Confirm `vps4` can reach the primary endpoint on `vps8`.
+2. Change postgres state from standalone to:
+   ```csv
+   service,postgres_runtime,postgres_runtimes,vps8,vps4,,present
+   ```
+3. Change `operator/postgres/config.yml` to `replication_mode: async_standby`.
+4. Run a normal `postgres_runtime` rollout and expect it to stop if `vps4`
+   still has initialized primary data.
+5. After backup/fencing review, run targeted standby reinit for `vps4` with
+   `--reinit-standby` / `-ReinitStandby`.
+6. Verify `vps8` has `pg_is_in_recovery() = false`, `vps4` has
+   `pg_is_in_recovery() = true`, `vps8` sees `vps4` in
+   `pg_stat_replication`, and `vps4` has a streaming WAL receiver.
+
+For a planned switchover from `vps8` to `vps4`:
+
+1. Stop all application writes and confirm replication catch-up.
+2. Stop PostgreSQL on `vps8` or otherwise fence it from writes.
+3. Promote `vps4` manually with `pg_ctl promote` inside the Postgres container:
+   ```powershell
+   ssh -i .\operator\vps4\admin_key useradmin@vps4.mine-craft.su `
+     "sudo docker exec -u postgres ai-service-postgres pg_ctl -D /var/lib/postgresql/data promote"
+   ```
+4. Verify writes on the promoted `vps4` primary.
+5. Update state so `vps4` is active and `vps8` is candidate standby.
+6. Rebuild `vps8` from the new primary through targeted standby reinit.
+
+For emergency failover, promote `vps4` only after confirming `vps8` is
+unreachable or fenced. Never restart the old `vps8` as primary after `vps4`
+has been promoted; recover it only by rebuilding it as standby from the new
+primary. Failback is a later planned switchover, not an in-place data flip.
 
 ### Promote `vps5` To Active Orchestration
 
@@ -599,8 +764,9 @@ Acceptance: `vps1` root password is cleared, admin-key SSH works, platform
 baseline directories/logrotate exist, `vpn-vps1:443/992/5555` is reachable,
 `softether-cascade` and `policy-router` are not running, and live HAProxy has
 no old `vpn_cascade` ACL/backend (`is_cascade` or `be_cascade`) and no
-`cascade-vpsN` route. New point-to-point management uses `l3-mgmt-vpsN` names,
-not `cascade-vpsN`. If `cascade-vps1` still TCP-connects but TLS/SNI fails,
+`cascade-vpsN` route. New point-to-point management uses the same
+`l3-vpsN.mine-craft.su` SNI on port `5555`, not `cascade-vpsN` or
+`l3-mgmt-vpsN` names. If `cascade-vps1` still TCP-connects but TLS/SNI fails,
 that is expected shared-IP HAProxy behavior; to force timeout, remove or
 disable the `cascade-vps1` DNS record during the L2 freeze.
 

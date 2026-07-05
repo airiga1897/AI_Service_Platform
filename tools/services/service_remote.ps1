@@ -62,6 +62,10 @@ param(
 
     [int]$RemoteJobReconnectAttempts = 30,
 
+    [int]$RemoteJobMaxWaitSeconds = 0,
+
+    [int]$RemoteJobStatusOutageMaxSeconds = 900,
+
     [int]$RemoteJobHeartbeatSeconds = 10,
 
     [int]$RemoteTransferAttempts = 6,
@@ -279,6 +283,18 @@ function Invoke-CaptureExternal($FilePath, $Arguments) {
     }
 }
 
+function Format-ExternalFailureReason($Result) {
+    $lines = @($Result.Output | Where-Object { $_ })
+    if ($lines.Count -eq 0) {
+        return "no stderr/stdout from ssh"
+    }
+    $reason = ($lines | Select-Object -First 3) -join " | "
+    if ($reason.Length -gt 300) {
+        return $reason.Substring(0, 300) + "..."
+    }
+    return $reason
+}
+
 function Resolve-OpenSshExecutable($Name) {
     $candidates = @()
     if ($env:WINDIR) {
@@ -348,7 +364,7 @@ function Read-BatchPlan($Path) {
         if (-not $step.service -or -not $step.action) {
             Fail "BatchPlanFile step $index must include service and action"
         }
-        if ($step.service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3", "softether_p2p", "platform_networks")) {
+        if ($step.service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks")) {
             Fail "BatchPlanFile step $index has unsupported service: $($step.service)"
         }
         if ($step.action -notin @("plan", "apply", "absent", "purge", "reseed")) {
@@ -432,27 +448,50 @@ echo "[OK] ansible known_hosts refreshed"
     return "sudo bash -lc $(Quote-BashArg $script)"
 }
 
-function Wait-RemoteServiceJob([string[]]$SshArgs, [string]$Remote, [string]$RemoteLog, [string]$RemoteDone, [string]$RemoteExitCode, [string]$RemotePid, [int]$PollSeconds, [int]$ReconnectAttempts, [int]$HeartbeatSeconds) {
+function Wait-RemoteServiceJob([string[]]$SshArgs, [string]$Remote, [string]$RemoteLog, [string]$RemoteDone, [string]$RemoteExitCode, [string]$RemotePid, [int]$PollSeconds, [int]$ReconnectAttempts, [int]$MaxWaitSeconds, [int]$StatusOutageMaxSeconds, [int]$HeartbeatSeconds) {
     $printedLines = 0
     $transportFailures = 0
     $startedAt = [DateTime]::UtcNow
     $lastHeartbeatAt = $startedAt
+    $lastStatusAvailableAt = $startedAt
+    $lastOutageWarningAt = [DateTime]::MinValue
     $currentStep = "remote job"
     $lastTask = ""
+    $statusOnlyPolling = $false
+    $logPollingReconnectAttempts = [Math]::Min(3, [Math]::Max(1, $ReconnectAttempts))
 
     while ($true) {
-        $pollCommand = @(
-            "if [ -f $(Quote-BashArg $RemoteLog) ]; then tail -n +$($printedLines + 1) $(Quote-BashArg $RemoteLog); fi",
-            "if [ -f $(Quote-BashArg $RemoteDone) ]; then echo __SERVICE_JOB_DONE__; cat $(Quote-BashArg $RemoteExitCode); elif [ -f $(Quote-BashArg $RemotePid) ] && ! kill -0 ""`$(cat $(Quote-BashArg $RemotePid))"" 2>/dev/null; then echo __SERVICE_JOB_DEAD__; fi"
-        ) -join "; "
+        $statusCommand = "if [ -f $(Quote-BashArg $RemoteDone) ]; then echo __SERVICE_JOB_DONE__; cat $(Quote-BashArg $RemoteExitCode); elif [ -f $(Quote-BashArg $RemotePid) ] && ! kill -0 ""`$(cat $(Quote-BashArg $RemotePid))"" 2>/dev/null; then echo __SERVICE_JOB_DEAD__; fi"
+        if ($statusOnlyPolling) {
+            $pollCommand = $statusCommand
+        } else {
+            $pollCommand = @(
+                "if [ -f $(Quote-BashArg $RemoteLog) ]; then tail -n +$($printedLines + 1) $(Quote-BashArg $RemoteLog); fi",
+                $statusCommand
+            ) -join "; "
+        }
         $result = Invoke-CaptureExternal $script:SshExecutablePath ($SshArgs + @($Remote, $pollCommand))
 
         if ($result.ExitCode -eq 255) {
             $transportFailures++
-            if ($transportFailures -gt $ReconnectAttempts) {
-                Fail "remote job status unavailable after $ReconnectAttempts reconnect attempts"
+            $failureReason = Format-ExternalFailureReason $result
+            $manualCheckCommand = "ssh <control-node> 'cat $(Quote-BashArg $RemoteDone) $(Quote-BashArg $RemoteExitCode) 2>/dev/null; tail -80 $(Quote-BashArg $RemoteLog)'"
+            if ((-not $statusOnlyPolling) -and ($transportFailures -ge $logPollingReconnectAttempts)) {
+                Write-Warning "remote log poll SSH failed after $transportFailures attempts: $failureReason; switching to status-only polling"
+                $statusOnlyPolling = $true
+                $transportFailures = 0
+                Start-Sleep -Seconds $PollSeconds
+                continue
             }
-            Write-Host "remote job polling hit SSH transport reset (exit 255), reconnecting $transportFailures/$ReconnectAttempts..."
+            $now = [DateTime]::UtcNow
+            $outageSeconds = [int](($now - $lastStatusAvailableAt).TotalSeconds)
+            if ($StatusOutageMaxSeconds -gt 0 -and $outageSeconds -ge $StatusOutageMaxSeconds) {
+                Fail "remote status poll SSH failed for ${outageSeconds}s; job result is still unknown. Last SSH error: $failureReason. Check manually: $manualCheckCommand"
+            }
+            if ($HeartbeatSeconds -gt 0 -and ($lastOutageWarningAt -eq [DateTime]::MinValue -or (($now - $lastOutageWarningAt).TotalSeconds -ge $HeartbeatSeconds))) {
+                Write-Warning "remote status poll SSH failed; job result is still unknown after ${outageSeconds}s. Last SSH error: $failureReason. Manual check: $manualCheckCommand"
+                $lastOutageWarningAt = $now
+            }
             Start-Sleep -Seconds $PollSeconds
             continue
         }
@@ -461,6 +500,7 @@ function Wait-RemoteServiceJob([string[]]$SshArgs, [string]$Remote, [string]$Rem
         }
 
         $transportFailures = 0
+        $lastStatusAvailableAt = [DateTime]::UtcNow
         $doneIndex = [Array]::IndexOf($result.Output, "__SERVICE_JOB_DONE__")
         if ($doneIndex -ge 0) {
             if ($doneIndex -gt 0) {
@@ -523,6 +563,9 @@ function Wait-RemoteServiceJob([string[]]$SshArgs, [string]$Remote, [string]$Rem
         }
 
         $now = [DateTime]::UtcNow
+        if ($MaxWaitSeconds -gt 0 -and (($now - $startedAt).TotalSeconds -ge $MaxWaitSeconds)) {
+            Fail "remote job still running after ${MaxWaitSeconds}s; last step: $currentStep; last task: $lastTask; log: $RemoteLog"
+        }
         if ($printedThisPoll -eq 0 -and $HeartbeatSeconds -gt 0 -and (($now - $lastHeartbeatAt).TotalSeconds -ge $HeartbeatSeconds)) {
             $taskText = if ($lastTask) { "; last task: $lastTask" } else { "" }
             Write-Host ("[WAIT] {0} is still running{1}; remote log: {2}" -f $currentStep, $taskText, $RemoteLog)
@@ -630,6 +673,8 @@ if (-not $KnownHostsFile) {
     $KnownHostsFile = Join-Path ([System.IO.Path]::GetTempPath()) "ai-service-platform.known_hosts"
 }
 Require-File $SshKeyFile "SshKeyFile"
+$SshKeyFile = (Resolve-Path -LiteralPath $SshKeyFile).Path
+$KnownHostsFile = [System.IO.Path]::GetFullPath($KnownHostsFile)
 Ensure-OpenSshPrivateKeyAcl $SshKeyFile
 Require-File $ServiceRunnerScript "ServiceRunnerScript"
 Require-File $CreateInventoryScript "CreateInventoryScript"
@@ -686,7 +731,7 @@ if ($isBatch) {
     }
     $serviceCommand = New-ServiceCommand $singleStep $RemoteRepoDir $RemoteNodesFile $RemoteStateFile $RemoteInventory
 }
-$useDetachedRemoteJob = ([bool]$DetachedRemoteJob) -or $isBatch
+$useDetachedRemoteJob = $true
 $installCommands = ""
 if (-not $isBatch) {
     $installCommands = @(
@@ -804,7 +849,9 @@ foreach ($line in @(
     "SUMMARY_FILE=$(Quote-BashArg "$remoteJobDir/summary.jsonl")",
     "printf '' > ""`$SUMMARY_FILE""",
     "log_stage() { printf '[remote-job] %s %s\n' ""`$(date -u '+%H:%M:%S')"" ""`$*""; }",
-    "finish_job() { rc=""`$1""; printf '%s\n' ""`$rc"" > $(Quote-BashArg $remoteJobExitCode); touch $(Quote-BashArg $remoteJobDone); exit ""`$rc""; }",
+    "JOB_FINISHED=0",
+    "finish_job() { rc=""`${1:-1}""; JOB_FINISHED=1; tmp=$(Quote-BashArg "$remoteJobExitCode.tmp"); printf '%s\n' ""`$rc"" > ""`$tmp""; mv -f ""`$tmp"" $(Quote-BashArg $remoteJobExitCode); touch $(Quote-BashArg $remoteJobDone); log_stage ""remote job markers written: exit_code=$(Quote-BashArg $remoteJobExitCode), done=$(Quote-BashArg $remoteJobDone), rc=`$rc""; exit ""`$rc""; }",
+    "trap 'rc=""`$?""; if [ ""`$JOB_FINISHED"" != ""1"" ]; then log_stage ""remote job exiting via trap rc=`$rc""; finish_job ""`$rc""; fi' EXIT",
     "run_stage() { label=""`$1""; shift; log_stage ""`$label""; ""`$@""; rc=""`$?""; if [ ""`$rc"" -ne 0 ]; then log_stage ""failed: `$label (rc=`$rc)""; finish_job ""`$rc""; fi; }",
     "run_stage $(Quote-BashArg "prepare repo directories") sudo mkdir -p $(Quote-BashArg "$RemoteRepoDir/tools/services") $(Quote-BashArg "$RemoteRepoDir/tools/bootstrap") $(Quote-BashArg "$RemoteRepoDir/tools") $(Quote-BashArg "$RemoteRepoDir/infra") $(Quote-BashArg "$RemoteRepoDir/infra/docker")",
     "run_stage $(Quote-BashArg "install service runner") sudo install -m 700 $(Quote-BashArg $remoteServiceRunnerTemp) $(Quote-BashArg "$RemoteRepoDir/tools/services/service.sh")",
@@ -851,16 +898,14 @@ if ($isBatch) {
             "STEP_DURATION=`$((STEP_FINISHED - STEP_STARTED))",
             "if [ ""`$rc"" -eq 0 ]; then printf '[OK] %s completed in %ss\n' ""`$STEP_LABEL"" ""`$STEP_DURATION""; else printf '[FAIL] %s failed with rc=%s after %ss\n' ""`$STEP_LABEL"" ""`$rc"" ""`$STEP_DURATION""; fi",
             "printf '%s|%s|%s|%s|%s|%s\n' ""`$STEP_LABEL"" ""`$STEP_SERVICE"" ""`$STEP_ACTION"" ""`$STEP_LIMIT"" ""`$rc"" ""`$STEP_DURATION"" >> ""`$SUMMARY_FILE""",
-            "if [ ""`$rc"" -ne 0 ]; then printf '%s\n' ""`$rc"" > $(Quote-BashArg $remoteJobExitCode); touch $(Quote-BashArg $remoteJobDone); exit ""`$rc""; fi"
+            "if [ ""`$rc"" -ne 0 ]; then finish_job ""`$rc""; fi"
         )) { $runScriptLines.Add($line) | Out-Null }
     }
     foreach ($line in @(
         "printf '\n[batch] Summary\n'",
         "cat ""`$SUMMARY_FILE""",
         "rc=0",
-        "printf '%s\n' `$rc > $(Quote-BashArg $remoteJobExitCode)",
-        "touch $(Quote-BashArg $remoteJobDone)",
-        "exit `$rc"
+        "finish_job ""`$rc"""
     )) { $runScriptLines.Add($line) | Out-Null }
 } else {
     foreach ($line in @(
@@ -868,9 +913,7 @@ if ($isBatch) {
         "sudo bash -lc $(Quote-BashArg $serviceCommand)",
         "rc=`$?",
         "log_stage ""service command finished with rc=`$rc""",
-        "printf '%s\n' `$rc > $(Quote-BashArg $remoteJobExitCode)",
-        "touch $(Quote-BashArg $remoteJobDone)",
-        "exit `$rc"
+        "finish_job ""`$rc"""
     )) { $runScriptLines.Add($line) | Out-Null }
 }
 
@@ -952,7 +995,7 @@ try {
         )) "remote service job start" $RemoteTransferAttempts
 
         Write-Host "Following remote service job log..."
-        Wait-RemoteServiceJob -SshArgs ([string[]]$sshCommonArgs) -Remote $remote -RemoteLog $remoteJobLog -RemoteDone $remoteJobDone -RemoteExitCode $remoteJobExitCode -RemotePid $remoteJobPid -PollSeconds $RemoteJobPollSeconds -ReconnectAttempts $RemoteJobReconnectAttempts -HeartbeatSeconds $RemoteJobHeartbeatSeconds
+        Wait-RemoteServiceJob -SshArgs ([string[]]$sshCommonArgs) -Remote $remote -RemoteLog $remoteJobLog -RemoteDone $remoteJobDone -RemoteExitCode $remoteJobExitCode -RemotePid $remoteJobPid -PollSeconds $RemoteJobPollSeconds -ReconnectAttempts $RemoteJobReconnectAttempts -MaxWaitSeconds $RemoteJobMaxWaitSeconds -StatusOutageMaxSeconds $RemoteJobStatusOutageMaxSeconds -HeartbeatSeconds $RemoteJobHeartbeatSeconds
         $remoteJobCompletedSuccessfully = $true
     } else {
         Write-Host "Installing service bundle and running remote service command..."

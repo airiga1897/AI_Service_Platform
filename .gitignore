@@ -16,6 +16,15 @@ logs/*
 
 # Operator-local inventory inputs and generated Ansible inventory
 operator/
+!operator/
+operator/*
+!operator/softether/
+operator/softether/*
+!operator/softether/l3-vps/
+operator/softether/l3-vps/*
+!operator/softether/l3-vps/secrets/
+operator/softether/l3-vps/secrets/*
+!operator/softether/l3-vps/secrets/template.json
 inventory.ini
 infra/ansible/inventory.ini
 infra/ansible/nodes.csv

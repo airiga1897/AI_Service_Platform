@@ -11,6 +11,7 @@ PLAYBOOK=""
 LIMIT=""
 POLICY_ROUTER_IMAGE_REF=""
 BUILD_POLICY_ROUTER_IMAGE="false"
+REINIT_STANDBY="false"
 CHECK="false"
 CONFIRM_PURGE="false"
 EXPECTED_HEADER="current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
@@ -56,14 +57,10 @@ Usage:
   bash tools/services/service.sh postgres_runtime apply [options]
   bash tools/services/service.sh postgres_runtime absent [options]
   bash tools/services/service.sh postgres_runtime purge --confirm-purge [options]
-  bash tools/services/service.sh softether_l3 plan [options]
-  bash tools/services/service.sh softether_l3 apply [options]
-  bash tools/services/service.sh softether_l3 absent [options]
-  bash tools/services/service.sh softether_l3 purge --confirm-purge [options]
-  bash tools/services/service.sh softether_p2p plan [options]
-  bash tools/services/service.sh softether_p2p apply [options]
-  bash tools/services/service.sh softether_p2p absent [options]
-  bash tools/services/service.sh softether_p2p purge --confirm-purge [options]
+  bash tools/services/service.sh softether_l3_vps plan [options]
+  bash tools/services/service.sh softether_l3_vps apply [options]
+  bash tools/services/service.sh softether_l3_vps absent [options]
+  bash tools/services/service.sh softether_l3_vps purge --confirm-purge [options]
   bash tools/services/service.sh platform_networks plan [options]
   bash tools/services/service.sh platform_networks apply [options]
   bash tools/services/service.sh platform_networks absent [options]
@@ -78,6 +75,7 @@ Options:
                         vpn_cascade only: pin policy-router image and skip cache/build.
   --build-policy-router-image
                         vpn_cascade only: force rebuild instead of reusing a matching local image.
+  --reinit-standby      postgres_runtime only: destructively reinitialize a target standby volume from primary.
   --check                Pass --check to ansible-playbook.
   --confirm-purge        Required for purge.
   -h, --help             Show help.
@@ -210,8 +208,7 @@ service_playbook() {
         edge_candidate_collector) echo "infra/ansible/edge_candidate_collector.yml" ;;
         edge_banlist) echo "infra/ansible/edge_banlist.yml" ;;
         postgres_runtime) echo "infra/ansible/postgres_runtime.yml" ;;
-        softether_l3) echo "infra/ansible/softether_l3.yml" ;;
-        softether_p2p) echo "infra/ansible/softether_p2p.yml" ;;
+        softether_l3_vps) echo "infra/ansible/softether_l3_vps.yml" ;;
         platform_networks) echo "infra/ansible/platform_networks.yml" ;;
         *) return 1 ;;
     esac
@@ -250,13 +247,10 @@ service_extra_vars() {
             printf '%s\n' "-e" "edge_banlist_state=$state" "-e" "edge_banlist_purge_data=$purge"
             ;;
         postgres_runtime)
-            printf '%s\n' "-e" "postgres_runtime_state=$state" "-e" "postgres_runtime_purge_data=$purge"
+            printf '%s\n' "-e" "postgres_runtime_state=$state" "-e" "postgres_runtime_purge_data=$purge" "-e" "postgres_runtime_reinit_standby=$REINIT_STANDBY"
             ;;
-        softether_l3)
-            printf '%s\n' "-e" "softether_l3_state=$state" "-e" "softether_l3_purge_data=$purge"
-            ;;
-        softether_p2p)
-            printf '%s\n' "-e" "softether_p2p_state=$state" "-e" "softether_p2p_purge_data=$purge"
+        softether_l3_vps)
+            printf '%s\n' "-e" "softether_l3_vps_state=$state" "-e" "softether_l3_vps_purge_data=$purge"
             ;;
         platform_networks)
             printf '%s\n' "-e" "platform_networks_state=$state"
@@ -284,8 +278,8 @@ if [ "$SERVICE" = "vpn" ]; then
     fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 fi
 case "$SERVICE" in
-    edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector|edge_banlist|postgres_runtime|softether_l3|softether_p2p|platform_networks) ;;
-    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3, softether_p2p, platform_networks." ;;
+    edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector|edge_banlist|postgres_runtime|softether_l3_vps|platform_networks) ;;
+    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks." ;;
 esac
 case "$ACTION" in
     plan|apply|absent|purge|reseed) ;;
@@ -324,6 +318,10 @@ while [ "$#" -gt 0 ]; do
             BUILD_POLICY_ROUTER_IMAGE="true"
             shift
             ;;
+        --reinit-standby)
+            REINIT_STANDBY="true"
+            shift
+            ;;
         --check)
             CHECK="true"
             shift
@@ -348,6 +346,15 @@ fi
 if [ "$BUILD_POLICY_ROUTER_IMAGE" = "true" ] && [ "$SERVICE" != "vpn_cascade" ]; then
     fail "--build-policy-router-image is supported only for service vpn_cascade"
 fi
+if [ "$REINIT_STANDBY" = "true" ] && [ "$SERVICE" != "postgres_runtime" ]; then
+    fail "--reinit-standby is supported only for service postgres_runtime"
+fi
+if [ "$REINIT_STANDBY" = "true" ] && [ "$ACTION" != "apply" ]; then
+    fail "--reinit-standby requires action apply"
+fi
+if [ "$REINIT_STANDBY" = "true" ] && [ -z "$LIMIT" ]; then
+    fail "--reinit-standby requires --limit for the intended standby alias"
+fi
 if [ "$BUILD_POLICY_ROUTER_IMAGE" = "true" ] && [ -n "$POLICY_ROUTER_IMAGE_REF" ]; then
     fail "--build-policy-router-image and --policy-router-image-ref are mutually exclusive"
 fi
@@ -357,7 +364,7 @@ first_line="$(head -n 1 "$NODES_FILE" | tr -d '\r')"
 [ "$first_line" = "$EXPECTED_HEADER" ] || fail "nodes.csv header must be exactly: $EXPECTED_HEADER"
 state_first_line="$(head -n 1 "$STATE_FILE" | tr -d '\r')"
 [ "$state_first_line" = "$EXPECTED_STATE_HEADER" ] || fail "state.csv header must be exactly: $EXPECTED_STATE_HEADER"
-if [ "$SERVICE" = "vpn_edge" ] || [ "$SERVICE" = "vpn_cascade" ] || [ "$SERVICE" = "policy_gateway" ] || [ "$SERVICE" = "softether_l3" ] || [ "$SERVICE" = "softether_p2p" ]; then
+if [ "$SERVICE" = "vpn_edge" ] || [ "$SERVICE" = "vpn_cascade" ] || [ "$SERVICE" = "policy_gateway" ] || [ "$SERVICE" = "softether_l3_vps" ]; then
     [ -f "$NETWORKS_FILE" ] || fail "networks.csv not found next to state.csv: $NETWORKS_FILE. Run sync_to_orchestration before $SERVICE $ACTION."
     networks_first_line="$(head -n 1 "$NETWORKS_FILE" | tr -d '\r')"
     [ "$networks_first_line" = "$EXPECTED_NETWORKS_HEADER" ] || fail "networks.csv header must be exactly: $EXPECTED_NETWORKS_HEADER. Run sync_to_orchestration before $SERVICE $ACTION."
@@ -388,7 +395,7 @@ while IFS=, read -r kind name ansible_group active_aliases candidate_aliases old
 
     if [ -n "$LIMIT" ]; then
         target_aliases="$active_aliases"
-        if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3" ] || [ "$SERVICE" = "softether_p2p" ] || [ "$SERVICE" = "platform_networks" ]; } && [ -n "$candidate_aliases" ]; then
+        if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ]; } && [ -n "$candidate_aliases" ]; then
             target_aliases="$(append_aliases_unique "$target_aliases" "$candidate_aliases")"
         fi
         selected_aliases="$(limit_aliases_in_row "$LIMIT" "$target_aliases")"
@@ -463,7 +470,7 @@ fi
 [ "$service_found" = "true" ] || fail "state.csv must contain a service row for $SERVICE matching --limit $(limit_display_for_error "$LIMIT")"
 if [ -n "$LIMIT" ]; then
     limit_match_aliases="$service_active_aliases"
-    if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3" ] || [ "$SERVICE" = "softether_p2p" ] || [ "$SERVICE" = "platform_networks" ]; } && [ -n "$service_candidate_aliases" ]; then
+    if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ]; } && [ -n "$service_candidate_aliases" ]; then
         limit_match_aliases="$(append_aliases_unique "$limit_match_aliases" "$service_candidate_aliases")"
     fi
     while IFS= read -r limit_alias; do
@@ -491,7 +498,7 @@ if [ "$ACTION" = "plan" ]; then
         current_alias="${current_alias//$'\r'/}"
         [ -n "$current_alias" ] || continue
         plan_present_aliases="$service_active_aliases"
-        if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3" ] || [ "$SERVICE" = "softether_p2p" ] || [ "$SERVICE" = "platform_networks" ]; } && [ -n "$service_candidate_aliases" ]; then
+        if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ]; } && [ -n "$service_candidate_aliases" ]; then
             plan_present_aliases="$(append_aliases_unique "$plan_present_aliases" "$service_candidate_aliases")"
         fi
         if [ "$service_row_state" = "present" ] && alias_in_list "$current_alias" "$plan_present_aliases"; then
@@ -533,7 +540,7 @@ if [ "$ACTION" = "apply" ] && [ "$service_row_state" != "present" ]; then
     fail "$SERVICE apply requires state=present in $STATE_FILE"
 fi
 service_target_aliases="$service_active_aliases"
-if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3" ] || [ "$SERVICE" = "softether_p2p" ] || [ "$SERVICE" = "platform_networks" ]; } && [ -n "$service_candidate_aliases" ]; then
+if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ]; } && [ -n "$service_candidate_aliases" ]; then
     service_target_aliases="$(append_aliases_unique "$service_target_aliases" "$service_candidate_aliases")"
 fi
 if [ "$ACTION" = "apply" ] && [ -z "$service_target_aliases" ]; then
@@ -555,7 +562,7 @@ fi
 
 if [ -n "$LIMIT" ]; then
     limit_args=(--limit "$(ansible_limit_pattern "$LIMIT")")
-elif { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3" ] || [ "$SERVICE" = "softether_p2p" ] || [ "$SERVICE" = "platform_networks" ]; } && [ -n "$service_candidate_aliases" ]; then
+elif { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ]; } && [ -n "$service_candidate_aliases" ]; then
     limit_args=(--limit "$service_group:candidate_$service_group")
 else
     limit_args=(--limit "$service_group")

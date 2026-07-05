@@ -145,7 +145,8 @@
       docker network rm "$name"
       echo "removed empty retired managed network $name"
     else
-      echo "retired managed network still has $count endpoint(s): $name"
+      echo "retired managed network still has $count endpoint(s): $name" >&2
+      exit 1
     fi
   args:
     executable: /bin/bash

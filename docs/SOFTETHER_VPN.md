@@ -231,26 +231,73 @@ layer is frozen:
   management. `edge_route,vpn_cascade` controls public `cascade-vpsN` SNI.
   Both are absent during the freeze.
 - `cascade-vpsN:5555` is no longer owned by the frozen `vpn_cascade` layer and
-  must not be reused by new transport layers. New point-to-point transport SNI
-  names use `l3-vpsN.mine-craft.su` for data and `l3-mgmt-vpsN.mine-craft.su`
-  for management when management is explicitly exposed.
+  must not be reused by new transport layers. New point-to-point transport uses
+  `l3-vpsN.mine-craft.su` as the public SNI. If management is explicitly
+  exposed, use the same SNI on port `5555`; do not add `l3-mgmt-vpsN` names.
 
 ### SoftEther P2P Status
 
-`softether_p2p` was tested as a possible Postgres transport, but the current
-desired state is `absent` while all active VPS aliases use a clean VPN/HAProxy
-baseline. No `l3-vps8` or `l3-mgmt-vps8` HAProxy SNI should be published during
-this cleanup.
+`softether_l3_vps` is the approved non-cascade transport pattern for inter-VPS
+point-to-point links. It must not use `CascadeCreate`, Local Bridge, shared
+`CascadeLab`, or any shared L2 fabric. `l3-vpsN.mine-craft.su` is the only
+public SNI for a P2P server: port `443` is transport and port `5555` is
+management when management is explicitly exposed.
 
-Future inter-VPS transport should route between explicit per-node platform
-networks rather than creating intermediate HAProxy service endpoint networks as
-the primary contract. The current per-node platform network convention is:
+The operator source of truth for this layer is `operator/softether/l3-vps`.
+The internal service name is also `softether_l3_vps`. Secret shape examples live
+in `operator/softether/l3-vps/secrets/template.json`; real per-link secret files
+stay in the same `secrets` directory and are not templates.
+
+Future inter-VPS transport should carry traffic between explicit routers, not
+between service containers directly. The planned service boundary is:
+
+```text
+platform service -> platform_router -> L3/P2P transport -> platform_router -> platform service
+```
+
+`softether_l3_vps` should be treated as transport only. It should not be the place
+where Postgres, Redis, nginx, or application routing policy lives. That policy
+belongs in a future `platform_router` role with explicit source/destination
+allowlists.
+
+The current per-node platform network convention is:
 
 ```text
 vpsN:
   ai_service_data_vpsN 172.30.N.0/24
   ai_service_app_vpsN  172.31.N.0/24
 ```
+
+Current link-scoped convention:
+
+```text
+172.20.0.0/24        shared edge network, per-node local
+172.24.0.0/24        shared edge management, per-node local
+172.27.<link>.0/24   P2P server/transport side
+172.28.<link>.0/24   P2P client side
+172.29.<link>.0/24   P2P management side
+172.30.<vps>.0/24    platform data: PostgreSQL, Redis, and similar stateful services
+172.31.<vps>.0/24    platform app: nginx, app, worker, and similar stateless services
+10.88.<link>.0/30    SoftEther virtual VPN subnet
+```
+
+Link ids follow traffic direction: `<client/source vps><server/target vps>`.
+For PostgreSQL transport from future standby `vps4` to primary `vps8`, link id
+`48` is reserved:
+
+```text
+172.27.48.0/24  HAProxy 172.27.48.3 -> softether-l3-vps-server 172.27.48.2
+172.28.48.0/24  softether-l3-vps-client 172.28.48.2
+172.29.48.0/24  HAProxy 172.29.48.3 -> softether-l3-vps-server 172.29.48.2
+172.30.8.0/24   PostgreSQL standalone 172.30.8.10
+172.30.4.0/24   PostgreSQL standalone 172.30.4.10
+10.88.48.0/30   server 10.88.48.1, client 10.88.48.2
+```
+
+P2P management is public only for aliases that run a P2P server. In the first
+link, `vps8` has `softether-l3-vps-server`, so `l3-vps8.mine-craft.su:5555`
+routes to server management. `vps4` has `softether-l3-vps-client`; client
+management is local through SSH and `vpncmd /CLIENT`, not public SNI.
 
 Only empty managed experiment networks may be removed during cleanup. Do not
 use global Docker prune or broad network deletion.
@@ -262,11 +309,9 @@ separate Virtual Hubs without merging them into one shared L2 fabric. This is a
 possible future option if we need several isolated SoftEther hubs with routing
 inside SoftEther itself.
 
-This option is intentionally not used during the current baseline cleanup.
-`softether_p2p` and `postgres_runtime` are absent until the per-node platform
-networks are verified. If we later evaluate Virtual Layer-3 Switch or a new
-P2P transport, it must be a separate design review with explicit
-hub/subnet/route tables and rollback plan.
+This option is intentionally not used in the current PostgreSQL transport
+stage. If we later evaluate Virtual Layer-3 Switch, it must be a separate
+design review with explicit hub/subnet/route tables and rollback plan.
 
 The current standby design is manual. It does not enable active-active routing
 or automatic failover. `vps1` and `vps4` are not automatic replacements for all
