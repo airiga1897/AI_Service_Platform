@@ -54,6 +54,8 @@ param(
 
     [switch]$ConfirmPurge,
 
+    [switch]$ReinitStandby,
+
     [switch]$DetachedRemoteJob,
 
     [switch]$AutoAcceptHostKey = $true,
@@ -155,7 +157,7 @@ function New-TarGzBundle($ServiceRunnerScript, $CreateInventoryScript, $AnsibleD
         Copy-Item -LiteralPath $StateFile -Destination (Join-Path $operatorStagingDir "state.csv")
         Copy-Item -LiteralPath $NetworksFile -Destination (Join-Path $operatorStagingDir "networks.csv")
         $operatorSourceDir = Split-Path -Parent (Resolve-Path -LiteralPath $NodesFile).Path
-        foreach ($operatorSubdir in @("haproxy", "softether", "edge_banlist", "postgres", "platform_networks")) {
+        foreach ($operatorSubdir in @("haproxy", "softether", "edge_banlist", "postgres", "platform_networks", "platform_router")) {
             $sourceSubdir = Join-Path $operatorSourceDir $operatorSubdir
             if (Test-Path -LiteralPath $sourceSubdir -PathType Container) {
                 Copy-Item -LiteralPath $sourceSubdir -Destination (Join-Path $operatorStagingDir $operatorSubdir) -Recurse
@@ -364,11 +366,22 @@ function Read-BatchPlan($Path) {
         if (-not $step.service -or -not $step.action) {
             Fail "BatchPlanFile step $index must include service and action"
         }
-        if ($step.service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks")) {
+        if ($step.service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks", "platform_router")) {
             Fail "BatchPlanFile step $index has unsupported service: $($step.service)"
         }
         if ($step.action -notin @("plan", "apply", "absent", "purge", "reseed")) {
             Fail "BatchPlanFile step $index has unsupported action: $($step.action)"
+        }
+        if ([bool]$step.reinit_standby) {
+            if ($step.service -ne "postgres_runtime") {
+                Fail "BatchPlanFile step $index uses reinit_standby outside postgres_runtime"
+            }
+            if ($step.action -ne "apply") {
+                Fail "BatchPlanFile step $index uses reinit_standby without action=apply"
+            }
+            if (-not $step.limit) {
+                Fail "BatchPlanFile step $index uses reinit_standby without limit"
+            }
         }
         $label = [string]$step.label
         if (-not $label) {
@@ -381,6 +394,7 @@ function Read-BatchPlan($Path) {
             Limit = [string]$step.limit
             Check = [bool]$step.check
             ConfirmPurge = [bool]$step.confirm_purge
+            ReinitStandby = [bool]$step.reinit_standby
             Label = $label
         }) | Out-Null
     }
@@ -400,6 +414,7 @@ function New-ServiceCommand($Step, $RemoteRepoDir, $RemoteNodesFile, $RemoteStat
     if ($Step.BuildPolicyRouterImage) { $args += "--build-policy-router-image" }
     if ($Step.Check) { $args += "--check" }
     if ($Step.ConfirmPurge) { $args += "--confirm-purge" }
+    if ($Step.ReinitStandby) { $args += "--reinit-standby" }
 
     return @(
         "set -e",
@@ -627,6 +642,17 @@ if ($PolicyRouterImageRef -and $BatchPlanFile) {
 if ($BuildPolicyRouterImage -and $BatchPlanFile) {
     Fail "-BuildPolicyRouterImage is supported only for a single vpn_cascade command, not BatchPlanFile"
 }
+if ($ReinitStandby) {
+    if ($Service -ne "postgres_runtime") {
+        Fail "-ReinitStandby is supported only for service postgres_runtime"
+    }
+    if ($Action -ne "apply") {
+        Fail "-ReinitStandby requires action apply"
+    }
+    if (-not $Limit) {
+        Fail "-ReinitStandby requires -Limit for the intended standby alias"
+    }
+}
 
 if ($BatchPlanFile) {
     Require-File $BatchPlanFile "BatchPlanFile"
@@ -725,6 +751,7 @@ if ($isBatch) {
         Limit = $Limit
         Check = [bool]$Check
         ConfirmPurge = [bool]$ConfirmPurge
+        ReinitStandby = [bool]$ReinitStandby
         PolicyRouterImageRef = $PolicyRouterImageRef
         BuildPolicyRouterImage = [bool]$BuildPolicyRouterImage
         Label = if ($Limit) { "$Service $Action for $Limit" } else { "$Service $Action" }
@@ -760,6 +787,8 @@ if (-not $isBatch) {
         "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/softether") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/softether"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/softether") $(Quote-BashArg "$remoteOperatorDir/softether"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/softether"); fi",
         "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/edge_banlist") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/edge_banlist"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/edge_banlist") $(Quote-BashArg "$remoteOperatorDir/edge_banlist"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/edge_banlist"); fi",
         "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/postgres") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/postgres"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/postgres") $(Quote-BashArg "$remoteOperatorDir/postgres"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/postgres"); fi",
+        "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/platform_networks") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/platform_networks"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/platform_networks") $(Quote-BashArg "$remoteOperatorDir/platform_networks"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/platform_networks"); fi",
+        "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/platform_router") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/platform_router"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/platform_router") $(Quote-BashArg "$remoteOperatorDir/platform_router"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/platform_router"); fi",
         "sudo bash -lc $(Quote-BashArg $serviceCommand)"
     ) -join "; "
 }
@@ -836,6 +865,7 @@ $remoteServiceDisplay = if ($isBatch) { "batch plan: $($batchSteps.Count) steps"
     if ($BuildPolicyRouterImage) { $remoteServiceDisplayArgs += "--build-policy-router-image" }
     if ($Check) { $remoteServiceDisplayArgs += "--check" }
     if ($ConfirmPurge) { $remoteServiceDisplayArgs += "--confirm-purge" }
+    if ($ReinitStandby) { $remoteServiceDisplayArgs += "--reinit-standby" }
     $remoteServiceDisplayArgs -join " "
 }
 $runScriptLines = New-Object System.Collections.Generic.List[string]
@@ -875,7 +905,8 @@ foreach ($line in @(
     "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/softether") ]; then run_stage $(Quote-BashArg "sync operator softether config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/softether"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/softether") $(Quote-BashArg "$remoteOperatorDir/softether"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/softether")"); fi",
     "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/edge_banlist") ]; then run_stage $(Quote-BashArg "sync operator edge_banlist config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/edge_banlist"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/edge_banlist") $(Quote-BashArg "$remoteOperatorDir/edge_banlist"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/edge_banlist")"); fi",
     "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/postgres") ]; then run_stage $(Quote-BashArg "sync operator postgres config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/postgres"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/postgres") $(Quote-BashArg "$remoteOperatorDir/postgres"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/postgres")"); fi",
-    "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/platform_networks") ]; then run_stage $(Quote-BashArg "sync operator platform_networks config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/platform_networks"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/platform_networks") $(Quote-BashArg "$remoteOperatorDir/platform_networks"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/platform_networks")"); fi"
+    "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/platform_networks") ]; then run_stage $(Quote-BashArg "sync operator platform_networks config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/platform_networks"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/platform_networks") $(Quote-BashArg "$remoteOperatorDir/platform_networks"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/platform_networks")"); fi",
+    "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/platform_router") ]; then run_stage $(Quote-BashArg "sync operator platform_router config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/platform_router"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/platform_router") $(Quote-BashArg "$remoteOperatorDir/platform_router"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/platform_router")"); fi"
 )) { $runScriptLines.Add($line) | Out-Null }
 
 if ($isBatch) {

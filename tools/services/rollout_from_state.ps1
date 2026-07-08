@@ -18,7 +18,7 @@ param(
     [int]$SecureBackupKeepLatest = 10,
     [string]$VpnIngressDomain = "mine-craft.su",
     [string[]]$ReseedVpnEdge = @(),
-    [ValidateSet("", "edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks")]
+    [ValidateSet("", "edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks", "platform_router")]
     [string]$OnlyService = "",
     [switch]$AutoAcceptHostKey = $true,
     [switch]$SkipSync,
@@ -31,7 +31,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ExpectedNodesHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
-$SupportedServices = @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks")
+$SupportedServices = @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks", "platform_router")
 $ReservedServices = @()
 $script:OperatorBackupCompleted = $false
 $script:BatchSteps = New-Object System.Collections.Generic.List[object]
@@ -118,7 +118,7 @@ function Get-ServiceApplyAliases($Row) {
     foreach ($alias in (Split-AliasList $Row.active_aliases)) {
         Add-UniqueAlias $aliases $alias
     }
-    if ($Row.name -in @("postgres_runtime", "softether_l3_vps", "platform_networks")) {
+    if ($Row.name -in @("postgres_runtime", "softether_l3_vps", "platform_networks", "platform_router")) {
         foreach ($alias in (Split-AliasList $Row.candidate_aliases)) {
             Add-UniqueAlias $aliases $alias
         }

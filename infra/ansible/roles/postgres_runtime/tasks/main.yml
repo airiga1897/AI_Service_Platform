@@ -139,6 +139,27 @@
     elif nodes[primary_alias].get("expected_ip"):
         replication_cidrs = [f"{nodes[primary_alias].get('expected_ip')}/32"]
 
+    replication_hba_cidrs_by_alias = config.get("replication_hba_cidrs_by_alias") or {}
+    if not isinstance(replication_hba_cidrs_by_alias, dict):
+        fail("postgres_runtime.replication_hba_cidrs_by_alias must be a map of alias to CIDR list")
+    extra_replication_hba_cidrs = replication_hba_cidrs_by_alias.get(alias, []) or []
+    if not isinstance(extra_replication_hba_cidrs, list):
+        fail(f"postgres_runtime.replication_hba_cidrs_by_alias.{alias} must be a list")
+    replication_hba_cidrs = []
+    for cidr in replication_cidrs + extra_replication_hba_cidrs:
+        cidr = str(cidr).strip()
+        if cidr and cidr not in replication_hba_cidrs:
+            replication_hba_cidrs.append(cidr)
+
+    service_routes = []
+    configured_service_routes = config.get("service_routes") or config.get("extra_routes") or {}
+    for item in configured_service_routes.get(alias, []) or []:
+        destination = str(item.get("destination") or item.get("to") or "").strip()
+        via = str(item.get("via") or "").strip()
+        if not destination or not via:
+            fail(f"postgres_runtime service route for {alias} requires destination and via")
+        service_routes.append({"destination": destination, "via": via})
+
     model = {
         "replication_mode": replication_mode,
         "role": node_role,
@@ -161,7 +182,9 @@
         "replication_slot": slots.get(alias, ""),
         "replication_slots": slots,
         "replication_cidrs": replication_cidrs,
+        "replication_hba_cidrs": replication_hba_cidrs,
         "allowed_app_cidrs": config.get("allowed_app_cidrs") or [],
+        "service_routes": service_routes,
         "port": port,
         "bind_host": config.get("bind_host") or "127.0.0.1",
         "listen_addresses": config.get("listen_addresses") or os.environ["DEFAULT_LISTEN_ADDRESSES"],
@@ -621,6 +644,34 @@
       or (postgres_runtime_conf_template.changed | default(false))
       or (postgres_runtime_hba_template.changed | default(false))
       or (postgres_runtime_compose_template.changed | default(false))
+
+- name: Apply postgres_runtime service return routes
+  ansible.builtin.shell: |
+    set -euo pipefail
+    container="{{ postgres_runtime_model.container_name }}"
+    routes_json='{{ postgres_runtime_model.service_routes | to_json }}'
+    pid="$(docker inspect -f {% raw %}'{{ .State.Pid }}'{% endraw %} "$container")"
+    if [ -z "$pid" ] || [ "$pid" = "0" ]; then
+      echo "$container is not running" >&2
+      exit 1
+    fi
+    command -v nsenter >/dev/null
+    command -v ip >/dev/null
+    python3 - "$routes_json" <<'PY' | while IFS='|' read -r destination via; do
+    import json
+    import sys
+    for item in json.loads(sys.argv[1]):
+        print(f"{item['destination']}|{item['via']}")
+    PY
+      nsenter -t "$pid" -n ip route replace "$destination" via "$via"
+    done
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - postgres_runtime_state == 'present'
+    - (postgres_runtime_model.service_routes | length) > 0
+    - not ansible_check_mode
 
 - name: Wait for postgres_runtime readiness
   ansible.builtin.command:

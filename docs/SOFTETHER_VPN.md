@@ -286,18 +286,27 @@ For PostgreSQL transport from future standby `vps4` to primary `vps8`, link id
 `48` is reserved:
 
 ```text
-172.27.48.0/24  HAProxy 172.27.48.3 -> softether-l3-vps-server 172.27.48.2
-172.28.48.0/24  softether-l3-vps-client 172.28.48.2
-172.29.48.0/24  HAProxy 172.29.48.3 -> softether-l3-vps-server 172.29.48.2
+172.27.48.0/24  HAProxy 172.27.48.3 -> platform-router shared netns 172.27.48.2
+172.28.48.0/24  legacy source handoff network, not active PG datapath
+172.29.48.0/24  HAProxy 172.29.48.3 -> platform-router shared netns 172.29.48.2
 172.30.8.0/24   PostgreSQL standalone 172.30.8.10
 172.30.4.0/24   PostgreSQL standalone 172.30.4.10
 10.88.48.0/30   server 10.88.48.1, client 10.88.48.2
 ```
 
-P2P management is public only for aliases that run a P2P server. In the first
-link, `vps8` has `softether-l3-vps-server`, so `l3-vps8.mine-craft.su:5555`
-routes to server management. `vps4` has `softether-l3-vps-client`; client
+P2P management is public only for aliases that run the server side. In the
+first link, `vps8` runs `platform-router-softether-server` in the
+`platform-router` network namespace, so `l3-vps8.mine-craft.su:5555` routes to
+server management. `vps4` runs `platform-router-softether-client`; client
 management is local through SSH and `vpncmd /CLIENT`, not public SNI.
+
+For the PostgreSQL proof path, `platform-router` owns a narrow source-side
+SNAT rule only for `172.30.4.0/24 -> 172.30.8.10:5432`, rewritten to
+`10.88.48.2` before entering `vpn_l3vps0`. PostgreSQL on `vps8` observes the
+connection source as `172.30.8.2`.
+For future PostgreSQL replication, `vps8` pg_hba should allow the replication
+user from `172.30.8.2/32`; do not model this path as a PostgreSQL return route
+to `172.27.48.2` or `10.88.48.2`.
 
 Only empty managed experiment networks may be removed during cleanup. Do not
 use global Docker prune or broad network deletion.

@@ -5,6 +5,6 @@ host    all             all             ::1/128                 scram-sha-256
 {% for cidr in postgres_runtime_model.allowed_app_cidrs %}
 host    all             {{ postgres_runtime_model.app_user }}   {{ cidr }}   scram-sha-256
 {% endfor %}
-{% for cidr in postgres_runtime_model.replication_cidrs %}
+{% for cidr in postgres_runtime_model.replication_hba_cidrs %}
 host    replication     {{ postgres_runtime_model.replication_user }}   {{ cidr }}   scram-sha-256
 {% endfor %}

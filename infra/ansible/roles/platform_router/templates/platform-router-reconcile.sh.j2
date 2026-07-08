@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+while true; do
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+{% for client in platform_router_model.softether_clients | default([]) %}
+  if ip link show "{{ client.iface }}" >/dev/null 2>&1; then
+    ip link set "{{ client.iface }}" up || true
+    ip addr replace "{{ client.client_ip }}/{{ client.prefixlen }}" dev "{{ client.iface }}" || true
+{% for policy in platform_router_model.policies %}
+{% if policy.route_destination and policy.softether_client_name == client.name %}
+    ip route replace "{{ policy.destination_ipv4 }}/32" via "{{ client.server_ip }}" dev "{{ client.iface }}" || true
+{% endif %}
+{% endfor %}
+  fi
+{% endfor %}
+  sleep 5
+done

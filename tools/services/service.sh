@@ -64,6 +64,10 @@ Usage:
   bash tools/services/service.sh platform_networks plan [options]
   bash tools/services/service.sh platform_networks apply [options]
   bash tools/services/service.sh platform_networks absent [options]
+  bash tools/services/service.sh platform_router plan [options]
+  bash tools/services/service.sh platform_router apply [options]
+  bash tools/services/service.sh platform_router absent [options]
+  bash tools/services/service.sh platform_router purge --confirm-purge [options]
 
 Options:
   --nodes-file PATH      Operator nodes.csv. Default: ./operator/nodes.csv
@@ -210,6 +214,7 @@ service_playbook() {
         postgres_runtime) echo "infra/ansible/postgres_runtime.yml" ;;
         softether_l3_vps) echo "infra/ansible/softether_l3_vps.yml" ;;
         platform_networks) echo "infra/ansible/platform_networks.yml" ;;
+        platform_router) echo "infra/ansible/platform_router.yml" ;;
         *) return 1 ;;
     esac
 }
@@ -255,6 +260,9 @@ service_extra_vars() {
         platform_networks)
             printf '%s\n' "-e" "platform_networks_state=$state"
             ;;
+        platform_router)
+            printf '%s\n' "-e" "platform_router_state=$state" "-e" "platform_router_purge_data=$purge"
+            ;;
         *)
             return 1
             ;;
@@ -278,8 +286,8 @@ if [ "$SERVICE" = "vpn" ]; then
     fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 fi
 case "$SERVICE" in
-    edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector|edge_banlist|postgres_runtime|softether_l3_vps|platform_networks) ;;
-    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks." ;;
+    edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector|edge_banlist|postgres_runtime|softether_l3_vps|platform_networks|platform_router) ;;
+    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks, platform_router." ;;
 esac
 case "$ACTION" in
     plan|apply|absent|purge|reseed) ;;
@@ -395,7 +403,7 @@ while IFS=, read -r kind name ansible_group active_aliases candidate_aliases old
 
     if [ -n "$LIMIT" ]; then
         target_aliases="$active_aliases"
-        if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ]; } && [ -n "$candidate_aliases" ]; then
+        if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ]; } && [ -n "$candidate_aliases" ]; then
             target_aliases="$(append_aliases_unique "$target_aliases" "$candidate_aliases")"
         fi
         selected_aliases="$(limit_aliases_in_row "$LIMIT" "$target_aliases")"
@@ -470,7 +478,7 @@ fi
 [ "$service_found" = "true" ] || fail "state.csv must contain a service row for $SERVICE matching --limit $(limit_display_for_error "$LIMIT")"
 if [ -n "$LIMIT" ]; then
     limit_match_aliases="$service_active_aliases"
-    if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ]; } && [ -n "$service_candidate_aliases" ]; then
+    if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ]; } && [ -n "$service_candidate_aliases" ]; then
         limit_match_aliases="$(append_aliases_unique "$limit_match_aliases" "$service_candidate_aliases")"
     fi
     while IFS= read -r limit_alias; do
@@ -498,7 +506,7 @@ if [ "$ACTION" = "plan" ]; then
         current_alias="${current_alias//$'\r'/}"
         [ -n "$current_alias" ] || continue
         plan_present_aliases="$service_active_aliases"
-        if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ]; } && [ -n "$service_candidate_aliases" ]; then
+        if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ]; } && [ -n "$service_candidate_aliases" ]; then
             plan_present_aliases="$(append_aliases_unique "$plan_present_aliases" "$service_candidate_aliases")"
         fi
         if [ "$service_row_state" = "present" ] && alias_in_list "$current_alias" "$plan_present_aliases"; then
@@ -540,7 +548,7 @@ if [ "$ACTION" = "apply" ] && [ "$service_row_state" != "present" ]; then
     fail "$SERVICE apply requires state=present in $STATE_FILE"
 fi
 service_target_aliases="$service_active_aliases"
-if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ]; } && [ -n "$service_candidate_aliases" ]; then
+if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ]; } && [ -n "$service_candidate_aliases" ]; then
     service_target_aliases="$(append_aliases_unique "$service_target_aliases" "$service_candidate_aliases")"
 fi
 if [ "$ACTION" = "apply" ] && [ -z "$service_target_aliases" ]; then
@@ -562,7 +570,7 @@ fi
 
 if [ -n "$LIMIT" ]; then
     limit_args=(--limit "$(ansible_limit_pattern "$LIMIT")")
-elif { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ]; } && [ -n "$service_candidate_aliases" ]; then
+elif { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ]; } && [ -n "$service_candidate_aliases" ]; then
     limit_args=(--limit "$service_group:candidate_$service_group")
 else
     limit_args=(--limit "$service_group")
@@ -586,14 +594,15 @@ printf '%s\n' "$list_hosts_output"
 if [ "$list_hosts_rc" -ne 0 ]; then
     fail "ansible --list-hosts failed before $SERVICE $ACTION with exit code $list_hosts_rc"
 fi
-list_hosts_count=""
+list_hosts_count=0
+list_hosts_seen="false"
 while IFS= read -r list_hosts_line; do
     if [[ "$list_hosts_line" =~ hosts[[:space:]]+\(([0-9]+)\) ]]; then
-        list_hosts_count="${BASH_REMATCH[1]}"
-        break
+        list_hosts_count=$((list_hosts_count + BASH_REMATCH[1]))
+        list_hosts_seen="true"
     fi
 done <<< "$list_hosts_output"
-[ -n "$list_hosts_count" ] || fail "Could not determine Ansible host count before $SERVICE $ACTION"
+[ "$list_hosts_seen" = "true" ] || fail "Could not determine Ansible host count before $SERVICE $ACTION"
 [ "$list_hosts_count" -gt 0 ] || fail "Ansible selected 0 hosts for $SERVICE $ACTION with limit $(limit_display_for_error "$LIMIT"). Regenerate inventory from nodes.csv/state.csv."
 
 set -x

@@ -433,9 +433,9 @@ The P2P address convention is link-scoped. Link ids follow traffic direction:
 from future standby `vps4` to primary `vps8`, link id `48` is used:
 
 ```text
-172.27.48.0/24  P2P transport on vps8: HAProxy 172.27.48.3 -> P2P server 172.27.48.2
-172.28.48.0/24  P2P client on vps4: P2P client 172.28.48.2
-172.29.48.0/24  P2P management on vps8: HAProxy 172.29.48.3 -> P2P server 172.29.48.2
+172.27.48.0/24  P2P transport on vps8: HAProxy 172.27.48.3 -> platform-router 172.27.48.2
+172.28.48.0/24  legacy source handoff network, not active PG datapath
+172.29.48.0/24  P2P management on vps8: HAProxy 172.29.48.3 -> platform-router 172.29.48.2
 172.30.8.0/24   vps8 data: standalone Postgres 172.30.8.10
 172.30.4.0/24   vps4 data: standalone Postgres 172.30.4.10
 172.31.8.0/24   vps8 app: future nginx/app/worker
@@ -454,9 +454,18 @@ under `operator/softether/l3-vps`. Keep non-secret JSON examples in
 `operator/softether/l3-vps/secrets/template.json`; do not create new source of
 truth paths for this layer.
 
-P2P management is public only for aliases that run a P2P server. In this link,
-`vps8` has `softether-l3-vps-server`. `vps4` has `softether-l3-vps-client`; client
+P2P management is public only for aliases that run the server side. In this
+link, `vps8` runs `platform-router-softether-server` in the `platform-router`
+network namespace. `vps4` runs `platform-router-softether-client`; client
 management remains local through SSH and `vpncmd /CLIENT`.
+
+The proven PostgreSQL service path uses a narrow source-side `platform_router`
+SNAT rule for `172.30.4.0/24 -> 172.30.8.10:5432`, rewritten to `10.88.48.2`
+before entering `vpn_l3vps0`. PostgreSQL on `vps8` observes `172.30.8.2`.
+`postgres_runtime.replication_hba_cidrs_by_alias.vps8` therefore allows the
+future replication user from `172.30.8.2/32` while the runtime remains in
+`standalone` mode. The old return-route model for `172.27.48.2` is no longer
+the desired service-path intent.
 
 The transition from standalone `vps4` to standby is intentionally destructive
 and must be explicit. A normal rollout must fail if it sees initialized primary
@@ -604,7 +613,18 @@ To build the standby after P2P transport is verified:
    ```csv
    service,postgres_runtime,postgres_runtimes,vps8,vps4,,present
    ```
-3. Change `operator/postgres/config.yml` to `replication_mode: async_standby`.
+3. Change `operator/postgres/config.yml` to:
+   ```yaml
+   replication_mode: async_standby
+   primary_endpoint: 172.30.8.10
+   standby_basebackup_network: container:platform-router
+   replication_hba_cidrs_by_alias:
+     vps8:
+       - 172.30.8.2/32
+   ```
+   `container:platform-router` is required because the verified route from
+   `vps4` to `172.30.8.10:5432` lives in the platform-router network namespace,
+   not on the host default namespace.
 4. Run a normal `postgres_runtime` rollout and expect it to stop if `vps4`
    still has initialized primary data.
 5. After backup/fencing review, run targeted standby reinit for `vps4` with

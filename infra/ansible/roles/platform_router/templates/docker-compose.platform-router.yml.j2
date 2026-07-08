@@ -1,0 +1,76 @@
+---
+services:
+  platform-router:
+    image: {{ platform_router_image }}
+    container_name: {{ platform_router_model.container_name }}
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    command: ["/bin/sh", "/usr/local/bin/platform-router-reconcile.sh"]
+    volumes:
+      - ./platform-router-reconcile.sh:/usr/local/bin/platform-router-reconcile.sh:ro
+    restart: always
+    networks:
+{% for network in platform_router_model.transport_networks | default([]) %}
+      {{ network.compose_name }}:
+        ipv4_address: {{ network.container_ipv4 }}
+{% endfor %}
+{% for network in platform_router_model.management_networks | default([]) %}
+      {{ network.compose_name }}:
+        ipv4_address: {{ network.container_ipv4 }}
+{% endfor %}
+      data:
+        ipv4_address: {{ platform_router_model.data_ipv4 }}
+      app:
+        ipv4_address: {{ platform_router_model.app_ipv4 }}
+{% for client in platform_router_model.softether_clients | default([]) %}
+
+  {{ client.container_name }}:
+    image: {{ client.image }}
+    container_name: {{ client.container_name }}
+    network_mode: "service:{{ platform_router_model.container_name }}"
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./{{ client.data_dir }}:/mnt
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - platform-router
+    restart: always
+{% endfor %}
+{% if platform_router_model.softether_server_runtime.enabled | default(false) %}
+
+  {{ platform_router_model.softether_server_runtime.container_name }}:
+    image: {{ platform_router_model.softether_server_runtime.image }}
+    container_name: {{ platform_router_model.softether_server_runtime.container_name }}
+    network_mode: "service:{{ platform_router_model.container_name }}"
+    volumes:
+      - ./{{ platform_router_model.softether_server_runtime.data_dir }}:/mnt
+      - ./{{ platform_router_model.softether_server_runtime.logs_dir }}:/usr/local/bin/server_log
+      - ./{{ platform_router_model.softether_server_runtime.adminip_file }}:/usr/local/bin/adminip.txt:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - platform-router
+    restart: always
+{% endif %}
+
+networks:
+{% for network in platform_router_model.transport_networks | default([]) %}
+  {{ network.compose_name }}:
+    external: true
+    name: {{ network.name }}
+{% endfor %}
+{% for network in platform_router_model.management_networks | default([]) %}
+  {{ network.compose_name }}:
+    external: true
+    name: {{ network.name }}
+{% endfor %}
+  data:
+    external: true
+    name: {{ platform_router_model.data_network_name }}
+  app:
+    external: true
+    name: {{ platform_router_model.app_network_name }}

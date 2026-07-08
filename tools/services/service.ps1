@@ -88,6 +88,7 @@ function Get-ServicePlaybook($Name) {
         "postgres_runtime" { return "infra\ansible\postgres_runtime.yml" }
         "softether_l3_vps" { return "infra\ansible\softether_l3_vps.yml" }
         "platform_networks" { return "infra\ansible\platform_networks.yml" }
+        "platform_router" { return "infra\ansible\platform_router.yml" }
         default { Fail "No default playbook for service: $Name" }
     }
 }
@@ -129,8 +130,11 @@ function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false"
         "platform_networks" {
             return @("-e", "platform_networks_state=$State")
         }
+        "platform_router" {
+            return @("-e", "platform_router_state=$State", "-e", "platform_router_purge_data=$PurgeData")
+        }
         default {
-            Fail "Unsupported service '$Name'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks."
+            Fail "Unsupported service '$Name'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks, platform_router."
         }
     }
 }
@@ -138,8 +142,8 @@ function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false"
 if ($Service -eq "vpn") {
     Fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 }
-if ($Service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks")) {
-    Fail "Unsupported service '$Service'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks."
+if ($Service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks", "platform_router")) {
+    Fail "Unsupported service '$Service'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks, platform_router."
 }
 if ($PolicyRouterImageRef -and $Service -ne "vpn_cascade") {
     Fail "-PolicyRouterImageRef is supported only for service vpn_cascade"
@@ -198,7 +202,7 @@ if ($Limit) {
         $active = @(Split-AliasList $row.active_aliases)
         $candidate = @(Split-AliasList $row.candidate_aliases)
         $targetAliases = @($active)
-        if ($Service -in @("postgres_runtime", "softether_l3_vps", "platform_networks")) {
+        if ($Service -in @("postgres_runtime", "softether_l3_vps", "platform_networks", "platform_router")) {
             $targetAliases += $candidate
         }
         $rowSelectedAliases = @($limitAliases | Where-Object { $targetAliases -contains $_ })
@@ -261,7 +265,7 @@ if (-not $serviceRow.ansible_group) {
 }
 
 $desiredNodes = @(Split-AliasList $serviceRow.active_aliases)
-if ($Service -in @("postgres_runtime", "softether_l3_vps", "platform_networks")) {
+if ($Service -in @("postgres_runtime", "softether_l3_vps", "platform_networks", "platform_router")) {
     $desiredNodes += @(Split-AliasList $serviceRow.candidate_aliases)
     $desiredNodes = @($desiredNodes | Where-Object { $_ } | Select-Object -Unique)
 }
@@ -337,7 +341,7 @@ $args += Get-ServiceExtraVars $Service $serviceState $servicePurgeData $serviceR
 
 if ($Limit) {
     $args += @("--limit", (ConvertTo-AnsibleLimit $Limit))
-} elseif ($Service -in @("postgres_runtime", "softether_l3_vps", "platform_networks") -and $serviceRow.candidate_aliases) {
+} elseif ($Service -in @("postgres_runtime", "softether_l3_vps", "platform_networks", "platform_router") -and $serviceRow.candidate_aliases) {
     $args += @("--limit", "$($serviceRow.ansible_group):candidate_$($serviceRow.ansible_group)")
 } else {
     $args += @("--limit", $serviceRow.ansible_group)

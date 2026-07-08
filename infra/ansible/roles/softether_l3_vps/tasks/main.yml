@@ -40,14 +40,83 @@
     with open(path, encoding="utf-8") as handle:
         config = yaml.safe_load(handle) or {}
     links = [link for link in config.get("links", []) if str(link.get("state", "present")).lower() == "present"]
-    selected = [link for link in links if alias in [link.get("server_alias"), link.get("client_alias")]]
-    if len(selected) != 1:
-        fail(f"{alias} must participate in exactly one present softether l3-vps link; found {len(selected)}")
+    selected = []
+    for link in links:
+        client_aliases = {str(link.get("client_alias") or "")} | {str(item) for item in (link.get("client_aliases") or [])}
+        if isinstance(link.get("standby_clients"), dict):
+            client_aliases |= {str(item) for item in link.get("standby_clients")}
+        if alias in ({str(link.get("server_alias") or "")} | client_aliases):
+            selected.append(link)
+    if not selected:
+        fail(f"{alias} must participate in at least one present softether l3-vps link")
+    if len(selected) > 1:
+        if any(str(link.get("runtime_mode") or "standalone").strip().lower() != "platform_router_sidecar" for link in selected):
+            fail(f"{alias} may participate in multiple softether l3-vps links only when all use runtime_mode=platform_router_sidecar")
+        networks = []
+        secret_files = []
+        for item in selected:
+            role = "server" if alias == item.get("server_alias") else "client"
+            network_name = str(item.get(f"{role}_network_name") or item.get("network_name") or os.environ["DEFAULT_NETWORK_NAME"])
+            network_subnet = ipaddress.ip_network(str(item.get(f"{role}_network_subnet") or item.get("network_subnet") or os.environ["DEFAULT_NETWORK_SUBNET"]), strict=True)
+            container_ipv4 = ipaddress.ip_address(str(item.get(f"{role}_container_ipv4") or item.get("container_ipv4") or os.environ["DEFAULT_CONTAINER_IPV4"]))
+            if container_ipv4 not in network_subnet:
+                fail(f"softether l3-vps {role} container IP {container_ipv4} must be inside docker network {network_subnet}")
+            networks.append({"name": network_name, "subnet": str(network_subnet)})
+            if role == "server":
+                management_network_name = str(item.get("server_management_network_name") or "")
+                management_network_subnet = str(item.get("server_management_network_subnet") or "")
+                management_container_ipv4 = str(item.get("server_management_container_ipv4") or "")
+                management_allowed_source_ipv4 = str(item.get("server_management_allowed_source_ipv4") or "")
+                if any([management_network_name, management_network_subnet, management_container_ipv4, management_allowed_source_ipv4]):
+                    if not all([management_network_name, management_network_subnet, management_container_ipv4, management_allowed_source_ipv4]):
+                        fail("softether l3-vps server management network requires server_management_network_name, server_management_network_subnet, server_management_container_ipv4, and server_management_allowed_source_ipv4")
+                    parsed_management_subnet = ipaddress.ip_network(management_network_subnet, strict=True)
+                    parsed_management_ip = ipaddress.ip_address(management_container_ipv4)
+                    parsed_management_source_ip = ipaddress.ip_address(management_allowed_source_ipv4)
+                    if parsed_management_ip not in parsed_management_subnet or parsed_management_source_ip not in parsed_management_subnet:
+                        fail(f"softether l3-vps server management IPs must be inside docker network {parsed_management_subnet}")
+                    if parsed_management_subnet.overlaps(network_subnet):
+                        fail(f"softether l3-vps server management network {parsed_management_subnet} must not overlap transport network {network_subnet}")
+                    networks.append({"name": management_network_name, "subnet": str(parsed_management_subnet)})
+            secret_files.append(os.path.join(secrets_dir, str(item["name"]) + ".json"))
+        first = selected[0]
+        model = {
+            "name": "multi",
+            "role": "multi",
+            "runtime_mode": "platform_router_sidecar",
+            "server_alias": "",
+            "client_alias": "",
+            "server_sni": "",
+            "management_sni": "",
+            "public_port": 443,
+            "hub": "",
+            "subnet": "10.255.255.0/30",
+            "prefixlen": 30,
+            "netmask": "255.255.255.252",
+            "server_ip": "10.255.255.1",
+            "client_ip": "10.255.255.2",
+            "network_name": networks[0]["name"],
+            "network_subnet": networks[0]["subnet"],
+            "container_ipv4": "127.0.0.1",
+            "networks": networks,
+            "service_network": {},
+            "management_network": {},
+            "purpose": str(first.get("purpose") or ""),
+            "secret_file": secret_files[0],
+            "secret_files": secret_files,
+        }
+        print(json.dumps(model, sort_keys=True))
+        sys.exit(0)
     link = selected[0]
+    runtime_mode = str(link.get("runtime_mode") or "standalone").strip().lower()
+    if runtime_mode not in {"standalone", "platform_router_sidecar"}:
+        fail(f"softether l3-vps link {link['name']} has unsupported runtime_mode: {runtime_mode}")
     role = "server" if alias == link.get("server_alias") else "client"
     subnet = ipaddress.ip_network(str(link["subnet"]), strict=True)
     server_ip = ipaddress.ip_address(str(link["server_ip"]))
-    client_ip = ipaddress.ip_address(str(link["client_ip"]))
+    standby_clients = link.get("standby_clients") or {}
+    standby_client = standby_clients.get(alias) if isinstance(standby_clients, dict) else {}
+    client_ip = ipaddress.ip_address(str((standby_client or {}).get("client_ip") or link["client_ip"]))
     if server_ip not in subnet or client_ip not in subnet or server_ip == client_ip:
         fail(f"softether l3-vps link {link['name']} endpoint IPs must be unique and inside subnet {subnet}")
     network_name = str(link.get(f"{role}_network_name") or link.get("network_name") or os.environ["DEFAULT_NETWORK_NAME"])
@@ -55,11 +124,6 @@
     container_ipv4 = ipaddress.ip_address(str(link.get(f"{role}_container_ipv4") or link.get("container_ipv4") or os.environ["DEFAULT_CONTAINER_IPV4"]))
     if container_ipv4 not in network_subnet:
         fail(f"softether l3-vps {role} container IP {container_ipv4} must be inside docker network {network_subnet}")
-    remote_routes = [str(route).strip() for route in link.get("remote_routes", []) if str(route).strip()]
-    if role == "client":
-        for route in remote_routes:
-            if ipaddress.ip_network(route, strict=False).overlaps(network_subnet):
-                fail(f"softether l3-vps client docker network {network_subnet} overlaps remote route {route}; use a non-overlapping client_network_subnet")
     management_network = {}
     if role == "server":
         service_network_name = str(link.get("server_service_network_name") or "")
@@ -94,6 +158,7 @@
     model = {
         "name": str(link["name"]),
         "role": role,
+        "runtime_mode": runtime_mode,
         "server_alias": str(link["server_alias"]),
         "client_alias": str(link["client_alias"]),
         "server_sni": str(link["server_sni"]),
@@ -108,11 +173,12 @@
         "network_name": network_name,
         "network_subnet": str(network_subnet),
         "container_ipv4": str(container_ipv4),
+        "networks": [{"name": network_name, "subnet": str(network_subnet)}] + ([{"name": management_network["name"], "subnet": management_network["subnet"]}] if management_network.get("name") else []),
         "service_network": {},
         "management_network": management_network,
-        "remote_routes": remote_routes,
         "purpose": str(link.get("purpose") or ""),
         "secret_file": os.path.join(secrets_dir, str(link["name"]) + ".json"),
+        "secret_files": [os.path.join(secrets_dir, str(link["name"]) + ".json")],
     }
     print(json.dumps(model, sort_keys=True))
     PY
@@ -144,27 +210,39 @@
     import json
     import os
     import sys
-    path = os.environ["SECRET_FILE"]
-    required = {"server_password", "hub_password", "client_user", "client_password"}
-    if not os.path.isfile(path):
-        print(f"softether l3-vps secret file not found: {path}", file=sys.stderr)
-        sys.exit(1)
-    try:
-        with open(path, encoding="utf-8") as handle:
-            data = json.load(handle)
-    except Exception as exc:
-        print(f"softether l3-vps secret JSON is invalid: {path}: {exc}", file=sys.stderr)
-        sys.exit(1)
-    missing = sorted(key for key in required if not str(data.get(key) or "").strip())
-    if missing:
-        print(f"softether l3-vps secret file {path} is missing required keys: {', '.join(missing)}", file=sys.stderr)
-        sys.exit(1)
-    print(f"softether l3-vps secret file is present and has required keys: {path}")
+    paths = json.loads(os.environ["SECRET_FILES_JSON"])
+    required = {"server_password", "hub_password"}
+    for path in paths:
+        if not os.path.isfile(path):
+            print(f"softether l3-vps secret file not found: {path}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception as exc:
+            print(f"softether l3-vps secret JSON is invalid: {path}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        missing = sorted(key for key in required if not str(data.get(key) or "").strip())
+        client_users = data.get("client_users") or {}
+        if not client_users:
+            missing.extend(key for key in ["client_user", "client_password"] if not str(data.get(key) or "").strip())
+        elif not isinstance(client_users, dict):
+            print(f"client_users in {path} must be a map", file=sys.stderr)
+            sys.exit(1)
+        else:
+            for alias, client in client_users.items():
+                if not isinstance(client, dict) or not str(client.get("client_user") or "") or not str(client.get("client_password") or ""):
+                    print(f"client_users.{alias} in {path} requires client_user and client_password", file=sys.stderr)
+                    sys.exit(1)
+        if missing:
+            print(f"softether l3-vps secret file {path} is missing required keys: {', '.join(missing)}", file=sys.stderr)
+            sys.exit(1)
+    print(f"softether l3-vps secret files are present and have required keys: {len(paths)}")
     PY
   args:
     executable: /bin/bash
   environment:
-    SECRET_FILE: "{{ softether_l3_vps_model.secret_file }}"
+    SECRET_FILES_JSON: "{{ softether_l3_vps_model.secret_files | default([softether_l3_vps_model.secret_file]) | to_json }}"
   delegate_to: localhost
   become: false
   check_mode: false
@@ -177,7 +255,7 @@
     python3 - <<'PY'
     import json
     import os
-    path = os.environ["SECRET_FILE"]
+    path = json.loads(os.environ["SECRET_FILES_JSON"])[0]
     required = {"server_password", "hub_password", "client_user", "client_password"}
     with open(path, encoding="utf-8") as handle:
         data = json.load(handle)
@@ -186,7 +264,7 @@
   args:
     executable: /bin/bash
   environment:
-    SECRET_FILE: "{{ softether_l3_vps_model.secret_file }}"
+    SECRET_FILES_JSON: "{{ softether_l3_vps_model.secret_files | default([softether_l3_vps_model.secret_file]) | to_json }}"
   delegate_to: localhost
   become: false
   check_mode: false
@@ -221,6 +299,7 @@
   when:
     - softether_l3_vps_state == 'present'
     - softether_l3_vps_model.role == 'server'
+    - softether_l3_vps_model.runtime_mode != 'platform_router_sidecar'
 
 - name: Render softether_l3_vps Docker Compose
   ansible.builtin.template:
@@ -228,7 +307,9 @@
     dest: "{{ softether_l3_vps_compose_file }}"
     mode: "0640"
   register: softether_l3_vps_compose_template
-  when: softether_l3_vps_state == 'present'
+  when:
+    - softether_l3_vps_state == 'present'
+    - softether_l3_vps_model.runtime_mode != 'platform_router_sidecar'
 
 - name: Ensure Docker runtime baseline for softether_l3_vps
   ansible.builtin.include_role:
@@ -291,13 +372,14 @@
     is search('removed empty legacy softether p2p docker network')
   when:
     - softether_l3_vps_state == 'present'
+    - softether_l3_vps_model.runtime_mode != 'platform_router_sidecar' or softether_l3_vps_model.role == 'server'
     - not ansible_check_mode
 
 - name: Ensure softether_l3_vps Docker network exists with expected subnet
   ansible.builtin.shell: |
     set -euo pipefail
-    name="{{ softether_l3_vps_model.network_name }}"
-    subnet="{{ softether_l3_vps_model.network_subnet }}"
+    name="{{ item.name }}"
+    subnet="{{ item.subnet }}"
     current="$(docker network inspect -f {% raw %}'{{ (index .IPAM.Config 0).Subnet }}'{% endraw %} "$name" 2>/dev/null || true)"
     if [ -n "$current" ] && [ "$current" != "$subnet" ]; then
       if [ -f "{{ softether_l3_vps_compose_file }}" ]; then
@@ -316,6 +398,7 @@
   args:
     executable: /bin/bash
   register: softether_l3_vps_network_create
+  loop: "{{ softether_l3_vps_model.networks | default([{'name': softether_l3_vps_model.network_name, 'subnet': softether_l3_vps_model.network_subnet}]) }}"
   changed_when: >
     (softether_l3_vps_network_create.stdout | default(''))
     is search('(?i)(created softether_l3_vps docker network|removed mismatched softether_l3_vps docker network)')
@@ -352,6 +435,7 @@
   when:
     - softether_l3_vps_state == 'present'
     - softether_l3_vps_model.role == 'server'
+    - (softether_l3_vps_model.networks | default([]) | length) <= 1
     - softether_l3_vps_model.management_network.name | default('') | length > 0
     - not ansible_check_mode
 
@@ -373,6 +457,23 @@
   when:
     - softether_l3_vps_state == 'present'
     - softether_l3_vps_model.role == 'client'
+    - softether_l3_vps_model.runtime_mode != 'platform_router_sidecar'
+    - not ansible_check_mode
+
+- name: Retire standalone softether_l3_vps container in platform_router sidecar mode
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if [ -f "{{ softether_l3_vps_compose_file }}" ]; then
+      docker compose -f "{{ softether_l3_vps_compose_file }}" down
+    else
+      docker rm -f "{{ softether_l3_vps_server_container_name }}" "{{ softether_l3_vps_client_container_name }}" >/dev/null 2>&1 || true
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - softether_l3_vps_state == 'present'
+    - softether_l3_vps_model.runtime_mode == 'platform_router_sidecar'
     - not ansible_check_mode
 
 - name: Start softether_l3_vps container
@@ -385,6 +486,7 @@
     is search('(?i)(creating|created|recreating|recreated|starting|started|pulling|pulled)')
   when:
     - softether_l3_vps_state == 'present'
+    - softether_l3_vps_model.runtime_mode != 'platform_router_sidecar'
     - not ansible_check_mode
 
 - name: Remove empty legacy SoftEther L3 VPS Docker networks
@@ -414,6 +516,7 @@
     is search('removed empty legacy softether_l3_vps docker network')
   when:
     - softether_l3_vps_state == 'present'
+    - softether_l3_vps_model.runtime_mode != 'platform_router_sidecar'
     - not ansible_check_mode
 
 - name: Configure softether_l3_vps server hub and SecureNAT
@@ -496,6 +599,7 @@
   when:
     - softether_l3_vps_state == 'present'
     - softether_l3_vps_model.role == 'server'
+    - softether_l3_vps_model.runtime_mode != 'platform_router_sidecar'
     - not ansible_check_mode
 
 - name: Configure softether_l3_vps client account
@@ -546,9 +650,10 @@
   when:
     - softether_l3_vps_state == 'present'
     - softether_l3_vps_model.role == 'client'
+    - softether_l3_vps_model.runtime_mode != 'platform_router_sidecar'
     - not ansible_check_mode
 
-- name: Configure softether_l3_vps client static address and remote service routes
+- name: Configure softether_l3_vps client static address
   ansible.builtin.shell: |
     set -euo pipefail
     container="{{ softether_l3_vps_client_container_name }}"
@@ -556,47 +661,17 @@
     iface="vpn_${nic}"
     client_ip="{{ softether_l3_vps_model.client_ip }}"
     prefix="{{ softether_l3_vps_model.prefixlen }}"
-    server_ip="{{ softether_l3_vps_model.server_ip }}"
-    routes_json='{{ softether_l3_vps_model.remote_routes | to_json }}'
     docker exec "$container" sh -ceu "
       ip link set '$iface' up
       ip addr replace '$client_ip/$prefix' dev '$iface'
     "
-    python3 - "$routes_json" <<'PY' | while IFS= read -r route; do
-    import json
-    import sys
-    for item in json.loads(sys.argv[1]):
-        text = str(item).strip()
-        if text:
-            print(text)
-    PY
-      docker exec "$container" ip route replace "$route" via "$server_ip" dev "$iface"
-      docker exec "$container" sh -ceu "
-        iptables -t nat -C POSTROUTING -d '$route' -j SNAT --to-source '$client_ip' 2>/dev/null ||
-          iptables -t nat -A POSTROUTING -d '$route' -j SNAT --to-source '$client_ip'
-      "
-      ip route replace "$route" via "{{ softether_l3_vps_model.container_ipv4 }}"
-    done
   args:
     executable: /bin/bash
   changed_when: false
   when:
     - softether_l3_vps_state == 'present'
     - softether_l3_vps_model.role == 'client'
-    - not ansible_check_mode
-
-- name: Verify softether_l3_vps client can reach remote service route target
-  ansible.builtin.command:
-    cmd: docker exec "{{ softether_l3_vps_client_container_name }}" ping -c 2 -W 2 "{{ (softether_l3_vps_model.remote_routes | first).split('/')[0] }}"
-  changed_when: false
-  register: softether_l3_vps_ping
-  retries: 12
-  delay: 5
-  until: softether_l3_vps_ping.rc == 0
-  when:
-    - softether_l3_vps_state == 'present'
-    - softether_l3_vps_model.role == 'client'
-    - (softether_l3_vps_model.remote_routes | length) > 0
+    - softether_l3_vps_model.runtime_mode != 'platform_router_sidecar'
     - not ansible_check_mode
 
 - name: Verify legacy softether_p2p runtime is absent
