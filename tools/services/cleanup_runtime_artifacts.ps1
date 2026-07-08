@@ -141,44 +141,44 @@ function Invoke-CleanupPlan($Plan) {
 set -euo pipefail
 keep_days=__KEEP_DAYS__
 for path in __PATH_ARGS__; do
-  [ -n "`$path" ] || continue
-  case "`$path" in
+  [ -n "$path" ] || continue
+  case "$path" in
     /tmp/ai-sp-*.tar|/tmp/ai-sp-*.tar.gz)
-      sudo rm -f -- "`$path"
+      sudo rm -f -- "$path"
       ;;
     /var/lib/ai-service-platform/jobs/service-*|/var/lib/ai-service-platform/jobs/bootstrap-*)
-      if [ -f "`$path/done" ] && [ -f "`$path/exit_code" ]; then
-        sudo find "`$path" -maxdepth 0 -mtime +"`$keep_days" -exec rm -rf -- {} +
+      if [ -f "$path/done" ] && [ -f "$path/exit_code" ]; then
+        sudo find "$path" -maxdepth 0 -mtime +"$keep_days" -exec rm -rf -- {} +
       fi
       ;;
     /var/log/ai-service-platform/jobs/service-*.log|/var/log/ai-service-platform/jobs/bootstrap-*.log)
-      sudo find "`$path" -maxdepth 0 -mtime +"`$keep_days" -exec rm -f -- {} +
+      sudo find "$path" -maxdepth 0 -mtime +"$keep_days" -exec rm -f -- {} +
       ;;
   esac
 done
 for name in __CONTAINER_ARGS__; do
-  [ -n "`$name" ] || continue
-  case "`$name" in
+  [ -n "$name" ] || continue
+  case "$name" in
     softether-p2p-server|softether-p2p-client|softether-cascade|vpn-cascade|softether-l3-vps-client|softether-l3-vps-server)
-      sudo docker rm -f "`$name" >/dev/null 2>&1 || true
+      sudo docker rm -f "$name" >/dev/null 2>&1 || true
       ;;
   esac
 done
 for name in __NETWORK_ARGS__; do
-  [ -n "`$name" ] || continue
-  case "`$name" in
+  [ -n "$name" ] || continue
+  case "$name" in
     ai_service_softether_p2p*|ai_service_vpn_cascade*|*cascade*)
-      count="$(sudo docker network inspect -f '{{ len .Containers }}' "`$name" 2>/dev/null || echo 1)"
-      if [ "`$count" = "0" ]; then sudo docker network rm "`$name" >/dev/null; fi
+      count="$(sudo docker network inspect -f '{{ len .Containers }}' "$name" 2>/dev/null || echo 1)"
+      if [ "$count" = "0" ]; then sudo docker network rm "$name" >/dev/null; fi
       ;;
   esac
 done
 for ref in __IMAGE_ARGS__; do
-  [ -n "`$ref" ] || continue
-  case "`$ref" in
+  [ -n "$ref" ] || continue
+  case "$ref" in
     ai-service-platform/*:*)
-      if ! sudo docker ps -a --format '{{.Image}}' | grep -Fx -- "`$ref" >/dev/null; then
-        sudo docker image rm "`$ref" >/dev/null 2>&1 || true
+      if ! sudo docker ps -a --format '{{.Image}}' | grep -Fx -- "$ref" >/dev/null; then
+        sudo docker image rm "$ref" >/dev/null 2>&1 || true
       fi
       ;;
   esac
