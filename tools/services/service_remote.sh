@@ -20,6 +20,7 @@ CREATE_INVENTORY_SCRIPT="tools/bootstrap/create_inventory.sh"
 ANSIBLE_DIR="infra/ansible"
 POLICY_ROUTER_DOCKER_DIR="infra/docker/policy-router"
 POLICY_GATEWAY_DOCKER_DIR="infra/docker/policy-gateway"
+SOFTETHER_VPNCLIENT_DOCKER_DIR="infra/docker/softether-vpnclient"
 EGRESS_POLICY_TOOLS_DIR="tools/egress_policy"
 LIMIT=""
 BUILD_POLICY_ROUTER_IMAGE="false"
@@ -260,6 +261,7 @@ require_file "$NETWORKS_FILE" "networks.csv"
 [ -d "$ANSIBLE_DIR" ] || fail "Ansible directory not found: $ANSIBLE_DIR"
 [ -d "$POLICY_ROUTER_DOCKER_DIR" ] || fail "Policy-router Docker context not found: $POLICY_ROUTER_DOCKER_DIR"
 [ -d "$POLICY_GATEWAY_DOCKER_DIR" ] || fail "Policy-gateway Docker context not found: $POLICY_GATEWAY_DOCKER_DIR"
+[ -d "$SOFTETHER_VPNCLIENT_DOCKER_DIR" ] || fail "SoftEther vpnclient Docker context not found: $SOFTETHER_VPNCLIENT_DOCKER_DIR"
 [ -d "$EGRESS_POLICY_TOOLS_DIR" ] || fail "Egress policy tools directory not found: $EGRESS_POLICY_TOOLS_DIR"
 if [ "$BUILD_POLICY_ROUTER_IMAGE" = "true" ] && [ "$SERVICE" != "vpn_cascade" ]; then
     fail "--build-policy-router-image is supported only for service vpn_cascade"
@@ -337,6 +339,7 @@ remote_create_inventory_temp="$remote_bundle_dir/tools/bootstrap/create_inventor
 remote_ansible_temp="$remote_bundle_dir/ansible"
 remote_policy_router_docker_temp="$remote_bundle_dir/docker/policy-router"
 remote_policy_gateway_docker_temp="$remote_bundle_dir/docker/policy-gateway"
+remote_softether_vpnclient_docker_temp="$remote_bundle_dir/docker/softether-vpnclient"
 remote_egress_policy_tools_temp="$remote_bundle_dir/tools/egress_policy"
 remote_operator_temp="$remote_bundle_dir/operator"
 remote_operator_dir="$(dirname "$REMOTE_STATE_FILE")"
@@ -441,7 +444,7 @@ echo "[OK] ansible known_hosts refreshed"
 EOF
 )"
 refresh_known_hosts_command="sudo bash -lc $(quote_bash_arg "$refresh_known_hosts_script")"
-install_and_run_command="set -e; sudo mkdir -p $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap") $(quote_bash_arg "$REMOTE_REPO_DIR/tools") $(quote_bash_arg "$REMOTE_REPO_DIR/infra") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker"); sudo install -m 700 $(quote_bash_arg "$remote_service_runner_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services/service.sh"); sudo install -m 700 $(quote_bash_arg "$remote_create_inventory_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap/create_inventory.sh"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/tools/egress_policy"); sudo cp -a $(quote_bash_arg "$remote_egress_policy_tools_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/egress_policy"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible"); sudo cp -a $(quote_bash_arg "$remote_ansible_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-router"); sudo cp -a $(quote_bash_arg "$remote_policy_router_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-router"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-gateway"); sudo cp -a $(quote_bash_arg "$remote_policy_gateway_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-gateway"); sudo mkdir -p $(quote_bash_arg "$remote_nodes_dir") $(quote_bash_arg "$remote_operator_dir"); sudo install -o ansible -g ansible -m 600 $(quote_bash_arg "$remote_operator_temp/nodes.csv") $(quote_bash_arg "$REMOTE_NODES_FILE"); sudo install -o ansible -g ansible -m 600 $(quote_bash_arg "$remote_operator_temp/state.csv") $(quote_bash_arg "$REMOTE_STATE_FILE"); sudo install -o ansible -g ansible -m 600 $(quote_bash_arg "$remote_operator_temp/networks.csv") $(quote_bash_arg "$remote_networks_file"); printf '%s\n' 'Refreshing ansible known_hosts from operator nodes'; $refresh_known_hosts_command; for d in haproxy softether edge_banlist postgres platform_networks platform_router; do if [ -d $(quote_bash_arg "$remote_operator_temp")/\$d ]; then sudo rm -rf $(quote_bash_arg "$remote_operator_dir")/\$d; sudo cp -a $(quote_bash_arg "$remote_operator_temp")/\$d $(quote_bash_arg "$remote_operator_dir")/\$d; sudo chown -R ansible:ansible $(quote_bash_arg "$remote_operator_dir")/\$d; fi; done; sudo bash $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap/create_inventory.sh") --nodes-file $(quote_bash_arg "$REMOTE_NODES_FILE") --state-file $(quote_bash_arg "$REMOTE_STATE_FILE") --output $(quote_bash_arg "$REMOTE_INVENTORY"); sudo bash -lc $(quote_bash_arg "$service_command")"
+install_and_run_command="set -e; sudo mkdir -p $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap") $(quote_bash_arg "$REMOTE_REPO_DIR/tools") $(quote_bash_arg "$REMOTE_REPO_DIR/infra") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker"); sudo install -m 700 $(quote_bash_arg "$remote_service_runner_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services/service.sh"); sudo install -m 700 $(quote_bash_arg "$remote_create_inventory_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap/create_inventory.sh"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/tools/egress_policy"); sudo cp -a $(quote_bash_arg "$remote_egress_policy_tools_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/egress_policy"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible"); sudo cp -a $(quote_bash_arg "$remote_ansible_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-router"); sudo cp -a $(quote_bash_arg "$remote_policy_router_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-router"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-gateway"); sudo cp -a $(quote_bash_arg "$remote_policy_gateway_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-gateway"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/softether-vpnclient"); sudo cp -a $(quote_bash_arg "$remote_softether_vpnclient_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/softether-vpnclient"); sudo mkdir -p $(quote_bash_arg "$remote_nodes_dir") $(quote_bash_arg "$remote_operator_dir"); sudo install -o ansible -g ansible -m 600 $(quote_bash_arg "$remote_operator_temp/nodes.csv") $(quote_bash_arg "$REMOTE_NODES_FILE"); sudo install -o ansible -g ansible -m 600 $(quote_bash_arg "$remote_operator_temp/state.csv") $(quote_bash_arg "$REMOTE_STATE_FILE"); sudo install -o ansible -g ansible -m 600 $(quote_bash_arg "$remote_operator_temp/networks.csv") $(quote_bash_arg "$remote_networks_file"); printf '%s\n' 'Refreshing ansible known_hosts from operator nodes'; $refresh_known_hosts_command; for d in haproxy softether edge_banlist postgres platform_networks platform_router; do if [ -d $(quote_bash_arg "$remote_operator_temp")/\$d ]; then sudo rm -rf $(quote_bash_arg "$remote_operator_dir")/\$d; sudo cp -a $(quote_bash_arg "$remote_operator_temp")/\$d $(quote_bash_arg "$remote_operator_dir")/\$d; sudo chown -R ansible:ansible $(quote_bash_arg "$remote_operator_dir")/\$d; fi; done; sudo bash $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap/create_inventory.sh") --nodes-file $(quote_bash_arg "$REMOTE_NODES_FILE") --state-file $(quote_bash_arg "$REMOTE_STATE_FILE") --output $(quote_bash_arg "$REMOTE_INVENTORY"); sudo bash -lc $(quote_bash_arg "$service_command")"
 remote_service_display="${remote_args[*]}"
 
 echo "Control node: $active_aliases via role '$CONTROL_ROLE'"
@@ -469,6 +472,7 @@ cp -a "$EGRESS_POLICY_TOOLS_DIR" "$staging_dir/tools/egress_policy"
 mkdir -p "$staging_dir/docker"
 cp -a "$POLICY_ROUTER_DOCKER_DIR" "$staging_dir/docker/policy-router"
 cp -a "$POLICY_GATEWAY_DOCKER_DIR" "$staging_dir/docker/policy-gateway"
+cp -a "$SOFTETHER_VPNCLIENT_DOCKER_DIR" "$staging_dir/docker/softether-vpnclient"
 mkdir -p "$staging_dir/operator"
 cp "$NODES_FILE" "$staging_dir/operator/nodes.csv"
 cp "$STATE_FILE" "$staging_dir/operator/state.csv"
@@ -502,6 +506,8 @@ run_stage $(quote_bash_arg "remove previous policy-router Docker context") sudo 
 run_stage $(quote_bash_arg "install policy-router Docker context") sudo cp -a $(quote_bash_arg "$remote_policy_router_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-router")
 run_stage $(quote_bash_arg "remove previous policy-gateway Docker context") sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-gateway")
 run_stage $(quote_bash_arg "install policy-gateway Docker context") sudo cp -a $(quote_bash_arg "$remote_policy_gateway_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-gateway")
+run_stage $(quote_bash_arg "remove previous softether-vpnclient Docker context") sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/softether-vpnclient")
+run_stage $(quote_bash_arg "install softether-vpnclient Docker context") sudo cp -a $(quote_bash_arg "$remote_softether_vpnclient_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/softether-vpnclient")
 run_stage $(quote_bash_arg "prepare operator CSV directory") sudo mkdir -p $(quote_bash_arg "$remote_nodes_dir") $(quote_bash_arg "$remote_operator_dir")
 run_stage $(quote_bash_arg "install operator nodes.csv") sudo install -o ansible -g ansible -m 600 $(quote_bash_arg "$remote_operator_temp/nodes.csv") $(quote_bash_arg "$REMOTE_NODES_FILE")
 run_stage $(quote_bash_arg "install operator state.csv") sudo install -o ansible -g ansible -m 600 $(quote_bash_arg "$remote_operator_temp/state.csv") $(quote_bash_arg "$REMOTE_STATE_FILE")
@@ -541,7 +547,7 @@ if [ "$DETACHED_REMOTE_JOB" = "true" ]; then
     scp "${scp_common_args[@]}" "$run_script_path" "$remote:$remote_job_script"
 fi
 
-extract_command="set -e; rm -rf $(quote_bash_arg "$remote_bundle_dir"); mkdir -p $(quote_bash_arg "$remote_bundle_dir"); tar -xzf $(quote_bash_arg "$remote_bundle_archive") -C $(quote_bash_arg "$remote_bundle_dir"); test -f $(quote_bash_arg "$remote_service_runner_temp"); test -f $(quote_bash_arg "$remote_create_inventory_temp"); test -d $(quote_bash_arg "$remote_egress_policy_tools_temp"); test -d $(quote_bash_arg "$remote_ansible_temp"); test -d $(quote_bash_arg "$remote_policy_router_docker_temp"); test -d $(quote_bash_arg "$remote_policy_gateway_docker_temp"); test -f $(quote_bash_arg "$remote_operator_temp/nodes.csv"); test -f $(quote_bash_arg "$remote_operator_temp/state.csv"); test -f $(quote_bash_arg "$remote_operator_temp/networks.csv")"
+extract_command="set -e; rm -rf $(quote_bash_arg "$remote_bundle_dir"); mkdir -p $(quote_bash_arg "$remote_bundle_dir"); tar -xzf $(quote_bash_arg "$remote_bundle_archive") -C $(quote_bash_arg "$remote_bundle_dir"); test -f $(quote_bash_arg "$remote_service_runner_temp"); test -f $(quote_bash_arg "$remote_create_inventory_temp"); test -d $(quote_bash_arg "$remote_egress_policy_tools_temp"); test -d $(quote_bash_arg "$remote_ansible_temp"); test -d $(quote_bash_arg "$remote_policy_router_docker_temp"); test -d $(quote_bash_arg "$remote_policy_gateway_docker_temp"); test -d $(quote_bash_arg "$remote_softether_vpnclient_docker_temp"); test -f $(quote_bash_arg "$remote_operator_temp/nodes.csv"); test -f $(quote_bash_arg "$remote_operator_temp/state.csv"); test -f $(quote_bash_arg "$remote_operator_temp/networks.csv")"
 echo "Extracting service bundle on orchestration node..."
 invoke_retry_transport "remote service bundle extract" ssh "${ssh_common_args[@]}" "$remote" "$extract_command"
 

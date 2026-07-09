@@ -40,6 +40,8 @@ param(
 
     [string]$PolicyGatewayDockerDir = "infra/docker/policy-gateway",
 
+    [string]$SoftetherVpnclientDockerDir = "infra/docker/softether-vpnclient",
+
     [string]$EgressPolicyToolsDir = "tools/egress_policy",
 
     [string]$Limit = "",
@@ -129,7 +131,7 @@ function Split-RemoteParentPath($Path) {
     return $text.Substring(0, $index)
 }
 
-function New-TarGzBundle($ServiceRunnerScript, $CreateInventoryScript, $AnsibleDir, $PolicyRouterDockerDir, $PolicyGatewayDockerDir, $EgressPolicyToolsDir, $NodesFile, $StateFile, $NetworksFile) {
+function New-TarGzBundle($ServiceRunnerScript, $CreateInventoryScript, $AnsibleDir, $PolicyRouterDockerDir, $PolicyGatewayDockerDir, $SoftetherVpnclientDockerDir, $EgressPolicyToolsDir, $NodesFile, $StateFile, $NetworksFile) {
     if (-not (Get-Command tar -ErrorAction SilentlyContinue)) {
         Fail "tar not found in PATH. It is required to upload service bundles as a single archive."
     }
@@ -148,6 +150,8 @@ function New-TarGzBundle($ServiceRunnerScript, $CreateInventoryScript, $AnsibleD
         Copy-Item -LiteralPath $PolicyRouterDockerDir -Destination $dockerStagingDir -Recurse
         $gatewayDockerStagingDir = Join-Path (Join-Path $stagingDir "docker") "policy-gateway"
         Copy-Item -LiteralPath $PolicyGatewayDockerDir -Destination $gatewayDockerStagingDir -Recurse
+        $softetherVpnclientDockerStagingDir = Join-Path (Join-Path $stagingDir "docker") "softether-vpnclient"
+        Copy-Item -LiteralPath $SoftetherVpnclientDockerDir -Destination $softetherVpnclientDockerStagingDir -Recurse
         $toolsStagingDir = Join-Path (Join-Path $stagingDir "tools") "egress_policy"
         New-Item -ItemType Directory -Path (Split-Path -Parent $toolsStagingDir) -Force | Out-Null
         Copy-Item -LiteralPath $EgressPolicyToolsDir -Destination $toolsStagingDir -Recurse
@@ -713,6 +717,9 @@ if (-not (Test-Path -LiteralPath $PolicyRouterDockerDir -PathType Container)) {
 if (-not (Test-Path -LiteralPath $PolicyGatewayDockerDir -PathType Container)) {
     Fail "PolicyGatewayDockerDir not found: $PolicyGatewayDockerDir"
 }
+if (-not (Test-Path -LiteralPath $SoftetherVpnclientDockerDir -PathType Container)) {
+    Fail "SoftetherVpnclientDockerDir not found: $SoftetherVpnclientDockerDir"
+}
 if (-not (Test-Path -LiteralPath $EgressPolicyToolsDir -PathType Container)) {
     Fail "EgressPolicyToolsDir not found: $EgressPolicyToolsDir"
 }
@@ -725,6 +732,7 @@ $remoteCreateInventoryTemp = "$remoteBundleDir/tools/bootstrap/create_inventory.
 $remoteAnsibleTemp = "$remoteBundleDir/ansible"
 $remotePolicyRouterDockerTemp = "$remoteBundleDir/docker/policy-router"
 $remotePolicyGatewayDockerTemp = "$remoteBundleDir/docker/policy-gateway"
+$remoteSoftetherVpnclientDockerTemp = "$remoteBundleDir/docker/softether-vpnclient"
 $remoteEgressPolicyToolsTemp = "$remoteBundleDir/tools/egress_policy"
 $remoteOperatorCsvTemp = "$remoteBundleDir/operator"
 $remoteNodesDir = Split-RemoteParentPath $RemoteNodesFile
@@ -774,6 +782,8 @@ if (-not $isBatch) {
         "sudo cp -a $(Quote-BashArg $remotePolicyRouterDockerTemp) $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-router")",
         "sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-gateway")",
         "sudo cp -a $(Quote-BashArg $remotePolicyGatewayDockerTemp) $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-gateway")",
+        "sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/docker/softether-vpnclient")",
+        "sudo cp -a $(Quote-BashArg $remoteSoftetherVpnclientDockerTemp) $(Quote-BashArg "$RemoteRepoDir/infra/docker/softether-vpnclient")",
         "printf '%s\n' 'Syncing operator CSV intent to orchestration node'",
         "sudo mkdir -p $(Quote-BashArg $remoteNodesDir) $(Quote-BashArg $remoteOperatorDir)",
         "sudo install -o ansible -g ansible -m 600 $(Quote-BashArg "$remoteOperatorCsvTemp/nodes.csv") $(Quote-BashArg $RemoteNodesFile)",
@@ -894,6 +904,8 @@ foreach ($line in @(
     "run_stage $(Quote-BashArg "install policy-router Docker context") sudo cp -a $(Quote-BashArg $remotePolicyRouterDockerTemp) $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-router")",
     "run_stage $(Quote-BashArg "remove previous policy-gateway Docker context") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-gateway")",
     "run_stage $(Quote-BashArg "install policy-gateway Docker context") sudo cp -a $(Quote-BashArg $remotePolicyGatewayDockerTemp) $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-gateway")",
+    "run_stage $(Quote-BashArg "remove previous softether-vpnclient Docker context") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/docker/softether-vpnclient")",
+    "run_stage $(Quote-BashArg "install softether-vpnclient Docker context") sudo cp -a $(Quote-BashArg $remoteSoftetherVpnclientDockerTemp) $(Quote-BashArg "$RemoteRepoDir/infra/docker/softether-vpnclient")",
     "printf '%s\n' 'Syncing operator CSV intent to orchestration node'",
     "run_stage $(Quote-BashArg "prepare operator CSV directory") sudo mkdir -p $(Quote-BashArg $remoteNodesDir) $(Quote-BashArg $remoteOperatorDir)",
     "run_stage $(Quote-BashArg "install operator nodes.csv") sudo install -o ansible -g ansible -m 600 $(Quote-BashArg "$remoteOperatorCsvTemp/nodes.csv") $(Quote-BashArg $RemoteNodesFile)",
@@ -950,7 +962,7 @@ if ($isBatch) {
 
 try {
     Write-Host "Preparing local service bundle..."
-    $bundle = New-TarGzBundle $ServiceRunnerScript $CreateInventoryScript $AnsibleDir $PolicyRouterDockerDir $PolicyGatewayDockerDir $EgressPolicyToolsDir $NodesFile $StateFile $NetworksFile
+    $bundle = New-TarGzBundle $ServiceRunnerScript $CreateInventoryScript $AnsibleDir $PolicyRouterDockerDir $PolicyGatewayDockerDir $SoftetherVpnclientDockerDir $EgressPolicyToolsDir $NodesFile $StateFile $NetworksFile
     if ($useDetachedRemoteJob) {
         Write-LfScript $runScriptPath $runScriptLines
     }
@@ -1000,6 +1012,7 @@ try {
         "test -d $(Quote-BashArg $remoteAnsibleTemp)",
         "test -d $(Quote-BashArg $remotePolicyRouterDockerTemp)",
         "test -d $(Quote-BashArg $remotePolicyGatewayDockerTemp)",
+        "test -d $(Quote-BashArg $remoteSoftetherVpnclientDockerTemp)",
         "test -f $(Quote-BashArg "$remoteOperatorCsvTemp/nodes.csv")",
         "test -f $(Quote-BashArg "$remoteOperatorCsvTemp/state.csv")",
         "test -f $(Quote-BashArg "$remoteOperatorCsvTemp/networks.csv")"

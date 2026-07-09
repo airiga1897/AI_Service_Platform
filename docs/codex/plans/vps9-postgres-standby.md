@@ -5,20 +5,21 @@
 Add `vps9` as a managed platform node, then validate a second PostgreSQL async
 standby path from `vps9` to the existing `vps8` primary. Bootstrap has completed:
 `vps9` is reachable as `useradmin`, sudo works, Docker is installed, and
-`operator/nodes.csv` contains the canonical node entry. Keep this separate from
-the already working `vps4` standby path: platform baseline first, then prove the
-L3/platform-router service path, then run an explicit destructive standby reinit
-only after the path is proven.
+`operator/nodes.csv` contains the canonical node entry. The standby expansion is
+now accepted: `vps8` remains primary, and both `vps4` and `vps9` are async
+streaming standbys.
+
+The remaining related work is SoftEther cleanup, not another PostgreSQL reinit.
+See [Future SoftEther runtime image](future-softether-runtime-image.md).
 
 ## Current Constraints
 
 - `vps9` is present in `operator/nodes.csv`.
-- The first post-bootstrap baseline step is to add `vps9` only to
-  `platform_networks`; edge/VPN ingress follows after the data/app networks are
-  verified.
-- The current `platform_router` role is being moved toward a primary-overlay
-  model. `vps8` should have one SoftEther server sidecar for the current PG
-  primary overlay, with separate standby accounts for `vps4` and `vps9`.
+- `vps9` platform baseline, platform networks, edge/VPN baseline, and
+  PostgreSQL standby initialization have completed.
+- The current `platform_router` model uses one SoftEther server sidecar on
+  `vps8` for the PG primary overlay, with separate standby accounts for `vps4`
+  and `vps9`.
 - Do not add a second server sidecar on `vps8` for `vps9`; server ports and
   listeners are shared inside the `platform-router` namespace.
 
@@ -88,10 +89,12 @@ only after the path is proven.
 
 - Standby acceptance:
   - `vps8`: `pg_is_in_recovery() = false`;
-  - `vps4`: existing standby remains streaming;
-  - `vps9`: `pg_is_in_recovery() = true`;
-  - `vps8 pg_stat_replication` sees both `vps4` and `vps9`;
-  - both replication slots are active.
+  - `vps4`: `pg_is_in_recovery() = true`, WAL receiver `streaming`;
+  - `vps9`: `pg_is_in_recovery() = true`, WAL receiver `streaming`;
+  - `vps8 pg_stat_replication` sees `ai_sp_vps4` and `ai_sp_vps9` as
+    `streaming` / `async`;
+  - both replication slots are active;
+  - primary-observed replication source is `172.30.8.2` for both standbys.
 
 ## Assumptions
 

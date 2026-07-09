@@ -18,8 +18,14 @@ RUN git clone --depth 1 --branch "${SOFTETHER_REF}" https://github.com/SoftEther
 
 WORKDIR /usr/local/src/SoftEtherVPN
 RUN git submodule update --init --recursive && \
-    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
-    cmake --build build --target vpnclient vpncmd --parallel "$(nproc)"
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 && \
+    cmake --build build --target vpnclient vpncmd hamcore-archive-build --parallel "$(nproc)"
+
+RUN test -x build/vpnclient && \
+    test -x build/vpncmd && \
+    test -f build/libcedar.so && \
+    test -f build/libmayaqua.so && \
+    test -f build/hamcore.se2
 
 FROM alpine:3.24
 

@@ -43,6 +43,11 @@ multiple competing SoftEther server sidecars in one router namespace.
 
 ## Deferred Implementation
 
+- Treat the working PostgreSQL overlay as the baseline: `vps8` primary,
+  `vps4` and `vps9` async streaming standbys, and primary-observed replication
+  source `172.30.8.2`.
+- Complete the SoftEther cleanup sequence before implementing active-ready
+  failover. See [Future SoftEther runtime image](future-softether-runtime-image.md).
 - Extend `softether_l3_vps` intent from link-per-standby to primary-overlay
   intent with a shared hub and multiple standby accounts.
 - Extend `platform_router` to generate:
@@ -50,13 +55,18 @@ multiple competing SoftEther server sidecars in one router namespace.
   - one client sidecar per standby source;
   - per-standby route and narrow source-side SNAT rules;
   - one target-side PG policy allowing the primary router data IP.
+- Prefer one unified SoftEther runtime image for future active-ready work, while
+  keeping server and client as separate sidecar containers.
+- Keep the current hub name until a separate naming cleanup can safely reconnect
+  both standby paths.
 - Keep `vpn_cascade`, `softether_p2p`, SoftEther Cascade, and Local Bridge out
   of the design.
 
 ## Current Track
 
-- Finish current PG topology first:
+- Current PG topology is complete enough for the next cleanup track:
   - `vps8` primary;
-  - `vps4` standby;
-  - future `vps9` standby after path proof.
-- After PostgreSQL is stable, move to nginx.
+  - `vps4` standby streaming;
+  - `vps9` standby streaming.
+- Next order: document snapshot, unify SoftEther runtime image, harden
+  `platform_router`, then return to broader active-ready or nginx work.

@@ -6,7 +6,8 @@ param(
     [switch]$Apply,
     [int]$ConnectTimeoutSeconds = 10,
     [int]$KeepGeneratedImageTagsPerRepository = 2,
-    [int]$KeepJobDays = 2
+    [int]$KeepJobDays = 2,
+    [switch]$IncludeFailedJobs
 )
 
 $ErrorActionPreference = "Stop"
@@ -70,8 +71,9 @@ function Get-CleanupPlan($Report) {
             if (-not (Is-AllowedTempPath $path)) { continue }
             $temp += [pscustomobject]@{
                 path = $path
-                reason = "whitelisted temp/job artifact"
-            }
+            reason = "whitelisted temp/job artifact"
+            cleanup_failed_or_empty = [bool]$IncludeFailedJobs
+        }
         }
 
         $legacyContainers = @($node.legacy_containers | ForEach-Object {
@@ -148,6 +150,11 @@ for path in __PATH_ARGS__; do
       ;;
     /var/lib/ai-service-platform/jobs/service-*|/var/lib/ai-service-platform/jobs/bootstrap-*)
       if [ -f "$path/done" ] && [ -f "$path/exit_code" ]; then
+        rc="$(cat "$path/exit_code" 2>/dev/null || true)"
+        if [ "$rc" = "0" ] || [ "__INCLUDE_FAILED_JOBS__" = "true" ]; then
+          sudo find "$path" -maxdepth 0 -mtime +"$keep_days" -exec rm -rf -- {} +
+        fi
+      elif [ "__INCLUDE_FAILED_JOBS__" = "true" ] && [ -z "$(sudo find "$path" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
         sudo find "$path" -maxdepth 0 -mtime +"$keep_days" -exec rm -rf -- {} +
       fi
       ;;
@@ -185,6 +192,7 @@ for ref in __IMAGE_ARGS__; do
 done
 '@
         $command = $command.Replace("__KEEP_DAYS__", (Quote-BashArg ([string]$KeepJobDays))).
+            Replace("__INCLUDE_FAILED_JOBS__", ($(if ($IncludeFailedJobs) { "true" } else { "false" }))).
             Replace("__PATH_ARGS__", $pathArgs).
             Replace("__CONTAINER_ARGS__", $containerArgs).
             Replace("__NETWORK_ARGS__", $networkArgs).
