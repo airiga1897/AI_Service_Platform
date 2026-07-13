@@ -29,6 +29,7 @@ services:
   {{ client.container_name }}:
     image: {{ client.image }}
     container_name: {{ client.container_name }}
+    command: ["/usr/local/bin/softether-entrypoint.sh", "client"]
     network_mode: "service:{{ platform_router_model.container_name }}"
     cap_add:
       - NET_ADMIN
@@ -46,11 +47,12 @@ services:
   {{ platform_router_model.softether_server_runtime.container_name }}:
     image: {{ platform_router_model.softether_server_runtime.image }}
     container_name: {{ platform_router_model.softether_server_runtime.container_name }}
+    command: ["/usr/local/bin/softether-entrypoint.sh", "server"]
     network_mode: "service:{{ platform_router_model.container_name }}"
     volumes:
       - ./{{ platform_router_model.softether_server_runtime.data_dir }}:/mnt
-      - ./{{ platform_router_model.softether_server_runtime.logs_dir }}:/usr/local/bin/server_log
-      - ./{{ platform_router_model.softether_server_runtime.adminip_file }}:/usr/local/bin/adminip.txt:ro
+      - ./{{ platform_router_model.softether_server_runtime.logs_dir }}:/mnt/server_log
+      - ./{{ platform_router_model.softether_server_runtime.adminip_file }}:/mnt/adminip.txt:ro
       - /etc/localtime:/etc/localtime:ro
     depends_on:
       - platform-router

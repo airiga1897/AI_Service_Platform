@@ -24,6 +24,7 @@ SOFTETHER_VPNCLIENT_DOCKER_DIR="infra/docker/softether-vpnclient"
 EGRESS_POLICY_TOOLS_DIR="tools/egress_policy"
 LIMIT=""
 BUILD_POLICY_ROUTER_IMAGE="false"
+PLATFORM_ROUTER_SOFTETHER_DEBUG="false"
 CHECK="false"
 CONFIRM_PURGE="false"
 DETACHED_REMOTE_JOB="false"
@@ -50,7 +51,9 @@ Options:
   --remote-repo-dir PATH  Repo path on orchestration node. Default: /opt/ai-service-platform
   --limit ALIAS           Service target alias.
   --build-policy-router-image
-                         vpn_cascade only: force rebuild instead of reusing a matching local image.
+                        vpn_cascade only: force rebuild instead of reusing a matching local image.
+  --platform-router-softether-debug
+                        platform_router only: show SoftEther server configure task output for diagnostics.
   --check                 Pass --check to service.sh apply.
   --confirm-purge         Pass --confirm-purge to service.sh purge.
   --detached-remote-job   Run service command as a detached job and poll its log.
@@ -241,6 +244,7 @@ while [ "$#" -gt 0 ]; do
         --remote-repo-dir) REMOTE_REPO_DIR="${2:-}"; shift 2 ;;
         --limit) LIMIT="${2:-}"; shift 2 ;;
         --build-policy-router-image) BUILD_POLICY_ROUTER_IMAGE="true"; shift ;;
+        --platform-router-softether-debug) PLATFORM_ROUTER_SOFTETHER_DEBUG="true"; shift ;;
         --check) CHECK="true"; shift ;;
         --confirm-purge) CONFIRM_PURGE="true"; shift ;;
         --detached-remote-job) DETACHED_REMOTE_JOB="true"; shift ;;
@@ -251,6 +255,10 @@ while [ "$#" -gt 0 ]; do
         *) fail "Unknown option: $1" ;;
     esac
 done
+
+if [ "$SERVICE" = "host_resources" ] && [ "$ACTION" != "plan" ] && [ "$ACTION" != "apply" ]; then
+    fail "host_resources v1 supports only plan and apply; absent/purge/reseed are intentionally disabled"
+fi
 
 require_file "$NODES_FILE" "--nodes-file"
 require_file "$STATE_FILE" "--state-file"
@@ -265,6 +273,9 @@ require_file "$NETWORKS_FILE" "networks.csv"
 [ -d "$EGRESS_POLICY_TOOLS_DIR" ] || fail "Egress policy tools directory not found: $EGRESS_POLICY_TOOLS_DIR"
 if [ "$BUILD_POLICY_ROUTER_IMAGE" = "true" ] && [ "$SERVICE" != "vpn_cascade" ]; then
     fail "--build-policy-router-image is supported only for service vpn_cascade"
+fi
+if [ "$PLATFORM_ROUTER_SOFTETHER_DEBUG" = "true" ] && [ "$SERVICE" != "platform_router" ]; then
+    fail "--platform-router-softether-debug is supported only for service platform_router"
 fi
 command -v ssh >/dev/null 2>&1 || fail "ssh not found in PATH"
 command -v scp >/dev/null 2>&1 || fail "scp not found in PATH"
@@ -402,6 +413,7 @@ remote_args=(
 )
 [ -n "$LIMIT" ] && remote_args+=("--limit" "$(quote_bash_arg "$LIMIT")")
 [ "$BUILD_POLICY_ROUTER_IMAGE" = "true" ] && remote_args+=("--build-policy-router-image")
+[ "$PLATFORM_ROUTER_SOFTETHER_DEBUG" = "true" ] && remote_args+=("--platform-router-softether-debug")
 [ "$CHECK" = "true" ] && remote_args+=("--check")
 [ "$CONFIRM_PURGE" = "true" ] && remote_args+=("--confirm-purge")
 
@@ -444,7 +456,7 @@ echo "[OK] ansible known_hosts refreshed"
 EOF
 )"
 refresh_known_hosts_command="sudo bash -lc $(quote_bash_arg "$refresh_known_hosts_script")"
-install_and_run_command="set -e; sudo mkdir -p $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap") $(quote_bash_arg "$REMOTE_REPO_DIR/tools") $(quote_bash_arg "$REMOTE_REPO_DIR/infra") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker"); sudo install -m 700 $(quote_bash_arg "$remote_service_runner_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services/service.sh"); sudo install -m 700 $(quote_bash_arg "$remote_create_inventory_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap/create_inventory.sh"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/tools/egress_policy"); sudo cp -a $(quote_bash_arg "$remote_egress_policy_tools_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/egress_policy"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible"); sudo cp -a $(quote_bash_arg "$remote_ansible_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-router"); sudo cp -a $(quote_bash_arg "$remote_policy_router_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-router"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-gateway"); sudo cp -a $(quote_bash_arg "$remote_policy_gateway_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-gateway"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/softether-vpnclient"); sudo cp -a $(quote_bash_arg "$remote_softether_vpnclient_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/softether-vpnclient"); sudo mkdir -p $(quote_bash_arg "$remote_nodes_dir") $(quote_bash_arg "$remote_operator_dir"); sudo install -o ansible -g ansible -m 600 $(quote_bash_arg "$remote_operator_temp/nodes.csv") $(quote_bash_arg "$REMOTE_NODES_FILE"); sudo install -o ansible -g ansible -m 600 $(quote_bash_arg "$remote_operator_temp/state.csv") $(quote_bash_arg "$REMOTE_STATE_FILE"); sudo install -o ansible -g ansible -m 600 $(quote_bash_arg "$remote_operator_temp/networks.csv") $(quote_bash_arg "$remote_networks_file"); printf '%s\n' 'Refreshing ansible known_hosts from operator nodes'; $refresh_known_hosts_command; for d in haproxy softether edge_banlist postgres platform_networks platform_router; do if [ -d $(quote_bash_arg "$remote_operator_temp")/\$d ]; then sudo rm -rf $(quote_bash_arg "$remote_operator_dir")/\$d; sudo cp -a $(quote_bash_arg "$remote_operator_temp")/\$d $(quote_bash_arg "$remote_operator_dir")/\$d; sudo chown -R ansible:ansible $(quote_bash_arg "$remote_operator_dir")/\$d; fi; done; sudo bash $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap/create_inventory.sh") --nodes-file $(quote_bash_arg "$REMOTE_NODES_FILE") --state-file $(quote_bash_arg "$REMOTE_STATE_FILE") --output $(quote_bash_arg "$REMOTE_INVENTORY"); sudo bash -lc $(quote_bash_arg "$service_command")"
+install_and_run_command="set -e; sudo mkdir -p $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap") $(quote_bash_arg "$REMOTE_REPO_DIR/tools") $(quote_bash_arg "$REMOTE_REPO_DIR/infra") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker"); sudo install -m 700 $(quote_bash_arg "$remote_service_runner_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/services/service.sh"); sudo install -m 700 $(quote_bash_arg "$remote_create_inventory_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap/create_inventory.sh"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/tools/egress_policy"); sudo cp -a $(quote_bash_arg "$remote_egress_policy_tools_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/egress_policy"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible"); sudo cp -a $(quote_bash_arg "$remote_ansible_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-router"); sudo cp -a $(quote_bash_arg "$remote_policy_router_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-router"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-gateway"); sudo cp -a $(quote_bash_arg "$remote_policy_gateway_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-gateway"); sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/softether-vpnclient"); sudo cp -a $(quote_bash_arg "$remote_softether_vpnclient_docker_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/softether-vpnclient"); sudo mkdir -p $(quote_bash_arg "$remote_nodes_dir") $(quote_bash_arg "$remote_operator_dir"); sudo install -o ansible -g ansible -m 600 $(quote_bash_arg "$remote_operator_temp/nodes.csv") $(quote_bash_arg "$REMOTE_NODES_FILE"); sudo install -o ansible -g ansible -m 600 $(quote_bash_arg "$remote_operator_temp/state.csv") $(quote_bash_arg "$REMOTE_STATE_FILE"); sudo install -o ansible -g ansible -m 600 $(quote_bash_arg "$remote_operator_temp/networks.csv") $(quote_bash_arg "$remote_networks_file"); printf '%s\n' 'Refreshing ansible known_hosts from operator nodes'; $refresh_known_hosts_command; for d in haproxy softether edge_banlist postgres platform_networks host_resources platform_router; do if [ -d $(quote_bash_arg "$remote_operator_temp")/\$d ]; then sudo rm -rf $(quote_bash_arg "$remote_operator_dir")/\$d; sudo cp -a $(quote_bash_arg "$remote_operator_temp")/\$d $(quote_bash_arg "$remote_operator_dir")/\$d; sudo chown -R ansible:ansible $(quote_bash_arg "$remote_operator_dir")/\$d; fi; done; sudo bash $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap/create_inventory.sh") --nodes-file $(quote_bash_arg "$REMOTE_NODES_FILE") --state-file $(quote_bash_arg "$REMOTE_STATE_FILE") --output $(quote_bash_arg "$REMOTE_INVENTORY"); sudo bash -lc $(quote_bash_arg "$service_command")"
 remote_service_display="${remote_args[*]}"
 
 echo "Control node: $active_aliases via role '$CONTROL_ROLE'"
@@ -478,7 +490,7 @@ cp "$NODES_FILE" "$staging_dir/operator/nodes.csv"
 cp "$STATE_FILE" "$staging_dir/operator/state.csv"
 cp "$NETWORKS_FILE" "$staging_dir/operator/networks.csv"
 operator_source_dir="$(dirname "$NODES_FILE")"
-for operator_subdir in haproxy softether edge_banlist postgres platform_networks platform_router; do
+for operator_subdir in haproxy softether edge_banlist postgres platform_networks host_resources platform_router; do
     if [ -d "$operator_source_dir/$operator_subdir" ]; then
         cp -a "$operator_source_dir/$operator_subdir" "$staging_dir/operator/$operator_subdir"
     fi
@@ -518,6 +530,7 @@ if [ -d $(quote_bash_arg "$remote_operator_temp/softether") ]; then run_stage $(
 if [ -d $(quote_bash_arg "$remote_operator_temp/edge_banlist") ]; then run_stage $(quote_bash_arg "sync operator edge_banlist config") sudo bash -lc $(quote_bash_arg "rm -rf $(quote_bash_arg "$remote_operator_dir/edge_banlist"); cp -a $(quote_bash_arg "$remote_operator_temp/edge_banlist") $(quote_bash_arg "$remote_operator_dir/edge_banlist"); chown -R ansible:ansible $(quote_bash_arg "$remote_operator_dir/edge_banlist")"); fi
 if [ -d $(quote_bash_arg "$remote_operator_temp/postgres") ]; then run_stage $(quote_bash_arg "sync operator postgres config") sudo bash -lc $(quote_bash_arg "rm -rf $(quote_bash_arg "$remote_operator_dir/postgres"); cp -a $(quote_bash_arg "$remote_operator_temp/postgres") $(quote_bash_arg "$remote_operator_dir/postgres"); chown -R ansible:ansible $(quote_bash_arg "$remote_operator_dir/postgres")"); fi
 if [ -d $(quote_bash_arg "$remote_operator_temp/platform_networks") ]; then run_stage $(quote_bash_arg "sync operator platform_networks config") sudo bash -lc $(quote_bash_arg "rm -rf $(quote_bash_arg "$remote_operator_dir/platform_networks"); cp -a $(quote_bash_arg "$remote_operator_temp/platform_networks") $(quote_bash_arg "$remote_operator_dir/platform_networks"); chown -R ansible:ansible $(quote_bash_arg "$remote_operator_dir/platform_networks")"); fi
+if [ -d $(quote_bash_arg "$remote_operator_temp/host_resources") ]; then run_stage $(quote_bash_arg "sync operator host_resources config") sudo bash -lc $(quote_bash_arg "rm -rf $(quote_bash_arg "$remote_operator_dir/host_resources"); cp -a $(quote_bash_arg "$remote_operator_temp/host_resources") $(quote_bash_arg "$remote_operator_dir/host_resources"); chown -R ansible:ansible $(quote_bash_arg "$remote_operator_dir/host_resources")"); fi
 if [ -d $(quote_bash_arg "$remote_operator_temp/platform_router") ]; then run_stage $(quote_bash_arg "sync operator platform_router config") sudo bash -lc $(quote_bash_arg "rm -rf $(quote_bash_arg "$remote_operator_dir/platform_router"); cp -a $(quote_bash_arg "$remote_operator_temp/platform_router") $(quote_bash_arg "$remote_operator_dir/platform_router"); chown -R ansible:ansible $(quote_bash_arg "$remote_operator_dir/platform_router")"); fi
 run_stage $(quote_bash_arg "regenerate Ansible inventory") sudo bash $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap/create_inventory.sh") --nodes-file $(quote_bash_arg "$REMOTE_NODES_FILE") --state-file $(quote_bash_arg "$REMOTE_STATE_FILE") --output $(quote_bash_arg "$REMOTE_INVENTORY")
 log_stage $(quote_bash_arg "running service command: $remote_service_display")

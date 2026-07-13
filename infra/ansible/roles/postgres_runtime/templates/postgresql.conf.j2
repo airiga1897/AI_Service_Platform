@@ -7,6 +7,9 @@ max_replication_slots = {{ postgres_runtime_model.max_replication_slots }}
 wal_keep_size = '{{ postgres_runtime_model.wal_keep_size }}'
 wal_compression = on
 synchronous_commit = on
+{% if postgres_runtime_model.role == 'standby' %}
+wal_receiver_timeout = '{{ postgres_runtime_model.standby_connection.wal_receiver_timeout }}'
+{% endif %}
 
 log_replication_commands = on
 log_connections = on

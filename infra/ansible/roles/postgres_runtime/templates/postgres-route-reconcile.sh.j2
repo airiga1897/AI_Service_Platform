@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+container="{{ postgres_runtime_model.container_name }}"
+
+if ! docker inspect "$container" >/dev/null 2>&1; then
+  echo "$container does not exist yet; route reconciliation deferred"
+  exit 0
+fi
+
+pid="$(docker inspect -f {% raw %}'{{ .State.Pid }}'{% endraw %} "$container" 2>/dev/null || true)"
+if [ -z "$pid" ] || [ "$pid" = "0" ] || [ ! -e "/proc/$pid/ns/net" ]; then
+  echo "$container is not running yet; route reconciliation deferred"
+  exit 0
+fi
+
+command -v nsenter >/dev/null
+command -v ip >/dev/null
+
+{% for route in postgres_runtime_model.service_routes %}
+if ! nsenter -t "$pid" -n ip route replace "{{ route.destination }}" via "{{ route.via }}"; then
+  echo "failed to reconcile route {{ route.destination }} via {{ route.via }} in $container" >&2
+  exit 1
+fi
+{% endfor %}

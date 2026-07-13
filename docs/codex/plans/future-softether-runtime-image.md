@@ -12,7 +12,7 @@ Current PG overlay facts:
 
 - `vps8` owns the primary-side `platform-router-softether-server`.
 - `vps4` and `vps9` use client sidecars in their `platform-router` namespaces.
-- The current shared hub still has the legacy name `P2PPgVps4Vps8`.
+- The current shared hub is named `P2PPgPrimaryVps8`.
 - Fixed client VPN identities are `vps4 = 10.88.48.4` and
   `vps9 = 10.88.48.9`.
 - PostgreSQL on the primary sees both standby paths as source `172.30.8.2`.
@@ -51,9 +51,8 @@ Current PG overlay facts:
 ## Implementation Plan
 
 0. Keep this as a documentation/acceptance snapshot before changing runtime.
-1. Do not rename the hub during the image refactor. A future rename from
-   `P2PPgVps4Vps8` to `P2PPgPrimaryVps8` is desirable, but it is a separate
-   controlled reconnect step.
+1. Keep the hub name stable during future image refactors. Hub naming cleanup
+   has already moved the PostgreSQL overlay toward `P2PPgPrimaryVps8`.
 2. Add a new Docker build context for the unified image, or rename the current
    `softether-vpnclient` context after it can also package `vpnserver`.
 3. Build `vpnserver`, `vpnclient`, `vpncmd`, and `hamcore.se2` from the same
@@ -67,7 +66,7 @@ Current PG overlay facts:
    with process-specific commands.
 7. Harden `platform_router` role checks after image unification:
    - fail clearly when expected hub users or fixed client IP intent are missing;
-   - verify managed route and narrow SNAT intent for each standby source;
+   - verify managed routes for each standby source;
    - keep check-mode free of undefined register fields.
 8. Keep `vpn_edge` and legacy/standalone `softether_l3_vps` image alignment as
    later follow-up work, after the PG overlay path is stable.

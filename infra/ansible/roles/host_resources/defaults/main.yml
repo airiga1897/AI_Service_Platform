@@ -1,0 +1,5 @@
+---
+host_resources_state: present
+host_resources_operator_config_file: "{{ playbook_dir }}/../../operator/host_resources/config.yml"
+host_resources_reconcile_script: /usr/local/sbin/ai-service-host-swap-reconcile
+host_resources_sysctl_file: /etc/sysctl.d/60-ai-service-platform-swap.conf

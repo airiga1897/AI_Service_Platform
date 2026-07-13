@@ -17,7 +17,7 @@ multiple competing SoftEther server sidecars in one router namespace.
 - Use one PG overlay hub per primary, not one hub per standby link. For current
   `vps8` primary, use a shared hub such as `P2PPgPrimaryVps8`.
 - The primary hub uses one VPN subnet, for example `10.88.48.0/24`:
-  - server/SecureNAT: `10.88.48.1`
+  - server/SecureNAT: `10.88.48.8`
   - `vps4` standby account: fixed client IP such as `10.88.48.4`
   - `vps9` standby account: fixed client IP such as `10.88.48.9`
 - The primary-side PostgreSQL source identity remains the primary
@@ -53,12 +53,12 @@ multiple competing SoftEther server sidecars in one router namespace.
 - Extend `platform_router` to generate:
   - one server sidecar on the primary side;
   - one client sidecar per standby source;
-  - per-standby route and narrow source-side SNAT rules;
+  - per-standby routes through the SoftEther client interface;
   - one target-side PG policy allowing the primary router data IP.
 - Prefer one unified SoftEther runtime image for future active-ready work, while
   keeping server and client as separate sidecar containers.
-- Keep the current hub name until a separate naming cleanup can safely reconnect
-  both standby paths.
+- Keep the current hub name stable during future image or failover work unless a
+  separate reconnect window is explicitly planned.
 - Keep `vpn_cascade`, `softether_p2p`, SoftEther Cascade, and Local Bridge out
   of the design.
 

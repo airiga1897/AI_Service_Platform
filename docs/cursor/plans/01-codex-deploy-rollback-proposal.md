@@ -26,7 +26,7 @@ ai-retail-dev → preprod → VPS2
 
 | # | Область | Что сделать |
 |---|---------|-------------|
-| 1 | `services.yml` | Для каждого `runtime_instances.*.deploy` добавить: `allowed_image_ref_pattern`, `frozen`, `frozen_image_ref_pattern`, `environments.<env>.{vps,compose_file,deploy_dir,deploy_state_tag_prefix}`. MVP: `ai-retail-mvp` с `frozen: true` и паттерном `ai-retail-mvp-v*`. |
+| 1 | `services.yml` | Для каждого `runtime_instances.*.deploy` добавить image policy и deploy metadata. Release guard для `ai-retail-mvp` разрешает только паттерн `ai-retail-mvp-v*`; старое machine encoding является legacy implementation detail. |
 | 2 | Валидатор | Проверять новые поля, regex, VPS из `platform.vps_layout`, пути compose, префиксы deploy-state, SoftEther-порты. Новые фикстуры/тесты. |
 | 3 | `tools/deploy/preflight.py` | CLI: `--instance`, `--environment`, `--image-ref` → JSON с метаданными деплоя или ошибка. |
 | 4 | `deploy.yml` | Job `preflight` (`make check` + preflight); deploy job только для `ai-retail-dev/preprod`, остальное — явный fail; SSH как guarded skeleton. Inputs: `instance`, `environment`, `image_ref` (убрать ручной `target_vps`). |

@@ -6,6 +6,8 @@ while true; do
 {% for client in platform_router_model.softether_clients | default([]) %}
   if ip link show "{{ client.iface }}" >/dev/null 2>&1; then
     ip link set "{{ client.iface }}" up || true
+    sysctl -w "net.ipv6.conf.{{ client.iface }}.disable_ipv6=1" >/dev/null 2>&1 || true
+    ip -6 addr flush dev "{{ client.iface }}" scope link >/dev/null 2>&1 || true
     ip addr replace "{{ client.client_ip }}/{{ client.prefixlen }}" dev "{{ client.iface }}" || true
 {% for policy in platform_router_model.policies %}
 {% if policy.route_destination and policy.softether_client_name == client.name %}

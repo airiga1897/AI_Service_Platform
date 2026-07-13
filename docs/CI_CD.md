@@ -1,5 +1,9 @@
 # CI/CD (непрерывная интеграция и доставка)
 
+> VPS aliases are node identifiers, not environment names. Current placement is
+> resolved from operator state/config; see [Service Placement
+> Policy](PLACEMENT.md).
+
 ## Модель
 
 Продукты собирают, платформа деплоит.
@@ -33,9 +37,10 @@
 | [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) | `make check` + `tools/deploy/preflight.py`; SSH predeploy-check только для `ai-retail-dev` / `preprod` |
 | [`.github/workflows/rollback.yml`](../.github/workflows/rollback.yml) | Re-deploy явного `to_ref`; deploy-state lookup пока не реализован |
 
-Первый включённый сценарий: **`ai-retail-dev` → `preprod` → VPS2**. Production и остальные инстансы отклоняются намеренно.
+The existing `ai-retail-dev/preprod` path is a legacy compose/predeploy proof.
+It must not be treated as the current application placement contract.
 
-`ai-retail-mvp` защищён полем `deploy.frozen: true` и regex `frozen_image_ref_pattern` в `services.yml` (валидатор + preflight).
+`ai-retail-mvp` защищён release guard: validator и preflight принимают только явно выпущенные версионные образы `ai-retail-mvp-v*`. Текущий release — `ai-retail-mvp-v1`. Текущее machine encoding этой политики будет переименовано отдельной совместимой миграцией контракта.
 
 ## GitHub Environments (окружения)
 
@@ -46,8 +51,8 @@
 - `aromaflow-demo`
 - `ai-retail-mvp`
 - `ai-retail-dev`
-- `vps1-prod`
-- `vps2-preprod`
+- role-based production environment
+- role-based preproduction environment
 - `orchestration-management`
 
 ## Локальная разработка и pre-commit

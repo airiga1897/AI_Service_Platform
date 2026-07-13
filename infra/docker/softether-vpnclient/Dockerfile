@@ -19,9 +19,10 @@ RUN git clone --depth 1 --branch "${SOFTETHER_REF}" https://github.com/SoftEther
 WORKDIR /usr/local/src/SoftEtherVPN
 RUN git submodule update --init --recursive && \
     cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 && \
-    cmake --build build --target vpnclient vpncmd hamcore-archive-build --parallel "$(nproc)"
+    cmake --build build --target vpnserver vpnclient vpncmd hamcore-archive-build --parallel "$(nproc)"
 
 RUN test -x build/vpnclient && \
+    test -x build/vpnserver && \
     test -x build/vpncmd && \
     test -f build/libcedar.so && \
     test -f build/libmayaqua.so && \
@@ -39,10 +40,11 @@ RUN apk add --no-cache \
 ENV LD_PRELOAD=/usr/lib/preloadable_libiconv.so
 
 WORKDIR /usr/local/bin
-VOLUME ["/var/log/softether", "/var/lib/softether", "/run/softether"]
 
 COPY --from=builder /usr/local/src/SoftEtherVPN/build/vpncmd /usr/local/src/SoftEtherVPN/build/hamcore.se2 ./
 COPY --from=builder /usr/local/src/SoftEtherVPN/build/libcedar.so /usr/local/src/SoftEtherVPN/build/libmayaqua.so /usr/local/lib/
-COPY --from=builder /usr/local/src/SoftEtherVPN/build/vpnclient ./
+COPY --from=builder /usr/local/src/SoftEtherVPN/build/vpnserver /usr/local/src/SoftEtherVPN/build/vpnclient ./
+COPY softether-entrypoint.sh /usr/local/bin/softether-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/softether-entrypoint.sh
 
-CMD ["/usr/local/bin/vpnclient", "execsvc"]
+CMD ["/usr/local/bin/softether-entrypoint.sh", "client"]

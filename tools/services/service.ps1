@@ -22,6 +22,8 @@ param(
 
     [switch]$ReinitStandby,
 
+    [switch]$PlatformRouterSoftetherDebug,
+
     [switch]$Check,
 
     [switch]$ConfirmPurge
@@ -88,12 +90,13 @@ function Get-ServicePlaybook($Name) {
         "postgres_runtime" { return "infra\ansible\postgres_runtime.yml" }
         "softether_l3_vps" { return "infra\ansible\softether_l3_vps.yml" }
         "platform_networks" { return "infra\ansible\platform_networks.yml" }
+        "host_resources" { return "infra\ansible\host_resources.yml" }
         "platform_router" { return "infra\ansible\platform_router.yml" }
         default { Fail "No default playbook for service: $Name" }
     }
 }
 
-function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false", $PolicyRouterImageRef = "", $BuildPolicyRouterImage = $false, $ReinitStandby = $false) {
+function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false", $PolicyRouterImageRef = "", $BuildPolicyRouterImage = $false, $ReinitStandby = $false, $PlatformRouterSoftetherDebug = $false) {
     switch ($Name) {
         "edge_haproxy" {
             return @("-e", "edge_haproxy_state=$State", "-e", "edge_haproxy_purge_data=$PurgeData")
@@ -130,11 +133,18 @@ function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false"
         "platform_networks" {
             return @("-e", "platform_networks_state=$State")
         }
+        "host_resources" {
+            return @("-e", "host_resources_state=$State")
+        }
         "platform_router" {
-            return @("-e", "platform_router_state=$State", "-e", "platform_router_purge_data=$PurgeData")
+            $vars = @("-e", "platform_router_state=$State", "-e", "platform_router_purge_data=$PurgeData")
+            if ($PlatformRouterSoftetherDebug) {
+                $vars += @("-e", "platform_router_softether_debug_no_log=false")
+            }
+            return $vars
         }
         default {
-            Fail "Unsupported service '$Name'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks, platform_router."
+            Fail "Unsupported service '$Name'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks, host_resources, platform_router."
         }
     }
 }
@@ -142,8 +152,11 @@ function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false"
 if ($Service -eq "vpn") {
     Fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 }
-if ($Service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks", "platform_router")) {
-    Fail "Unsupported service '$Service'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks, platform_router."
+if ($Service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks", "host_resources", "platform_router")) {
+    Fail "Unsupported service '$Service'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks, host_resources, platform_router."
+}
+if ($Service -eq "host_resources" -and $Action -notin @("plan", "apply")) {
+    Fail "host_resources v1 supports only plan and apply; absent/purge/reseed are intentionally disabled"
 }
 if ($PolicyRouterImageRef -and $Service -ne "vpn_cascade") {
     Fail "-PolicyRouterImageRef is supported only for service vpn_cascade"
@@ -159,6 +172,9 @@ if ($ReinitStandby -and $Action -ne "apply") {
 }
 if ($ReinitStandby -and -not $Limit) {
     Fail "-ReinitStandby requires -Limit for the intended standby alias"
+}
+if ($PlatformRouterSoftetherDebug -and $Service -ne "platform_router") {
+    Fail "-PlatformRouterSoftetherDebug is supported only for service platform_router"
 }
 if ($BuildPolicyRouterImage -and $PolicyRouterImageRef) {
     Fail "-BuildPolicyRouterImage and -PolicyRouterImageRef are mutually exclusive"
@@ -337,7 +353,7 @@ $args = @(
     "-i", $Inventory,
     $Playbook
 )
-$args += Get-ServiceExtraVars $Service $serviceState $servicePurgeData $serviceReseedConfig $PolicyRouterImageRef ([bool]$BuildPolicyRouterImage) ([bool]$ReinitStandby)
+$args += Get-ServiceExtraVars $Service $serviceState $servicePurgeData $serviceReseedConfig $PolicyRouterImageRef ([bool]$BuildPolicyRouterImage) ([bool]$ReinitStandby) ([bool]$PlatformRouterSoftetherDebug)
 
 if ($Limit) {
     $args += @("--limit", (ConvertTo-AnsibleLimit $Limit))

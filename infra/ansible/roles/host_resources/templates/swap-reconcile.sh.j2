@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+swap_path={{ host_resources_model.swap_path | quote }}
+legacy_swap_paths=({% for legacy_path in host_resources_model.legacy_swap_paths %}{{ legacy_path | quote }} {% endfor %})
+desired_bytes="$(({{ host_resources_model.swap_size_mb }} * 1024 * 1024))"
+minimum_free_bytes="$(({{ host_resources_model.minimum_free_disk_mb }} * 1024 * 1024))"
+memory_reserve_bytes="$(({{ host_resources_model.minimum_available_memory_after_swapoff_mb }} * 1024 * 1024))"
+temporary_path="${swap_path}.ai-service-platform.new"
+backup_path=""
+original_path=""
+changed=false
+rollback_pending=false
+old_was_active=false
+new_installed=false
+
+fail() {
+    echo "$*" >&2
+    exit 1
+}
+
+cleanup_on_exit() {
+    rc="$?"
+    trap - EXIT
+    rm -f "$temporary_path"
+    if [ "$rc" -ne 0 ] && [ "$new_installed" = "true" ]; then
+        swapoff "$swap_path" >/dev/null 2>&1 || true
+        rm -f "$swap_path"
+        if [ "$rollback_pending" = "true" ] && [ -e "$backup_path" ]; then
+            mv "$backup_path" "$original_path"
+            if [ "$old_was_active" = "true" ]; then
+                swapon "$original_path" || echo "CRITICAL: failed to reactivate restored swap $original_path" >&2
+            fi
+        fi
+    fi
+    exit "$rc"
+}
+trap cleanup_on_exit EXIT
+
+active_source() {
+    local path="$1"
+    swapon --show=NAME --noheadings --raw | grep -Fxc "$path" || true
+}
+
+normalize_fstab() {
+    SWAP_PATH="$swap_path" LEGACY_SWAP_PATHS="$(printf '%s\n' "${legacy_swap_paths[@]}")" python3 - <<'PY'
+import os
+import tempfile
+
+path = "/etc/fstab"
+swap_path = os.environ["SWAP_PATH"]
+legacy_swap_paths = set(filter(None, os.environ.get("LEGACY_SWAP_PATHS", "").splitlines()))
+with open(path, encoding="utf-8") as handle:
+    original = handle.readlines()
+
+kept = []
+for line in original:
+    fields = line.split()
+    if fields and not line.lstrip().startswith("#") and (fields[0] == swap_path or fields[0] in legacy_swap_paths):
+        continue
+    kept.append(line)
+if kept and not kept[-1].endswith("\n"):
+    kept[-1] += "\n"
+kept.append(f"{swap_path} none swap sw 0 0\n")
+
+if kept != original:
+    directory = os.path.dirname(path)
+    fd, temporary = tempfile.mkstemp(prefix=".fstab.ai-service-platform.", dir=directory, text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.writelines(kept)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    print("changed=true")
+else:
+    print("changed=false")
+PY
+}
+
+allowed=("$swap_path" "${legacy_swap_paths[@]}")
+active_sources=()
+active_source_count=0
+unknown="$(swapon --show=NAME --noheadings --raw | while IFS= read -r source; do
+    [ -z "$source" ] && continue
+    resolved="$(readlink -f "$source")"
+    matched=false
+    for candidate in "${allowed[@]}"; do
+        [ "$resolved" != "$candidate" ] || matched=true
+    done
+    [ "$matched" = "true" ] || printf '%s\n' "$source"
+done)"
+[ -z "$unknown" ] || fail "unknown active swap source(s): $unknown"
+
+existing_files=0
+for candidate in "${allowed[@]}"; do
+    [ ! -e "$candidate" ] || existing_files="$((existing_files + 1))"
+done
+[ "$existing_files" -le 1 ] || fail "multiple managed/legacy swap files require manual review"
+
+while IFS= read -r source; do
+    if [ -n "$source" ]; then
+        active_sources+=("$(readlink -f "$source")")
+        active_source_count="$((active_source_count + 1))"
+    fi
+done < <(swapon --show=NAME --noheadings --raw)
+[ "$active_source_count" -le 1 ] || fail "multiple managed/legacy swap sources are active"
+
+if [ "$active_source_count" -eq 1 ]; then
+    original_path="${active_sources[0]}"
+elif [ -e "$swap_path" ]; then
+    original_path="$swap_path"
+else
+    for legacy_path in "${legacy_swap_paths[@]}"; do
+        if [ -e "$legacy_path" ]; then
+            [ -z "$original_path" ] || fail "multiple inactive managed/legacy swap files require manual review"
+            original_path="$legacy_path"
+        fi
+    done
+fi
+
+current_size=0
+[ -z "$original_path" ] || current_size="$(stat -c %s "$original_path")"
+is_active=0
+[ -z "$original_path" ] || is_active="$(active_source "$original_path")"
+[ -z "$original_path" ] || backup_path="${original_path}.ai-service-platform.backup"
+[ -z "$backup_path" ] || [ ! -e "$backup_path" ] || fail "stale swap backup requires manual review: $backup_path"
+
+if [ "$original_path" != "$swap_path" ] || [ "$current_size" -ne "$desired_bytes" ]; then
+    available_bytes="$(df --output=avail -B1 "$(dirname "$swap_path")" | tail -1 | tr -d ' ')"
+    required_bytes="$((desired_bytes + minimum_free_bytes))"
+    [ "$available_bytes" -ge "$required_bytes" ] || fail \
+        "insufficient free disk for safe swap replacement: available=$available_bytes required=$required_bytes"
+
+    if [ "$is_active" -eq 1 ]; then
+        swap_used_bytes="$(swapon --show=NAME,USED --bytes --noheadings --raw | awk -v path="$original_path" '$1 == path { print $2; found=1 } END { if (!found) print 0 }')"
+        memory_available_kb="$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)"
+        memory_available_bytes="$((memory_available_kb * 1024))"
+        required_memory_bytes="$((swap_used_bytes + memory_reserve_bytes))"
+        [ "$memory_available_bytes" -ge "$required_memory_bytes" ] || fail \
+            "insufficient available memory for swapoff: available=$memory_available_bytes required=$required_memory_bytes"
+    fi
+
+    rm -f "$temporary_path"
+    fallocate -l "$desired_bytes" "$temporary_path"
+    chmod 0600 "$temporary_path"
+    mkswap "$temporary_path" >/dev/null
+
+    if [ "$is_active" -eq 1 ]; then
+        old_was_active=true
+        if ! swapoff "$original_path"; then
+            fail "swapoff failed; existing swap remains active"
+        fi
+    fi
+
+    if [ -n "$original_path" ] && [ -e "$original_path" ]; then
+        mv "$original_path" "$backup_path"
+        rollback_pending=true
+    fi
+    mv "$temporary_path" "$swap_path"
+    new_installed=true
+    if ! swapon "$swap_path"; then
+        fail "failed to activate replacement swap; previous swap restored"
+    fi
+    rm -f "$backup_path"
+    rollback_pending=false
+    new_installed=false
+    changed=true
+elif [ "$is_active" -ne 1 ]; then
+    if [ "$(stat -c %a "$swap_path")" != "600" ]; then
+        chmod 0600 "$swap_path"
+        changed=true
+    fi
+    swapon "$swap_path"
+    changed=true
+fi
+
+if [ "$(stat -c %a "$swap_path")" != "600" ]; then
+    chmod 0600 "$swap_path"
+    changed=true
+fi
+fstab_result="$(normalize_fstab)"
+if grep -q 'changed=true' <<<"$fstab_result"; then
+    changed=true
+fi
+
+echo "changed=$changed"
+echo "swap_path=$swap_path size_bytes=$(stat -c %s "$swap_path")"

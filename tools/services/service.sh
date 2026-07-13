@@ -12,6 +12,7 @@ LIMIT=""
 POLICY_ROUTER_IMAGE_REF=""
 BUILD_POLICY_ROUTER_IMAGE="false"
 REINIT_STANDBY="false"
+PLATFORM_ROUTER_SOFTETHER_DEBUG="false"
 CHECK="false"
 CONFIRM_PURGE="false"
 EXPECTED_HEADER="current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
@@ -80,6 +81,8 @@ Options:
   --build-policy-router-image
                         vpn_cascade only: force rebuild instead of reusing a matching local image.
   --reinit-standby      postgres_runtime only: destructively reinitialize a target standby volume from primary.
+  --platform-router-softether-debug
+                        platform_router only: show SoftEther server configure task output for diagnostics.
   --check                Pass --check to ansible-playbook.
   --confirm-purge        Required for purge.
   -h, --help             Show help.
@@ -214,6 +217,7 @@ service_playbook() {
         postgres_runtime) echo "infra/ansible/postgres_runtime.yml" ;;
         softether_l3_vps) echo "infra/ansible/softether_l3_vps.yml" ;;
         platform_networks) echo "infra/ansible/platform_networks.yml" ;;
+        host_resources) echo "infra/ansible/host_resources.yml" ;;
         platform_router) echo "infra/ansible/platform_router.yml" ;;
         *) return 1 ;;
     esac
@@ -260,8 +264,14 @@ service_extra_vars() {
         platform_networks)
             printf '%s\n' "-e" "platform_networks_state=$state"
             ;;
+        host_resources)
+            printf '%s\n' "-e" "host_resources_state=$state"
+            ;;
         platform_router)
             printf '%s\n' "-e" "platform_router_state=$state" "-e" "platform_router_purge_data=$purge"
+            if [ "$PLATFORM_ROUTER_SOFTETHER_DEBUG" = "true" ]; then
+                printf '%s\n' "-e" "platform_router_softether_debug_no_log=false"
+            fi
             ;;
         *)
             return 1
@@ -286,14 +296,18 @@ if [ "$SERVICE" = "vpn" ]; then
     fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 fi
 case "$SERVICE" in
-    edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector|edge_banlist|postgres_runtime|softether_l3_vps|platform_networks|platform_router) ;;
-    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks, platform_router." ;;
+    edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector|edge_banlist|postgres_runtime|softether_l3_vps|platform_networks|host_resources|platform_router) ;;
+    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks, host_resources, platform_router." ;;
 esac
 case "$ACTION" in
     plan|apply|absent|purge|reseed) ;;
     *) usage; fail "Action must be one of: plan, apply, absent, purge, reseed" ;;
 esac
 shift 2
+
+if [ "$SERVICE" = "host_resources" ] && [ "$ACTION" != "plan" ] && [ "$ACTION" != "apply" ]; then
+    fail "host_resources v1 supports only plan and apply; absent/purge/reseed are intentionally disabled"
+fi
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -330,6 +344,10 @@ while [ "$#" -gt 0 ]; do
             REINIT_STANDBY="true"
             shift
             ;;
+        --platform-router-softether-debug)
+            PLATFORM_ROUTER_SOFTETHER_DEBUG="true"
+            shift
+            ;;
         --check)
             CHECK="true"
             shift
@@ -362,6 +380,9 @@ if [ "$REINIT_STANDBY" = "true" ] && [ "$ACTION" != "apply" ]; then
 fi
 if [ "$REINIT_STANDBY" = "true" ] && [ -z "$LIMIT" ]; then
     fail "--reinit-standby requires --limit for the intended standby alias"
+fi
+if [ "$PLATFORM_ROUTER_SOFTETHER_DEBUG" = "true" ] && [ "$SERVICE" != "platform_router" ]; then
+    fail "--platform-router-softether-debug is supported only for service platform_router"
 fi
 if [ "$BUILD_POLICY_ROUTER_IMAGE" = "true" ] && [ -n "$POLICY_ROUTER_IMAGE_REF" ]; then
     fail "--build-policy-router-image and --policy-router-image-ref are mutually exclusive"

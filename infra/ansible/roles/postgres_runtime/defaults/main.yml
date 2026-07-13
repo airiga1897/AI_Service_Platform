@@ -19,5 +19,15 @@ postgres_runtime_default_listen_addresses: "*"
 postgres_runtime_default_wal_keep_size: 512MB
 postgres_runtime_default_max_wal_senders: 5
 postgres_runtime_default_max_replication_slots: 5
+postgres_runtime_default_connect_timeout_seconds: 5
+postgres_runtime_default_keepalives_idle_seconds: 10
+postgres_runtime_default_keepalives_interval_seconds: 5
+postgres_runtime_default_keepalives_count: 3
+postgres_runtime_default_tcp_user_timeout_ms: 30000
+postgres_runtime_default_wal_receiver_timeout: 30s
 postgres_runtime_startup_retries: 90
 postgres_runtime_startup_delay: 2
+postgres_runtime_route_reconcile_script: /usr/local/sbin/ai-service-postgres-route-reconcile
+postgres_runtime_route_reconcile_service: ai-service-postgres-route-reconcile.service
+postgres_runtime_route_reconcile_timer: ai-service-postgres-route-reconcile.timer
+postgres_runtime_route_reconcile_interval: 10s

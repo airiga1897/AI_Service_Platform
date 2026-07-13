@@ -291,7 +291,7 @@ For PostgreSQL transport from future standby `vps4` to primary `vps8`, link id
 172.29.48.0/24  HAProxy 172.29.48.3 -> platform-router shared netns 172.29.48.2
 172.30.8.0/24   PostgreSQL standalone 172.30.8.10
 172.30.4.0/24   PostgreSQL standalone 172.30.4.10
-10.88.48.0/30   server 10.88.48.1, client 10.88.48.2
+10.88.48.0/24   server 10.88.48.8, clients 10.88.48.4 and 10.88.48.9
 ```
 
 P2P management is public only for aliases that run the server side. In the
@@ -300,13 +300,24 @@ first link, `vps8` runs `platform-router-softether-server` in the
 server management. `vps4` runs `platform-router-softether-client`; client
 management is local through SSH and `vpncmd /CLIENT`, not public SNI.
 
-For the PostgreSQL proof path, `platform-router` owns a narrow source-side
-SNAT rule only for `172.30.4.0/24 -> 172.30.8.10:5432`, rewritten to
-`10.88.48.2` before entering `vpn_l3vps0`. PostgreSQL on `vps8` observes the
-connection source as `172.30.8.2`.
+For the PostgreSQL proof path, source `platform-router` containers install a
+route to `172.30.8.10/32` through `vpn_l3vps0`, but they do not SNAT the
+traffic. PostgreSQL on `vps8` observes the connection source as `172.30.8.2`
+because primary-side delivery is handled by SoftEther SecureNAT.
 For future PostgreSQL replication, `vps8` pg_hba should allow the replication
 user from `172.30.8.2/32`; do not model this path as a PostgreSQL return route
-to `172.27.48.2` or `10.88.48.2`.
+to `172.27.48.2`, `10.88.48.4`, or `10.88.48.9`.
+
+Platform-managed SoftEther client accounts select the PostgreSQL overlay hub
+with explicit `/HUB`, while `/USERNAME` remains the plain hub user such as
+`p2p_pg_vps4` or `p2p_pg_vps9`. `vpncmd AccountCreate` requires `/HUB`; do not
+replace it with `hub\user` in the role-managed client account. PG overlay hubs
+must keep `NoEnum` enabled (`SetEnumDeny`) like the VPN ingress hubs.
+
+During hub rename cleanup, do not keep duplicate PG overlay hubs with the same
+client users longer than needed. First prove that `vps4` and `vps9` sessions are
+connected to the desired hub, then delete the retired hub explicitly. The normal
+`platform_router` role must not delete old hubs as part of routine convergence.
 
 Only empty managed experiment networks may be removed during cleanup. Do not
 use global Docker prune or broad network deletion.

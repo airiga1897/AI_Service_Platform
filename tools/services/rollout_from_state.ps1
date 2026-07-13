@@ -18,20 +18,21 @@ param(
     [int]$SecureBackupKeepLatest = 10,
     [string]$VpnIngressDomain = "mine-craft.su",
     [string[]]$ReseedVpnEdge = @(),
-    [ValidateSet("", "edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks", "platform_router")]
+    [ValidateSet("", "edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks", "host_resources", "platform_router")]
     [string]$OnlyService = "",
     [switch]$AutoAcceptHostKey = $true,
     [switch]$SkipSync,
     [switch]$SkipStandbySync,
     [switch]$SkipPostcheck,
     [switch]$SkipDryRun,
-    [switch]$SkipOperatorBackup
+    [switch]$SkipOperatorBackup,
+    [switch]$PlatformRouterSoftetherDebug
 )
 
 $ErrorActionPreference = "Stop"
 $ExpectedNodesHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
-$SupportedServices = @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks", "platform_router")
+$SupportedServices = @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks", "host_resources", "platform_router")
 $ReservedServices = @()
 $script:OperatorBackupCompleted = $false
 $script:BatchSteps = New-Object System.Collections.Generic.List[object]
@@ -1522,6 +1523,7 @@ function Add-ServiceBatchStep($Service, $Action, $Limit, [switch]$Check, [switch
         limit = $Limit
         check = [bool]$Check
         confirm_purge = [bool]$ConfirmPurge
+        platform_router_softether_debug = [bool]($PlatformRouterSoftetherDebug -and $Service -eq "platform_router")
         label = $Label
     }) | Out-Null
 }
@@ -1705,6 +1707,9 @@ if ($OnlyService) {
     }
     Write-Host "OnlyService: $OnlyService"
 }
+if ($PlatformRouterSoftetherDebug -and $OnlyService -and $OnlyService -ne "platform_router") {
+    Fail "-PlatformRouterSoftetherDebug is supported only for platform_router rollouts"
+}
 $edgeRouteRows = @($stateRows | Where-Object { $_.kind -eq "edge_route" })
 $edgeHaproxyAliases = @(Get-PresentServiceAliases $stateRows "edge_haproxy")
 $vpnEdgeAliases = @(Get-PresentServiceAliases $stateRows "vpn_edge")
@@ -1852,6 +1857,9 @@ foreach ($serviceRow in $orderedServiceRows) {
 
     if ($state -notin @("present", "absent", "purged")) {
         Fail "$service state must be one of: present, absent, purged"
+    }
+    if ($service -eq "host_resources" -and $state -ne "present") {
+        Fail "host_resources v1 requires state=present; absent/purged are intentionally disabled"
     }
 
     if ($ReservedServices -contains $service) {

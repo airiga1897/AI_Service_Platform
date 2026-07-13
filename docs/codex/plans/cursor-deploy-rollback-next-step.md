@@ -67,9 +67,9 @@ Implementation scope:
    - `ai-retail-dev` must support `preprod` on `VPS2`.
    - `aromaflow-work` production remains declared but not actually rolled out
      by the first implementation.
-   - `ai-retail-mvp` must be `frozen: true`.
-   - For `ai-retail-mvp`, add a strict `frozen_image_ref_pattern` for MVP
-     release refs, for example tags matching `ai-retail-mvp-v*`.
+   - `ai-retail-mvp` must use a release guard.
+   - Allow only versioned `ai-retail-mvp-v*` release images. The old schema
+     represents this policy through the legacy `frozen` fields.
    - Keep existing branch/source policy fields if present; do not erase useful
      migration context.
 
@@ -191,7 +191,7 @@ Implementation scope:
    - only `ai-retail-dev/preprod` is enabled for first real rollout;
    - deploy uses immutable `image_ref`;
    - rollback is re-deploy of previous image ref, not git checkout;
-   - `ai-retail-mvp` is frozen and guarded;
+   - `ai-retail-mvp` is release-guarded;
    - production deploy remains disabled until separate approval.
 
 7. Keep generated configs consistent.

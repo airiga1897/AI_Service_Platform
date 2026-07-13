@@ -7,6 +7,9 @@
 
 `vps1`, `vps2`, `vps3` - короткие operator aliases текущей схемы. Это не platform roles.
 
+Canonical placement rules are documented in [Service Placement
+Policy](PLACEMENT.md). Alias numbers never imply production or preproduction.
+
 ## nodes.csv
 
 Real файл хранится вне git:
@@ -57,44 +60,15 @@ An orchestration candidate may also run normal edge services. For example,
 ingress node when `state.csv` contains the matching `edge_haproxy`, `vpn_edge`,
 and `edge_route,vpn_ingress` rows.
 
-### Current Verified Role Map
+### Current Role Map
 
-As of 2026-06-27, standby is manual. No role in this map implies automatic
-failover, active-active routing, or automatic movement of service rows.
+Do not copy a node-to-role table into this document. It becomes stale as soon as
+an operator moves a service. Read `operator/state.csv` for the current map and
+the service-specific operator config for topology details.
 
-Provider placement is descriptive metadata, not an automation role:
-
-- `adminvps`: `vps1`, `vps2`, `vps4`, `vps5`, `vps7`.
-- `selectel`: `vps3`, `vps6`, `vps8`.
-
-Runtime roles are managed separately through `state.csv`:
-
-- `vps6` is the active orchestration node; `vps5` is its standby orchestration
-  candidate and also an active VPN ingress node.
-- `vps3` is the former cascade receiver and remains the primary candidate for
-  future RU egress policy work. `vps7` is the manual duplicate/standby
-  candidate for future L3 `vps3` HA work. Neither has active shared
-  `CascadeLab` links while the L2 freeze is active.
-- `vps2` is the active public/service edge target, including the current
-  `minecraft` route. `vps1` and `vps4` are manual duplicate/standby candidates
-  for `vps2`; both are active VPN ingress nodes.
-- `vps8` is the staged services-active node and `vps4` is the services-standby
-  node. PostgreSQL is first rolled out as two independent standalone runtimes on
-  those aliases to validate the role before P2P transport and standby
-  conversion.
-- Public `vpn_cascade` SNI/backends and local `vpn_cascade` runtime remain
-  absent. `softether_l3_vps` may be present
-  only as transport-only P2P; service reachability still belongs to the planned
-  `platform_router` layer.
-- Every active VPS alias from `vps1` through `vps8` has the full VPN ingress
-  stack in `state.csv`: `edge_haproxy`, `vpn_edge`, and
-  `edge_route,vpn_ingress`.
-- Every manual standby candidate must keep that VPN ingress stack healthy before
-  it is considered promotable.
-- Current verified cascade policy is no active shared `CascadeLab` links. The
-  shared SoftEther L2 cascade fabric is frozen because alternate receiver links
-  caused a likely broadcast storm. Treat `vps7` HA as future L3 policy routing
-  work, not L2 mesh expansion.
+Standby and candidate fields are manual readiness declarations. They do not
+imply automatic failover, active-active routing, or automatic movement of
+service rows. Provider and country are placement metadata, not automation roles.
 
 ## state.csv
 
@@ -114,22 +88,12 @@ kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state
 
 ```csv
 kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state
-platform_role,orchestration,orchestration,vps3,,,present
-platform_role,monitoring,monitoring,vps3,,,present
-platform_role,backup,backup,vps2,,,present
-service,edge_haproxy,edge_haproxy,vps1,,,present
-service,vpn_edge,vpn_edges,vps1+vps2+vps3,,,present
-edge_route,vpn_ingress,vpn_ingress,vps1,,,present
-edge_route,minecraft,minecraft_edge,vps1,,,absent
-service,aromaflow_frontend,frontend,vps1,,,present
-service,aromaflow_backend,backend,vps1,,,present
-service,ai_retail_frontend,frontend,vps2,,,absent
-service,ai_retail_backend,backend,vps2,,,absent
-service,vpn_cascade,vpn_cascades,,,,absent
-service,edge_candidate_collector,edge_candidate_collectors,vps1+vps2+vps3+vps4+vps5,,,present
+platform_role,orchestration,orchestration,<active_alias>,<candidate_alias>,,present
+service,example_runtime,example_runtimes,<active_alias>,<candidate_alias>,,present
+edge_route,example_site,example_site,<published_alias>,,,present
 ```
 
-`kind=platform_role` - ответственность узла: `orchestration`, `monitoring`, `backup`, `production`, `preprod`, `hot_standby`.
+`kind=platform_role` - ответственность узла, например `orchestration`, `monitoring` или `backup`. Product environment names are not encoded in VPS aliases.
 
 `kind=service` - устанавливаемый или останавливаемый компонент: `edge_haproxy`, `vpn_edge`, product frontend/backend services.
 

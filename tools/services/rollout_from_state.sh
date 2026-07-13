@@ -19,6 +19,7 @@ SKIP_STANDBY_SYNC="false"
 SKIP_POSTCHECK="false"
 SKIP_DRY_RUN="false"
 SKIP_OPERATOR_BACKUP="false"
+PLATFORM_ROUTER_SOFTETHER_DEBUG="false"
 RESEED_VPN_EDGE=""
 ONLY_SERVICE=""
 
@@ -46,6 +47,8 @@ Options:
   --reseed-vpn-edge ALIASES
                          Explicitly reseed SoftEther config for aliases.
   --only-service NAME    Roll out only one service: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, or edge_candidate_collector.
+  --platform-router-softether-debug
+                         platform_router only: show SoftEther server configure task output for diagnostics.
   --skip-sync             Skip sync/verify step.
   --skip-standby-sync     Skip automatic sync of orchestration candidates.
   --skip-postcheck        Skip service postcheck placeholders.
@@ -228,6 +231,9 @@ invoke_service_remote() {
     [ -n "$limit" ] && args+=("--limit" "$limit")
     [ "$check" = "true" ] && args+=("--check")
     [ "$confirm_purge" = "true" ] && args+=("--confirm-purge")
+    if [ "$PLATFORM_ROUTER_SOFTETHER_DEBUG" = "true" ] && [ "$service" = "platform_router" ]; then
+        args+=("--platform-router-softether-debug")
+    fi
     bash "$SERVICE_REMOTE_SCRIPT" "${args[@]}"
 }
 
@@ -430,6 +436,7 @@ while [ "$#" -gt 0 ]; do
         --auto-accept-host-key|--refresh-known-hosts) AUTO_ACCEPT_HOST_KEY="true"; shift ;;
         --reseed-vpn-edge) RESEED_VPN_EDGE="${2:-}"; shift 2 ;;
         --only-service) ONLY_SERVICE="${2:-}"; shift 2 ;;
+        --platform-router-softether-debug) PLATFORM_ROUTER_SOFTETHER_DEBUG="true"; shift ;;
         --skip-sync) SKIP_SYNC="true"; shift ;;
         --skip-standby-sync) SKIP_STANDBY_SYNC="true"; shift ;;
         --skip-postcheck) SKIP_POSTCHECK="true"; shift ;;
@@ -449,9 +456,12 @@ fi
 require_file "$SERVICE_REMOTE_SCRIPT" "--service-remote-script"
 
 case "$ONLY_SERVICE" in
-    ""|edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector) ;;
-    *) fail "--only-service must be one of: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector" ;;
+    ""|edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector|edge_banlist|postgres_runtime|softether_l3_vps|platform_networks|host_resources|platform_router) ;;
+    *) fail "--only-service must be one of: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks, host_resources, platform_router" ;;
 esac
+if [ "$PLATFORM_ROUTER_SOFTETHER_DEBUG" = "true" ] && [ -n "$ONLY_SERVICE" ] && [ "$ONLY_SERVICE" != "platform_router" ]; then
+    fail "--platform-router-softether-debug is supported only for platform_router rollouts"
+fi
 
 first_line="$(head -n 1 "$NODES_FILE" | tr -d '\r')"
 [ "$first_line" = "$EXPECTED_HEADER" ] || fail "nodes.csv header must be exactly: $EXPECTED_HEADER"
@@ -570,6 +580,9 @@ while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _
         present|absent|purged) ;;
         *) fail "$name state must be one of: present, absent, purged" ;;
     esac
+    if [ "$name" = "host_resources" ] && [ "$row_state" != "present" ]; then
+        fail "host_resources v1 requires state=present; absent/purged are intentionally disabled"
+    fi
     while IFS= read -r alias; do
         [ -n "$alias" ] || continue
         if [ "$name" = "vpn_edge" ] && [ "$row_state" = "present" ] && ! alias_in_list "$alias" "$vpn_ingress_aliases"; then
@@ -624,10 +637,11 @@ fi
 process_service_rows() {
     local desired_state="$1"
     local service_filter="$2"
-    while IFS=, read -r kind name _ansible_group active_aliases _candidate_aliases _old_aliases row_state extra || [ -n "${kind:-}" ]; do
+    while IFS=, read -r kind name _ansible_group active_aliases candidate_aliases _old_aliases row_state extra || [ -n "${kind:-}" ]; do
     kind="${kind//$'\r'/}"
     name="${name//$'\r'/}"
     active_aliases="${active_aliases//$'\r'/}"
+    candidate_aliases="${candidate_aliases//$'\r'/}"
     row_state="${row_state//$'\r'/}"
     extra="${extra//$'\r'/}"
     [ "$kind" = "service" ] || continue
@@ -648,7 +662,7 @@ process_service_rows() {
         *) fail "$name state must be one of: present, absent, purged" ;;
     esac
     case "$name" in
-        edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector) ;;
+        edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector|edge_banlist|postgres_runtime|softether_l3_vps|platform_networks|host_resources|platform_router) ;;
         *)
             echo "$name: not implemented yet; skipped"
             summary+=("$name: skipped not implemented")
@@ -665,7 +679,12 @@ process_service_rows() {
         active_aliases="$(order_vpn_cascade_aliases "$active_aliases")"
     fi
 
-    mapfile -t aliases < <(split_aliases_to_lines "$active_aliases")
+    target_aliases="$active_aliases"
+    if { [ "$name" = "postgres_runtime" ] || [ "$name" = "softether_l3_vps" ] || [ "$name" = "platform_networks" ] || [ "$name" = "platform_router" ]; } && [ -n "$candidate_aliases" ]; then
+        target_aliases="$(append_aliases_unique "$target_aliases" "$candidate_aliases")"
+    fi
+
+    mapfile -t aliases < <(split_aliases_to_lines "$target_aliases")
     if [ "${#aliases[@]}" -eq 0 ]; then
         if [ "$row_state" = "present" ]; then
             fail "$name has state=present but active_aliases is empty"

@@ -15,16 +15,22 @@ platform_router_image: ai-service-platform/platform-router:local
 platform_router_build_image: true
 platform_router_build_context: "{{ playbook_dir }}/../docker/policy-router"
 platform_router_remote_archive: ""
-platform_router_softether_client_image_repository: ai-service-platform/softether-vpnclient
-platform_router_softether_client_image: ai-service-platform/softether-vpnclient:local
-platform_router_softether_client_build_image: true
-platform_router_softether_client_build_context: "{{ playbook_dir }}/../docker/softether-vpnclient"
-platform_router_softether_client_remote_archive: ""
+platform_router_softether_runtime_image_repository: ai-service-platform/softether-runtime
+platform_router_softether_runtime_image: ai-service-platform/softether-runtime:local
+platform_router_softether_runtime_build_image: true
+platform_router_softether_runtime_build_context: "{{ playbook_dir }}/../docker/softether-vpnclient"
+platform_router_softether_runtime_remote_archive: ""
+platform_router_softether_client_image_repository: "{{ platform_router_softether_runtime_image_repository }}"
+platform_router_softether_client_image: "{{ platform_router_softether_runtime_image }}"
+platform_router_softether_client_build_image: "{{ platform_router_softether_runtime_build_image }}"
+platform_router_softether_client_build_context: "{{ platform_router_softether_runtime_build_context }}"
+platform_router_softether_client_remote_archive: "{{ platform_router_softether_runtime_remote_archive }}"
 platform_router_softether_client_container_name: platform-router-softether-client
 platform_router_softether_client_nic_name: l3vps0
 platform_router_softether_client_account_name: l3-vps-link
 platform_router_softether_client_vpncmd_timeout_seconds: 20
+platform_router_softether_debug_no_log: true
 platform_router_legacy_softether_l3_vps_client_container_name: softether-l3-vps-client
-platform_router_softether_server_image: softethervpn/vpnserver:stable
+platform_router_softether_server_image: "{{ platform_router_softether_client_image }}"
 platform_router_softether_server_container_name: platform-router-softether-server
 platform_router_legacy_softether_l3_vps_server_container_name: softether-l3-vps-server

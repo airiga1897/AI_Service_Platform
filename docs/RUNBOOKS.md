@@ -186,7 +186,12 @@ CLI читает `services.yml`, формирует URL по `healthcheck.path`,
 
 См. также [`DEPLOYMENT.md`](DEPLOYMENT.md) и [ADR-0006](adr/0006-deploy-from-immutable-image-refs.md).
 
-### Деплой `ai-retail-dev` в preprod (VPS2)
+### Legacy `ai-retail-dev` predeploy proof
+
+This procedure predates role-based product placement. Do not infer a target VPS
+from the environment name. Before re-enabling it, migrate the deploy workflow to
+resolve its target from operator state/config as defined in
+[`PLACEMENT.md`](PLACEMENT.md).
 
 1. Собрать и опубликовать образ в GHCR из `AI_E_Retail` (тег по коммит-SHA).
 2. Локально проверить preflight:
@@ -198,7 +203,7 @@ CLI читает `services.yml`, формирует URL по `healthcheck.path`,
    ```
 3. В GitHub: **Actions → Deploy** → `workflow_dispatch` с `instance=ai-retail-dev`, `environment=preprod`, `image_ref=<полный ref>`.
 4. Workflow прогонит `make check` и preflight; SSH predeploy-check выполнится только при настроенных secrets (`SSH_HOST`, `SSH_USER`, `SSH_KEY`) в Environment `ai-retail-dev-preprod`.
-5. На VPS2 заранее должен быть runtime env-файл `/opt/stacks/ai-retail-dev-preprod/.env.ai-retail.dev`.
+5. On the resolved target, the runtime env file must exist in the configured deploy directory.
 6. Текущий milestone проверяет `docker compose config`; реальный `pull/up` и healthcheck будут включены следующим отдельным шагом.
 
 Другие `instance`/`environment` в этом milestone **отклоняются** workflow'ом намеренно.
@@ -209,7 +214,7 @@ CLI читает `services.yml`, формирует URL по `healthcheck.path`,
 2. **Actions → Rollback** → `to_ref=<предыдущий ref>` (обязателен; пустой `to_ref` завершит workflow с ошибкой).
 3. Preflight проверит ref против `services.yml`; SSH-откат — re-deploy того же compose с предыдущим `IMAGE_REF`.
 
-`ai-retail-mvp` заморожен: preflight/deploy отклонят refs вне паттерна `ai-retail-mvp-v*`.
+`ai-retail-mvp` использует release guard: preflight/deploy отклонят refs вне паттерна `ai-retail-mvp-v*`. Текущий release — `ai-retail-mvp-v1`.
 
 ---
 
@@ -440,7 +445,7 @@ from future standby `vps4` to primary `vps8`, link id `48` is used:
 172.30.4.0/24   vps4 data: standalone Postgres 172.30.4.10
 172.31.8.0/24   vps8 app: future nginx/app/worker
 172.31.4.0/24   vps4 app: future nginx/app/worker
-10.88.48.0/30   SoftEther virtual VPN: server 10.88.48.1, client 10.88.48.2
+10.88.48.0/24   SoftEther virtual VPN: server 10.88.48.8, clients 10.88.48.4 and 10.88.48.9
 ```
 
 `l3-vps8.mine-craft.su:443` is the SoftEther P2P transport SNI.
@@ -459,13 +464,19 @@ link, `vps8` runs `platform-router-softether-server` in the `platform-router`
 network namespace. `vps4` runs `platform-router-softether-client`; client
 management remains local through SSH and `vpncmd /CLIENT`.
 
-The proven PostgreSQL service path uses a narrow source-side `platform_router`
-SNAT rule for `172.30.4.0/24 -> 172.30.8.10:5432`, rewritten to `10.88.48.2`
-before entering `vpn_l3vps0`. PostgreSQL on `vps8` observes `172.30.8.2`.
+The proven PostgreSQL service path does not use platform-router SNAT. Source
+routers route `172.30.8.10/32` through `vpn_l3vps0`, and primary-side
+SoftEther SecureNAT makes PostgreSQL on `vps8` observe `172.30.8.2`.
 `postgres_runtime.replication_hba_cidrs_by_alias.vps8` therefore allows the
-future replication user from `172.30.8.2/32` while the runtime remains in
-`standalone` mode. The old return-route model for `172.27.48.2` is no longer
-the desired service-path intent.
+replication user from `172.30.8.2/32`. The old return-route model for
+`172.27.48.2`, `10.88.48.4`, or `10.88.48.9` is no longer the desired
+service-path intent.
+
+When renaming the PostgreSQL overlay hub, keep `vpncmd AccountCreate` on the
+explicit `/HUB` plus plain `/USERNAME` model. If the old hub still contains the
+same client users, first roll out and verify sessions on the new hub, then
+delete the retired hub as a separate cleanup. Do not make normal
+`platform_router` convergence delete old hubs automatically.
 
 The transition from standalone `vps4` to standby is intentionally destructive
 and must be explicit. A normal rollout must fail if it sees initialized primary
@@ -820,11 +831,28 @@ public edge route from `vps2`; edge duties still move only through explicit
 - Восстановление БД из бэкапа (после стабилизации `backup_*` ролей).
 - Восстановление SoftEther VPN из тома `softether_data` и резервных
   TLS-сертификатов (см. [`SOFTETHER_VPN.md`](SOFTETHER_VPN.md)).
-- Failover VPS1 → VPS2 с использованием `failover.sh` /
-  `failback.sh` из роли `backup_server`.
+- Role-based application failover after the legacy positional
+  `backup_server` scripts are replaced. Do not run the old `failover.sh` /
+  `failback.sh` as a current placement procedure.
 - Продление и валидация TLS-сертификатов (Nginx + Certbot, копия для
   SoftEther).
 - Инспекция HAProxy/Nginx маршрутизации (после внедрения
   `tools/render-edge`).
 - Инспекция SoftEther: маршрутизация, management-доступ,
   логи (`5555/tcp` allowlist, `softether_logs`).
+# Host Swap Policy
+
+Emergency swap is managed by the `host_resources` service from
+`operator/host_resources/config.yml`. The service owns only `/swapfile` and
+`vm.swappiness`; it does not tune PostgreSQL or Redis memory limits.
+
+Apply one node at a time:
+
+```powershell
+.\tools\services\service_remote.ps1 host_resources apply -Limit vps3
+```
+
+The role refuses unknown active swap sources, insufficient disk/memory
+headroom, and destructive `absent`/`purge` actions. After apply, verify
+`swapon --show`, `/etc/fstab`, `sysctl vm.swappiness`, and perform the first
+reboot persistence rehearsal on the `vps3` canary before continuing.

@@ -160,6 +160,54 @@
             fail(f"postgres_runtime service route for {alias} requires destination and via")
         service_routes.append({"destination": destination, "via": via})
 
+    standby_connection = config.get("standby_connection") or {}
+    if not isinstance(standby_connection, dict):
+        fail("postgres_runtime.standby_connection must be a map")
+
+    def positive_int(name, default, minimum=1, maximum=86400000):
+        value = standby_connection.get(name, default)
+        if isinstance(value, bool) or (
+            not isinstance(value, int)
+            and not (isinstance(value, str) and value.isdigit())
+        ):
+            fail(f"postgres_runtime.standby_connection.{name} must be an integer")
+        value = int(value)
+        if value < minimum or value > maximum:
+            fail(
+                f"postgres_runtime.standby_connection.{name} must be between "
+                f"{minimum} and {maximum}"
+            )
+        return value
+
+    wal_receiver_timeout = str(
+        standby_connection.get("wal_receiver_timeout")
+        or os.environ["DEFAULT_WAL_RECEIVER_TIMEOUT"]
+    ).strip()
+    if not re.fullmatch(r"[1-9][0-9]*(?:ms|s|min|h|d)", wal_receiver_timeout):
+        fail(
+            "postgres_runtime.standby_connection.wal_receiver_timeout must be "
+            "a positive duration with ms|s|min|h|d suffix"
+        )
+
+    standby_connection_model = {
+        "connect_timeout_seconds": positive_int(
+            "connect_timeout_seconds", os.environ["DEFAULT_CONNECT_TIMEOUT_SECONDS"], 2, 300
+        ),
+        "keepalives_idle_seconds": positive_int(
+            "keepalives_idle_seconds", os.environ["DEFAULT_KEEPALIVES_IDLE_SECONDS"], 1, 3600
+        ),
+        "keepalives_interval_seconds": positive_int(
+            "keepalives_interval_seconds", os.environ["DEFAULT_KEEPALIVES_INTERVAL_SECONDS"], 1, 300
+        ),
+        "keepalives_count": positive_int(
+            "keepalives_count", os.environ["DEFAULT_KEEPALIVES_COUNT"], 1, 100
+        ),
+        "tcp_user_timeout_ms": positive_int(
+            "tcp_user_timeout_ms", os.environ["DEFAULT_TCP_USER_TIMEOUT_MS"], 1000, 3600000
+        ),
+        "wal_receiver_timeout": wal_receiver_timeout,
+    }
+
     model = {
         "replication_mode": replication_mode,
         "role": node_role,
@@ -185,6 +233,7 @@
         "replication_hba_cidrs": replication_hba_cidrs,
         "allowed_app_cidrs": config.get("allowed_app_cidrs") or [],
         "service_routes": service_routes,
+        "standby_connection": standby_connection_model,
         "port": port,
         "bind_host": config.get("bind_host") or "127.0.0.1",
         "listen_addresses": config.get("listen_addresses") or os.environ["DEFAULT_LISTEN_ADDRESSES"],
@@ -210,6 +259,12 @@
     DEFAULT_WAL_KEEP_SIZE: "{{ postgres_runtime_default_wal_keep_size }}"
     DEFAULT_MAX_WAL_SENDERS: "{{ postgres_runtime_default_max_wal_senders }}"
     DEFAULT_MAX_REPLICATION_SLOTS: "{{ postgres_runtime_default_max_replication_slots }}"
+    DEFAULT_CONNECT_TIMEOUT_SECONDS: "{{ postgres_runtime_default_connect_timeout_seconds }}"
+    DEFAULT_KEEPALIVES_IDLE_SECONDS: "{{ postgres_runtime_default_keepalives_idle_seconds }}"
+    DEFAULT_KEEPALIVES_INTERVAL_SECONDS: "{{ postgres_runtime_default_keepalives_interval_seconds }}"
+    DEFAULT_KEEPALIVES_COUNT: "{{ postgres_runtime_default_keepalives_count }}"
+    DEFAULT_TCP_USER_TIMEOUT_MS: "{{ postgres_runtime_default_tcp_user_timeout_ms }}"
+    DEFAULT_WAL_RECEIVER_TIMEOUT: "{{ postgres_runtime_default_wal_receiver_timeout }}"
   delegate_to: localhost
   become: false
   check_mode: false
@@ -288,15 +343,93 @@
   register: postgres_runtime_compose_stat
   when: postgres_runtime_state == 'absent'
 
+- name: Resolve postgres_runtime route reconciler intent
+  ansible.builtin.set_fact:
+    postgres_runtime_route_reconcile_enabled: >-
+      {{ postgres_runtime_state == 'present'
+         and ((((postgres_runtime_model | default({})).service_routes | default([])) | length) > 0) }}
+
+- name: Check installed postgres_runtime route reconciler units
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "/etc/systemd/system/{{ postgres_runtime_route_reconcile_service }}"
+    - "/etc/systemd/system/{{ postgres_runtime_route_reconcile_timer }}"
+  register: postgres_runtime_route_reconcile_unit_stats
+
+- name: Stop disabled postgres_runtime route reconciler timer
+  ansible.builtin.systemd:
+    name: "{{ postgres_runtime_route_reconcile_timer }}"
+    state: stopped
+    enabled: false
+  when:
+    - not postgres_runtime_route_reconcile_enabled
+    - postgres_runtime_route_reconcile_unit_stats.results[1].stat.exists
+    - not ansible_check_mode
+
+- name: Remove disabled postgres_runtime route reconciler
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ postgres_runtime_route_reconcile_script }}"
+    - "/etc/systemd/system/{{ postgres_runtime_route_reconcile_service }}"
+    - "/etc/systemd/system/{{ postgres_runtime_route_reconcile_timer }}"
+  register: postgres_runtime_route_reconcile_remove
+  when: not postgres_runtime_route_reconcile_enabled
+
+- name: Reload systemd after postgres_runtime route reconciler removal
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when:
+    - postgres_runtime_route_reconcile_remove.changed | default(false)
+    - not ansible_check_mode
+
 - name: Ensure postgres_runtime directories
   ansible.builtin.file:
     path: "{{ item.path }}"
     state: directory
     mode: "{{ item.mode }}"
   loop:
+    - { path: "/usr/local/sbin", mode: "0755" }
     - { path: "{{ postgres_runtime_root_dir }}", mode: "0755" }
     - { path: "{{ postgres_runtime_config_dir }}", mode: "0755" }
   when: postgres_runtime_state == 'present'
+
+- name: Render postgres_runtime route reconciler script
+  ansible.builtin.template:
+    src: postgres-route-reconcile.sh.j2
+    dest: "{{ postgres_runtime_route_reconcile_script }}"
+    mode: "0755"
+  register: postgres_runtime_route_reconcile_script_template
+  when: postgres_runtime_route_reconcile_enabled
+
+- name: Render postgres_runtime route reconciler service
+  ansible.builtin.template:
+    src: postgres-route-reconcile.service.j2
+    dest: "/etc/systemd/system/{{ postgres_runtime_route_reconcile_service }}"
+    mode: "0644"
+  register: postgres_runtime_route_reconcile_service_template
+  when: postgres_runtime_route_reconcile_enabled
+
+- name: Render postgres_runtime route reconciler timer
+  ansible.builtin.template:
+    src: postgres-route-reconcile.timer.j2
+    dest: "/etc/systemd/system/{{ postgres_runtime_route_reconcile_timer }}"
+    mode: "0644"
+  register: postgres_runtime_route_reconcile_timer_template
+  when: postgres_runtime_route_reconcile_enabled
+
+- name: Reload systemd for postgres_runtime route reconciler
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when:
+    - postgres_runtime_route_reconcile_enabled
+    - >-
+      (postgres_runtime_route_reconcile_script_template.changed | default(false))
+      or (postgres_runtime_route_reconcile_service_template.changed | default(false))
+      or (postgres_runtime_route_reconcile_timer_template.changed | default(false))
+    - not ansible_check_mode
 
 - name: Render postgres_runtime environment
   ansible.builtin.template:
@@ -347,6 +480,15 @@
     - postgres_runtime_state == 'present'
     - not ansible_check_mode
 
+- name: Enable postgres_runtime route reconciler timer
+  ansible.builtin.systemd:
+    name: "{{ postgres_runtime_route_reconcile_timer }}"
+    state: started
+    enabled: true
+  when:
+    - postgres_runtime_route_reconcile_enabled
+    - not ansible_check_mode
+
 - name: Verify Docker Compose plugin is available for postgres_runtime
   ansible.builtin.command:
     cmd: docker compose version
@@ -390,7 +532,7 @@
 
 - name: Check postgres_runtime standby signal in existing data volume
   ansible.builtin.command:
-    cmd: docker run --rm -v "{{ postgres_runtime_model.volume_name }}:/var/lib/postgresql/data" "{{ postgres_runtime_model.image }}" sh -c "test -s /var/lib/postgresql/data/standby.signal"
+    cmd: docker run --rm -v "{{ postgres_runtime_model.volume_name }}:/var/lib/postgresql/data" "{{ postgres_runtime_model.image }}" sh -c "test -f /var/lib/postgresql/data/standby.signal"
   register: postgres_runtime_standby_signal_check
   changed_when: false
   failed_when: false
@@ -591,10 +733,10 @@
     dest: "{{ postgres_runtime_volume_mountpoint.stdout | trim }}/postgresql.auto.conf"
     mode: "0644"
   no_log: true
+  register: postgres_runtime_standby_conninfo_template
   when:
     - postgres_runtime_state == 'present'
     - postgres_runtime_model.role == 'standby'
-    - not (postgres_runtime_data_initialized | default(false))
     - not ansible_check_mode
 
 - name: Ensure standby signal file exists
@@ -615,7 +757,6 @@
   when:
     - postgres_runtime_state == 'present'
     - postgres_runtime_model.role == 'standby'
-    - not (postgres_runtime_data_initialized | default(false))
     - not ansible_check_mode
 
 - name: Start postgres_runtime container
@@ -644,33 +785,16 @@
       or (postgres_runtime_conf_template.changed | default(false))
       or (postgres_runtime_hba_template.changed | default(false))
       or (postgres_runtime_compose_template.changed | default(false))
+      or (postgres_runtime_standby_conninfo_template.changed | default(false))
 
 - name: Apply postgres_runtime service return routes
-  ansible.builtin.shell: |
-    set -euo pipefail
-    container="{{ postgres_runtime_model.container_name }}"
-    routes_json='{{ postgres_runtime_model.service_routes | to_json }}'
-    pid="$(docker inspect -f {% raw %}'{{ .State.Pid }}'{% endraw %} "$container")"
-    if [ -z "$pid" ] || [ "$pid" = "0" ]; then
-      echo "$container is not running" >&2
-      exit 1
-    fi
-    command -v nsenter >/dev/null
-    command -v ip >/dev/null
-    python3 - "$routes_json" <<'PY' | while IFS='|' read -r destination via; do
-    import json
-    import sys
-    for item in json.loads(sys.argv[1]):
-        print(f"{item['destination']}|{item['via']}")
-    PY
-      nsenter -t "$pid" -n ip route replace "$destination" via "$via"
-    done
-  args:
-    executable: /bin/bash
+  ansible.builtin.systemd:
+    name: "{{ postgres_runtime_route_reconcile_service }}"
+    state: started
+  register: postgres_runtime_route_reconcile_apply
   changed_when: false
   when:
-    - postgres_runtime_state == 'present'
-    - (postgres_runtime_model.service_routes | length) > 0
+    - postgres_runtime_route_reconcile_enabled
     - not ansible_check_mode
 
 - name: Wait for postgres_runtime readiness
@@ -743,7 +867,10 @@
     cmd: docker exec -e PGPASSWORD="{{ postgres_runtime_secret_map.POSTGRES_SUPERUSER_PASSWORD }}" "{{ postgres_runtime_model.container_name }}" psql -U postgres -d postgres -tAc "SELECT count(*) FROM pg_stat_wal_receiver WHERE status = 'streaming';"
   register: postgres_runtime_wal_receiver
   changed_when: false
-  failed_when: (postgres_runtime_wal_receiver.stdout | trim | int) < 1
+  failed_when: false
+  until: (postgres_runtime_wal_receiver.stdout | trim | int) >= 1
+  retries: 12
+  delay: 5
   no_log: true
   when:
     - postgres_runtime_state == 'present'

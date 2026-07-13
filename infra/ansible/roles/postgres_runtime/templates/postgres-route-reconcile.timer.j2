@@ -1,0 +1,11 @@
+[Unit]
+Description=Reconcile AI Service PostgreSQL container routes periodically
+
+[Timer]
+OnActiveSec=5s
+OnUnitActiveSec={{ postgres_runtime_route_reconcile_interval }}
+AccuracySec=1s
+Unit={{ postgres_runtime_route_reconcile_service }}
+
+[Install]
+WantedBy=timers.target

@@ -6,7 +6,7 @@
 Видение, которое нужно явно описать в документации:
 
 - В этом репозитории планируется размещать **4 рантайм-инстанса** (уже отражены в `services.yml`):
-  - `ai-retail-mvp` — замороженная MVP-версия `airiga1897/AI_E_Retail`.
+  - `ai-retail-mvp` — release-guarded MVP runtime `airiga1897/AI_E_Retail`.
   - `ai-retail-dev` — зеркальная копия для дальнейшей разработки `airiga1897/AI_E_Retail` (на старте идентична MVP, далее расходится).
   - `aromaflow-work` — рабочий сайт `airiga1897/AromaFlowAI`.
   - `aromaflow-demo` — демо-версия того же сайта (с `setup_demo_content`).
@@ -18,7 +18,7 @@
 - Заведён мета-ADR `0001-record-architecture-decisions.md` («мы ведём ADR в этом каталоге, формат MADR»).
 - Заведены ADR, отражающие уже принятые решения (формулировки опираются на `services.yml` и существующие doc-файлы):
   - `0002-infra-only-repository.md` — этот репозиторий хранит только оркестрацию; продуктовый код в продуктовых репозиториях.
-  - `0003-four-runtime-instances.md` — два инстанса AromaFlowAI (`work`, `demo`) и два инстанса AI_E_Retail (`mvp`, `dev`); MVP заморожен, dev развивается.
+  - `0003-four-runtime-instances.md` — два инстанса AromaFlowAI (`work`, `demo`) и два инстанса AI_E_Retail (`mvp`, `dev`); MVP использует versioned release images, dev развивается независимо.
   - `0004-extensible-service-catalog.md` — `services.yml` рассчитан на расширение новыми сайтами и Telegram-ботами по шаблонам из `future_service_template`.
   - `0005-edge-haproxy-nginx-softether.md` — единый edge: HAProxy + per-site Nginx + SoftEther как обязательный платформенный компонент.
   - `0006-deploy-from-immutable-image-refs.md` — деплой только из неизменяемых docker image refs; `bootstrap_ref` — временная мера.

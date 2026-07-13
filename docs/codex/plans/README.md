@@ -1,5 +1,10 @@
 # Codex Plans
 
+> Numbered plans describe completed or historical milestones and are not a
+> placement source of truth. Fixed positional environment mappings are retired.
+> Use [`../../PLACEMENT.md`](../../PLACEMENT.md) and current operator
+> state/config.
+
 Эта папка хранит operational order и будущие планы. Numbered-файлы описывают основной порядок внедрения. `future-*` и prompt/archive документы не являются текущим порядком выполнения.
 
 ## Основной Порядок
@@ -44,6 +49,8 @@ these paths and installs log rotation on every current and future VPS. See
 
 ## Будущие Материалы
 
+- [Minimum VPS resource expansion](minimum-vps-resource-expansion.md) - approved pools, minimum profiles, safe resize order, and acceptance checks before `site_runtime`.
+- [Manual site runtime rollout before GitHub CD](manual-site-runtime-rollout-before-github-cd.md) - operator-first rollout contract, durable deployment journal, rehearsal gates, and the criteria for enabling GitHub CD.
 - [Future Edge HAProxy security layers](future-edge-haproxy-security-layers.md) - GeoIP, scanner autoban, WAF-like rules и ACME bypass после стабильного VPN/TCP edge.
 - [Future VPS transport](future-vps-transport-softether-s2s-and-ssh-tunnel.md) - SoftEther site-to-site/cascade и SSH tunnel fallback.
 - [Future SD-WAN-like egress controller](future-sd-wan-like-egress-controller.md) - direct/cascade path selection for approved targets with health checks and safe route reconciliation.

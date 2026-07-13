@@ -20,7 +20,7 @@ flowchart LR
     V4_PG["ai-service-postgres<br/>172.30.4.10 data"]
     V4_APP["future app/nginx/worker<br/>172.31.4.x app"]
 
-    V4_PR["platform-router<br/>172.30.4.2 data<br/>172.31.4.2 app<br/>vpn_l3vps0: 10.88.48.2"]
+    V4_PR["platform-router<br/>172.30.4.2 data<br/>172.31.4.2 app<br/>vpn_l3vps0: 10.88.48.4"]
     V4_P2P["platform-router-softether-client<br/>sidecar<br/>network_mode: service:platform-router"]
   end
 
@@ -54,11 +54,11 @@ flowchart LR
 
   V4_P2P -. "creates vpn_l3vps0 in shared netns" .-> V4_PR
   V8_P2P -. "runs SoftEther server in shared netns" .-> V8_PR
-  V4_PR <-->|"SoftEther VPN<br/>10.88.48.2 <-> 10.88.48.1"| V8_PR
+  V4_PR <-->|"SoftEther VPN<br/>10.88.48.4 <-> 10.88.48.8"| V8_PR
 
   V4_PG -->|"future replication path"| V4_PR
   V4_APP --> V4_PR
-  V4_PR -->|"SNAT 172.30.4.0/24 -> 10.88.48.2<br/>172.30.8.10/32 via 10.88.48.1 dev vpn_l3vps0"| V8_PR
+  V4_PR -->|"172.30.8.10/32 via 10.88.48.8 dev vpn_l3vps0<br/>no platform-router SNAT"| V8_PR
   V8_PR -->|"5432"| V8_PG
   V8_PR --> V8_APP
 ```
@@ -78,11 +78,19 @@ flowchart LR
 - On the target side, the L3 server runs as `platform-router-softether-server`
   with `network_mode: service:platform-router`. Public L3 transport and
   management backend IPs are owned by `platform-router`.
-- `platform-router` v1 uses a narrow source-side service SNAT only for the
-  first PostgreSQL policy: `172.30.4.0/24 -> 172.30.8.10:5432` is rewritten to
-  `10.88.48.2` before entering `vpn_l3vps0`. There is no broad MASQUERADE.
-- The expected SoftEther client IPv4 identity is `10.88.48.2`. The proven
-  PostgreSQL observed source is `172.30.8.2`.
+- The PostgreSQL overlay does not use platform-router SNAT. Source routers only
+  install the route to `172.30.8.10/32` through `vpn_l3vps0`.
+- SoftEther IP tables may show both VPN endpoint identities (`10.88.48.4`,
+  `10.88.48.9`) and real PostgreSQL data addresses (`172.30.4.10`,
+  `172.30.9.10`). PostgreSQL on `vps8` observes `172.30.8.2` because the
+  primary-side delivery is handled by SoftEther SecureNAT.
+- The primary-side SoftEther SecureNAT identity is `10.88.48.8`; client
+  endpoint identities are aligned with source aliases (`vps4 = 10.88.48.4`,
+  `vps9 = 10.88.48.9`).
+- Role-managed SoftEther client accounts select the hub with `/HUB`; the
+  username stays plain (`p2p_pg_vps4`, `p2p_pg_vps9`). `vpncmd AccountCreate`
+  requires `/HUB`, so this role does not replace it with `hub\user`.
+- PG overlay hubs should have `NoEnum` enabled (`SetEnumDeny`).
 - `postgres_runtime` prepares `vps8` pg_hba for future replication from
   `172.30.8.2/32`; this sidecar model does not need a PostgreSQL return route
   for `172.27.48.2`.
@@ -94,5 +102,5 @@ platform service -> platform_router -> L3/P2P transport -> platform_router -> pl
 
 - Public L3 VPS management is exposed only on aliases running an L3 VPS server.
   For the first link, that is `l3-vps8.mine-craft.su:5555`.
-- The first `platform_router` policy is intentionally narrow:
-  `vps4 -> vps8 172.30.8.10:5432`.
+- The `platform_router` PostgreSQL policies are intentionally narrow:
+  `vps4/vps9 -> vps8 172.30.8.10:5432`.

@@ -103,8 +103,8 @@ standalone-валидатор, который придётся выкинуть.
    ```yaml
    deploy:
      allowed_image_ref_pattern: "^ghcr\\.io/airiga1897/aromaflowai:[0-9a-f]{40}$"
-     frozen: false                       # true только для ai-retail-mvp
-     frozen_image_ref_pattern: null      # для ai-retail-mvp: "^...:ai-retail-mvp-v.*$"
+     frozen: false                       # legacy field encoding release policy
+     frozen_image_ref_pattern: null      # legacy versioned-image pattern field
      environments:                       # уже есть, дополнить:
        preprod:
          vps: vps2
@@ -115,9 +115,9 @@ standalone-валидатор, который придётся выкинуть.
          compose_file: infra/stacks/<instance>/docker-compose.<instance>.yml
          deploy_state_tag_prefix: "deploy/<instance>/prod/"
    ```
-2. Для `ai-retail-mvp` выставить `frozen: true` и заполнить
-   `frozen_image_ref_pattern` явно — это машиночитаемая фиксация
-   решения из ADR-0003.
+2. Для `ai-retail-mvp` включить release guard и разрешить только versioned
+   images `ai-retail-mvp-v*`. В старом schema contract политика кодируется
+   полями `frozen` и `frozen_image_ref_pattern`.
 3. Перерендерить compose'ы (новых полей в шаблонах быть не должно —
    `deploy` потребляется только пайплайном, не compose'ом). `make
    render-check` должен остаться зелёным без изменений в
@@ -166,8 +166,8 @@ standalone-валидатор, который придётся выкинуть.
 **Критерии готовности:**
 - Все новые проверки покрыты unit-тестами.
 - `make check` зелёный.
-- Попытка убрать `frozen: true` у `ai-retail-mvp` или подменить
-  `frozen_image_ref_pattern` на «всё подряд» проваливает валидатор.
+- Попытка отключить release guard у `ai-retail-mvp` или разрешить произвольные
+  image refs проваливает валидатор.
 
 **Файлы:**
 - `tools/validate-services-yml/validate_services_yml.py`
@@ -304,7 +304,7 @@ jobs:
    `projects.*.source` (закрытие техдолга из ADR-0006).
 2. Прогнать `deploy.yml` на каждом из оставшихся инстансов
    (`aromaflow-demo`, `aromaflow-work`, `ai-retail-mvp` — последний
-   с реальным `ai-retail-mvp-v*` тегом для проверки frozen-guard'а).
+   с реальным `ai-retail-mvp-v*` тегом для проверки release guard).
 3. Обновить runbook «добавление нового рантайм-инстанса» —
    добавить шаг «заполнить блок `deploy` в `services.yml`».
 
