@@ -59,6 +59,7 @@ these paths and installs log rotation on every current and future VPS. See
 - [Future operator state node retirement tool](future-operator-state-node-retirement-tool.md) - безопасное удаление VPS из service placement, cascade topology, inventory inputs и operator secrets.
 - [Future management control plane and knowledge retrieval](future-management-control-plane-and-knowledge-retrieval.md) - web control plane и AI semantic knowledge layer.
 - [Future data services and platform auth](future-data-services-and-platform-auth.md) - PostgreSQL, MariaDB reserved и platform auth.
+- [Controlled pgvector runtime migration](pgvector-runtime-migration.md) - standby-first PostgreSQL image migration required by AI_E_Retail.
 
 ## Вспомогательные Материалы
 

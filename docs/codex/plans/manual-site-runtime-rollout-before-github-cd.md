@@ -10,6 +10,11 @@
 Первым runtime будет `AI_E_Retail MVP`, но contract и tooling сразу должны быть
 generic для AI_E_Retail, AromaFlow и TravellTickets.
 
+AI_E_Retail rollout is blocked until the staged
+[pgvector runtime migration](pgvector-runtime-migration.md) is complete on
+`vps4`, `vps9`, and `vps8`. The product database and `vector` extension are
+created only after all three PostgreSQL nodes use the same pinned image.
+
 ## Runtime And Tooling Contract
 
 - Добавить generic `site_runtime`.

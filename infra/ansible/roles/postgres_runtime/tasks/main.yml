@@ -208,6 +208,53 @@
         "wal_receiver_timeout": wal_receiver_timeout,
     }
 
+    image = str(config.get("image") or os.environ["DEFAULT_IMAGE"]).strip()
+    image_contract = config.get("image_contract") or {}
+    if not isinstance(image_contract, dict):
+        fail("postgres_runtime.image_contract must be a map")
+    image_overrides = config.get("image_overrides") or {}
+    if not isinstance(image_overrides, dict):
+        fail("postgres_runtime.image_overrides must be a map of alias to image contract")
+    for override_alias, override in image_overrides.items():
+        if override_alias not in nodes:
+            fail(f"postgres_runtime.image_overrides references unknown alias: {override_alias}")
+        if not isinstance(override, dict):
+            fail(f"postgres_runtime.image_overrides.{override_alias} must be a map")
+    image_override = image_overrides.get(alias) or {}
+    if image_override:
+        image = str(image_override.get("image") or "").strip()
+        if not image:
+            fail(f"postgres_runtime.image_overrides.{alias}.image must not be empty")
+
+    expected_postgres_version = str(
+        image_override.get("expected_postgres_version")
+        or image_contract.get("expected_postgres_version")
+        or ""
+    ).strip()
+    if expected_postgres_version and not re.fullmatch(r"[0-9]+\.[0-9]+", expected_postgres_version):
+        fail(
+            "postgres_runtime effective image contract expected_postgres_version "
+            "must use major.minor format"
+        )
+    required_extensions = (
+        image_override.get("required_extensions")
+        if "required_extensions" in image_override
+        else image_contract.get("required_extensions")
+    ) or []
+    if not isinstance(required_extensions, list):
+        fail("postgres_runtime effective image contract required_extensions must be a list")
+    normalized_extensions = []
+    for extension in required_extensions:
+        extension = str(extension).strip()
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", extension):
+            fail(f"invalid PostgreSQL extension name in image contract: {extension}")
+        if extension not in normalized_extensions:
+            normalized_extensions.append(extension)
+    if (image_contract or image_override) and not re.fullmatch(
+        r"[^\s@]+@sha256:[0-9a-f]{64}", image
+    ):
+        fail("postgres_runtime contracted image must be pinned by sha256 digest")
+
     model = {
         "replication_mode": replication_mode,
         "role": node_role,
@@ -221,7 +268,11 @@
         "network_role": network_role,
         "docker_network_name": docker_network_name,
         "container_ipv4": container_ipv4,
-        "image": config.get("image") or os.environ["DEFAULT_IMAGE"],
+        "image": image,
+        "image_contract": {
+            "expected_postgres_version": expected_postgres_version,
+            "required_extensions": normalized_extensions,
+        },
         "container_name": config.get("container_name") or os.environ["DEFAULT_CONTAINER_NAME"],
         "volume_name": config.get("volume_name") or os.environ["DEFAULT_DATA_VOLUME"],
         "database": config.get("database") or "ai_service_platform",
@@ -495,6 +546,41 @@
   changed_when: false
   when:
     - postgres_runtime_state == 'present'
+    - not ansible_check_mode
+
+- name: Preflight postgres_runtime image contract
+  ansible.builtin.shell: |
+    set -euo pipefail
+    actual_version="$(
+      docker run --rm --entrypoint postgres "{{ postgres_runtime_model.image }}" --version \
+        | sed -E 's/^postgres \(PostgreSQL\) ([0-9]+\.[0-9]+).*/\1/'
+    )"
+    if [ "$actual_version" != "$EXPECTED_POSTGRES_VERSION" ]; then
+      echo "postgres image version mismatch: expected $EXPECTED_POSTGRES_VERSION, got $actual_version" >&2
+      exit 1
+    fi
+    docker run --rm \
+      --entrypoint sh \
+      -e REQUIRED_EXTENSIONS="$REQUIRED_EXTENSIONS" \
+      "{{ postgres_runtime_model.image }}" \
+      -ceu '
+        extension_dir="$(pg_config --sharedir)/extension"
+        for extension in $REQUIRED_EXTENSIONS; do
+          if [ ! -f "$extension_dir/$extension.control" ]; then
+            echo "required PostgreSQL extension is missing from image: $extension" >&2
+            exit 1
+          fi
+        done
+      '
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_POSTGRES_VERSION: "{{ postgres_runtime_model.image_contract.expected_postgres_version }}"
+    REQUIRED_EXTENSIONS: "{{ postgres_runtime_model.image_contract.required_extensions | join(' ') }}"
+  changed_when: false
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.image_contract.expected_postgres_version | length > 0
     - not ansible_check_mode
 
 - name: Ensure postgres_runtime data volume exists
@@ -807,6 +893,64 @@
   delay: "{{ postgres_runtime_startup_delay }}"
   when:
     - postgres_runtime_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify postgres_runtime required extensions are available
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - "{{ postgres_runtime_model.container_name }}"
+      - psql
+      - -U
+      - postgres
+      - -d
+      - postgres
+      - -v
+      - ON_ERROR_STOP=1
+      - -tAc
+      - >-
+        SELECT count(*) FROM pg_available_extensions
+        WHERE name = ANY (string_to_array('{{ postgres_runtime_model.image_contract.required_extensions | join(',') }}', ','));
+  register: postgres_runtime_available_extensions
+  changed_when: false
+  failed_when: >-
+    (postgres_runtime_available_extensions.stdout | trim | int)
+    != (postgres_runtime_model.image_contract.required_extensions | length)
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.image_contract.required_extensions | length > 0
+    - not ansible_check_mode
+
+- name: Verify postgres_runtime migrated image and server version
+  ansible.builtin.shell: |
+    set -euo pipefail
+    running_image="$(
+      docker inspect -f {% raw %}'{{ .Config.Image }}'{% endraw %} \
+        "{{ postgres_runtime_model.container_name }}"
+    )"
+    if [ "$running_image" != "$EXPECTED_IMAGE" ]; then
+      echo "running PostgreSQL image mismatch" >&2
+      exit 1
+    fi
+    actual_version="$(
+      docker exec "{{ postgres_runtime_model.container_name }}" \
+        psql -U postgres -d postgres -tAc 'SHOW server_version' \
+          | sed -E 's/^([0-9]+\.[0-9]+).*/\1/'
+    )"
+    if [ "$actual_version" != "$EXPECTED_POSTGRES_VERSION" ]; then
+      echo "running PostgreSQL version mismatch: expected $EXPECTED_POSTGRES_VERSION, got $actual_version" >&2
+      exit 1
+    fi
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_IMAGE: "{{ postgres_runtime_model.image }}"
+    EXPECTED_POSTGRES_VERSION: "{{ postgres_runtime_model.image_contract.expected_postgres_version }}"
+  changed_when: false
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.image_contract.expected_postgres_version | length > 0
     - not ansible_check_mode
 
 - name: Configure primary users and replication slots
