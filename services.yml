@@ -557,6 +557,19 @@ runtime_instances:
         live: /healthz/
         ready: /readyz/
         worker: /worker-healthz/
+      backup:
+        engine: restic
+        transport: sftp
+        datasets:
+          - database
+          - public_media
+          - private_media
+        retention:
+          daily: 7
+          weekly: 4
+          monthly: 6
+        schedule: manual
+        restore_policy: scratch-only
 
   ai-retail-dev:
     project: ai_e_retail

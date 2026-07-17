@@ -1,0 +1,136 @@
+---
+- name: Проверить параметры backup/restore site_runtime
+  ansible.builtin.assert:
+    that:
+      - site_runtime_backup_action in ['backup-init', 'backup', 'restore-rehearsal']
+      - site_runtime_instance | length > 0
+      - site_runtime_backup_action != 'restore-rehearsal' or site_runtime_snapshot_id | length > 0
+    fail_msg: "Некорректные параметры ручного backup/restore site_runtime."
+
+- name: Вычислить каноническую backup-модель
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ site_runtime_backup_resolver }}"
+      - --registry
+      - "{{ site_runtime_services_registry }}"
+      - --instances
+      - "{{ site_runtime_instances_file }}"
+      - --state
+      - "{{ site_runtime_state_file }}"
+      - --nodes
+      - "{{ site_runtime_nodes_file }}"
+      - --instance
+      - "{{ site_runtime_instance }}"
+      - --limit
+      - "{{ inventory_hostname }}"
+      - --snapshot-id
+      - "{{ site_runtime_snapshot_id }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  register: site_runtime_backup_model_command
+
+- name: Сохранить каноническую backup-модель
+  ansible.builtin.set_fact:
+    site_runtime_backup_model: "{{ site_runtime_backup_model_command.stdout | from_json }}"
+
+- name: Проверить наличие локального backup-секрета
+  ansible.builtin.stat:
+    path: "{{ site_runtime_backup_model.secret_file }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  register: site_runtime_backup_secret_stat
+
+- name: Отклонить отсутствующий или небезопасный backup-секрет
+  ansible.builtin.assert:
+    that:
+      - site_runtime_backup_secret_stat.stat.exists
+      - site_runtime_backup_secret_stat.stat.isreg
+      - not site_runtime_backup_secret_stat.stat.xoth
+      - not site_runtime_backup_secret_stat.stat.roth
+    fail_msg: "Operator-local RESTIC_PASSWORD отсутствует или доступен другим пользователям."
+
+- name: Проверить Restic на orchestration node
+  ansible.builtin.command: [restic, version]
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  failed_when:
+    - site_runtime_backup_action != 'backup-init' or not site_runtime_backup_check | bool
+    - site_runtime_restic_version.rc != 0
+  register: site_runtime_restic_version
+
+- name: Установить Restic на orchestration node
+  ansible.builtin.apt:
+    name: restic
+    state: present
+    update_cache: true
+  delegate_to: localhost
+  when:
+    - site_runtime_backup_action == 'backup-init'
+    - not site_runtime_backup_check | bool
+
+- name: Подготовить закрытый repository path на backup target
+  ansible.builtin.file:
+    path: "{{ site_runtime_backup_model.backup_target.repository }}"
+    state: directory
+    owner: ansible
+    group: ansible
+    mode: "0700"
+  delegate_to: "{{ site_runtime_backup_model.backup_target.alias }}"
+  when:
+    - site_runtime_backup_action == 'backup-init'
+    - not site_runtime_backup_check | bool
+
+- name: Создать временный файл канонической модели на orchestration node
+  ansible.builtin.tempfile:
+    state: file
+    prefix: site-runtime-backup-model-
+    suffix: .json
+  delegate_to: localhost
+  check_mode: false
+  register: site_runtime_backup_model_file
+
+- name: Записать временную backup-модель
+  ansible.builtin.copy:
+    content: "{{ site_runtime_backup_model | to_nice_json }}"
+    dest: "{{ site_runtime_backup_model_file.path }}"
+    mode: "0600"
+  delegate_to: localhost
+  check_mode: false
+
+- name: Выполнить сериализованную backup/restore операцию
+  ansible.builtin.command:
+    argv: >-
+      {{
+        [
+          'python3', site_runtime_backup_runner,
+          '--action', site_runtime_backup_action,
+          '--model', site_runtime_backup_model_file.path,
+          '--secret', site_runtime_backup_model.secret_file,
+          '--nodes', site_runtime_nodes_file
+        ]
+        + (['--check'] if site_runtime_backup_check | bool else [])
+      }}
+  delegate_to: localhost
+  become: true
+  check_mode: false
+  changed_when:
+    - not site_runtime_backup_check | bool
+    - site_runtime_backup_action in ['backup-init', 'backup', 'restore-rehearsal']
+  register: site_runtime_backup_result_command
+
+- name: Удалить временную backup-модель
+  ansible.builtin.file:
+    path: "{{ site_runtime_backup_model_file.path }}"
+    state: absent
+  delegate_to: localhost
+  check_mode: false
+
+- name: Вывести результат backup/restore без секретов
+  ansible.builtin.debug:
+    msg: "{{ site_runtime_backup_result_command.stdout | from_json }}"

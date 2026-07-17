@@ -1,0 +1,11 @@
+---
+site_runtime_backup_action: ""
+site_runtime_instance: ""
+site_runtime_snapshot_id: ""
+site_runtime_backup_check: false
+site_runtime_services_registry: /opt/ai-service-platform/services.yml
+site_runtime_instances_file: /opt/ai-service-platform/operator/site_runtime/instances.yml
+site_runtime_nodes_file: /opt/ai-service-platform/operator/nodes.csv
+site_runtime_state_file: /opt/ai-service-platform/operator/state.csv
+site_runtime_backup_resolver: /opt/ai-service-platform/tools/site_runtime/resolve_backup.py
+site_runtime_backup_runner: /opt/ai-service-platform/tools/site_runtime/backup_runtime.py
