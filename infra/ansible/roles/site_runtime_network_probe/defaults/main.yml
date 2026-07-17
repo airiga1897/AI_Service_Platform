@@ -1,0 +1,15 @@
+---
+site_runtime_network_probe_state: present
+site_runtime_network_probe_allowed_alias: vps3
+site_runtime_network_probe_root_dir: /opt/ai-service-platform/site_runtime-network-probe
+site_runtime_network_probe_compose_file: "{{ site_runtime_network_probe_root_dir }}/docker-compose.yml"
+site_runtime_network_probe_anchor_name: ai-service-site-runtime-anchor-probe-vps3
+site_runtime_network_probe_source_container: platform-router
+site_runtime_network_probe_expected_image_repository: ai-service-platform/platform-router
+site_runtime_network_probe_app_network: ai_service_app_vps3
+site_runtime_network_probe_anchor_ipv4: 172.31.3.10
+site_runtime_network_probe_router_ipv4: 172.31.3.2
+site_runtime_network_probe_destination_ipv4: 172.30.8.10
+site_runtime_network_probe_destination_port: 5432
+site_runtime_network_probe_tcp_timeout_seconds: 5
+site_runtime_network_probe_route_reconcile_seconds: 15

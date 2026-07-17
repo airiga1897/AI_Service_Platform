@@ -1,0 +1,7 @@
+---
+- name: Подготовить системные образы site_runtime
+  hosts: site_runtimes
+  become: true
+  gather_facts: false
+  roles:
+    - role: site_runtime_support_images_stage

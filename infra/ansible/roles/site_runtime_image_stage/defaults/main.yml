@@ -1,0 +1,12 @@
+---
+site_runtime_stage_state: present
+site_runtime_instance: ""
+site_runtime_image_ref: ""
+site_runtime_image_archive: ""
+site_runtime_image_manifest: ""
+site_runtime_services_registry: /opt/ai-service-platform/services.yml
+site_runtime_instances_file: /opt/ai-service-platform/operator/site_runtime/instances.yml
+site_runtime_nodes_file: /opt/ai-service-platform/operator/nodes.csv
+site_runtime_state_file: /opt/ai-service-platform/operator/state.csv
+site_runtime_resolver: /opt/ai-service-platform/tools/site_runtime/resolve.py
+site_runtime_stage_root: /var/lib/ai-service-platform/site-runtime

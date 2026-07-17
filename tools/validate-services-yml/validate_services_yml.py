@@ -403,13 +403,21 @@ def validate_instance_deploy(
     ):
         allowed_pattern = None
 
+    release_guard = deploy.get("release_guard")
     frozen = deploy.get("frozen")
-    if frozen is not True and frozen is not False:
+    frozen_pattern = deploy.get("frozen_image_ref_pattern")
+    if release_guard is not None:
+        if release_guard != "immutable-released-image":
+            fail(errors, f"{node_path}.deploy.release_guard must be immutable-released-image")
+        if "frozen" in deploy or "frozen_image_ref_pattern" in deploy:
+            fail(errors, f"{node_path}.deploy must not mix release_guard with legacy frozen fields")
+        if isinstance(allowed_pattern, str) and "@sha256:" not in allowed_pattern:
+            fail(errors, f"{node_path}.deploy.allowed_image_ref_pattern must be digest-only")
+    elif frozen is not True and frozen is not False:
         fail(errors, f"{node_path}.deploy.frozen must be a boolean")
         frozen = False
 
-    frozen_pattern = deploy.get("frozen_image_ref_pattern")
-    if frozen is True:
+    if release_guard is None and frozen is True:
         if not validate_regex_pattern(
             errors,
             frozen_pattern,
@@ -428,7 +436,7 @@ def validate_instance_deploy(
                     )
             except re.error:
                 pass
-    elif frozen_pattern not in (None, False, ""):
+    elif release_guard is None and frozen_pattern not in (None, False, ""):
         fail(
             errors,
             f"{node_path}.deploy.frozen_image_ref_pattern must be null when frozen is false",
@@ -565,6 +573,97 @@ def validate_runtime_instances(
         # ---- deploy contract --------------------------------------------
         deploy = require_mapping(errors, instance_data.get("deploy"), f"{node_path}.deploy")
         validate_instance_deploy(errors, instance_name, deploy, valid_vps, node_path)
+
+        site_runtime = instance_data.get("site_runtime")
+        if site_runtime is not None:
+            runtime_path = f"{node_path}.site_runtime"
+            runtime = require_mapping(errors, site_runtime, runtime_path)
+            repository = runtime.get("image_repository")
+            if not isinstance(repository, str) or not re.fullmatch(r"[a-z0-9.-]+(?:/[a-z0-9._-]+)+", repository):
+                fail(errors, f"{runtime_path}.image_repository must be a normalized repository")
+            if runtime.get("platform") != "linux/amd64":
+                fail(errors, f"{runtime_path}.platform must be linux/amd64 in v1")
+            if runtime.get("release_guard") != "immutable-released-image":
+                fail(errors, f"{runtime_path}.release_guard must be immutable-released-image")
+            if runtime.get("entrypoint_override") != []:
+                fail(errors, f"{runtime_path}.entrypoint_override must be an empty list")
+            support_images = require_mapping(errors, runtime.get("support_images"), f"{runtime_path}.support_images")
+            if support_images != {"redis": "redis:7-alpine", "nginx": "nginx:alpine"}:
+                fail(errors, f"{runtime_path}.support_images must contain redis:7-alpine and nginx:alpine")
+            volumes = require_mapping(errors, runtime.get("volumes"), f"{runtime_path}.volumes")
+            if set(volumes) != {"redis"}:
+                fail(errors, f"{runtime_path}.volumes должен содержать только redis")
+            for volume_name, volume_value in volumes.items():
+                if not isinstance(volume_value, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]+", volume_value):
+                    fail(errors, f"{runtime_path}.volumes.{volume_name} must be a normalized Docker volume name")
+
+            storage = require_mapping(errors, runtime.get("storage"), f"{runtime_path}.storage")
+            expected_storage = {
+                "release_static": {
+                    "lifecycle": "release",
+                    "container_path": "/app/staticfiles",
+                    "runtime_access": "read-only",
+                    "nginx": True,
+                    "name_field": "volume_prefix",
+                },
+                "public_media": {
+                    "lifecycle": "persistent",
+                    "container_path": "/app/media",
+                    "runtime_access": "read-write",
+                    "nginx": True,
+                    "name_field": "volume",
+                },
+                "private_media": {
+                    "lifecycle": "persistent",
+                    "container_path": "/app/private_media",
+                    "runtime_access": "read-write",
+                    "nginx": False,
+                    "name_field": "volume",
+                },
+            }
+            if set(storage) != set(expected_storage):
+                fail(
+                    errors,
+                    f"{runtime_path}.storage должен содержать release_static, public_media и private_media",
+                )
+            storage_names = [volumes.get("redis")]
+            for storage_name, expected in expected_storage.items():
+                storage_path = f"{runtime_path}.storage.{storage_name}"
+                storage_class = require_mapping(errors, storage.get(storage_name), storage_path)
+                expected_fields = {
+                    "lifecycle",
+                    "container_path",
+                    "runtime_access",
+                    "nginx",
+                    expected["name_field"],
+                }
+                if set(storage_class) != expected_fields:
+                    fail(errors, f"{storage_path} должен содержать только поля: {', '.join(sorted(expected_fields))}")
+                for field in ("lifecycle", "container_path", "runtime_access", "nginx"):
+                    if storage_class.get(field) != expected[field]:
+                        fail(errors, f"{storage_path}.{field} должен быть {expected[field]!r}")
+                volume_value = storage_class.get(expected["name_field"])
+                if not isinstance(volume_value, str) or not re.fullmatch(
+                    r"[a-z0-9][a-z0-9_-]+", volume_value
+                ):
+                    fail(
+                        errors,
+                        f"{storage_path}.{expected['name_field']} должен быть нормализованным именем Docker volume",
+                    )
+                storage_names.append(volume_value)
+            normalized_storage_names = [name for name in storage_names if isinstance(name, str)]
+            if len(normalized_storage_names) != len(set(normalized_storage_names)):
+                fail(errors, f"Имена {runtime_path} storage и Redis volume не должны совпадать")
+            components = require_mapping(errors, runtime.get("components"), f"{runtime_path}.components")
+            for component in ("static", "web", "worker", "beat", "migration"):
+                command = (components.get(component) or {}).get("command") if isinstance(components.get(component), dict) else None
+                if not isinstance(command, str) or not command.strip():
+                    fail(errors, f"{runtime_path}.components.{component}.command is required")
+            health_contract = require_mapping(errors, runtime.get("health"), f"{runtime_path}.health")
+            for health_name in ("live", "ready", "worker"):
+                health_path = health_contract.get(health_name)
+                if not isinstance(health_path, str) or not health_path.startswith("/"):
+                    fail(errors, f"{runtime_path}.health.{health_name} must start with '/'")
 
         # ---- local ports -------------------------------------------------
         local = instance_data.get("local") or {}

@@ -1,0 +1,7 @@
+---
+- name: Проверить или применить generic site_runtime
+  hosts: site_runtimes
+  become: true
+  gather_facts: false
+  roles:
+    - role: site_runtime_apply

@@ -22,7 +22,13 @@ POLICY_ROUTER_DOCKER_DIR="infra/docker/policy-router"
 POLICY_GATEWAY_DOCKER_DIR="infra/docker/policy-gateway"
 SOFTETHER_VPNCLIENT_DOCKER_DIR="infra/docker/softether-vpnclient"
 EGRESS_POLICY_TOOLS_DIR="tools/egress_policy"
+SERVICES_REGISTRY_FILE="services.yml"
+SITE_RUNTIME_TOOLS_DIR="tools/site_runtime"
+SITE_RUNTIME_PREPARE_SCRIPT="tools/site_runtime/prepare_image.sh"
+SITE_RUNTIME_SUPPORT_PREPARE_SCRIPT="tools/site_runtime/prepare_support_images.sh"
 LIMIT=""
+INSTANCE=""
+IMAGE_REF=""
 BUILD_POLICY_ROUTER_IMAGE="false"
 PLATFORM_ROUTER_SOFTETHER_DEBUG="false"
 CHECK="false"
@@ -38,7 +44,7 @@ EXPECTED_STATE_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,
 usage() {
     cat <<'USAGE'
 Usage:
-  bash tools/services/service_remote.sh <service> <plan|apply|absent|purge|reseed> [options]
+  bash tools/services/service_remote.sh <service> <plan|apply|absent|purge|reseed|probe|stage-image|stage-support-images> [options]
 
 Options:
   --nodes-file PATH       Operator nodes.csv. Default: ./operator/nodes.csv
@@ -50,6 +56,8 @@ Options:
   --ssh-key-file PATH     SSH private key. Default: ./operator/<control-alias>/admin_key
   --remote-repo-dir PATH  Repo path on orchestration node. Default: /opt/ai-service-platform
   --limit ALIAS           Service target alias.
+  --instance NAME         site_runtime instance name.
+  --image-ref REF         site_runtime immutable repository@sha256 reference.
   --build-policy-router-image
                         vpn_cascade only: force rebuild instead of reusing a matching local image.
   --platform-router-softether-debug
@@ -224,8 +232,8 @@ if [ "$SERVICE" = "-h" ] || [ "$SERVICE" = "--help" ]; then
     exit 0
 fi
 case "$ACTION" in
-    plan|apply|absent|purge|reseed) ;;
-    *) usage; fail "Action must be one of: plan, apply, absent, purge, reseed" ;;
+    plan|apply|absent|purge|reseed|probe|stage-image|stage-support-images) ;;
+    *) usage; fail "Action must be one of: plan, apply, absent, purge, reseed, probe, stage-image, stage-support-images" ;;
 esac
 if [ "$SERVICE" = "vpn" ]; then
     fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
@@ -243,6 +251,8 @@ while [ "$#" -gt 0 ]; do
         --ssh-key-file) SSH_KEY_FILE="${2:-}"; shift 2 ;;
         --remote-repo-dir) REMOTE_REPO_DIR="${2:-}"; shift 2 ;;
         --limit) LIMIT="${2:-}"; shift 2 ;;
+        --instance) INSTANCE="${2:-}"; shift 2 ;;
+        --image-ref) IMAGE_REF="${2:-}"; shift 2 ;;
         --build-policy-router-image) BUILD_POLICY_ROUTER_IMAGE="true"; shift ;;
         --platform-router-softether-debug) PLATFORM_ROUTER_SOFTETHER_DEBUG="true"; shift ;;
         --check) CHECK="true"; shift ;;
@@ -259,6 +269,24 @@ done
 if [ "$SERVICE" = "host_resources" ] && [ "$ACTION" != "plan" ] && [ "$ACTION" != "apply" ]; then
     fail "host_resources v1 supports only plan and apply; absent/purge/reseed are intentionally disabled"
 fi
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" != "plan" ] && [ "$ACTION" != "probe" ] && [ "$ACTION" != "stage-image" ] && [ "$ACTION" != "stage-support-images" ] && [ "$ACTION" != "apply" ]; then
+    fail "site_runtime action is not supported"
+fi
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "probe" ] && [ "$LIMIT" != "vps3" ]; then
+    fail "site_runtime probe requires exactly --limit vps3"
+fi
+if [ "$SERVICE" = "site_runtime" ] && [ -z "$LIMIT" ]; then
+    fail "site_runtime requires exactly one --limit alias"
+fi
+if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "plan" ] || [ "$ACTION" = "stage-image" ] || [ "$ACTION" = "apply" ]; } && { [ -z "$INSTANCE" ] || [ -z "$IMAGE_REF" ] || [ -z "$LIMIT" ]; }; then
+    fail "site_runtime $ACTION requires --instance, --image-ref, and exactly one --limit alias"
+fi
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" != "probe" ] && [ "$DETACHED_REMOTE_JOB" != "true" ]; then
+    fail "site_runtime plan/staging/apply requires --detached-remote-job in the Bash remote wrapper"
+fi
+if [ "$SERVICE" != "site_runtime" ] && [ "$ACTION" = "probe" ]; then
+    fail "probe is supported only for site_runtime"
+fi
 
 require_file "$NODES_FILE" "--nodes-file"
 require_file "$STATE_FILE" "--state-file"
@@ -271,6 +299,10 @@ require_file "$NETWORKS_FILE" "networks.csv"
 [ -d "$POLICY_GATEWAY_DOCKER_DIR" ] || fail "Policy-gateway Docker context not found: $POLICY_GATEWAY_DOCKER_DIR"
 [ -d "$SOFTETHER_VPNCLIENT_DOCKER_DIR" ] || fail "SoftEther vpnclient Docker context not found: $SOFTETHER_VPNCLIENT_DOCKER_DIR"
 [ -d "$EGRESS_POLICY_TOOLS_DIR" ] || fail "Egress policy tools directory not found: $EGRESS_POLICY_TOOLS_DIR"
+require_file "$SERVICES_REGISTRY_FILE" "services registry"
+[ -d "$SITE_RUNTIME_TOOLS_DIR" ] || fail "site_runtime tools directory not found: $SITE_RUNTIME_TOOLS_DIR"
+[ "$SERVICE" != "site_runtime" ] || [ "$ACTION" != "stage-image" ] || require_file "$SITE_RUNTIME_PREPARE_SCRIPT" "site_runtime prepare script"
+[ "$SERVICE" != "site_runtime" ] || [ "$ACTION" != "stage-support-images" ] || require_file "$SITE_RUNTIME_SUPPORT_PREPARE_SCRIPT" "site_runtime support prepare script"
 if [ "$BUILD_POLICY_ROUTER_IMAGE" = "true" ] && [ "$SERVICE" != "vpn_cascade" ]; then
     fail "--build-policy-router-image is supported only for service vpn_cascade"
 fi
@@ -352,7 +384,13 @@ remote_policy_router_docker_temp="$remote_bundle_dir/docker/policy-router"
 remote_policy_gateway_docker_temp="$remote_bundle_dir/docker/policy-gateway"
 remote_softether_vpnclient_docker_temp="$remote_bundle_dir/docker/softether-vpnclient"
 remote_egress_policy_tools_temp="$remote_bundle_dir/tools/egress_policy"
+remote_site_runtime_tools_temp="$remote_bundle_dir/tools/site_runtime"
+remote_services_registry_temp="$remote_bundle_dir/services.yml"
 remote_operator_temp="$remote_bundle_dir/operator"
+remote_site_runtime_image_archive="$remote_bundle_dir/site-runtime-image.tar"
+remote_site_runtime_image_manifest="$remote_bundle_dir/site-runtime-image-manifest.json"
+remote_site_runtime_support_archive="$remote_bundle_dir/site-runtime-support-images.tar"
+remote_site_runtime_support_manifest="$remote_bundle_dir/site-runtime-support-images-manifest.json"
 remote_operator_dir="$(dirname "$REMOTE_STATE_FILE")"
 remote_nodes_dir="$(dirname "$REMOTE_NODES_FILE")"
 remote_networks_file="$remote_operator_dir/networks.csv"
@@ -369,6 +407,9 @@ remote_job_completed_successfully="false"
 archive_path="$(mktemp -t ai-service-platform.service-remote.XXXXXX.tar.gz)"
 staging_dir="$(mktemp -d -t ai-service-platform.service-remote.XXXXXX)"
 run_script_path="$(mktemp -t ai-service-platform.service-job.XXXXXX.sh)"
+site_runtime_image_temp_dir=""
+site_runtime_image_archive=""
+site_runtime_image_manifest=""
 ssh_common_args=(
     -n
     -T
@@ -400,6 +441,7 @@ scp_common_args=(
 
 cleanup() {
     rm -rf "$archive_path" "$staging_dir" "$run_script_path"
+    [ -z "$site_runtime_image_temp_dir" ] || rm -rf "$site_runtime_image_temp_dir"
     run_cleanup_ssh
 }
 trap cleanup EXIT
@@ -412,6 +454,21 @@ remote_args=(
     "--inventory" "$(quote_bash_arg "$REMOTE_INVENTORY")"
 )
 [ -n "$LIMIT" ] && remote_args+=("--limit" "$(quote_bash_arg "$LIMIT")")
+[ -n "$INSTANCE" ] && remote_args+=("--instance" "$(quote_bash_arg "$INSTANCE")")
+[ -n "$IMAGE_REF" ] && remote_args+=("--image-ref" "$(quote_bash_arg "$IMAGE_REF")")
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "stage-image" ]; then
+    remote_args+=("--image-archive" "$(quote_bash_arg "$remote_site_runtime_image_archive")")
+    remote_args+=("--image-manifest" "$(quote_bash_arg "$remote_site_runtime_image_manifest")")
+fi
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "stage-support-images" ]; then
+    remote_args+=("--support-archive" "$(quote_bash_arg "$remote_site_runtime_support_archive")")
+    remote_args+=("--support-manifest" "$(quote_bash_arg "$remote_site_runtime_support_manifest")")
+fi
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" != "probe" ]; then
+    remote_args+=("--services-registry" "$(quote_bash_arg "$REMOTE_REPO_DIR/services.yml")")
+    remote_args+=("--site-runtime-instances" "$(quote_bash_arg "$REMOTE_REPO_DIR/operator/site_runtime/instances.yml")")
+    remote_args+=("--site-runtime-resolver" "$(quote_bash_arg "$REMOTE_REPO_DIR/tools/site_runtime/resolve.py")")
+fi
 [ "$BUILD_POLICY_ROUTER_IMAGE" = "true" ] && remote_args+=("--build-policy-router-image")
 [ "$PLATFORM_ROUTER_SOFTETHER_DEBUG" = "true" ] && remote_args+=("--platform-router-softether-debug")
 [ "$CHECK" = "true" ] && remote_args+=("--check")
@@ -464,6 +521,8 @@ echo "Remote:       $remote"
 echo "Service:      $SERVICE"
 echo "Action:       $ACTION"
 [ -n "$LIMIT" ] && echo "Limit:        $LIMIT"
+[ -n "$INSTANCE" ] && echo "Instance:     $INSTANCE"
+[ -n "$IMAGE_REF" ] && echo "Image:        $IMAGE_REF"
 [ "$BUILD_POLICY_ROUTER_IMAGE" = "true" ] && echo "Build policy image: true"
 [ "$CHECK" = "true" ] && echo "Check:        true"
 if [ "$DETACHED_REMOTE_JOB" = "true" ]; then
@@ -475,12 +534,34 @@ else
 fi
 
 echo "Preparing local service bundle..."
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "stage-image" ]; then
+    echo "Preparing exact private image archive on workstation..."
+    prepare_output="$(bash "$SITE_RUNTIME_PREPARE_SCRIPT" "$INSTANCE" "$IMAGE_REF" "$LIMIT")"
+    prepared_json="$(printf '%s\n' "$prepare_output" | tail -n 1)"
+    site_runtime_image_temp_dir="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["temp_dir"])' "$prepared_json")"
+    site_runtime_image_archive="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["archive_path"])' "$prepared_json")"
+    site_runtime_image_manifest="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["manifest_path"])' "$prepared_json")"
+    require_file "$site_runtime_image_archive" "prepared site_runtime archive"
+    require_file "$site_runtime_image_manifest" "prepared site_runtime manifest"
+fi
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "stage-support-images" ]; then
+    echo "Preparing exact Redis/Nginx archives on workstation..."
+    prepare_output="$(bash "$SITE_RUNTIME_SUPPORT_PREPARE_SCRIPT" "$LIMIT")"
+    prepared_json="$(printf '%s\n' "$prepare_output" | tail -n 1)"
+    site_runtime_image_temp_dir="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["temp_dir"])' "$prepared_json")"
+    site_runtime_image_archive="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["archive_path"])' "$prepared_json")"
+    site_runtime_image_manifest="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["manifest_path"])' "$prepared_json")"
+    require_file "$site_runtime_image_archive" "prepared site_runtime support archive"
+    require_file "$site_runtime_image_manifest" "prepared site_runtime support manifest"
+fi
 cp "$SERVICE_RUNNER_SCRIPT" "$staging_dir/service.sh"
 mkdir -p "$staging_dir/tools/bootstrap"
 cp "$CREATE_INVENTORY_SCRIPT" "$staging_dir/tools/bootstrap/create_inventory.sh"
 cp -a "$ANSIBLE_DIR" "$staging_dir/ansible"
 mkdir -p "$staging_dir/tools"
 cp -a "$EGRESS_POLICY_TOOLS_DIR" "$staging_dir/tools/egress_policy"
+cp -a "$SITE_RUNTIME_TOOLS_DIR" "$staging_dir/tools/site_runtime"
+cp "$SERVICES_REGISTRY_FILE" "$staging_dir/services.yml"
 mkdir -p "$staging_dir/docker"
 cp -a "$POLICY_ROUTER_DOCKER_DIR" "$staging_dir/docker/policy-router"
 cp -a "$POLICY_GATEWAY_DOCKER_DIR" "$staging_dir/docker/policy-gateway"
@@ -490,7 +571,7 @@ cp "$NODES_FILE" "$staging_dir/operator/nodes.csv"
 cp "$STATE_FILE" "$staging_dir/operator/state.csv"
 cp "$NETWORKS_FILE" "$staging_dir/operator/networks.csv"
 operator_source_dir="$(dirname "$NODES_FILE")"
-for operator_subdir in haproxy softether edge_banlist postgres platform_networks host_resources platform_router; do
+for operator_subdir in haproxy softether edge_banlist postgres platform_networks host_resources platform_router site_runtime; do
     if [ -d "$operator_source_dir/$operator_subdir" ]; then
         cp -a "$operator_source_dir/$operator_subdir" "$staging_dir/operator/$operator_subdir"
     fi
@@ -512,6 +593,9 @@ run_stage $(quote_bash_arg "install service runner") sudo install -m 700 $(quote
 run_stage $(quote_bash_arg "install inventory generator") sudo install -m 700 $(quote_bash_arg "$remote_create_inventory_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap/create_inventory.sh")
 run_stage $(quote_bash_arg "remove previous egress policy tools") sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/tools/egress_policy")
 run_stage $(quote_bash_arg "install egress policy tools") sudo cp -a $(quote_bash_arg "$remote_egress_policy_tools_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/egress_policy")
+run_stage $(quote_bash_arg "remove previous site_runtime tools") sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/tools/site_runtime")
+run_stage $(quote_bash_arg "install site_runtime tools") sudo cp -a $(quote_bash_arg "$remote_site_runtime_tools_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/tools/site_runtime")
+run_stage $(quote_bash_arg "install services registry") sudo install -m 644 $(quote_bash_arg "$remote_services_registry_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/services.yml")
 run_stage $(quote_bash_arg "remove previous Ansible bundle") sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible")
 run_stage $(quote_bash_arg "install Ansible bundle") sudo cp -a $(quote_bash_arg "$remote_ansible_temp") $(quote_bash_arg "$REMOTE_REPO_DIR/infra/ansible")
 run_stage $(quote_bash_arg "remove previous policy-router Docker context") sudo rm -rf $(quote_bash_arg "$REMOTE_REPO_DIR/infra/docker/policy-router")
@@ -532,6 +616,7 @@ if [ -d $(quote_bash_arg "$remote_operator_temp/postgres") ]; then run_stage $(q
 if [ -d $(quote_bash_arg "$remote_operator_temp/platform_networks") ]; then run_stage $(quote_bash_arg "sync operator platform_networks config") sudo bash -lc $(quote_bash_arg "rm -rf $(quote_bash_arg "$remote_operator_dir/platform_networks"); cp -a $(quote_bash_arg "$remote_operator_temp/platform_networks") $(quote_bash_arg "$remote_operator_dir/platform_networks"); chown -R ansible:ansible $(quote_bash_arg "$remote_operator_dir/platform_networks")"); fi
 if [ -d $(quote_bash_arg "$remote_operator_temp/host_resources") ]; then run_stage $(quote_bash_arg "sync operator host_resources config") sudo bash -lc $(quote_bash_arg "rm -rf $(quote_bash_arg "$remote_operator_dir/host_resources"); cp -a $(quote_bash_arg "$remote_operator_temp/host_resources") $(quote_bash_arg "$remote_operator_dir/host_resources"); chown -R ansible:ansible $(quote_bash_arg "$remote_operator_dir/host_resources")"); fi
 if [ -d $(quote_bash_arg "$remote_operator_temp/platform_router") ]; then run_stage $(quote_bash_arg "sync operator platform_router config") sudo bash -lc $(quote_bash_arg "rm -rf $(quote_bash_arg "$remote_operator_dir/platform_router"); cp -a $(quote_bash_arg "$remote_operator_temp/platform_router") $(quote_bash_arg "$remote_operator_dir/platform_router"); chown -R ansible:ansible $(quote_bash_arg "$remote_operator_dir/platform_router")"); fi
+if [ -d $(quote_bash_arg "$remote_operator_temp/site_runtime") ]; then run_stage $(quote_bash_arg "sync operator site_runtime config") sudo bash -lc $(quote_bash_arg "rm -rf $(quote_bash_arg "$remote_operator_dir/site_runtime"); cp -a $(quote_bash_arg "$remote_operator_temp/site_runtime") $(quote_bash_arg "$remote_operator_dir/site_runtime"); chown -R ansible:ansible $(quote_bash_arg "$remote_operator_dir/site_runtime"); if [ -d $(quote_bash_arg "$remote_operator_dir/site_runtime/secrets") ]; then find $(quote_bash_arg "$remote_operator_dir/site_runtime/secrets") -type f -exec chmod 600 {} +; fi"); fi
 run_stage $(quote_bash_arg "regenerate Ansible inventory") sudo bash $(quote_bash_arg "$REMOTE_REPO_DIR/tools/bootstrap/create_inventory.sh") --nodes-file $(quote_bash_arg "$REMOTE_NODES_FILE") --state-file $(quote_bash_arg "$REMOTE_STATE_FILE") --output $(quote_bash_arg "$REMOTE_INVENTORY")
 log_stage $(quote_bash_arg "running service command: $remote_service_display")
 sudo bash -lc $(quote_bash_arg "$service_command")
@@ -560,9 +645,24 @@ if [ "$DETACHED_REMOTE_JOB" = "true" ]; then
     scp "${scp_common_args[@]}" "$run_script_path" "$remote:$remote_job_script"
 fi
 
-extract_command="set -e; rm -rf $(quote_bash_arg "$remote_bundle_dir"); mkdir -p $(quote_bash_arg "$remote_bundle_dir"); tar -xzf $(quote_bash_arg "$remote_bundle_archive") -C $(quote_bash_arg "$remote_bundle_dir"); test -f $(quote_bash_arg "$remote_service_runner_temp"); test -f $(quote_bash_arg "$remote_create_inventory_temp"); test -d $(quote_bash_arg "$remote_egress_policy_tools_temp"); test -d $(quote_bash_arg "$remote_ansible_temp"); test -d $(quote_bash_arg "$remote_policy_router_docker_temp"); test -d $(quote_bash_arg "$remote_policy_gateway_docker_temp"); test -d $(quote_bash_arg "$remote_softether_vpnclient_docker_temp"); test -f $(quote_bash_arg "$remote_operator_temp/nodes.csv"); test -f $(quote_bash_arg "$remote_operator_temp/state.csv"); test -f $(quote_bash_arg "$remote_operator_temp/networks.csv")"
+extract_command="set -e; rm -rf $(quote_bash_arg "$remote_bundle_dir"); mkdir -p $(quote_bash_arg "$remote_bundle_dir"); tar -xzf $(quote_bash_arg "$remote_bundle_archive") -C $(quote_bash_arg "$remote_bundle_dir"); test -f $(quote_bash_arg "$remote_service_runner_temp"); test -f $(quote_bash_arg "$remote_create_inventory_temp"); test -d $(quote_bash_arg "$remote_egress_policy_tools_temp"); test -d $(quote_bash_arg "$remote_site_runtime_tools_temp"); test -f $(quote_bash_arg "$remote_services_registry_temp"); test -d $(quote_bash_arg "$remote_ansible_temp"); test -d $(quote_bash_arg "$remote_policy_router_docker_temp"); test -d $(quote_bash_arg "$remote_policy_gateway_docker_temp"); test -d $(quote_bash_arg "$remote_softether_vpnclient_docker_temp"); test -f $(quote_bash_arg "$remote_operator_temp/nodes.csv"); test -f $(quote_bash_arg "$remote_operator_temp/state.csv"); test -f $(quote_bash_arg "$remote_operator_temp/networks.csv")"
 echo "Extracting service bundle on orchestration node..."
 invoke_retry_transport "remote service bundle extract" ssh "${ssh_common_args[@]}" "$remote" "$extract_command"
+
+if [ -n "$site_runtime_image_archive" ]; then
+    if [ "$ACTION" = "stage-support-images" ]; then
+        remote_prepared_archive="$remote_site_runtime_support_archive"
+        remote_prepared_manifest="$remote_site_runtime_support_manifest"
+    else
+        remote_prepared_archive="$remote_site_runtime_image_archive"
+        remote_prepared_manifest="$remote_site_runtime_image_manifest"
+    fi
+    echo "Uploading verified image archive to orchestration node..."
+    scp "${scp_common_args[@]}" "$site_runtime_image_archive" "$remote:$remote_prepared_archive"
+    scp "${scp_common_args[@]}" "$site_runtime_image_manifest" "$remote:$remote_prepared_manifest"
+    image_permissions_command="chmod 0644 $(quote_bash_arg "$remote_prepared_archive") $(quote_bash_arg "$remote_prepared_manifest")"
+    invoke_retry_transport "site_runtime image permissions" ssh "${ssh_common_args[@]}" "$remote" "$image_permissions_command"
+fi
 
 if [ "$DETACHED_REMOTE_JOB" = "true" ]; then
     start_job_command="set -e; chmod 700 $(quote_bash_arg "$remote_job_script"); rm -f $(quote_bash_arg "$remote_job_log") $(quote_bash_arg "$remote_job_exit_code") $(quote_bash_arg "$remote_job_done") $(quote_bash_arg "$remote_job_pid"); nohup bash $(quote_bash_arg "$remote_job_script") </dev/null >/dev/null 2>&1 & echo \$! > $(quote_bash_arg "$remote_job_pid")"

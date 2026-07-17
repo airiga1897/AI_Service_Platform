@@ -21,8 +21,7 @@ services:
 {% endif %}
     volumes:
       - "{{ postgres_runtime_model.volume_name }}:/var/lib/postgresql/data"
-      - "{{ postgres_runtime_config_dir }}/postgresql.conf:/etc/postgresql/postgresql.conf:ro"
-      - "{{ postgres_runtime_config_dir }}/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro"
+      - "{{ postgres_runtime_config_dir }}:/etc/postgresql:ro"
 
 volumes:
   {{ postgres_runtime_model.volume_name }}:

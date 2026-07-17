@@ -3,7 +3,7 @@ param(
     [string]$Service,
 
     [Parameter(Mandatory=$true, Position=1)]
-    [ValidateSet("plan", "apply", "absent", "purge", "reseed")]
+    [ValidateSet("plan", "apply", "absent", "purge", "reseed", "probe", "stage-image", "stage-support-images")]
     [string]$Action,
 
     [string]$NodesFile = ".\operator\nodes.csv",
@@ -15,6 +15,24 @@ param(
     [string]$Playbook = "",
 
     [string]$Limit,
+
+    [string]$Instance = "",
+
+    [string]$ImageRef = "",
+
+    [string]$ServicesRegistry = ".\services.yml",
+
+    [string]$SiteRuntimeInstances = ".\operator\site_runtime\instances.yml",
+
+    [string]$SiteRuntimeResolver = ".\tools\site_runtime\resolve.py",
+
+    [string]$ImageArchive = "",
+
+    [string]$ImageManifest = "",
+
+    [string]$SupportArchive = "",
+
+    [string]$SupportManifest = "",
 
     [string]$PolicyRouterImageRef = "",
 
@@ -30,6 +48,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$script:Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $script:Utf8NoBom
+$OutputEncoding = $script:Utf8NoBom
 $ExpectedHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 $ExpectedNetworksHeader = "alias,policy_subnet,edge_ip,cascade_ip,cascade_router_ip,policy_gateway_ip"
@@ -92,6 +113,12 @@ function Get-ServicePlaybook($Name) {
         "platform_networks" { return "infra\ansible\platform_networks.yml" }
         "host_resources" { return "infra\ansible\host_resources.yml" }
         "platform_router" { return "infra\ansible\platform_router.yml" }
+        "site_runtime" {
+            if ($Action -eq "probe") { return "infra\ansible\site_runtime_network_probe.yml" }
+            if ($Action -eq "stage-image") { return "infra\ansible\site_runtime_image_stage.yml" }
+            if ($Action -eq "stage-support-images") { return "infra\ansible\site_runtime_support_images_stage.yml" }
+            return "infra\ansible\site_runtime_apply.yml"
+        }
         default { Fail "No default playbook for service: $Name" }
     }
 }
@@ -143,8 +170,45 @@ function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false"
             }
             return $vars
         }
+        "site_runtime" {
+            if ($Action -eq "probe") {
+                return @("-e", "site_runtime_network_probe_state=present")
+            }
+            if ($Action -eq "stage-support-images") {
+                return @(
+                    "-e", "site_runtime_support_state=present",
+                    "-e", "site_runtime_support_archive=$SupportArchive",
+                    "-e", "site_runtime_support_manifest=$SupportManifest"
+                )
+            }
+            if ($Action -eq "apply") {
+                return @(
+                    "-e", "site_runtime_apply_state=present",
+                    "-e", "site_runtime_instance=$Instance",
+                    "-e", "site_runtime_image_ref=$ImageRef",
+                    "-e", "site_runtime_services_registry=$ServicesRegistry",
+                    "-e", "site_runtime_instances_file=$SiteRuntimeInstances",
+                    "-e", "site_runtime_nodes_file=$NodesFile",
+                    "-e", "site_runtime_state_file=$StateFile",
+                    "-e", "site_runtime_resolver=$SiteRuntimeResolver",
+                    "-e", "site_runtime_env_resolver=$(Join-Path (Split-Path -Parent $SiteRuntimeResolver) 'resolve_env.py')"
+                )
+            }
+            return @(
+                "-e", "site_runtime_stage_state=present",
+                "-e", "site_runtime_instance=$Instance",
+                "-e", "site_runtime_image_ref=$ImageRef",
+                "-e", "site_runtime_image_archive=$ImageArchive",
+                "-e", "site_runtime_image_manifest=$ImageManifest",
+                "-e", "site_runtime_services_registry=$ServicesRegistry",
+                "-e", "site_runtime_instances_file=$SiteRuntimeInstances",
+                "-e", "site_runtime_nodes_file=$NodesFile",
+                "-e", "site_runtime_state_file=$StateFile",
+                "-e", "site_runtime_resolver=$SiteRuntimeResolver"
+            )
+        }
         default {
-            Fail "Unsupported service '$Name'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks, host_resources, platform_router."
+            Fail "Unsupported service '$Name'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks, host_resources, platform_router, site_runtime."
         }
     }
 }
@@ -152,8 +216,29 @@ function Get-ServiceExtraVars($Name, $State, $PurgeData, $ReseedConfig = "false"
 if ($Service -eq "vpn") {
     Fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 }
-if ($Service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks", "host_resources", "platform_router")) {
-    Fail "Unsupported service '$Service'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks, host_resources, platform_router."
+if ($Service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks", "host_resources", "platform_router", "site_runtime")) {
+    Fail "Unsupported service '$Service'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks, host_resources, platform_router, site_runtime."
+}
+if ($Service -eq "site_runtime" -and $Action -notin @("plan", "probe", "stage-image", "stage-support-images", "apply")) {
+    Fail "site_runtime supports plan, probe, stage-image, stage-support-images, and apply"
+}
+if ($Service -ne "site_runtime" -and $Action -eq "probe") {
+    Fail "probe is supported only for site_runtime"
+}
+if ($Service -eq "site_runtime" -and $Action -in @("plan", "stage-image", "apply") -and (-not $Instance -or -not $ImageRef)) {
+    Fail "site_runtime $Action requires -Instance and -ImageRef"
+}
+if ($Service -eq "site_runtime" -and -not $Limit) {
+    Fail "site_runtime requires exactly one -Limit alias"
+}
+if ($Service -eq "site_runtime" -and $Action -eq "probe" -and $Limit -ne "vps3") {
+    Fail "site_runtime probe requires exactly -Limit vps3"
+}
+if ($Service -eq "site_runtime" -and $Action -eq "stage-image" -and (-not $ImageArchive -or -not $ImageManifest)) {
+    Fail "site_runtime stage-image requires internal -ImageArchive and -ImageManifest inputs"
+}
+if ($Service -eq "site_runtime" -and $Action -eq "stage-support-images" -and (-not $SupportArchive -or -not $SupportManifest)) {
+    Fail "site_runtime stage-support-images requires internal -SupportArchive and -SupportManifest inputs"
 }
 if ($Service -eq "host_resources" -and $Action -notin @("plan", "apply")) {
     Fail "host_resources v1 supports only plan and apply; absent/purge/reseed are intentionally disabled"
@@ -202,7 +287,8 @@ if ($Service -in @("vpn_edge", "vpn_cascade", "policy_gateway", "softether_l3_vp
 
 $rows = Import-Csv -LiteralPath $NodesFile
 $stateRows = Import-Csv -LiteralPath $StateFile
-$serviceRows = @($stateRows | Where-Object { $_.kind -eq "service" -and $_.name -eq $Service })
+$stateLookupService = if ($Service -eq "site_runtime" -and $Action -eq "probe") { "platform_router" } else { $Service }
+$serviceRows = @($stateRows | Where-Object { $_.kind -eq "service" -and $_.name -eq $stateLookupService })
 $serviceRow = $null
 if ($Limit) {
     $limitAliases = @(Split-LimitList $Limit)
@@ -218,7 +304,7 @@ if ($Limit) {
         $active = @(Split-AliasList $row.active_aliases)
         $candidate = @(Split-AliasList $row.candidate_aliases)
         $targetAliases = @($active)
-        if ($Service -in @("postgres_runtime", "softether_l3_vps", "platform_networks", "platform_router")) {
+        if ($Service -in @("postgres_runtime", "softether_l3_vps", "platform_networks", "platform_router", "site_runtime")) {
             $targetAliases += $candidate
         }
         $rowSelectedAliases = @($limitAliases | Where-Object { $targetAliases -contains $_ })
@@ -281,12 +367,29 @@ if (-not $serviceRow.ansible_group) {
 }
 
 $desiredNodes = @(Split-AliasList $serviceRow.active_aliases)
-if ($Service -in @("postgres_runtime", "softether_l3_vps", "platform_networks", "platform_router")) {
+if ($Service -in @("postgres_runtime", "softether_l3_vps", "platform_networks", "platform_router", "site_runtime")) {
     $desiredNodes += @(Split-AliasList $serviceRow.candidate_aliases)
     $desiredNodes = @($desiredNodes | Where-Object { $_ } | Select-Object -Unique)
 }
 
 if ($Action -eq "plan") {
+    if ($Service -eq "site_runtime") {
+        Require-Command python
+        Require-File $ServicesRegistry "services registry"
+        Require-File $SiteRuntimeInstances "site_runtime instances"
+        Require-File $SiteRuntimeResolver "site_runtime resolver"
+        Invoke-External "python" @(
+            $SiteRuntimeResolver,
+            "--registry", $ServicesRegistry,
+            "--instances", $SiteRuntimeInstances,
+            "--state", $StateFile,
+            "--nodes", $NodesFile,
+            "--instance", $Instance,
+            "--image-ref", $ImageRef,
+            "--limit", $Limit
+        )
+        exit 0
+    }
     Write-Host "Service: $Service"
     Write-Host "State file: $StateFile"
     Write-Host "Service state: $($serviceRow.state)"
@@ -317,11 +420,19 @@ if (-not $Playbook) {
 }
 Require-File $Playbook "Playbook"
 
-if ($Action -eq "apply" -and $serviceRow.state -ne "present") {
-    Fail "$Service apply requires state=present in $StateFile"
+if ($Action -in @("apply", "probe", "stage-image", "stage-support-images") -and $serviceRow.state -ne "present") {
+    Fail "$Service $Action requires state=present in $StateFile"
 }
-if ($Action -eq "apply" -and $desiredNodes.Count -eq 0) {
+if ($Action -in @("apply", "probe", "stage-image", "stage-support-images") -and $desiredNodes.Count -eq 0) {
     Fail "No active/candidate aliases for $Service found in $StateFile"
+}
+if ($Service -eq "site_runtime" -and $Action -eq "stage-image") {
+    Require-File $ImageArchive "site_runtime image archive"
+    Require-File $ImageManifest "site_runtime image manifest"
+}
+if ($Service -eq "site_runtime" -and $Action -eq "stage-support-images") {
+    Require-File $SupportArchive "site_runtime support archive"
+    Require-File $SupportManifest "site_runtime support manifest"
 }
 if ($Action -eq "purge" -and -not $ConfirmPurge) {
     Fail "purge requires -ConfirmPurge"
@@ -357,7 +468,7 @@ $args += Get-ServiceExtraVars $Service $serviceState $servicePurgeData $serviceR
 
 if ($Limit) {
     $args += @("--limit", (ConvertTo-AnsibleLimit $Limit))
-} elseif ($Service -in @("postgres_runtime", "softether_l3_vps", "platform_networks", "platform_router") -and $serviceRow.candidate_aliases) {
+} elseif ($Service -in @("postgres_runtime", "softether_l3_vps", "platform_networks", "platform_router", "site_runtime") -and $serviceRow.candidate_aliases) {
     $args += @("--limit", "$($serviceRow.ansible_group):candidate_$($serviceRow.ansible_group)")
 } else {
     $args += @("--limit", $serviceRow.ansible_group)

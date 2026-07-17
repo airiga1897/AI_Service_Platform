@@ -1,0 +1,164 @@
+---
+- name: Проверить контейнеры, образы, порты и storage private runtime
+  ansible.builtin.shell: |
+    python3 - "{{ site_runtime_instance_root }}/docker-compose.yml" <<'PY'
+    import json
+    import os
+    import subprocess
+    import sys
+
+    compose_file = sys.argv[1]
+    instance = os.environ["EXPECTED_INSTANCE"]
+    product_image_id = os.environ["EXPECTED_PRODUCT_IMAGE_ID"]
+    support_image_ids = json.loads(os.environ["EXPECTED_SUPPORT_IMAGE_IDS"])
+    storage = json.loads(os.environ["EXPECTED_STORAGE"])
+
+    def run(args):
+        proc = subprocess.run(args, capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            raise SystemExit(proc.stderr.strip() or f"Команда завершилась с rc={proc.returncode}")
+        return proc.stdout.strip()
+
+    def service_ids(service):
+        output = run([
+            "docker", "compose", "-f", compose_file, "--profile", "deployment",
+            "ps", "-a", "-q", service,
+        ])
+        return [line for line in output.splitlines() if line]
+
+    long_running = ["anchor", "redis", "web", "worker", "beat", "nginx"]
+    containers = {}
+    inspections = {}
+    for service in long_running:
+        ids = service_ids(service)
+        if len(ids) != 1:
+            raise SystemExit(f"Для сервиса {service} ожидается ровно один контейнер")
+        info = json.loads(run(["docker", "inspect", ids[0]]))[0]
+        if not info.get("State", {}).get("Running"):
+            raise SystemExit(f"Контейнер сервиса {service} не запущен")
+        if info.get("HostConfig", {}).get("PortBindings"):
+            raise SystemExit(f"У сервиса {service} обнаружены host port bindings")
+        containers[service] = info.get("Name", "").lstrip("/")
+        inspections[service] = info
+
+    one_shot = {
+        service: service_ids(service)
+        for service in ("static", "migration")
+    }
+    if any(one_shot.values()):
+        raise SystemExit("One-shot static/migration контейнеры не были удалены")
+
+    for service in ("web", "worker", "beat"):
+        if inspections[service].get("Image") != product_image_id:
+            raise SystemExit(f"Сервис {service} использует неожиданный product image ID")
+    for service in ("redis", "nginx"):
+        if inspections[service].get("Image") != support_image_ids[service]:
+            raise SystemExit(f"Сервис {service} использует неожиданный support image ID")
+
+    def assert_volume(service, destination, expected_name, expected_rw):
+        matches = [
+            mount for mount in inspections[service].get("Mounts", [])
+            if mount.get("Destination") == destination
+        ]
+        if len(matches) != 1:
+            raise SystemExit(f"Сервис {service}: mount {destination} отсутствует или неоднозначен")
+        mount = matches[0]
+        if mount.get("Type") != "volume" or mount.get("Name") != expected_name:
+            raise SystemExit(f"Сервис {service}: неверный volume для {destination}")
+        if bool(mount.get("RW")) is not expected_rw:
+            raise SystemExit(f"Сервис {service}: неверный режим доступа к {destination}")
+
+    release_static = storage["release_static"]
+    public_media = storage["public_media"]
+    private_media = storage["private_media"]
+    assert_volume("web", release_static["container_path"], release_static["volume"], False)
+    assert_volume("web", public_media["container_path"], public_media["volume"], True)
+    assert_volume("web", private_media["container_path"], private_media["volume"], True)
+    assert_volume("worker", public_media["container_path"], public_media["volume"], True)
+    assert_volume("worker", private_media["container_path"], private_media["volume"], True)
+    assert_volume("nginx", "/srv/static", release_static["volume"], False)
+    assert_volume("nginx", "/srv/media", public_media["volume"], False)
+    if any(
+        mount.get("Name") == private_media["volume"]
+        for mount in inspections["nginx"].get("Mounts", [])
+    ):
+        raise SystemExit("Nginx не должен получать private_media")
+
+    print(json.dumps({
+        "instance": instance,
+        "containers": containers,
+        "one_shot_containers_absent": True,
+        "host_ports_absent": True,
+        "product_config_image_id": product_image_id,
+        "storage_mounts_valid": True,
+    }, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_INSTANCE: "{{ site_runtime_instance }}"
+    EXPECTED_PRODUCT_IMAGE_ID: "{{ site_runtime_product_receipt.config_image_id }}"
+    EXPECTED_SUPPORT_IMAGE_IDS: >-
+      {{ {'redis': site_runtime_support_images.redis.config_image_id,
+          'nginx': site_runtime_support_images.nginx.config_image_id} | to_json }}
+    EXPECTED_STORAGE: "{{ site_runtime_model.runtime_contract.storage | to_json }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_acceptance_runtime_command
+
+- name: Прочитать current receipt для финальной приёмки
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_stage_root }}/deployments/{{ site_runtime_instance }}/current.json"
+  register: site_runtime_acceptance_current_slurp
+
+- name: Разобрать current receipt для финальной приёмки
+  ansible.builtin.set_fact:
+    site_runtime_acceptance_current: >-
+      {{ site_runtime_acceptance_current_slurp.content | b64decode | from_json }}
+
+- name: Прочитать успешный deployment journal
+  ansible.builtin.slurp:
+    src: >-
+      {{ site_runtime_stage_root }}/deployments/{{ site_runtime_instance }}/{{ site_runtime_acceptance_current.deployment_id }}.json
+  register: site_runtime_acceptance_journal_slurp
+
+- name: Разобрать успешный deployment journal
+  ansible.builtin.set_fact:
+    site_runtime_acceptance_journal: >-
+      {{ site_runtime_acceptance_journal_slurp.content | b64decode | from_json }}
+
+- name: Проверить current receipt и deployment journal
+  ansible.builtin.assert:
+    that:
+      - site_runtime_acceptance_current.digest == site_runtime_model.distribution_digest
+      - site_runtime_acceptance_current.compose_checksum == site_runtime_compose_checksum
+      - site_runtime_acceptance_current.storage == site_runtime_storage_identity
+      - site_runtime_acceptance_journal.deployment_id == site_runtime_acceptance_current.deployment_id
+      - site_runtime_acceptance_journal.alias == inventory_hostname
+      - site_runtime_acceptance_journal.current_digest == site_runtime_model.distribution_digest
+      - site_runtime_acceptance_journal.compose_checksum == site_runtime_compose_checksum
+      - site_runtime_acceptance_journal.storage == site_runtime_storage_identity
+      - site_runtime_acceptance_journal.support_image_digests | sort == site_runtime_support_receipt.images | map(attribute='distribution_digest') | list | sort
+      - site_runtime_acceptance_journal.static_status == 'succeeded'
+      - site_runtime_acceptance_journal.migration_status == 'succeeded'
+      - site_runtime_acceptance_journal.health_result == 'succeeded'
+      - site_runtime_acceptance_journal.final_status == 'succeeded'
+    fail_msg: "current.json или deployment journal не прошли финальную приёмку."
+
+- name: Сформировать единый runtime acceptance
+  ansible.builtin.set_fact:
+    site_runtime_runtime_acceptance: >-
+      {{
+        (site_runtime_acceptance_runtime_command.stdout | from_json)
+        | combine({
+          'performed': true,
+          'deployment_id': site_runtime_acceptance_current.deployment_id,
+          'digest': site_runtime_acceptance_current.digest,
+          'compose_checksum': site_runtime_acceptance_current.compose_checksum,
+          'storage': site_runtime_acceptance_current.storage,
+          'static_status': site_runtime_acceptance_journal.static_status,
+          'migration_status': site_runtime_acceptance_journal.migration_status,
+          'health_status': site_runtime_acceptance_journal.health_result,
+          'final_status': site_runtime_acceptance_journal.final_status
+        })
+      }}

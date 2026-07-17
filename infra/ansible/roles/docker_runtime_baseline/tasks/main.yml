@@ -1,5 +1,5 @@
 ---
-- name: Check Docker runtime baseline
+- name: Проверить базовую конфигурацию Docker
   ansible.builtin.shell: |
     set -euo pipefail
     command -v docker >/dev/null 2>&1
@@ -12,7 +12,7 @@
   check_mode: false
   when: not ansible_check_mode
 
-- name: Install Docker runtime baseline when missing
+- name: Установить отсутствующую базовую конфигурацию Docker
   ansible.builtin.shell: |
     set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive

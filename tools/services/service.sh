@@ -9,6 +9,15 @@ STATE_FILE="./operator/state.csv"
 INVENTORY="inventory.ini"
 PLAYBOOK=""
 LIMIT=""
+INSTANCE=""
+IMAGE_REF=""
+SERVICES_REGISTRY="./services.yml"
+SITE_RUNTIME_INSTANCES="./operator/site_runtime/instances.yml"
+SITE_RUNTIME_RESOLVER="./tools/site_runtime/resolve.py"
+IMAGE_ARCHIVE=""
+IMAGE_MANIFEST=""
+SUPPORT_ARCHIVE=""
+SUPPORT_MANIFEST=""
 POLICY_ROUTER_IMAGE_REF=""
 BUILD_POLICY_ROUTER_IMAGE="false"
 REINIT_STANDBY="false"
@@ -38,6 +47,11 @@ Usage:
   bash tools/services/service.sh vpn_edge absent [options]
   bash tools/services/service.sh vpn_edge purge --confirm-purge [options]
   bash tools/services/service.sh vpn_edge reseed --limit ALIAS [options]
+  bash tools/services/service.sh site_runtime probe --limit vps3 [options]
+  bash tools/services/service.sh site_runtime plan --instance NAME --image-ref REF --limit ALIAS
+  bash tools/services/service.sh site_runtime stage-image --instance NAME --image-ref REF --limit ALIAS [internal archive options]
+  bash tools/services/service.sh site_runtime stage-support-images --limit ALIAS [internal archive options]
+  bash tools/services/service.sh site_runtime apply --instance NAME --image-ref REF --limit ALIAS [--check]
   bash tools/services/service.sh vpn_cascade plan [options]
   bash tools/services/service.sh vpn_cascade apply [options]
   bash tools/services/service.sh vpn_cascade absent [options]
@@ -76,6 +90,8 @@ Options:
   --inventory PATH       Generated Ansible inventory. Default: inventory.ini
   --playbook PATH        Override service playbook.
   --limit VALUE          Ansible --limit. Default: service ansible_group.
+  --instance NAME        site_runtime instance name.
+  --image-ref REF        site_runtime immutable repository@sha256 reference.
   --policy-router-image-ref REF
                         vpn_cascade only: pin policy-router image and skip cache/build.
   --build-policy-router-image
@@ -219,6 +235,17 @@ service_playbook() {
         platform_networks) echo "infra/ansible/platform_networks.yml" ;;
         host_resources) echo "infra/ansible/host_resources.yml" ;;
         platform_router) echo "infra/ansible/platform_router.yml" ;;
+        site_runtime)
+            if [ "$ACTION" = "probe" ]; then
+                echo "infra/ansible/site_runtime_network_probe.yml"
+            elif [ "$ACTION" = "stage-image" ]; then
+                echo "infra/ansible/site_runtime_image_stage.yml"
+            elif [ "$ACTION" = "stage-support-images" ]; then
+                echo "infra/ansible/site_runtime_support_images_stage.yml"
+            else
+                echo "infra/ansible/site_runtime_apply.yml"
+            fi
+            ;;
         *) return 1 ;;
     esac
 }
@@ -273,6 +300,39 @@ service_extra_vars() {
                 printf '%s\n' "-e" "platform_router_softether_debug_no_log=false"
             fi
             ;;
+        site_runtime)
+            if [ "$ACTION" = "probe" ]; then
+                printf '%s\n' "-e" "site_runtime_network_probe_state=present"
+            elif [ "$ACTION" = "stage-support-images" ]; then
+                printf '%s\n' \
+                    "-e" "site_runtime_support_state=present" \
+                    "-e" "site_runtime_support_archive=$SUPPORT_ARCHIVE" \
+                    "-e" "site_runtime_support_manifest=$SUPPORT_MANIFEST"
+            elif [ "$ACTION" = "apply" ]; then
+                printf '%s\n' \
+                    "-e" "site_runtime_apply_state=present" \
+                    "-e" "site_runtime_instance=$INSTANCE" \
+                    "-e" "site_runtime_image_ref=$IMAGE_REF" \
+                    "-e" "site_runtime_services_registry=$SERVICES_REGISTRY" \
+                    "-e" "site_runtime_instances_file=$SITE_RUNTIME_INSTANCES" \
+                    "-e" "site_runtime_nodes_file=$NODES_FILE" \
+                    "-e" "site_runtime_state_file=$STATE_FILE" \
+                    "-e" "site_runtime_resolver=$SITE_RUNTIME_RESOLVER" \
+                    "-e" "site_runtime_env_resolver=$(dirname "$SITE_RUNTIME_RESOLVER")/resolve_env.py"
+            else
+                printf '%s\n' \
+                    "-e" "site_runtime_stage_state=present" \
+                    "-e" "site_runtime_instance=$INSTANCE" \
+                    "-e" "site_runtime_image_ref=$IMAGE_REF" \
+                    "-e" "site_runtime_image_archive=$IMAGE_ARCHIVE" \
+                    "-e" "site_runtime_image_manifest=$IMAGE_MANIFEST" \
+                    "-e" "site_runtime_services_registry=$SERVICES_REGISTRY" \
+                    "-e" "site_runtime_instances_file=$SITE_RUNTIME_INSTANCES" \
+                    "-e" "site_runtime_nodes_file=$NODES_FILE" \
+                    "-e" "site_runtime_state_file=$STATE_FILE" \
+                    "-e" "site_runtime_resolver=$SITE_RUNTIME_RESOLVER"
+            fi
+            ;;
         *)
             return 1
             ;;
@@ -281,9 +341,9 @@ service_extra_vars() {
 
 run_ansible_playbook() {
     if [ "$(id -u)" -eq 0 ]; then
-        sudo -u ansible env ANSIBLE_SSH_COMMON_ARGS="$ANSIBLE_SSH_COMMON_ARGS" ansible-playbook "$@"
+        sudo -u ansible env LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONIOENCODING=utf-8 ANSIBLE_SSH_COMMON_ARGS="$ANSIBLE_SSH_COMMON_ARGS" ansible-playbook "$@"
     else
-        ansible-playbook "$@"
+        env LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONIOENCODING=utf-8 ansible-playbook "$@"
     fi
 }
 
@@ -296,14 +356,21 @@ if [ "$SERVICE" = "vpn" ]; then
     fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 fi
 case "$SERVICE" in
-    edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector|edge_banlist|postgres_runtime|softether_l3_vps|platform_networks|host_resources|platform_router) ;;
-    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks, host_resources, platform_router." ;;
+    edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector|edge_banlist|postgres_runtime|softether_l3_vps|platform_networks|host_resources|platform_router|site_runtime) ;;
+    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks, host_resources, platform_router, site_runtime." ;;
 esac
 case "$ACTION" in
-    plan|apply|absent|purge|reseed) ;;
-    *) usage; fail "Action must be one of: plan, apply, absent, purge, reseed" ;;
+    plan|apply|absent|purge|reseed|probe|stage-image|stage-support-images) ;;
+    *) usage; fail "Action must be one of: plan, apply, absent, purge, reseed, probe, stage-image, stage-support-images" ;;
 esac
 shift 2
+
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" != "plan" ] && [ "$ACTION" != "probe" ] && [ "$ACTION" != "stage-image" ] && [ "$ACTION" != "stage-support-images" ] && [ "$ACTION" != "apply" ]; then
+    fail "site_runtime action is not supported"
+fi
+if [ "$SERVICE" != "site_runtime" ] && [ "$ACTION" = "probe" ]; then
+    fail "probe is supported only for site_runtime"
+fi
 
 if [ "$SERVICE" = "host_resources" ] && [ "$ACTION" != "plan" ] && [ "$ACTION" != "apply" ]; then
     fail "host_resources v1 supports only plan and apply; absent/purge/reseed are intentionally disabled"
@@ -330,6 +397,42 @@ while [ "$#" -gt 0 ]; do
             ;;
         --limit)
             LIMIT="${2:-}"
+            shift 2
+            ;;
+        --instance)
+            INSTANCE="${2:-}"
+            shift 2
+            ;;
+        --image-ref)
+            IMAGE_REF="${2:-}"
+            shift 2
+            ;;
+        --services-registry)
+            SERVICES_REGISTRY="${2:-}"
+            shift 2
+            ;;
+        --site-runtime-instances)
+            SITE_RUNTIME_INSTANCES="${2:-}"
+            shift 2
+            ;;
+        --site-runtime-resolver)
+            SITE_RUNTIME_RESOLVER="${2:-}"
+            shift 2
+            ;;
+        --image-archive)
+            IMAGE_ARCHIVE="${2:-}"
+            shift 2
+            ;;
+        --image-manifest)
+            IMAGE_MANIFEST="${2:-}"
+            shift 2
+            ;;
+        --support-archive)
+            SUPPORT_ARCHIVE="${2:-}"
+            shift 2
+            ;;
+        --support-manifest)
+            SUPPORT_MANIFEST="${2:-}"
             shift 2
             ;;
         --policy-router-image-ref)
@@ -365,6 +468,22 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+if [ "$SERVICE" = "site_runtime" ] && [ -z "$LIMIT" ]; then
+    fail "site_runtime requires exactly one --limit alias"
+fi
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "probe" ] && [ "$LIMIT" != "vps3" ]; then
+    fail "site_runtime probe requires exactly --limit vps3"
+fi
+if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "plan" ] || [ "$ACTION" = "stage-image" ] || [ "$ACTION" = "apply" ]; } && { [ -z "$INSTANCE" ] || [ -z "$IMAGE_REF" ]; }; then
+    fail "site_runtime $ACTION requires --instance and --image-ref"
+fi
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "stage-support-images" ] && { [ -z "$SUPPORT_ARCHIVE" ] || [ -z "$SUPPORT_MANIFEST" ]; }; then
+    fail "site_runtime stage-support-images requires internal --support-archive and --support-manifest inputs"
+fi
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "stage-image" ] && { [ -z "$IMAGE_ARCHIVE" ] || [ -z "$IMAGE_MANIFEST" ]; }; then
+    fail "site_runtime stage-image requires internal --image-archive and --image-manifest inputs"
+fi
 
 if [ -n "$POLICY_ROUTER_IMAGE_REF" ] && [ "$SERVICE" != "vpn_cascade" ]; then
     fail "--policy-router-image-ref is supported only for service vpn_cascade"
@@ -408,6 +527,10 @@ service_row_state=""
 service_match_count=0
 service_total_count=0
 service_plan_rows=()
+state_lookup_service="$SERVICE"
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "probe" ]; then
+    state_lookup_service="platform_router"
+fi
 while IFS=, read -r kind name ansible_group active_aliases candidate_aliases old_aliases row_state extra || [ -n "${kind:-}" ]; do
     kind="${kind//$'\r'/}"
     name="${name//$'\r'/}"
@@ -417,14 +540,14 @@ while IFS=, read -r kind name ansible_group active_aliases candidate_aliases old
     old_aliases="${old_aliases//$'\r'/}"
     row_state="${row_state//$'\r'/}"
     extra="${extra//$'\r'/}"
-    [ "$kind" = "service" ] && [ "$name" = "$SERVICE" ] || continue
+    [ "$kind" = "service" ] && [ "$name" = "$state_lookup_service" ] || continue
     [ -z "$extra" ] || fail "state.csv $SERVICE row has too many columns"
     service_total_count=$((service_total_count + 1))
     service_plan_rows+=("$ansible_group|$active_aliases|$candidate_aliases|$old_aliases|$row_state")
 
     if [ -n "$LIMIT" ]; then
         target_aliases="$active_aliases"
-        if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ]; } && [ -n "$candidate_aliases" ]; then
+        if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ] || [ "$SERVICE" = "site_runtime" ]; } && [ -n "$candidate_aliases" ]; then
             target_aliases="$(append_aliases_unique "$target_aliases" "$candidate_aliases")"
         fi
         selected_aliases="$(limit_aliases_in_row "$LIMIT" "$target_aliases")"
@@ -499,7 +622,7 @@ fi
 [ "$service_found" = "true" ] || fail "state.csv must contain a service row for $SERVICE matching --limit $(limit_display_for_error "$LIMIT")"
 if [ -n "$LIMIT" ]; then
     limit_match_aliases="$service_active_aliases"
-    if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ]; } && [ -n "$service_candidate_aliases" ]; then
+    if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ] || [ "$SERVICE" = "site_runtime" ]; } && [ -n "$service_candidate_aliases" ]; then
         limit_match_aliases="$(append_aliases_unique "$limit_match_aliases" "$service_candidate_aliases")"
     fi
     while IFS= read -r limit_alias; do
@@ -517,6 +640,25 @@ esac
 [ -n "$service_group" ] || fail "$SERVICE ansible_group is empty in state.csv"
 
 if [ "$ACTION" = "plan" ]; then
+    if [ "$SERVICE" = "site_runtime" ]; then
+        site_runtime_python="python3"
+        if ! python3 -c 'import sys' >/dev/null 2>&1; then
+            site_runtime_python="python"
+        fi
+        "$site_runtime_python" -c 'import sys' >/dev/null 2>&1 || fail "python3/python not found in PATH"
+        [ -f "$SERVICES_REGISTRY" ] || fail "services registry not found: $SERVICES_REGISTRY"
+        [ -f "$SITE_RUNTIME_INSTANCES" ] || fail "site_runtime instances not found: $SITE_RUNTIME_INSTANCES"
+        [ -f "$SITE_RUNTIME_RESOLVER" ] || fail "site_runtime resolver not found: $SITE_RUNTIME_RESOLVER"
+        "$site_runtime_python" "$SITE_RUNTIME_RESOLVER" \
+            --registry "$SERVICES_REGISTRY" \
+            --instances "$SITE_RUNTIME_INSTANCES" \
+            --state "$STATE_FILE" \
+            --nodes "$NODES_FILE" \
+            --instance "$INSTANCE" \
+            --image-ref "$IMAGE_REF" \
+            --limit "$LIMIT"
+        exit $?
+    fi
     echo "Service: $SERVICE"
     echo "State file: $STATE_FILE"
     echo "Service state: $service_row_state"
@@ -527,7 +669,7 @@ if [ "$ACTION" = "plan" ]; then
         current_alias="${current_alias//$'\r'/}"
         [ -n "$current_alias" ] || continue
         plan_present_aliases="$service_active_aliases"
-        if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ]; } && [ -n "$service_candidate_aliases" ]; then
+        if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ] || [ "$SERVICE" = "site_runtime" ]; } && [ -n "$service_candidate_aliases" ]; then
             plan_present_aliases="$(append_aliases_unique "$plan_present_aliases" "$service_candidate_aliases")"
         fi
         if [ "$service_row_state" = "present" ] && alias_in_list "$current_alias" "$plan_present_aliases"; then
@@ -565,15 +707,23 @@ fi
 if [ "$ACTION" = "reseed" ] && [ "$service_row_state" != "present" ]; then
     fail "$SERVICE reseed requires state=present in $STATE_FILE"
 fi
-if [ "$ACTION" = "apply" ] && [ "$service_row_state" != "present" ]; then
-    fail "$SERVICE apply requires state=present in $STATE_FILE"
+if { [ "$ACTION" = "apply" ] || [ "$ACTION" = "probe" ] || [ "$ACTION" = "stage-image" ] || [ "$ACTION" = "stage-support-images" ]; } && [ "$service_row_state" != "present" ]; then
+    fail "$SERVICE $ACTION requires state=present in $STATE_FILE"
 fi
 service_target_aliases="$service_active_aliases"
-if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ]; } && [ -n "$service_candidate_aliases" ]; then
+if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ] || [ "$SERVICE" = "site_runtime" ]; } && [ -n "$service_candidate_aliases" ]; then
     service_target_aliases="$(append_aliases_unique "$service_target_aliases" "$service_candidate_aliases")"
 fi
-if [ "$ACTION" = "apply" ] && [ -z "$service_target_aliases" ]; then
+if { [ "$ACTION" = "apply" ] || [ "$ACTION" = "probe" ] || [ "$ACTION" = "stage-image" ] || [ "$ACTION" = "stage-support-images" ]; } && [ -z "$service_target_aliases" ]; then
     fail "No active/candidate aliases for $SERVICE found in $STATE_FILE"
+fi
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "stage-image" ]; then
+    [ -f "$IMAGE_ARCHIVE" ] || fail "site_runtime image archive not found: $IMAGE_ARCHIVE"
+    [ -f "$IMAGE_MANIFEST" ] || fail "site_runtime image manifest not found: $IMAGE_MANIFEST"
+fi
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "stage-support-images" ]; then
+    [ -f "$SUPPORT_ARCHIVE" ] || fail "site_runtime support archive not found: $SUPPORT_ARCHIVE"
+    [ -f "$SUPPORT_MANIFEST" ] || fail "site_runtime support manifest not found: $SUPPORT_MANIFEST"
 fi
 
 service_state="present"
@@ -591,7 +741,7 @@ fi
 
 if [ -n "$LIMIT" ]; then
     limit_args=(--limit "$(ansible_limit_pattern "$LIMIT")")
-elif { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ]; } && [ -n "$service_candidate_aliases" ]; then
+elif { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ] || [ "$SERVICE" = "site_runtime" ]; } && [ -n "$service_candidate_aliases" ]; then
     limit_args=(--limit "$service_group:candidate_$service_group")
 else
     limit_args=(--limit "$service_group")

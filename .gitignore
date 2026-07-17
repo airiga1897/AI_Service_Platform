@@ -25,6 +25,11 @@ operator/softether/l3-vps/*
 !operator/softether/l3-vps/secrets/
 operator/softether/l3-vps/secrets/*
 !operator/softether/l3-vps/secrets/template.json
+!operator/site_runtime/
+operator/site_runtime/*
+!operator/site_runtime/secrets/
+operator/site_runtime/secrets/*
+!operator/site_runtime/secrets/template.env
 inventory.ini
 infra/ansible/inventory.ini
 infra/ansible/nodes.csv

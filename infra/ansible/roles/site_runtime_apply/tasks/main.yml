@@ -1,0 +1,648 @@
+---
+- name: Проверить входные параметры site_runtime apply
+  ansible.builtin.assert:
+    that:
+      - site_runtime_apply_state == 'present'
+      - site_runtime_instance | length > 0
+      - site_runtime_image_ref | length > 0
+
+- name: Вычислить canonical site_runtime model
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ site_runtime_resolver }}"
+      - --registry
+      - "{{ site_runtime_services_registry }}"
+      - --instances
+      - "{{ site_runtime_instances_file }}"
+      - --state
+      - "{{ site_runtime_state_file }}"
+      - --nodes
+      - "{{ site_runtime_nodes_file }}"
+      - --instance
+      - "{{ site_runtime_instance }}"
+      - --image-ref
+      - "{{ site_runtime_image_ref }}"
+      - --limit
+      - "{{ inventory_hostname }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  register: site_runtime_apply_model_command
+
+- name: Сохранить canonical site_runtime model
+  ansible.builtin.set_fact:
+    site_runtime_model: "{{ site_runtime_apply_model_command.stdout | from_json }}"
+
+- name: Зафиксировать storage identities deployment
+  ansible.builtin.set_fact:
+    site_runtime_storage_identity:
+      release_static: "{{ site_runtime_model.runtime_contract.storage.release_static.volume }}"
+      public_media: "{{ site_runtime_model.runtime_contract.storage.public_media.volume }}"
+      private_media: "{{ site_runtime_model.runtime_contract.storage.private_media.volume }}"
+
+- name: Вычислить пути receipts
+  ansible.builtin.set_fact:
+    site_runtime_product_receipt_path: >-
+      {{ site_runtime_stage_root }}/images/{{ site_runtime_instance }}/{{ site_runtime_model.distribution_digest | regex_replace('^sha256:', '') }}.json
+    site_runtime_support_receipt_path: "{{ site_runtime_stage_root }}/support/{{ inventory_hostname }}.json"
+    site_runtime_instance_root: "{{ site_runtime_runtime_root }}/{{ site_runtime_instance }}"
+    site_runtime_deployment_id: "{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}-{{ site_runtime_model.distribution_digest | regex_replace('^sha256:', '') | truncate(12, true, '') }}"
+
+- name: Прочитать product receipt
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_product_receipt_path }}"
+  register: site_runtime_product_receipt_slurp
+
+- name: Прочитать support receipt
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_support_receipt_path }}"
+  register: site_runtime_support_receipt_slurp
+
+- name: Разобрать receipts
+  ansible.builtin.set_fact:
+    site_runtime_product_receipt: "{{ site_runtime_product_receipt_slurp.content | b64decode | from_json }}"
+    site_runtime_support_receipt: "{{ site_runtime_support_receipt_slurp.content | b64decode | from_json }}"
+
+- name: Индексировать support images
+  ansible.builtin.set_fact:
+    site_runtime_support_images: >-
+      {{ dict(site_runtime_support_receipt.images | map(attribute='name') | zip(site_runtime_support_receipt.images)) }}
+
+- name: Проверить receipts deployment identity
+  ansible.builtin.assert:
+    that:
+      - site_runtime_product_receipt.image_ref == site_runtime_model.image_ref
+      - site_runtime_product_receipt.transport_tag == site_runtime_model.transport_tag
+      - site_runtime_product_receipt.config_image_id is match('^sha256:[0-9a-f]{64}$')
+      - site_runtime_support_receipt.target_alias == inventory_hostname
+      - site_runtime_support_receipt.images | length == 2
+      - site_runtime_support_images.redis.source_ref == 'redis:7-alpine'
+      - site_runtime_support_images.nginx.source_ref == 'nginx:alpine'
+    fail_msg: "Product/support receipts не соответствуют canonical site_runtime model."
+
+- name: Проверить exact product image
+  ansible.builtin.command:
+    argv: [docker, image, inspect, "{{ site_runtime_model.transport_tag }}"]
+  check_mode: false
+  changed_when: false
+  register: site_runtime_apply_product_image
+  failed_when: >-
+    site_runtime_apply_product_image.rc != 0 or
+    (site_runtime_apply_product_image.stdout | from_json | first).Id != site_runtime_product_receipt.config_image_id
+
+- name: Проверить exact support images
+  ansible.builtin.command:
+    argv: [docker, image, inspect, "{{ item.transport_tag }}"]
+  loop: "{{ site_runtime_support_receipt.images }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_apply_support_images
+  failed_when: >-
+    site_runtime_apply_support_images.rc != 0 or
+    (site_runtime_apply_support_images.stdout | from_json | first).Id != item.config_image_id
+
+- name: Проверить application network
+  ansible.builtin.command:
+    argv: [docker, network, inspect, "{{ site_runtime_model.network.app_network }}"]
+  check_mode: false
+  changed_when: false
+
+- name: Прочитать работающий platform_router
+  ansible.builtin.command:
+    argv: [docker, inspect, platform-router]
+  check_mode: false
+  changed_when: false
+  register: site_runtime_apply_router
+
+- name: Зафиксировать exact anchor image
+  ansible.builtin.set_fact:
+    site_runtime_anchor_image: "{{ (site_runtime_apply_router.stdout | from_json | first).Config.Image }}"
+
+- name: Проверить anchor image
+  ansible.builtin.command:
+    argv: [docker, image, inspect, "{{ site_runtime_anchor_image }}"]
+  check_mode: false
+  changed_when: false
+
+- name: Проверить состояние phase-1 probe
+  ansible.builtin.command:
+    argv: [docker, inspect, ai-service-site-runtime-anchor-probe-vps3]
+  check_mode: false
+  changed_when: false
+  failed_when: false
+  register: site_runtime_apply_probe
+
+- name: Проверить состояние recovery runtime anchor
+  ansible.builtin.command:
+    argv: [docker, inspect, "site-runtime-{{ site_runtime_instance }}-anchor"]
+  check_mode: false
+  changed_when: false
+  failed_when: false
+  register: site_runtime_apply_existing_anchor
+
+- name: Проверить unmanaged private media в существующем runtime
+  ansible.builtin.shell: |
+    python3 - \
+      "{{ site_runtime_model.runtime_contract.storage.private_media.container_path }}" \
+      "{{ site_runtime_instance_root }}/docker-compose.yml" <<'PY'
+    import json
+    from pathlib import Path
+    import subprocess
+    import sys
+
+    private_path, compose_file = sys.argv[1:]
+    if not Path(compose_file).is_file():
+        print(0)
+        raise SystemExit(0)
+    listed = subprocess.run(
+        ["docker", "compose", "-f", compose_file, "ps", "-aq", "web", "worker"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if listed.returncode != 0:
+        raise SystemExit("Не удалось определить существующие web/worker containers")
+    containers = listed.stdout.split()
+    unmanaged_entries = 0
+    for container in containers:
+        inspected = subprocess.run(
+            ["docker", "inspect", container],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if inspected.returncode != 0:
+            if "No such object" in inspected.stderr:
+                continue
+            raise SystemExit(f"Не удалось проверить существующий контейнер {container}")
+        info = json.loads(inspected.stdout)[0]
+        if any(
+            mount.get("Type") == "volume" and mount.get("Destination") == private_path
+            for mount in info.get("Mounts", [])
+        ):
+            continue
+        counted = subprocess.run(
+            [
+                "docker", "exec", container, "/bin/sh", "-ec",
+                'if [ -d "$1" ]; then find "$1" -mindepth 1 -maxdepth 1 -print | wc -l; else printf "0\\n"; fi',
+                "private-media-check", private_path,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if counted.returncode != 0:
+            raise SystemExit(f"Не удалось проверить private media в контейнере {container}")
+        unmanaged_entries += int(counted.stdout.strip())
+    print(unmanaged_entries)
+    PY
+  args:
+    executable: /bin/bash
+  check_mode: false
+  changed_when: false
+  register: site_runtime_apply_unmanaged_private_media
+
+- name: Зафиксировать количество unmanaged private media entries
+  ansible.builtin.set_fact:
+    site_runtime_unmanaged_private_media_entries: >-
+      {{ site_runtime_apply_unmanaged_private_media.stdout | int }}
+
+- name: Запретить потерю unmanaged private media
+  ansible.builtin.assert:
+    that:
+      - site_runtime_unmanaged_private_media_entries | int == 0
+    fail_msg: >-
+      В существующем runtime обнаружены unmanaged private media entries.
+      Автоматический перенос запрещён; требуется отдельный операторский import.
+
+- name: Проверить минимальный runtime secret contract без вывода значений
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ site_runtime_env_resolver }}"
+      - --app-secret
+      - "{{ site_runtime_model.runtime_intent.application_secret_file }}"
+      - --postgres-config
+      - "{{ site_runtime_postgres_config }}"
+      - --postgres-secrets
+      - "{{ site_runtime_postgres_secrets }}"
+      - --instance
+      - "{{ site_runtime_instance }}"
+      - --validate-only
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+
+- name: Разрешить минимальный runtime secret contract
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ site_runtime_env_resolver }}"
+      - --app-secret
+      - "{{ site_runtime_model.runtime_intent.application_secret_file }}"
+      - --postgres-config
+      - "{{ site_runtime_postgres_config }}"
+      - --postgres-secrets
+      - "{{ site_runtime_postgres_secrets }}"
+      - --instance
+      - "{{ site_runtime_instance }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  no_log: true
+  register: site_runtime_apply_env_command
+
+- name: Сохранить runtime secrets без журналирования
+  ansible.builtin.set_fact:
+    site_runtime_secret_env: "{{ site_runtime_apply_env_command.stdout | from_json }}"
+  no_log: true
+
+- name: Сформировать runtime artifacts в памяти
+  ansible.builtin.set_fact:
+    site_runtime_compose_content: "{{ lookup('template', 'docker-compose.yml.j2') }}"
+    site_runtime_nginx_content: "{{ lookup('template', 'nginx.conf.j2') }}"
+    site_runtime_env_content: "{{ lookup('template', 'runtime.env.j2') }}"
+  no_log: true
+
+- name: Вычислить checksum Compose
+  ansible.builtin.set_fact:
+    site_runtime_compose_checksum: "{{ site_runtime_compose_content | hash('sha256') }}"
+    site_runtime_runtime_acceptance:
+      performed: false
+      reason: check_mode
+
+- name: Проверить предыдущий deployment receipt
+  ansible.builtin.stat:
+    path: "{{ site_runtime_stage_root }}/deployments/{{ site_runtime_instance }}/current.json"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_apply_current_stat
+
+- name: Прочитать предыдущий deployment receipt
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_stage_root }}/deployments/{{ site_runtime_instance }}/current.json"
+  when: site_runtime_apply_current_stat.stat.exists
+  register: site_runtime_apply_current_slurp
+
+- name: Зафиксировать previous digest
+  ansible.builtin.set_fact:
+    site_runtime_current_deployment: >-
+      {{
+        (site_runtime_apply_current_slurp.content | b64decode | from_json)
+        if site_runtime_apply_current_stat.stat.exists
+        else {}
+      }}
+    site_runtime_previous_digest: >-
+      {{
+        (site_runtime_apply_current_slurp.content | b64decode | from_json).digest
+        if site_runtime_apply_current_stat.stat.exists
+        else none
+      }}
+
+- name: Определить идемпотентный apply
+  ansible.builtin.set_fact:
+    site_runtime_apply_already_current: >-
+      {{
+        site_runtime_current_deployment.get('digest') == site_runtime_model.distribution_digest
+        and site_runtime_current_deployment.get('compose_checksum') == site_runtime_compose_checksum
+        and site_runtime_current_deployment.get('storage', {}) == site_runtime_storage_identity
+      }}
+
+- name: Зафиксировать Docker state до проверки
+  ansible.builtin.shell: |
+    docker ps -aq | sort
+    printf '%s\n' '---volumes---'
+    docker volume ls -q | sort
+  args: { executable: /bin/bash }
+  check_mode: false
+  changed_when: false
+  register: site_runtime_apply_state_before
+
+- name: Проверить отрендеренный runtime во временном каталоге
+  block:
+    - name: Создать временный каталог проверки
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: site-runtime-check-
+      check_mode: false
+      register: site_runtime_apply_check_dir
+
+    - name: Записать временные runtime artifacts
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "{{ site_runtime_apply_check_dir.path }}/{{ item.name }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { name: docker-compose.yml, content: "{{ site_runtime_compose_content }}", mode: "0640" }
+        - { name: nginx.conf, content: "{{ site_runtime_nginx_content }}", mode: "0640" }
+        - { name: runtime.env, content: "{{ site_runtime_env_content }}", mode: "0600" }
+      check_mode: false
+      no_log: true
+
+    - name: Выполнить docker compose config
+      ansible.builtin.command:
+        argv: [docker, compose, -f, "{{ site_runtime_apply_check_dir.path }}/docker-compose.yml", config, --quiet]
+      check_mode: false
+      changed_when: false
+
+    - name: Проверить PostgreSQL authentication до migration
+      ansible.builtin.shell: |
+        python3 - \
+          "{{ site_runtime_apply_check_dir.path }}/runtime.env" \
+          "{{
+            'ai-service-site-runtime-anchor-probe-vps3'
+            if site_runtime_apply_probe.rc == 0
+            else 'site-runtime-' + site_runtime_instance + '-anchor'
+          }}" \
+          "{{ site_runtime_model.transport_tag }}" <<'PY'
+        import json
+        import os
+        from pathlib import Path
+        import re
+        import subprocess
+        import sys
+
+        values = {}
+        for number, raw_line in enumerate(Path(sys.argv[1]).read_text(encoding="utf-8").splitlines(), 1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                raise SystemExit(f"runtime.env:{number}: ожидается KEY=VALUE")
+            key, raw_value = line.split("=", 1)
+            if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
+                raise SystemExit(f"runtime.env:{number}: недопустимое имя переменной")
+            value = json.loads(raw_value) if raw_value.startswith('"') else raw_value
+            if not isinstance(value, str):
+                raise SystemExit(f"runtime.env:{number}: значение должно быть строкой")
+            values[key] = value
+
+        child_env = os.environ.copy()
+        child_env.update(values)
+        command = [
+            "docker", "run", "--rm", "--pull", "never",
+            "--network", f"container:{sys.argv[2]}",
+            "--entrypoint", "/bin/sh",
+        ]
+        for key in sorted(values):
+            command.extend(["--env", key])
+        command.extend([
+            sys.argv[3], "-ec",
+            "python manage.py showmigrations --plan >/dev/null",
+        ])
+        raise SystemExit(subprocess.run(command, env=child_env, check=False).returncode)
+        PY
+      args:
+        executable: /bin/bash
+      check_mode: false
+      changed_when: false
+  always:
+    - name: Удалить временные runtime artifacts
+      ansible.builtin.file:
+        path: "{{ site_runtime_apply_check_dir.path | default('/nonexistent') }}"
+        state: absent
+      check_mode: false
+
+- name: Применить runtime после отдельного операторского разрешения
+  when:
+    - not ansible_check_mode
+    - not site_runtime_apply_already_current
+  block:
+    - name: Инициализировать статусы deployment
+      ansible.builtin.set_fact:
+        site_runtime_static_status: not_started
+        site_runtime_migration_status: not_started
+        site_runtime_health_status: not_started
+        site_runtime_current_receipt_written: false
+
+    - name: Создать runtime и journal каталоги
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ site_runtime_instance_root }}", mode: "0750" }
+        - { path: "{{ site_runtime_stage_root }}/deployments/{{ site_runtime_instance }}", mode: "0750" }
+
+    - name: Сохранить предыдущие runtime artifacts
+      ansible.builtin.command:
+        argv: [cp, -a, "{{ site_runtime_instance_root }}", "{{ site_runtime_stage_root }}/deployments/{{ site_runtime_instance }}/{{ site_runtime_deployment_id }}.previous"]
+      failed_when: false
+      changed_when: false
+
+    - name: Записать runtime artifacts
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "{{ site_runtime_instance_root }}/{{ item.name }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { name: docker-compose.yml, content: "{{ site_runtime_compose_content }}", mode: "0640" }
+        - { name: nginx.conf, content: "{{ site_runtime_nginx_content }}", mode: "0640" }
+        - { name: runtime.env, content: "{{ site_runtime_env_content }}", mode: "0600" }
+      no_log: true
+
+    - name: Убрать phase-1 probe перед takeover адреса
+      ansible.builtin.command:
+        argv: [docker, compose, -f, "{{ site_runtime_probe_root }}/docker-compose.yml", down]
+      when: site_runtime_apply_probe.rc == 0
+      changed_when: true
+
+    - name: Запустить anchor и Redis
+      ansible.builtin.command:
+        argv: [docker, compose, -f, "{{ site_runtime_instance_root }}/docker-compose.yml", up, -d, --no-build, --pull, never, anchor, redis]
+      changed_when: true
+
+    - name: Проверить TCP path PostgreSQL
+      ansible.builtin.command:
+        argv: [docker, exec, "site-runtime-{{ site_runtime_instance }}-anchor", nc, -z, -w, "5", 172.30.8.10, "5432"]
+      changed_when: false
+
+    - name: Зафиксировать начало подготовки frontend/static
+      ansible.builtin.set_fact:
+        site_runtime_static_status: running
+
+    - name: Подготовить frontend/static единственным one-shot контейнером
+      ansible.builtin.command:
+        argv: [docker, compose, -f, "{{ site_runtime_instance_root }}/docker-compose.yml", --profile, deployment, run, --rm, --no-deps, static]
+      changed_when: true
+
+    - name: Зафиксировать успешную подготовку frontend/static
+      ansible.builtin.set_fact:
+        site_runtime_static_status: succeeded
+
+    - name: Зафиксировать начало migration step
+      ansible.builtin.set_fact:
+        site_runtime_migration_status: running
+
+    - name: Выполнить единственный migration step
+      ansible.builtin.command:
+        argv: [docker, compose, -f, "{{ site_runtime_instance_root }}/docker-compose.yml", --profile, deployment, run, --rm, --no-deps, migration]
+      changed_when: true
+
+    - name: Зафиксировать успешный migration step
+      ansible.builtin.set_fact:
+        site_runtime_migration_status: succeeded
+
+    - name: Запустить private runtime
+      ansible.builtin.command:
+        argv: [docker, compose, -f, "{{ site_runtime_instance_root }}/docker-compose.yml", up, -d, --no-build, --pull, never, web, worker, beat, nginx]
+      changed_when: true
+
+    - name: Зафиксировать начало health acceptance
+      ansible.builtin.set_fact:
+        site_runtime_health_status: running
+
+    - name: Проверить private health endpoints
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - -f
+          - "{{ site_runtime_instance_root }}/docker-compose.yml"
+          - exec
+          - -T
+          - web
+          - python
+          - -c
+          - >-
+            import urllib.request;
+            [urllib.request.urlopen('http://127.0.0.1:8080' + p, timeout=5).read()
+            for p in ('/healthz/','/readyz/','/worker-healthz/')]
+      register: site_runtime_apply_health
+      retries: 20
+      delay: 3
+      until: site_runtime_apply_health.rc == 0
+      changed_when: false
+
+    - name: Зафиксировать успешный health acceptance
+      ansible.builtin.set_fact:
+        site_runtime_health_status: succeeded
+
+    - name: Записать успешный deployment journal
+      ansible.builtin.copy:
+        content: >-
+          {{ {'deployment_id': site_runtime_deployment_id, 'deployment_time_utc': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ'),
+          'alias': inventory_hostname, 'previous_digest': site_runtime_previous_digest, 'current_digest': site_runtime_model.distribution_digest,
+          'compose_checksum': site_runtime_compose_checksum, 'support_image_digests': site_runtime_support_receipt.images | map(attribute='distribution_digest') | list,
+          'storage': site_runtime_storage_identity,
+          'static_status': site_runtime_static_status, 'migration_status': site_runtime_migration_status,
+          'health_result': site_runtime_health_status, 'final_status': 'succeeded'} | to_nice_json }}
+        dest: "{{ site_runtime_stage_root }}/deployments/{{ site_runtime_instance }}/{{ site_runtime_deployment_id }}.json"
+        mode: "0640"
+
+    - name: Обновить current deployment receipt
+      ansible.builtin.copy:
+        content: >-
+          {{ {'deployment_id': site_runtime_deployment_id, 'digest': site_runtime_model.distribution_digest,
+          'compose_checksum': site_runtime_compose_checksum, 'storage': site_runtime_storage_identity} | to_nice_json }}
+        dest: "{{ site_runtime_stage_root }}/deployments/{{ site_runtime_instance }}/current.json"
+        mode: "0640"
+
+    - name: Зафиксировать запись current deployment receipt
+      ansible.builtin.set_fact:
+        site_runtime_current_receipt_written: true
+
+    - name: Выполнить финальную приёмку нового private runtime
+      ansible.builtin.include_tasks: accept_runtime.yml
+  rescue:
+    - name: Записать failed deployment journal без автоматического rollback
+      ansible.builtin.copy:
+        content: >-
+          {{ {'deployment_id': site_runtime_deployment_id, 'deployment_time_utc': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ'),
+          'alias': inventory_hostname, 'previous_digest': site_runtime_previous_digest, 'current_digest': site_runtime_model.distribution_digest,
+          'compose_checksum': site_runtime_compose_checksum, 'storage': site_runtime_storage_identity,
+          'static_status': site_runtime_static_status | default('not_started'),
+          'migration_status': site_runtime_migration_status | default('not_started'),
+          'health_result': site_runtime_health_status | default('not_started'), 'final_status': 'failed', 'automatic_schema_rollback': False} | to_nice_json }}
+        dest: "{{ site_runtime_stage_root }}/deployments/{{ site_runtime_instance }}/{{ site_runtime_deployment_id }}.json"
+        mode: "0640"
+
+    - name: Восстановить предыдущий current receipt после ошибки приёмки
+      ansible.builtin.copy:
+        content: "{{ site_runtime_apply_current_slurp.content | b64decode }}"
+        dest: "{{ site_runtime_stage_root }}/deployments/{{ site_runtime_instance }}/current.json"
+        mode: "0640"
+      when:
+        - site_runtime_current_receipt_written | default(false)
+        - site_runtime_apply_current_stat.stat.exists
+
+    - name: Удалить новый current receipt после ошибки первого deployment
+      ansible.builtin.file:
+        path: "{{ site_runtime_stage_root }}/deployments/{{ site_runtime_instance }}/current.json"
+        state: absent
+      when:
+        - site_runtime_current_receipt_written | default(false)
+        - not site_runtime_apply_current_stat.stat.exists
+
+    - name: Остановить apply после сохранения диагностики
+      ansible.builtin.fail:
+        msg: "site_runtime apply завершился ошибкой; schema/runtime автоматически не откатывались."
+
+- name: Проверить health уже принятого deployment
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - -f
+      - "{{ site_runtime_instance_root }}/docker-compose.yml"
+      - exec
+      - -T
+      - web
+      - python
+      - -c
+      - >-
+        import urllib.request;
+        [urllib.request.urlopen('http://127.0.0.1:8080' + p, timeout=5).read()
+        for p in ('/healthz/','/readyz/','/worker-healthz/')]
+  when:
+    - not ansible_check_mode
+    - site_runtime_apply_already_current
+  changed_when: false
+
+- name: Выполнить финальную приёмку уже принятого private runtime
+  ansible.builtin.include_tasks: accept_runtime.yml
+  when:
+    - not ansible_check_mode
+    - site_runtime_apply_already_current
+
+- name: Зафиксировать Docker state после проверки
+  ansible.builtin.shell: |
+    docker ps -aq | sort
+    printf '%s\n' '---volumes---'
+    docker volume ls -q | sort
+  args: { executable: /bin/bash }
+  check_mode: false
+  changed_when: false
+  register: site_runtime_apply_state_after
+
+- name: Подтвердить отсутствие runtime mutations в check-mode
+  ansible.builtin.assert:
+    that:
+      - not ansible_check_mode or site_runtime_apply_state_before.stdout == site_runtime_apply_state_after.stdout
+      - >-
+        not ansible_check_mode or
+        ((site_runtime_apply_probe.rc == 0) != (site_runtime_apply_existing_anchor.rc == 0))
+    fail_msg: "site_runtime apply -Check изменил Docker state или не обнаружил ровно один network anchor."
+
+- name: Вывести resolved apply contract
+  ansible.builtin.debug:
+    msg:
+      instance: "{{ site_runtime_instance }}"
+      alias: "{{ inventory_hostname }}"
+      deployment_identity: "{{ site_runtime_model.image_ref }}"
+      compose_checksum: "{{ site_runtime_compose_checksum }}"
+      support_images: "{{ site_runtime_support_receipt.images | map(attribute='resolved_ref') | list }}"
+      storage: "{{ site_runtime_storage_identity }}"
+      unmanaged_private_media_entries: "{{ site_runtime_unmanaged_private_media_entries }}"
+      static_command: "{{ site_runtime_model.runtime_contract.components.static.command }}"
+      migration_command: "{{ site_runtime_model.runtime_contract.components.migration.command }}"
+      private_health: "{{ site_runtime_model.runtime_contract.health }}"
+      phase1_probe_takeover_planned: "{{ site_runtime_apply_probe.rc == 0 }}"
+      recovery_anchor_present: "{{ site_runtime_apply_existing_anchor.rc == 0 }}"
+      check_mode_mutations: false
+      already_current: "{{ site_runtime_apply_already_current }}"
+      runtime_acceptance: "{{ site_runtime_runtime_acceptance }}"

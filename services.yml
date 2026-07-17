@@ -455,7 +455,7 @@ runtime_instances:
 
   ai-retail-mvp:
     project: ai_e_retail
-    role: frozen-mvp
+    role: released-mvp
     profile: ai-retail-mvp
     source_policy: github-only
     env:
@@ -481,7 +481,7 @@ runtime_instances:
         - ai-retail-mvp-redis
         - ai-retail-mvp-nginx
     healthcheck:
-      path: /health/
+      path: /healthz/
       expected_status: 200
       timeout_seconds: 5
     data:
@@ -495,12 +495,11 @@ runtime_instances:
         postgres: ai_retail_mvp_postgres
         redis: ai_retail_mvp_redis
     seed:
-      automatic_demo_data: true
+      automatic_demo_data: false
       command: python manage.py load_demo_data
     deploy:
-      allowed_image_ref_pattern: '^ghcr\.io/airiga1897/ai[_-]e[_-]retail[^:]*:ai-retail-mvp-v[0-9a-zA-Z._-]+$'
-      frozen: true
-      frozen_image_ref_pattern: '^ghcr\.io/airiga1897/ai[_-]e[_-]retail[^:]*:ai-retail-mvp-v[0-9a-zA-Z._-]+$'
+      allowed_image_ref_pattern: '^ghcr\.io/airiga1897/ai_e_retail@sha256:[0-9a-f]{64}$'
+      release_guard: immutable-released-image
       source:
         repository: https://github.com/airiga1897/AI_E_Retail
         bootstrap_ref: codex/feature/fixmvp08
@@ -514,6 +513,50 @@ runtime_instances:
           compose_file: infra/stacks/ai-retail-mvp/docker-compose.ai-retail-mvp.yml
           deploy_dir: /opt/stacks/ai-retail-mvp-preprod
           deploy_state_tag_prefix: deploy/ai-retail-mvp/preprod/
+    site_runtime:
+      image_repository: ghcr.io/airiga1897/ai_e_retail
+      platform: linux/amd64
+      release_guard: immutable-released-image
+      entrypoint_override: []
+      support_images:
+        redis: redis:7-alpine
+        nginx: nginx:alpine
+      volumes:
+        redis: ai_retail_mvp_redis
+      storage:
+        release_static:
+          lifecycle: release
+          volume_prefix: ai_retail_mvp_static
+          container_path: /app/staticfiles
+          runtime_access: read-only
+          nginx: true
+        public_media:
+          lifecycle: persistent
+          volume: ai_retail_mvp_media
+          container_path: /app/media
+          runtime_access: read-write
+          nginx: true
+        private_media:
+          lifecycle: persistent
+          volume: ai_retail_mvp_private_media
+          container_path: /app/private_media
+          runtime_access: read-write
+          nginx: false
+      components:
+        static:
+          command: python manage.py collectstatic --noinput
+        web:
+          command: gunicorn electronics_network.wsgi:application --bind 127.0.0.1:8000 --workers 2 --timeout 120
+        worker:
+          command: python -m celery -A electronics_network worker -l info
+        beat:
+          command: python -m celery -A electronics_network beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+        migration:
+          command: python manage.py migrate --noinput
+      health:
+        live: /healthz/
+        ready: /readyz/
+        worker: /worker-healthz/
 
   ai-retail-dev:
     project: ai_e_retail

@@ -3,7 +3,7 @@ param(
     [string]$Service,
 
     [Parameter(Position=1)]
-    [ValidateSet("plan", "apply", "absent", "purge", "reseed")]
+    [ValidateSet("plan", "apply", "absent", "purge", "reseed", "probe", "stage-image", "stage-support-images")]
     [string]$Action,
 
     [string]$NodesFile = ".\operator\nodes.csv",
@@ -44,7 +44,19 @@ param(
 
     [string]$EgressPolicyToolsDir = "tools/egress_policy",
 
+    [string]$ServicesRegistryFile = "services.yml",
+
+    [string]$SiteRuntimeToolsDir = "tools/site_runtime",
+
     [string]$Limit = "",
+
+    [string]$Instance = "",
+
+    [string]$ImageRef = "",
+
+    [string]$SiteRuntimePrepareScript = "tools/site_runtime/prepare_image.ps1",
+
+    [string]$SiteRuntimeSupportPrepareScript = "tools/site_runtime/prepare_support_images.ps1",
 
     [string]$PolicyRouterImageRef = "",
 
@@ -84,6 +96,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$script:Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $script:Utf8NoBom
+$OutputEncoding = $script:Utf8NoBom
 $ExpectedHeader = "current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
 $ExpectedStateHeader = "kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
 $ExpectedNetworksHeader = "alias,policy_subnet,edge_ip,cascade_ip,cascade_router_ip,policy_gateway_ip"
@@ -133,7 +148,7 @@ function Split-RemoteParentPath($Path) {
     return $text.Substring(0, $index)
 }
 
-function New-TarGzBundle($ServiceRunnerScript, $CreateInventoryScript, $AnsibleDir, $PolicyRouterDockerDir, $PolicyGatewayDockerDir, $SoftetherVpnclientDockerDir, $EgressPolicyToolsDir, $NodesFile, $StateFile, $NetworksFile) {
+function New-TarGzBundle($ServiceRunnerScript, $CreateInventoryScript, $AnsibleDir, $PolicyRouterDockerDir, $PolicyGatewayDockerDir, $SoftetherVpnclientDockerDir, $EgressPolicyToolsDir, $ServicesRegistryFile, $SiteRuntimeToolsDir, $NodesFile, $StateFile, $NetworksFile) {
     if (-not (Get-Command tar -ErrorAction SilentlyContinue)) {
         Fail "tar not found in PATH. It is required to upload service bundles as a single archive."
     }
@@ -157,13 +172,16 @@ function New-TarGzBundle($ServiceRunnerScript, $CreateInventoryScript, $AnsibleD
         $toolsStagingDir = Join-Path (Join-Path $stagingDir "tools") "egress_policy"
         New-Item -ItemType Directory -Path (Split-Path -Parent $toolsStagingDir) -Force | Out-Null
         Copy-Item -LiteralPath $EgressPolicyToolsDir -Destination $toolsStagingDir -Recurse
+        Copy-Item -LiteralPath $ServicesRegistryFile -Destination (Join-Path $stagingDir "services.yml")
+        $siteRuntimeToolsStagingDir = Join-Path (Join-Path $stagingDir "tools") "site_runtime"
+        Copy-Item -LiteralPath $SiteRuntimeToolsDir -Destination $siteRuntimeToolsStagingDir -Recurse
         $operatorStagingDir = Join-Path $stagingDir "operator"
         New-Item -ItemType Directory -Path $operatorStagingDir | Out-Null
         Copy-Item -LiteralPath $NodesFile -Destination (Join-Path $operatorStagingDir "nodes.csv")
         Copy-Item -LiteralPath $StateFile -Destination (Join-Path $operatorStagingDir "state.csv")
         Copy-Item -LiteralPath $NetworksFile -Destination (Join-Path $operatorStagingDir "networks.csv")
         $operatorSourceDir = Split-Path -Parent (Resolve-Path -LiteralPath $NodesFile).Path
-        foreach ($operatorSubdir in @("haproxy", "softether", "edge_banlist", "postgres", "platform_networks", "host_resources", "platform_router")) {
+        foreach ($operatorSubdir in @("haproxy", "softether", "edge_banlist", "postgres", "platform_networks", "host_resources", "platform_router", "site_runtime")) {
             $sourceSubdir = Join-Path $operatorSourceDir $operatorSubdir
             if (Test-Path -LiteralPath $sourceSubdir -PathType Container) {
                 Copy-Item -LiteralPath $sourceSubdir -Destination (Join-Path $operatorStagingDir $operatorSubdir) -Recurse
@@ -275,6 +293,8 @@ function Invoke-CaptureExternal($FilePath, $Arguments) {
     $process.StartInfo.UseShellExecute = $false
     $process.StartInfo.RedirectStandardOutput = $true
     $process.StartInfo.RedirectStandardError = $true
+    $process.StartInfo.StandardOutputEncoding = $script:Utf8NoBom
+    $process.StartInfo.StandardErrorEncoding = $script:Utf8NoBom
     try {
         [void]$process.Start()
         $stdout = $process.StandardOutput.ReadToEnd()
@@ -372,14 +392,20 @@ function Read-BatchPlan($Path) {
         if (-not $step.service -or -not $step.action) {
             Fail "BatchPlanFile step $index must include service and action"
         }
-        if ($step.service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks", "host_resources", "platform_router")) {
+        if ($step.service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks", "host_resources", "platform_router", "site_runtime")) {
             Fail "BatchPlanFile step $index has unsupported service: $($step.service)"
         }
-        if ($step.action -notin @("plan", "apply", "absent", "purge", "reseed")) {
+        if ($step.action -notin @("plan", "apply", "absent", "purge", "reseed", "probe")) {
             Fail "BatchPlanFile step $index has unsupported action: $($step.action)"
         }
         if ($step.service -eq "host_resources" -and $step.action -notin @("plan", "apply")) {
             Fail "BatchPlanFile step ${index}: host_resources v1 supports only plan and apply"
+        }
+        if ($step.service -eq "site_runtime" -and ($step.action -ne "probe" -or $step.limit -ne "vps3")) {
+            Fail "BatchPlanFile step ${index}: site_runtime phase 1 requires action=probe and limit=vps3"
+        }
+        if ($step.service -ne "site_runtime" -and $step.action -eq "probe") {
+            Fail "BatchPlanFile step ${index}: probe is supported only for site_runtime"
         }
         if ([bool]$step.reinit_standby) {
             if ($step.service -ne "postgres_runtime") {
@@ -423,6 +449,19 @@ function New-ServiceCommand($Step, $RemoteRepoDir, $RemoteNodesFile, $RemoteStat
         "--inventory", (Quote-BashArg $RemoteInventory)
     )
     if ($Step.Limit) { $args += @("--limit", (Quote-BashArg $Step.Limit)) }
+    if ($Step.Instance) { $args += @("--instance", (Quote-BashArg $Step.Instance)) }
+    if ($Step.ImageRef) { $args += @("--image-ref", (Quote-BashArg $Step.ImageRef)) }
+    if ($Step.ImageArchive) { $args += @("--image-archive", (Quote-BashArg $Step.ImageArchive)) }
+    if ($Step.ImageManifest) { $args += @("--image-manifest", (Quote-BashArg $Step.ImageManifest)) }
+    if ($Step.SupportArchive) { $args += @("--support-archive", (Quote-BashArg $Step.SupportArchive)) }
+    if ($Step.SupportManifest) { $args += @("--support-manifest", (Quote-BashArg $Step.SupportManifest)) }
+    if ($Step.Service -eq "site_runtime" -and $Step.Action -ne "probe") {
+        $args += @(
+            "--services-registry", (Quote-BashArg "$RemoteRepoDir/services.yml"),
+            "--site-runtime-instances", (Quote-BashArg "$RemoteRepoDir/operator/site_runtime/instances.yml"),
+            "--site-runtime-resolver", (Quote-BashArg "$RemoteRepoDir/tools/site_runtime/resolve.py")
+        )
+    }
     if ($Step.PolicyRouterImageRef) { $args += @("--policy-router-image-ref", (Quote-BashArg $Step.PolicyRouterImageRef)) }
     if ($Step.BuildPolicyRouterImage) { $args += "--build-policy-router-image" }
     if ($Step.Check) { $args += "--check" }
@@ -679,6 +718,27 @@ if ($BatchPlanFile) {
 if (-not $BatchPlanFile -and $Service -eq "host_resources" -and $Action -notin @("plan", "apply")) {
     Fail "host_resources v1 supports only plan and apply; absent/purge/reseed are intentionally disabled"
 }
+if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -notin @("plan", "probe", "stage-image", "stage-support-images", "apply")) {
+    Fail "site_runtime action is not supported"
+}
+if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "probe" -and $Limit -ne "vps3") {
+    Fail "site_runtime probe requires exactly -Limit vps3"
+}
+if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and -not $Limit) {
+    Fail "site_runtime requires exactly one -Limit alias"
+}
+if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -in @("plan", "stage-image", "apply") -and (-not $Instance -or -not $ImageRef -or -not $Limit)) {
+    Fail "site_runtime $Action requires -Instance, -ImageRef, and exactly one -Limit alias"
+}
+if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "stage-image") {
+    Require-File $SiteRuntimePrepareScript "SiteRuntimePrepareScript"
+}
+if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "stage-support-images") {
+    Require-File $SiteRuntimeSupportPrepareScript "SiteRuntimeSupportPrepareScript"
+}
+if (-not $BatchPlanFile -and $Service -ne "site_runtime" -and $Action -eq "probe") {
+    Fail "probe is supported only for site_runtime"
+}
 if ($RemoteTransferAttempts -lt 1) {
     Fail "RemoteTransferAttempts must be greater than zero"
 }
@@ -739,6 +799,10 @@ if (-not (Test-Path -LiteralPath $SoftetherVpnclientDockerDir -PathType Containe
 if (-not (Test-Path -LiteralPath $EgressPolicyToolsDir -PathType Container)) {
     Fail "EgressPolicyToolsDir not found: $EgressPolicyToolsDir"
 }
+Require-File $ServicesRegistryFile "ServicesRegistryFile"
+if (-not (Test-Path -LiteralPath $SiteRuntimeToolsDir -PathType Container)) {
+    Fail "SiteRuntimeToolsDir not found: $SiteRuntimeToolsDir"
+}
 
 $remote = "$SshUser@$($controlNode.endpoint)"
 $remoteBundleDir = "/tmp/ai-service-platform.service-remote.$([guid]::NewGuid().ToString('N'))"
@@ -750,7 +814,13 @@ $remotePolicyRouterDockerTemp = "$remoteBundleDir/docker/policy-router"
 $remotePolicyGatewayDockerTemp = "$remoteBundleDir/docker/policy-gateway"
 $remoteSoftetherVpnclientDockerTemp = "$remoteBundleDir/docker/softether-vpnclient"
 $remoteEgressPolicyToolsTemp = "$remoteBundleDir/tools/egress_policy"
+$remoteSiteRuntimeToolsTemp = "$remoteBundleDir/tools/site_runtime"
+$remoteServicesRegistryTemp = "$remoteBundleDir/services.yml"
 $remoteOperatorCsvTemp = "$remoteBundleDir/operator"
+$remoteSiteRuntimeImageArchive = "$remoteBundleDir/site-runtime-image.tar"
+$remoteSiteRuntimeImageManifest = "$remoteBundleDir/site-runtime-image-manifest.json"
+$remoteSiteRuntimeSupportArchive = "$remoteBundleDir/site-runtime-support-images.tar"
+$remoteSiteRuntimeSupportManifest = "$remoteBundleDir/site-runtime-support-images-manifest.json"
 $remoteNodesDir = Split-RemoteParentPath $RemoteNodesFile
 $remoteOperatorDir = Split-RemoteParentPath $RemoteStateFile
 $remoteNetworksFile = "$remoteOperatorDir/networks.csv"
@@ -773,6 +843,12 @@ if ($isBatch) {
         Service = $Service
         Action = $Action
         Limit = $Limit
+        Instance = $Instance
+        ImageRef = $ImageRef
+        ImageArchive = if ($Service -eq "site_runtime" -and $Action -eq "stage-image") { $remoteSiteRuntimeImageArchive } else { "" }
+        ImageManifest = if ($Service -eq "site_runtime" -and $Action -eq "stage-image") { $remoteSiteRuntimeImageManifest } else { "" }
+        SupportArchive = if ($Service -eq "site_runtime" -and $Action -eq "stage-support-images") { $remoteSiteRuntimeSupportArchive } else { "" }
+        SupportManifest = if ($Service -eq "site_runtime" -and $Action -eq "stage-support-images") { $remoteSiteRuntimeSupportManifest } else { "" }
         Check = [bool]$Check
         ConfirmPurge = [bool]$ConfirmPurge
         ReinitStandby = [bool]$ReinitStandby
@@ -793,6 +869,9 @@ if (-not $isBatch) {
         "sudo install -m 700 $(Quote-BashArg $remoteCreateInventoryTemp) $(Quote-BashArg "$RemoteRepoDir/tools/bootstrap/create_inventory.sh")",
         "sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/tools/egress_policy")",
         "sudo cp -a $(Quote-BashArg $remoteEgressPolicyToolsTemp) $(Quote-BashArg "$RemoteRepoDir/tools/egress_policy")",
+        "sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/tools/site_runtime")",
+        "sudo cp -a $(Quote-BashArg $remoteSiteRuntimeToolsTemp) $(Quote-BashArg "$RemoteRepoDir/tools/site_runtime")",
+        "sudo install -m 644 $(Quote-BashArg $remoteServicesRegistryTemp) $(Quote-BashArg "$RemoteRepoDir/services.yml")",
         "sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/ansible")",
         "sudo cp -a $(Quote-BashArg $remoteAnsibleTemp) $(Quote-BashArg "$RemoteRepoDir/infra/ansible")",
         "sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-router")",
@@ -817,6 +896,7 @@ if (-not $isBatch) {
         "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/platform_networks") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/platform_networks"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/platform_networks") $(Quote-BashArg "$remoteOperatorDir/platform_networks"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/platform_networks"); fi",
         "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/host_resources") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/host_resources"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/host_resources") $(Quote-BashArg "$remoteOperatorDir/host_resources"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/host_resources"); fi",
         "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/platform_router") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/platform_router"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/platform_router") $(Quote-BashArg "$remoteOperatorDir/platform_router"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/platform_router"); fi",
+        "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/site_runtime") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/site_runtime"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/site_runtime") $(Quote-BashArg "$remoteOperatorDir/site_runtime"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/site_runtime"); fi",
         "sudo bash -lc $(Quote-BashArg $serviceCommand)"
     ) -join "; "
 }
@@ -831,6 +911,12 @@ if ($isBatch) {
     Write-Host "Action:       $Action"
     if ($Limit) {
         Write-Host "Limit:        $Limit"
+    }
+    if ($Instance) {
+        Write-Host "Instance:     $Instance"
+    }
+    if ($ImageRef) {
+        Write-Host "Image:        $ImageRef"
     }
     if ($Check) {
         Write-Host "Check:        true"
@@ -886,9 +972,12 @@ if ($AutoAcceptHostKey) {
 }
 $runScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-service-platform.service-job." + [guid]::NewGuid().ToString("N") + ".sh")
 $remoteJobCompletedSuccessfully = $false
+$siteRuntimePreparedImage = $null
 $remoteServiceDisplay = if ($isBatch) { "batch plan: $($batchSteps.Count) steps" } else {
     $remoteServiceDisplayArgs = @($Service, $Action)
     if ($Limit) { $remoteServiceDisplayArgs += @("--limit", $Limit) }
+    if ($Instance) { $remoteServiceDisplayArgs += @("--instance", $Instance) }
+    if ($ImageRef) { $remoteServiceDisplayArgs += @("--image-ref", $ImageRef) }
     if ($PolicyRouterImageRef) { $remoteServiceDisplayArgs += @("--policy-router-image-ref", $PolicyRouterImageRef) }
     if ($BuildPolicyRouterImage) { $remoteServiceDisplayArgs += "--build-policy-router-image" }
     if ($Check) { $remoteServiceDisplayArgs += "--check" }
@@ -917,6 +1006,9 @@ foreach ($line in @(
     "run_stage $(Quote-BashArg "install inventory generator") sudo install -m 700 $(Quote-BashArg $remoteCreateInventoryTemp) $(Quote-BashArg "$RemoteRepoDir/tools/bootstrap/create_inventory.sh")",
     "run_stage $(Quote-BashArg "remove previous egress policy tools") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/tools/egress_policy")",
     "run_stage $(Quote-BashArg "install egress policy tools") sudo cp -a $(Quote-BashArg $remoteEgressPolicyToolsTemp) $(Quote-BashArg "$RemoteRepoDir/tools/egress_policy")",
+    "run_stage $(Quote-BashArg "remove previous site_runtime tools") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/tools/site_runtime")",
+    "run_stage $(Quote-BashArg "install site_runtime tools") sudo cp -a $(Quote-BashArg $remoteSiteRuntimeToolsTemp) $(Quote-BashArg "$RemoteRepoDir/tools/site_runtime")",
+    "run_stage $(Quote-BashArg "install services registry") sudo install -m 644 $(Quote-BashArg $remoteServicesRegistryTemp) $(Quote-BashArg "$RemoteRepoDir/services.yml")",
     "run_stage $(Quote-BashArg "remove previous Ansible bundle") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/ansible")",
     "run_stage $(Quote-BashArg "install Ansible bundle") sudo cp -a $(Quote-BashArg $remoteAnsibleTemp) $(Quote-BashArg "$RemoteRepoDir/infra/ansible")",
     "run_stage $(Quote-BashArg "remove previous policy-router Docker context") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/infra/docker/policy-router")",
@@ -938,7 +1030,8 @@ foreach ($line in @(
     "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/postgres") ]; then run_stage $(Quote-BashArg "sync operator postgres config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/postgres"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/postgres") $(Quote-BashArg "$remoteOperatorDir/postgres"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/postgres")"); fi",
     "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/platform_networks") ]; then run_stage $(Quote-BashArg "sync operator platform_networks config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/platform_networks"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/platform_networks") $(Quote-BashArg "$remoteOperatorDir/platform_networks"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/platform_networks")"); fi",
     "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/host_resources") ]; then run_stage $(Quote-BashArg "sync operator host_resources config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/host_resources"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/host_resources") $(Quote-BashArg "$remoteOperatorDir/host_resources"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/host_resources")"); fi",
-    "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/platform_router") ]; then run_stage $(Quote-BashArg "sync operator platform_router config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/platform_router"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/platform_router") $(Quote-BashArg "$remoteOperatorDir/platform_router"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/platform_router")"); fi"
+    "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/platform_router") ]; then run_stage $(Quote-BashArg "sync operator platform_router config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/platform_router"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/platform_router") $(Quote-BashArg "$remoteOperatorDir/platform_router"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/platform_router")"); fi",
+    "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/site_runtime") ]; then run_stage $(Quote-BashArg "sync operator site_runtime config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/site_runtime"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/site_runtime") $(Quote-BashArg "$remoteOperatorDir/site_runtime"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/site_runtime"); if [ -d $(Quote-BashArg "$remoteOperatorDir/site_runtime/secrets") ]; then find $(Quote-BashArg "$remoteOperatorDir/site_runtime/secrets") -type f -exec chmod 600 {} +; fi"); fi"
 )) { $runScriptLines.Add($line) | Out-Null }
 
 if ($isBatch) {
@@ -981,8 +1074,24 @@ if ($isBatch) {
 }
 
 try {
+    if (-not $isBatch -and $Service -eq "site_runtime" -and $Action -eq "stage-image") {
+        Write-Host "Preparing exact private image archive on workstation..."
+        $prepareOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $SiteRuntimePrepareScript -Instance $Instance -ImageRef $ImageRef -TargetAlias $Limit
+        if ($LASTEXITCODE -ne 0) { Fail "site_runtime image preparation failed with exit code $LASTEXITCODE" }
+        $siteRuntimePreparedImage = @($prepareOutput)[-1] | ConvertFrom-Json
+        Require-File $siteRuntimePreparedImage.archive_path "prepared site_runtime archive"
+        Require-File $siteRuntimePreparedImage.manifest_path "prepared site_runtime manifest"
+    }
+    if (-not $isBatch -and $Service -eq "site_runtime" -and $Action -eq "stage-support-images") {
+        Write-Host "Preparing exact Redis/Nginx archives on workstation..."
+        $prepareOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $SiteRuntimeSupportPrepareScript -TargetAlias $Limit
+        if ($LASTEXITCODE -ne 0) { Fail "site_runtime support image preparation failed with exit code $LASTEXITCODE" }
+        $siteRuntimePreparedImage = @($prepareOutput)[-1] | ConvertFrom-Json
+        Require-File $siteRuntimePreparedImage.archive_path "prepared site_runtime support archive"
+        Require-File $siteRuntimePreparedImage.manifest_path "prepared site_runtime support manifest"
+    }
     Write-Host "Preparing local service bundle..."
-    $bundle = New-TarGzBundle $ServiceRunnerScript $CreateInventoryScript $AnsibleDir $PolicyRouterDockerDir $PolicyGatewayDockerDir $SoftetherVpnclientDockerDir $EgressPolicyToolsDir $NodesFile $StateFile $NetworksFile
+    $bundle = New-TarGzBundle $ServiceRunnerScript $CreateInventoryScript $AnsibleDir $PolicyRouterDockerDir $PolicyGatewayDockerDir $SoftetherVpnclientDockerDir $EgressPolicyToolsDir $ServicesRegistryFile $SiteRuntimeToolsDir $NodesFile $StateFile $NetworksFile
     if ($useDetachedRemoteJob) {
         Write-LfScript $runScriptPath $runScriptLines
     }
@@ -1029,6 +1138,8 @@ try {
         "test -f $(Quote-BashArg $remoteServiceRunnerTemp)",
         "test -f $(Quote-BashArg $remoteCreateInventoryTemp)",
         "test -d $(Quote-BashArg $remoteEgressPolicyToolsTemp)",
+        "test -d $(Quote-BashArg $remoteSiteRuntimeToolsTemp)",
+        "test -f $(Quote-BashArg $remoteServicesRegistryTemp)",
         "test -d $(Quote-BashArg $remoteAnsibleTemp)",
         "test -d $(Quote-BashArg $remotePolicyRouterDockerTemp)",
         "test -d $(Quote-BashArg $remotePolicyGatewayDockerTemp)",
@@ -1043,6 +1154,25 @@ try {
         $remote,
         $extractCommand
     )) "remote service bundle extract" $RemoteTransferAttempts
+
+    if ($siteRuntimePreparedImage) {
+        Write-Host "Uploading verified private image archive to orchestration node..."
+        $remotePreparedArchive = if ($Action -eq "stage-support-images") { $remoteSiteRuntimeSupportArchive } else { $remoteSiteRuntimeImageArchive }
+        $remotePreparedManifest = if ($Action -eq "stage-support-images") { $remoteSiteRuntimeSupportManifest } else { $remoteSiteRuntimeImageManifest }
+        Invoke-ExternalRetrySshTransport $script:ScpExecutablePath ($scpCommonArgs + @(
+            $siteRuntimePreparedImage.archive_path,
+            "${remote}:$remotePreparedArchive"
+        )) "site_runtime image archive upload" $RemoteTransferAttempts $RemoteTransferRetryDelaySeconds
+        Invoke-ExternalRetrySshTransport $script:ScpExecutablePath ($scpCommonArgs + @(
+            $siteRuntimePreparedImage.manifest_path,
+            "${remote}:$remotePreparedManifest"
+        )) "site_runtime image manifest upload" $RemoteTransferAttempts $RemoteTransferRetryDelaySeconds
+        $imagePermissionsCommand = "chmod 0644 $(Quote-BashArg $remotePreparedArchive) $(Quote-BashArg $remotePreparedManifest)"
+        Invoke-ExternalRetryTransport $script:SshExecutablePath ($sshCommonArgs + @(
+            $remote,
+            $imagePermissionsCommand
+        )) "site_runtime image permissions" $RemoteTransferAttempts
+    }
 
     if ($useDetachedRemoteJob) {
         $startJobCommand = @(
@@ -1075,6 +1205,9 @@ try {
         Remove-Item -LiteralPath $bundle.StagingDir -Recurse -Force -ErrorAction SilentlyContinue
     }
     Remove-Item -LiteralPath $runScriptPath -Force -ErrorAction SilentlyContinue
+    if ($siteRuntimePreparedImage -and $siteRuntimePreparedImage.temp_dir) {
+        Remove-Item -LiteralPath $siteRuntimePreparedImage.temp_dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
     if ($useDetachedRemoteJob -and $remoteJobCompletedSuccessfully) {
         Write-Host "Cleaning remote temporary service bundle and completed job state; preserving rotated job log: $remoteJobLog"
         $cleanupTarget = New-BackgroundCleanupCommand "rm -rf $(Quote-BashArg $remoteBundleDir) $(Quote-BashArg $remoteBundleArchive) $(Quote-BashArg $remoteJobDir)"

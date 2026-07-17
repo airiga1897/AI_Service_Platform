@@ -1,0 +1,14 @@
+---
+- name: Site runtime network-anchor probe on active platform routers
+  hosts: platform_routers
+  become: true
+  gather_facts: false
+  roles:
+    - site_runtime_network_probe
+
+- name: Site runtime network-anchor probe on candidate platform routers
+  hosts: candidate_platform_routers
+  become: true
+  gather_facts: false
+  roles:
+    - site_runtime_network_probe

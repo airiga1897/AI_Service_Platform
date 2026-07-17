@@ -1,5 +1,5 @@
 ---
-- name: PostgreSQL runtime primary rollout
+- name: Развёртывание основного узла PostgreSQL runtime
   hosts: postgres_runtimes
   become: true
   gather_facts: false
@@ -9,7 +9,7 @@
   roles:
     - postgres_runtime
 
-- name: PostgreSQL runtime standby rollout
+- name: Развёртывание резервных узлов PostgreSQL runtime
   hosts: candidate_postgres_runtimes
   become: true
   gather_facts: false

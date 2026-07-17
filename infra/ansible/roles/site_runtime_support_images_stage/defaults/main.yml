@@ -1,0 +1,5 @@
+---
+site_runtime_support_state: present
+site_runtime_support_archive: ""
+site_runtime_support_manifest: ""
+site_runtime_support_root: /var/lib/ai-service-platform/site-runtime

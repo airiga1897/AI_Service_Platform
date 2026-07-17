@@ -138,15 +138,43 @@ class ValidatorBrokenFixtureTests(unittest.TestCase):
             f"missing invalid-regex error in: {errors}",
         )
 
-    def test_frozen_instance_requires_frozen_pattern(self) -> None:
+    def test_released_instance_requires_digest_only_pattern(self) -> None:
         self.data["runtime_instances"]["ai-retail-mvp"]["deploy"][
-            "frozen_image_ref_pattern"
-        ] = None
+            "allowed_image_ref_pattern"
+        ] = r"^ghcr\.io/airiga1897/ai_e_retail:latest$"
         errors, _ = validate_data(self.data)
         self.assertTrue(
-            any("frozen_image_ref_pattern" in e for e in errors),
-            f"missing frozen pattern error in: {errors}",
+            any("digest-only" in e for e in errors),
+            f"missing digest-only pattern error in: {errors}",
         )
+
+    def test_site_runtime_requires_all_storage_classes(self) -> None:
+        del self.data["runtime_instances"]["ai-retail-mvp"]["site_runtime"]["storage"][
+            "private_media"
+        ]
+        errors, _ = validate_data(self.data)
+        self.assertTrue(any("storage должен содержать" in error for error in errors), errors)
+
+    def test_site_runtime_rejects_wrong_storage_lifecycle(self) -> None:
+        self.data["runtime_instances"]["ai-retail-mvp"]["site_runtime"]["storage"][
+            "release_static"
+        ]["lifecycle"] = "persistent"
+        errors, _ = validate_data(self.data)
+        self.assertTrue(any("release_static.lifecycle" in error for error in errors), errors)
+
+    def test_site_runtime_rejects_duplicate_storage_volume_names(self) -> None:
+        self.data["runtime_instances"]["ai-retail-mvp"]["site_runtime"]["storage"][
+            "private_media"
+        ]["volume"] = "ai_retail_mvp_media"
+        errors, _ = validate_data(self.data)
+        self.assertTrue(any("volume не должны совпадать" in error for error in errors), errors)
+
+    def test_site_runtime_rejects_wrong_private_media_path(self) -> None:
+        self.data["runtime_instances"]["ai-retail-mvp"]["site_runtime"]["storage"][
+            "private_media"
+        ]["container_path"] = "/app/media"
+        errors, _ = validate_data(self.data)
+        self.assertTrue(any("private_media.container_path" in error for error in errors), errors)
 
     def test_compose_file_must_be_under_instance_stack(self) -> None:
         self.data["runtime_instances"]["ai-retail-dev"]["deploy"]["environments"][

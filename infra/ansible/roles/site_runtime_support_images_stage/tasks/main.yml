@@ -1,0 +1,171 @@
+---
+- name: Проверить входные параметры support-image staging
+  ansible.builtin.assert:
+    that:
+      - site_runtime_support_state == 'present'
+      - site_runtime_support_archive | length > 0
+      - site_runtime_support_manifest | length > 0
+    fail_msg: "Для stage-support-images необходимы archive и manifest."
+
+- name: Прочитать support manifest на orchestration-узле
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_support_manifest }}"
+  delegate_to: localhost
+  become: false
+  register: site_runtime_support_manifest_slurp
+
+- name: Разобрать support manifest
+  ansible.builtin.set_fact:
+    site_runtime_support_model: "{{ site_runtime_support_manifest_slurp.content | b64decode | from_json }}"
+
+- name: Проверить общий контракт support manifest
+  ansible.builtin.assert:
+    that:
+      - site_runtime_support_model.schema_version | int == 1
+      - site_runtime_support_model.kind == 'site-runtime-support-images'
+      - site_runtime_support_model.target_alias == inventory_hostname
+      - site_runtime_support_model.platform == 'linux/amd64'
+      - site_runtime_support_model.archive_sha256 is match('^[0-9a-f]{64}$')
+      - site_runtime_support_model.images | length == 2
+      - site_runtime_support_model.images | map(attribute='name') | sort == ['nginx', 'redis']
+    fail_msg: "Support manifest не соответствует контракту site_runtime."
+
+- name: Проверить элементы support manifest
+  ansible.builtin.assert:
+    that:
+      - item.source_ref in ['redis:7-alpine', 'nginx:alpine']
+      - item.resolved_ref is match('^[^@]+@sha256:[0-9a-f]{64}$')
+      - item.distribution_digest is match('^sha256:[0-9a-f]{64}$')
+      - item.config_image_id is match('^sha256:[0-9a-f]{64}$')
+      - item.platform == 'linux/amd64'
+      - item.transport_tag is match('^ai-service-platform/site-runtime-support:[a-z]+-sha256-[0-9a-f]{64}$')
+    fail_msg: "Некорректный элемент support manifest: {{ item.name | default('unknown') }}"
+  loop: "{{ site_runtime_support_model.images }}"
+
+- name: Проверить checksum архива на orchestration-узле
+  ansible.builtin.stat:
+    path: "{{ site_runtime_support_archive }}"
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  register: site_runtime_support_control_archive
+  failed_when: >-
+    not site_runtime_support_control_archive.stat.exists or
+    site_runtime_support_control_archive.stat.checksum != site_runtime_support_model.archive_sha256
+
+- name: Зафиксировать контейнеры до support-image staging
+  ansible.builtin.command: { argv: [docker, ps, -aq] }
+  check_mode: false
+  changed_when: false
+  register: site_runtime_support_containers_before
+
+- name: Проверить уже загруженные support images
+  ansible.builtin.command:
+    argv: [docker, image, inspect, "{{ item.transport_tag }}"]
+  loop: "{{ site_runtime_support_model.images }}"
+  check_mode: false
+  changed_when: false
+  failed_when: false
+  register: site_runtime_support_existing
+
+- name: Определить идемпотентность support-image staging
+  ansible.builtin.set_fact:
+    site_runtime_support_already_loaded: >-
+      {{
+        (site_runtime_support_existing.results | selectattr('rc', 'equalto', 0) | list | length == 2)
+        and
+        (
+          site_runtime_support_existing.results
+          | selectattr('rc', 'equalto', 0)
+          | map(attribute='stdout') | map('from_json') | map('first') | map(attribute='Id') | sort
+          == site_runtime_support_model.images | map(attribute='config_image_id') | sort
+        )
+      }}
+
+- name: Передать и загрузить support images
+  when:
+    - not ansible_check_mode
+    - not site_runtime_support_already_loaded
+  block:
+    - name: Создать временный каталог support-image staging
+      ansible.builtin.file:
+        path: "{{ site_runtime_support_root }}/tmp"
+        state: directory
+        mode: "0700"
+
+    - name: Передать support archive на target
+      ansible.builtin.copy:
+        src: "{{ site_runtime_support_archive }}"
+        dest: "{{ site_runtime_support_root }}/tmp/support-images.tar"
+        mode: "0600"
+
+    - name: Проверить checksum support archive на target
+      ansible.builtin.stat:
+        path: "{{ site_runtime_support_root }}/tmp/support-images.tar"
+        checksum_algorithm: sha256
+      register: site_runtime_support_target_archive
+      failed_when: site_runtime_support_target_archive.stat.checksum != site_runtime_support_model.archive_sha256
+
+    - name: Загрузить support images в Docker
+      ansible.builtin.command:
+        argv: [docker, image, load, --input, "{{ site_runtime_support_root }}/tmp/support-images.tar"]
+      register: site_runtime_support_load
+      changed_when: site_runtime_support_load.rc == 0
+  always:
+    - name: Удалить временный support archive с target
+      ansible.builtin.file:
+        path: "{{ site_runtime_support_root }}/tmp/support-images.tar"
+        state: absent
+      when: not ansible_check_mode
+
+- name: Повторно проверить support images
+  ansible.builtin.command:
+    argv: [docker, image, inspect, "{{ item.transport_tag }}"]
+  loop: "{{ site_runtime_support_model.images }}"
+  check_mode: false
+  changed_when: false
+  failed_when: false
+  register: site_runtime_support_loaded
+
+- name: Подтвердить exact config image IDs
+  ansible.builtin.assert:
+    that:
+      - ansible_check_mode or item.rc == 0
+      - ansible_check_mode or (item.stdout | from_json | first).Id == item.item.config_image_id
+      - ansible_check_mode or (item.stdout | from_json | first).Os == 'linux'
+      - ansible_check_mode or (item.stdout | from_json | first).Architecture == 'amd64'
+  loop: "{{ site_runtime_support_loaded.results }}"
+
+- name: Создать каталог support receipts
+  ansible.builtin.file:
+    path: "{{ site_runtime_support_root }}/support"
+    state: directory
+    mode: "0750"
+  when: not ansible_check_mode
+
+- name: Записать детерминированный support receipt
+  ansible.builtin.copy:
+    content: "{{ site_runtime_support_model | to_nice_json }}"
+    dest: "{{ site_runtime_support_root }}/support/{{ inventory_hostname }}.json"
+    mode: "0640"
+  when: not ansible_check_mode
+
+- name: Зафиксировать контейнеры после support-image staging
+  ansible.builtin.command: { argv: [docker, ps, -aq] }
+  check_mode: false
+  changed_when: false
+  register: site_runtime_support_containers_after
+
+- name: Подтвердить отсутствие изменений контейнеров
+  ansible.builtin.assert:
+    that:
+      - site_runtime_support_containers_before.stdout_lines | sort == site_runtime_support_containers_after.stdout_lines | sort
+    fail_msg: "stage-support-images не должен изменять контейнеры."
+
+- name: Вывести результат support-image staging
+  ansible.builtin.debug:
+    msg:
+      alias: "{{ inventory_hostname }}"
+      already_loaded: "{{ site_runtime_support_already_loaded }}"
+      images: "{{ site_runtime_support_model.images | map(attribute='resolved_ref') | list }}"
+      containers_changed: false

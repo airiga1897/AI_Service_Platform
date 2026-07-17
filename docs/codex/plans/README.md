@@ -51,6 +51,12 @@ these paths and installs log rotation on every current and future VPS. See
 
 - [Minimum VPS resource expansion](minimum-vps-resource-expansion.md) - approved pools, minimum profiles, safe resize order, and acceptance checks before `site_runtime`.
 - [Manual site runtime rollout before GitHub CD](manual-site-runtime-rollout-before-github-cd.md) - operator-first rollout contract, durable deployment journal, rehearsal gates, and the criteria for enabling GitHub CD.
+- [Site runtime vps3 network-anchor probe](site-runtime-vps3-network-probe.md) - the narrow phase-1 shared-netns and PostgreSQL TCP-path acceptance gate.
+- [AI Retail product database on postgres_runtime](ai-retail-product-database.md) - phase-2 database, role, pgvector, credential, and narrow HBA intent before product rollout.
+- [Подготовка приватного образа Site Runtime](site-runtime-private-image-staging.md) — generic-модель размещения и доставка неизменяемого приватного образа по пути workstation → vps6 → target без запуска продукта.
+- [Generic site_runtime apply для AI_E_Retail](site-runtime-private-apply.md) — private runtime contract, support-image staging и безопасный `apply -Check` до первого запуска.
+- [Единый storage-контракт для site runtime](site-runtime-storage-contract.md) — разделение release static, public/private media, временных загрузок и экспортов для AI_E_Retail, AromaFlow и будущих проектов.
+- [CI и публикация образа AI_E_Retail в GHCR](ai-retail-ci-ghcr-publication.md) — продуктовые quality gates, сборка production stage, фиксация digest и передача immutable image ref платформе.
 - [Future Edge HAProxy security layers](future-edge-haproxy-security-layers.md) - GeoIP, scanner autoban, WAF-like rules и ACME bypass после стабильного VPN/TCP edge.
 - [Future VPS transport](future-vps-transport-softether-s2s-and-ssh-tunnel.md) - SoftEther site-to-site/cascade и SSH tunnel fallback.
 - [Future SD-WAN-like egress controller](future-sd-wan-like-egress-controller.md) - direct/cascade path selection for approved targets with health checks and safe route reconciliation.

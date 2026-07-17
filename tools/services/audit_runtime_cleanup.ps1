@@ -1,6 +1,9 @@
 param(
     [string]$NodesFile = ".\operator\nodes.csv",
     [string]$OperatorDir = ".\operator",
+    [string]$StateFile = ".\operator\state.csv",
+    [string]$PostgresConfig = ".\operator\postgres\config.yml",
+    [string]$PostgresAuditValidator = ".\tools\postgres_runtime\validate_audit.py",
     [string[]]$Aliases = @(),
     [string]$OutputDir = (Join-Path $env:TEMP "ai-service-platform\runtime-cleanup"),
     [int]$ConnectTimeoutSeconds = 10
@@ -146,17 +149,54 @@ for root in paths:
 import json
 import subprocess
 
-def run(command):
-    return subprocess.run(command, shell=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def run(args):
+    return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-names = run("sudo docker ps --format '{{.Names}}'").stdout.splitlines()
+def psql(sql):
+    proc = run([
+        "sudo", "docker", "exec", "ai-service-postgres",
+        "psql", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "postgres", "-tAc", sql,
+    ])
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "psql failed")
+    return proc.stdout.strip()
+
+names = run(["sudo", "docker", "ps", "--format", "{{.Names}}"]).stdout.splitlines()
 if "ai-service-postgres" not in names:
     print(json.dumps({"present": False}, sort_keys=True))
 else:
-    recovery = run("sudo docker exec ai-service-postgres psql -U postgres -tAc 'select pg_is_in_recovery()' 2>/dev/null || true").stdout.strip()
-    route = run("sudo docker exec ai-service-postgres ip route 2>/dev/null || true").stdout.strip()
-    replication = run("sudo docker exec ai-service-postgres psql -U postgres -tAc \"select application_name || '|' || coalesce(client_addr::text,'') || '|' || state || '|' || sync_state from pg_stat_replication order by application_name\" 2>/dev/null || true").stdout.strip()
-    print(json.dumps({"present": True, "pg_is_in_recovery": recovery, "route": route, "replication": replication}, sort_keys=True))
+    try:
+        recovery = psql("select pg_is_in_recovery()")
+        hba_file = psql("show hba_file")
+        hba_rules = json.loads(psql(
+            "SELECT coalesce(json_agg(json_build_object("
+            "'type', type, 'database', database, 'user_name', user_name, "
+            "'address', address, 'netmask', netmask, 'auth_method', auth_method, "
+            "'error', error) ORDER BY line_number)::text, '[]') FROM pg_hba_file_rules"
+        ))
+        replication = json.loads(psql(
+            "SELECT coalesce(json_agg(json_build_object("
+            "'application_name', application_name, 'client_addr', client_addr, "
+            "'state', state, 'sync_state', sync_state) ORDER BY application_name)::text, '[]') "
+            "FROM pg_stat_replication"
+        ))
+        wal_receivers = json.loads(psql(
+            "SELECT coalesce(json_agg(json_build_object("
+            "'status', status, 'sender_host', sender_host, 'slot_name', slot_name))::text, '[]') "
+            "FROM pg_stat_wal_receiver"
+        ))
+        route_proc = run(["sudo", "docker", "exec", "ai-service-postgres", "ip", "route"])
+        print(json.dumps({
+            "present": True,
+            "pg_is_in_recovery": recovery,
+            "hba_file": hba_file,
+            "hba_rules": hba_rules,
+            "replication": replication,
+            "wal_receivers": wal_receivers,
+            "route": route_proc.stdout.strip(),
+        }, sort_keys=True))
+    except Exception as exc:
+        print(json.dumps({"present": True, "error": str(exc)}, sort_keys=True))
 '@
 
     $containerItems = ConvertFrom-JsonLines $containers.stdout
@@ -188,6 +228,14 @@ else:
         $repo -notlike "haproxy" -and
         $repo -notlike "alpine"
     })
+    try {
+        $postgresObject = $postgres.stdout | ConvertFrom-Json
+    } catch {
+        $postgresObject = [pscustomobject]@{
+            present = $null
+            error = "invalid postgres audit JSON: $($_.Exception.Message)"
+        }
+    }
 
     return [pscustomobject]@{
         alias = $alias
@@ -206,7 +254,7 @@ else:
         legacy_networks = $legacyNetworks
         generated_images = $generatedImages
         unknown_images = $unknownImages
-        postgres_raw = [string]$postgres.stdout
+        postgres = $postgresObject
     }
 }
 
@@ -217,6 +265,12 @@ function Write-MarkdownReport($Report, $Path) {
     $lines.Add("- Generated: $($Report.generated_at)")
     $lines.Add("- Nodes: $($Report.nodes.Count)")
     $lines.Add("- Mode: read-only")
+    if ($Report.postgres_contract) {
+        $lines.Add("- PostgreSQL contract: ``$($Report.postgres_contract.ok)``")
+        foreach ($errorMessage in @($Report.postgres_contract.errors)) {
+            $lines.Add("  - $errorMessage")
+        }
+    }
     $lines.Add("")
     foreach ($node in $Report.nodes) {
         $lines.Add("## $($node.alias)")
@@ -234,6 +288,13 @@ function Write-MarkdownReport($Report, $Path) {
         $lines.Add("- Legacy networks: $($node.legacy_networks.Count)")
         $lines.Add("- Generated images: $($node.generated_images.Count)")
         $lines.Add("- Unknown images: $($node.unknown_images.Count)")
+        if ($node.postgres) {
+            $lines.Add("- PostgreSQL present: ``$($node.postgres.present)``")
+            $lines.Add("- PostgreSQL recovery: ``$($node.postgres.pg_is_in_recovery)``")
+            if ($node.postgres.hba_file) {
+                $lines.Add("- PostgreSQL HBA file: ``$($node.postgres.hba_file)``")
+            }
+        }
         if ($node.legacy_containers.Count -gt 0) {
             $lines.Add("")
             $lines.Add("Legacy containers:")
@@ -270,6 +331,14 @@ function Write-MarkdownReport($Report, $Path) {
 if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
     Fail "ssh not found in PATH"
 }
+foreach ($required in @($StateFile, $PostgresConfig, $PostgresAuditValidator)) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+        Fail "required audit input not found: $required"
+    }
+}
+if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+    Fail "python not found in PATH"
+}
 
 $nodes = Read-Nodes $NodesFile
 if ($nodes.Count -eq 0) {
@@ -291,10 +360,27 @@ $report = [pscustomobject]@{
     nodes_file = $NodesFile
     mode = "read-only"
     nodes = $nodeReports
+    postgres_contract = $null
 }
 
+$report | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $jsonPath -Encoding utf8
+$validatorOutput = & python $PostgresAuditValidator --report $jsonPath --config $PostgresConfig --state $StateFile
+$validatorExitCode = $LASTEXITCODE
+try {
+    $report.postgres_contract = $validatorOutput | ConvertFrom-Json
+} catch {
+    $report.postgres_contract = [pscustomobject]@{
+        ok = $false
+        errors = @("Не удалось разобрать результат canonical PostgreSQL audit")
+    }
+    $validatorExitCode = 1
+}
 $report | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $jsonPath -Encoding utf8
 Write-MarkdownReport $report $mdPath
 
 Write-Host "[OK] JSON report: $jsonPath"
 Write-Host "[OK] Markdown report: $mdPath"
+if ($validatorExitCode -ne 0) {
+    Fail "canonical PostgreSQL contract audit failed; inspect the generated report"
+}
+Write-Host "[OK] Canonical PostgreSQL contract: primary=$($report.postgres_contract.primary_alias), standbys=$(@($report.postgres_contract.standby_aliases) -join ',')"
