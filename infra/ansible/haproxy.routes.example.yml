@@ -1,0 +1,39 @@
+vpn_ingress:
+  per_alias:
+    vps1:
+      sni:
+        - vpn-vps1.mine-craft.su
+    vps2:
+      sni:
+        - vpn-vps2.mine-craft.su
+    vps6:
+      sni:
+        - vpn-vps6.mine-craft.su
+  backend:
+    host: 172.20.0.2
+  ports:
+    sstp: 443
+    softether_alt: 992
+    management: 5555
+
+minecraft:
+  defaults:
+    backends:
+      game:
+        primary: mainserv01.netcraze.pro:25565
+      rcon:
+        primary: mainserv01.netcraze.pro:25575
+    vpn_sni: []
+  per_alias:
+    vps4:
+      vpn_sni:
+        - mainsrv01.mine-craft.su
+  ports:
+    game: 25565
+    rcon: 25575
+  policy:
+    blacklist: true
+    rate_limit: soft
+    rcon_public: true
+    rcon_rate_limit: strict
+    geoip: disabled

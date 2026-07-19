@@ -1,0 +1,111 @@
+---
+services:
+  anchor:
+    image: {{ site_runtime_anchor_image }}
+    pull_policy: never
+    container_name: site-runtime-{{ site_runtime_model.instance }}-anchor
+    cap_add: [NET_ADMIN]
+    command:
+      - /bin/sh
+      - -ec
+      - >-
+        while true; do ip route replace
+        {{ site_runtime_model.network.postgres_route.destination }} via
+        {{ site_runtime_model.network.postgres_route.via }};
+        sleep {{ site_runtime_route_reconcile_seconds }}; done
+    restart: unless-stopped
+    networks:
+      app:
+        ipv4_address: {{ site_runtime_model.network.anchor_ipv4 }}
+
+  redis:
+    image: {{ site_runtime_support_images.redis.transport_tag }}
+    pull_policy: never
+    network_mode: service:anchor
+    command: [redis-server, --bind, 127.0.0.1, --protected-mode, "yes", --appendonly, "yes"]
+    restart: unless-stopped
+    volumes: [redis_data:/data]
+    depends_on: { anchor: { condition: service_started } }
+
+  migration:
+    image: {{ site_runtime_model.transport_tag }}
+    pull_policy: never
+    network_mode: service:anchor
+    entrypoint: []
+    command: ["/bin/sh", "-ec", {{ ('exec ' + site_runtime_model.runtime_contract.components.migration.command) | to_json }}]
+    env_file: [runtime.env]
+    depends_on: { redis: { condition: service_started } }
+    profiles: [deployment]
+    restart: "no"
+
+  static:
+    image: {{ site_runtime_model.transport_tag }}
+    pull_policy: never
+    network_mode: service:anchor
+    entrypoint: []
+    command: ["/bin/sh", "-ec", {{ ('exec ' + site_runtime_model.runtime_contract.components.static.command) | to_json }}]
+    env_file: [runtime.env]
+    volumes:
+      - release_static_data:{{ site_runtime_model.runtime_contract.storage.release_static.container_path }}
+    depends_on: { redis: { condition: service_started } }
+    profiles: [deployment]
+    restart: "no"
+
+  web:
+    image: {{ site_runtime_model.transport_tag }}
+    pull_policy: never
+    network_mode: service:anchor
+    entrypoint: []
+    command: ["/bin/sh", "-ec", {{ ('exec ' + site_runtime_model.runtime_contract.components.web.command) | to_json }}]
+    env_file: [runtime.env]
+    volumes:
+      - release_static_data:{{ site_runtime_model.runtime_contract.storage.release_static.container_path }}:ro
+      - public_media_data:{{ site_runtime_model.runtime_contract.storage.public_media.container_path }}
+      - private_media_data:{{ site_runtime_model.runtime_contract.storage.private_media.container_path }}
+    restart: unless-stopped
+    depends_on: { redis: { condition: service_started } }
+
+  worker:
+    image: {{ site_runtime_model.transport_tag }}
+    pull_policy: never
+    network_mode: service:anchor
+    entrypoint: []
+    command: ["/bin/sh", "-ec", {{ ('exec ' + site_runtime_model.runtime_contract.components.worker.command) | to_json }}]
+    env_file: [runtime.env]
+    volumes:
+      - public_media_data:{{ site_runtime_model.runtime_contract.storage.public_media.container_path }}
+      - private_media_data:{{ site_runtime_model.runtime_contract.storage.private_media.container_path }}
+    restart: unless-stopped
+    depends_on: { redis: { condition: service_started } }
+
+  beat:
+    image: {{ site_runtime_model.transport_tag }}
+    pull_policy: never
+    network_mode: service:anchor
+    entrypoint: []
+    command: ["/bin/sh", "-ec", {{ ('exec ' + site_runtime_model.runtime_contract.components.beat.command) | to_json }}]
+    env_file: [runtime.env]
+    restart: unless-stopped
+    depends_on: { redis: { condition: service_started } }
+
+  nginx:
+    image: {{ site_runtime_support_images.nginx.transport_tag }}
+    pull_policy: never
+    network_mode: service:anchor
+    restart: unless-stopped
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - release_static_data:/srv/static:ro
+      - public_media_data:/srv/media:ro
+    depends_on: { web: { condition: service_started } }
+
+networks:
+  app:
+    external: true
+    name: {{ site_runtime_model.network.app_network }}
+
+volumes:
+  redis_data: { name: {{ site_runtime_model.runtime_contract.volumes.redis }} }
+  release_static_data: { name: {{ site_runtime_model.runtime_contract.storage.release_static.volume }} }
+  public_media_data: { name: {{ site_runtime_model.runtime_contract.storage.public_media.volume }} }
+  private_media_data: { name: {{ site_runtime_model.runtime_contract.storage.private_media.volume }} }

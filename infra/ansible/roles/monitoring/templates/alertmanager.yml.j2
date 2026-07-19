@@ -1,0 +1,28 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ['alertname', 'instance']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: telegram
+
+receivers:
+  - name: telegram
+    telegram_configs:
+      - bot_token: "{{ vault_telegram_token }}"
+        chat_id: {{ vault_telegram_chat_id }}
+        message: |
+          {% raw %}{{ range .Alerts }}
+          🔴 *{{ .Annotations.summary }}*
+          {{ .Annotations.description }}
+          Сервер: {{ .Labels.instance }}
+          {{ end }}{% endraw %}
+        parse_mode: Markdown
+        send_resolved: true
+
+inhibit_rules:
+  - source_matchers: [severity="critical"]
+    target_matchers: [severity="warning"]
+    equal: ['instance']

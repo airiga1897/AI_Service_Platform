@@ -1,0 +1,8 @@
+[Unit]
+Description=Reconcile AI Service PostgreSQL container routes
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart={{ postgres_runtime_route_reconcile_script }}

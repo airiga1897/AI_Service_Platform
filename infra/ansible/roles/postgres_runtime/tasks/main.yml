@@ -1,0 +1,1346 @@
+---
+- name: Проверить состояние postgres_runtime
+  ansible.builtin.assert:
+    that:
+      - postgres_runtime_state in ['present', 'absent']
+      - postgres_runtime_purge_data in [true, false, 'true', 'false', 'True', 'False']
+      - postgres_runtime_reinit_standby in [true, false, 'true', 'false', 'True', 'False']
+    fail_msg: "postgres_runtime_state must be present|absent and purge/reinit flags must be boolean-like."
+
+- name: Проверить операторскую конфигурацию PostgreSQL на управляющем узле
+  ansible.builtin.stat:
+    path: "{{ postgres_runtime_operator_config_file }}"
+  delegate_to: localhost
+  become: false
+  register: postgres_runtime_config_stat
+  when: postgres_runtime_state == 'present'
+
+- name: Остановиться при отсутствии операторской конфигурации PostgreSQL
+  ansible.builtin.fail:
+    msg: "postgres_runtime requires operator postgres config: {{ postgres_runtime_operator_config_file }}"
+  when:
+    - postgres_runtime_state == 'present'
+    - not postgres_runtime_config_stat.stat.exists or not postgres_runtime_config_stat.stat.isreg
+
+- name: Сформировать модель postgres_runtime из операторского желаемого состояния
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - <<'PY'
+    import csv
+    import ipaddress
+    import json
+    import os
+    import re
+    import sys
+
+    try:
+        import yaml
+    except Exception as exc:
+        print(f"PyYAML is required to read postgres config: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    alias = os.environ["INVENTORY_HOSTNAME"]
+    config_file = os.environ["CONFIG_FILE"]
+    state_file = os.environ["STATE_FILE"]
+    nodes_file = os.environ["NODES_FILE"]
+
+    def split_aliases(value):
+        return [item for item in (value or "").split("+") if item]
+
+    def fail(message):
+        print(message, file=sys.stderr)
+        sys.exit(1)
+
+    with open(config_file, encoding="utf-8") as handle:
+        config = (yaml.safe_load(handle) or {}).get("postgres_runtime") or {}
+    with open(state_file, newline="", encoding="utf-8-sig") as handle:
+        rows = list(csv.DictReader(handle))
+    with open(nodes_file, newline="", encoding="utf-8-sig") as handle:
+        nodes = {row["current_alias"]: row for row in csv.DictReader(handle)}
+
+    service_rows = [
+        row for row in rows
+        if row.get("kind") == "service"
+        and row.get("name") == "postgres_runtime"
+        and row.get("state") == "present"
+    ]
+    if len(service_rows) != 1:
+        fail("postgres_runtime requires exactly one present service row in state.csv")
+    row = service_rows[0]
+    replication_mode = str(config.get("replication_mode") or "async_standby").strip()
+    if replication_mode not in {"standalone", "async_standby"}:
+        fail("postgres_runtime.replication_mode must be standalone or async_standby")
+
+    primary_aliases = split_aliases(row.get("active_aliases"))
+    standby_aliases = split_aliases(row.get("candidate_aliases"))
+    if not primary_aliases:
+        fail("postgres_runtime active_aliases must not be empty")
+
+    if replication_mode == "standalone":
+        if standby_aliases:
+            fail("postgres_runtime standalone mode must not use candidate_aliases")
+        if alias not in primary_aliases:
+            fail(f"{alias} is not listed in postgres_runtime active_aliases")
+        primary_alias = alias
+        node_role = "primary"
+    else:
+        if len(primary_aliases) != 1:
+            fail("postgres_runtime async_standby mode requires exactly one primary alias in active_aliases")
+        primary_alias = primary_aliases[0]
+        if alias == primary_alias:
+            node_role = "primary"
+        elif alias in standby_aliases:
+            node_role = "standby"
+        else:
+            fail(f"{alias} is not active or candidate for postgres_runtime")
+
+    for required in primary_aliases + standby_aliases:
+        if required not in nodes:
+            fail(f"postgres_runtime references unknown node alias: {required}")
+
+    alias_match = re.match(r"^vps([0-9]+)$", alias)
+    if not alias_match:
+        fail(f"postgres_runtime platform network addressing requires vpsN alias, got: {alias}")
+    alias_number = int(alias_match.group(1))
+    network_role = str(config.get("network_role") or "data").strip()
+    if network_role not in {"data", "app"}:
+        fail("postgres_runtime.network_role must be data or app")
+    container_ip_suffix = int(config.get("container_ip_suffix") or 10)
+    if container_ip_suffix < 2 or container_ip_suffix > 254:
+        fail("postgres_runtime.container_ip_suffix must be between 2 and 254")
+    network_octet = 30 if network_role == "data" else 31
+    docker_network_name = f"ai_service_{network_role}_{alias}"
+    container_ipv4 = f"172.{network_octet}.{alias_number}.{container_ip_suffix}"
+
+    def safe_slot_name(name):
+        text = re.sub(r"[^A-Za-z0-9_]", "_", name)
+        if not re.match(r"^[A-Za-z_]", text):
+            text = "_" + text
+        return text[:60]
+
+    port = int(config.get("port") or os.environ["DEFAULT_PORT"])
+    slot_prefix = str(config.get("replication_slot_prefix") or "ai_sp")
+    slots = {
+        standby: safe_slot_name(f"{slot_prefix}_{standby}")
+        for standby in standby_aliases
+    }
+    replication_cidrs_are_explicit = "replication_cidrs" in config
+    configured_replication_cidrs = config.get("replication_cidrs")
+    if replication_cidrs_are_explicit and not isinstance(configured_replication_cidrs, list):
+        fail("postgres_runtime.replication_cidrs must be a list when specified")
+    if not replication_cidrs_are_explicit:
+        configured_replication_cidrs = []
+    replication_cidrs = []
+    if replication_mode == "standalone":
+        replication_cidrs = []
+    elif replication_cidrs_are_explicit:
+        # Явный пустой список отключает устаревший fallback на публичные expected_ip.
+        replication_cidrs = configured_replication_cidrs
+    elif node_role == "primary":
+        replication_cidrs = [
+            f"{nodes[standby].get('expected_ip')}/32"
+            for standby in standby_aliases
+            if nodes[standby].get("expected_ip")
+        ]
+    elif nodes[primary_alias].get("expected_ip"):
+        replication_cidrs = [f"{nodes[primary_alias].get('expected_ip')}/32"]
+
+    replication_hba_cidrs_by_alias = config.get("replication_hba_cidrs_by_alias") or {}
+    if not isinstance(replication_hba_cidrs_by_alias, dict):
+        fail("postgres_runtime.replication_hba_cidrs_by_alias must be a map of alias to CIDR list")
+    extra_replication_hba_cidrs = replication_hba_cidrs_by_alias.get(alias, []) or []
+    if not isinstance(extra_replication_hba_cidrs, list):
+        fail(f"postgres_runtime.replication_hba_cidrs_by_alias.{alias} must be a list")
+    replication_hba_cidrs = []
+    for cidr in replication_cidrs + extra_replication_hba_cidrs:
+        cidr = str(cidr).strip()
+        if cidr and cidr not in replication_hba_cidrs:
+            replication_hba_cidrs.append(cidr)
+
+    service_routes = []
+    configured_service_routes = config.get("service_routes") or config.get("extra_routes") or {}
+    for item in configured_service_routes.get(alias, []) or []:
+        destination = str(item.get("destination") or item.get("to") or "").strip()
+        via = str(item.get("via") or "").strip()
+        if not destination or not via:
+            fail(f"postgres_runtime service route for {alias} requires destination and via")
+        service_routes.append({"destination": destination, "via": via})
+
+    standby_connection = config.get("standby_connection") or {}
+    if not isinstance(standby_connection, dict):
+        fail("postgres_runtime.standby_connection must be a map")
+
+    def positive_int(name, default, minimum=1, maximum=86400000):
+        value = standby_connection.get(name, default)
+        if isinstance(value, bool) or (
+            not isinstance(value, int)
+            and not (isinstance(value, str) and value.isdigit())
+        ):
+            fail(f"postgres_runtime.standby_connection.{name} must be an integer")
+        value = int(value)
+        if value < minimum or value > maximum:
+            fail(
+                f"postgres_runtime.standby_connection.{name} must be between "
+                f"{minimum} and {maximum}"
+            )
+        return value
+
+    wal_receiver_timeout = str(
+        standby_connection.get("wal_receiver_timeout")
+        or os.environ["DEFAULT_WAL_RECEIVER_TIMEOUT"]
+    ).strip()
+    if not re.fullmatch(r"[1-9][0-9]*(?:ms|s|min|h|d)", wal_receiver_timeout):
+        fail(
+            "postgres_runtime.standby_connection.wal_receiver_timeout must be "
+            "a positive duration with ms|s|min|h|d suffix"
+        )
+
+    standby_connection_model = {
+        "connect_timeout_seconds": positive_int(
+            "connect_timeout_seconds", os.environ["DEFAULT_CONNECT_TIMEOUT_SECONDS"], 2, 300
+        ),
+        "keepalives_idle_seconds": positive_int(
+            "keepalives_idle_seconds", os.environ["DEFAULT_KEEPALIVES_IDLE_SECONDS"], 1, 3600
+        ),
+        "keepalives_interval_seconds": positive_int(
+            "keepalives_interval_seconds", os.environ["DEFAULT_KEEPALIVES_INTERVAL_SECONDS"], 1, 300
+        ),
+        "keepalives_count": positive_int(
+            "keepalives_count", os.environ["DEFAULT_KEEPALIVES_COUNT"], 1, 100
+        ),
+        "tcp_user_timeout_ms": positive_int(
+            "tcp_user_timeout_ms", os.environ["DEFAULT_TCP_USER_TIMEOUT_MS"], 1000, 3600000
+        ),
+        "wal_receiver_timeout": wal_receiver_timeout,
+    }
+
+    image = str(config.get("image") or os.environ["DEFAULT_IMAGE"]).strip()
+    image_contract = config.get("image_contract") or {}
+    if not isinstance(image_contract, dict):
+        fail("postgres_runtime.image_contract must be a map")
+    image_overrides = config.get("image_overrides") or {}
+    if not isinstance(image_overrides, dict):
+        fail("postgres_runtime.image_overrides must be a map of alias to image contract")
+    for override_alias, override in image_overrides.items():
+        if override_alias not in nodes:
+            fail(f"postgres_runtime.image_overrides references unknown alias: {override_alias}")
+        if not isinstance(override, dict):
+            fail(f"postgres_runtime.image_overrides.{override_alias} must be a map")
+    image_override = image_overrides.get(alias) or {}
+    if image_override:
+        image = str(image_override.get("image") or "").strip()
+        if not image:
+            fail(f"postgres_runtime.image_overrides.{alias}.image must not be empty")
+
+    expected_postgres_version = str(
+        image_override.get("expected_postgres_version")
+        or image_contract.get("expected_postgres_version")
+        or ""
+    ).strip()
+    if expected_postgres_version and not re.fullmatch(r"[0-9]+\.[0-9]+", expected_postgres_version):
+        fail(
+            "postgres_runtime effective image contract expected_postgres_version "
+            "must use major.minor format"
+        )
+    required_extensions = (
+        image_override.get("required_extensions")
+        if "required_extensions" in image_override
+        else image_contract.get("required_extensions")
+    ) or []
+    if not isinstance(required_extensions, list):
+        fail("postgres_runtime effective image contract required_extensions must be a list")
+    normalized_extensions = []
+    for extension in required_extensions:
+        extension = str(extension).strip()
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", extension):
+            fail(f"invalid PostgreSQL extension name in image contract: {extension}")
+        if extension not in normalized_extensions:
+            normalized_extensions.append(extension)
+    if (image_contract or image_override) and not re.fullmatch(
+        r"[^\s@]+@sha256:[0-9a-f]{64}", image
+    ):
+        fail("postgres_runtime contracted image must be pinned by sha256 digest")
+
+    configured_managed_databases = config.get("managed_databases") or {}
+    if not isinstance(configured_managed_databases, dict):
+        fail("postgres_runtime.managed_databases must be a map keyed by instance name")
+    managed_databases = []
+    seen_database_names = set()
+    seen_owner_roles = set()
+    seen_password_secrets = set()
+    for instance_name in sorted(configured_managed_databases):
+        item = configured_managed_databases[instance_name]
+        path = f"postgres_runtime.managed_databases.{instance_name}"
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", str(instance_name)):
+            fail(f"{path} key must be a lowercase kebab-case instance name")
+        if not isinstance(item, dict):
+            fail(f"{path} must be a map")
+
+        database = str(item.get("database") or "").strip()
+        owner_role = str(item.get("owner_role") or "").strip()
+        password_secret = str(item.get("password_secret") or "").strip()
+        for field_name, value in (("database", database), ("owner_role", owner_role)):
+            if not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", value):
+                fail(f"{path}.{field_name} must be a safe PostgreSQL identifier")
+        if not re.fullmatch(r"POSTGRES_PRODUCT_[A-Z0-9_]+_PASSWORD", password_secret):
+            fail(f"{path}.password_secret must match POSTGRES_PRODUCT_*_PASSWORD")
+        if database in seen_database_names:
+            fail(f"duplicate managed product database: {database}")
+        if owner_role in seen_owner_roles:
+            fail(f"duplicate managed product owner role: {owner_role}")
+        if password_secret in seen_password_secrets:
+            fail(f"duplicate managed product password secret: {password_secret}")
+        seen_database_names.add(database)
+        seen_owner_roles.add(owner_role)
+        seen_password_secrets.add(password_secret)
+
+        extensions = item.get("extensions") or []
+        if not isinstance(extensions, list) or not extensions:
+            fail(f"{path}.extensions must be a non-empty list")
+        normalized_product_extensions = []
+        for extension in extensions:
+            extension = str(extension).strip()
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", extension):
+                fail(f"invalid PostgreSQL extension name in {path}: {extension}")
+            if extension not in normalized_extensions:
+                fail(
+                    f"{path}.extensions requires {extension}, but the effective "
+                    "postgres_runtime image contract does not declare it"
+                )
+            if extension not in normalized_product_extensions:
+                normalized_product_extensions.append(extension)
+
+        allowed_cidrs = item.get("allowed_cidrs") or []
+        if not isinstance(allowed_cidrs, list) or not allowed_cidrs:
+            fail(f"{path}.allowed_cidrs must be a non-empty list")
+        normalized_product_cidrs = []
+        for cidr in allowed_cidrs:
+            try:
+                parsed_cidr = ipaddress.ip_network(str(cidr).strip(), strict=False)
+            except ValueError as exc:
+                fail(f"invalid CIDR in {path}.allowed_cidrs: {cidr}: {exc}")
+            if parsed_cidr.version != 4:
+                fail(f"{path}.allowed_cidrs currently supports IPv4 only")
+            normalized_cidr = str(parsed_cidr)
+            if normalized_cidr not in normalized_product_cidrs:
+                normalized_product_cidrs.append(normalized_cidr)
+
+        managed_databases.append({
+            "instance": str(instance_name),
+            "database": database,
+            "owner_role": owner_role,
+            "password_secret": password_secret,
+            "extensions": normalized_product_extensions,
+            "allowed_cidrs": normalized_product_cidrs,
+        })
+
+    model = {
+        "replication_mode": replication_mode,
+        "role": node_role,
+        "primary_alias": primary_alias,
+        "primary_endpoint": config.get("primary_endpoint") or nodes[primary_alias]["endpoint"],
+        "primary_expected_ip": config.get("primary_endpoint") or nodes[primary_alias].get("expected_ip") or nodes[primary_alias]["endpoint"],
+        "standby_basebackup_network": config.get("standby_basebackup_network") or "host",
+        "standby_network_mode": config.get("standby_network_mode") or "",
+        "standby_aliases": standby_aliases,
+        "current_alias": alias,
+        "network_role": network_role,
+        "docker_network_name": docker_network_name,
+        "container_ipv4": container_ipv4,
+        "image": image,
+        "image_contract": {
+            "expected_postgres_version": expected_postgres_version,
+            "required_extensions": normalized_extensions,
+        },
+        "container_name": config.get("container_name") or os.environ["DEFAULT_CONTAINER_NAME"],
+        "volume_name": config.get("volume_name") or os.environ["DEFAULT_DATA_VOLUME"],
+        "database": config.get("database") or "ai_service_platform",
+        "app_user": config.get("app_user") or "ai_service_app",
+        "replication_user": config.get("replication_user") or "ai_sp_replicator",
+        "replication_slot": slots.get(alias, ""),
+        "replication_slots": slots,
+        "replication_cidrs": replication_cidrs,
+        "replication_hba_cidrs": replication_hba_cidrs,
+        "allowed_app_cidrs": config.get("allowed_app_cidrs") or [],
+        "managed_databases": managed_databases,
+        "service_routes": service_routes,
+        "standby_connection": standby_connection_model,
+        "port": port,
+        "bind_host": config.get("bind_host") or "127.0.0.1",
+        "listen_addresses": config.get("listen_addresses") or os.environ["DEFAULT_LISTEN_ADDRESSES"],
+        "wal_keep_size": config.get("wal_keep_size") or os.environ["DEFAULT_WAL_KEEP_SIZE"],
+        "max_wal_senders": int(config.get("max_wal_senders") or os.environ["DEFAULT_MAX_WAL_SENDERS"]),
+        "max_replication_slots": int(config.get("max_replication_slots") or os.environ["DEFAULT_MAX_REPLICATION_SLOTS"]),
+        "secrets_file": config.get("secrets_file") or "/opt/ai-service-platform/operator/postgres/secrets.env",
+    }
+    print(json.dumps(model, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    INVENTORY_HOSTNAME: "{{ inventory_hostname }}"
+    CONFIG_FILE: "{{ postgres_runtime_operator_config_file }}"
+    STATE_FILE: "{{ postgres_runtime_operator_state_file }}"
+    NODES_FILE: "{{ postgres_runtime_operator_nodes_file }}"
+    DEFAULT_IMAGE: "{{ postgres_runtime_default_image }}"
+    DEFAULT_CONTAINER_NAME: "{{ postgres_runtime_default_container_name }}"
+    DEFAULT_DATA_VOLUME: "{{ postgres_runtime_default_data_volume }}"
+    DEFAULT_PORT: "{{ postgres_runtime_default_port }}"
+    DEFAULT_LISTEN_ADDRESSES: "{{ postgres_runtime_default_listen_addresses }}"
+    DEFAULT_WAL_KEEP_SIZE: "{{ postgres_runtime_default_wal_keep_size }}"
+    DEFAULT_MAX_WAL_SENDERS: "{{ postgres_runtime_default_max_wal_senders }}"
+    DEFAULT_MAX_REPLICATION_SLOTS: "{{ postgres_runtime_default_max_replication_slots }}"
+    DEFAULT_CONNECT_TIMEOUT_SECONDS: "{{ postgres_runtime_default_connect_timeout_seconds }}"
+    DEFAULT_KEEPALIVES_IDLE_SECONDS: "{{ postgres_runtime_default_keepalives_idle_seconds }}"
+    DEFAULT_KEEPALIVES_INTERVAL_SECONDS: "{{ postgres_runtime_default_keepalives_interval_seconds }}"
+    DEFAULT_KEEPALIVES_COUNT: "{{ postgres_runtime_default_keepalives_count }}"
+    DEFAULT_TCP_USER_TIMEOUT_MS: "{{ postgres_runtime_default_tcp_user_timeout_ms }}"
+    DEFAULT_WAL_RECEIVER_TIMEOUT: "{{ postgres_runtime_default_wal_receiver_timeout }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  register: postgres_runtime_model_command
+  when: postgres_runtime_state == 'present'
+
+- name: Сохранить модель postgres_runtime
+  ansible.builtin.set_fact:
+    postgres_runtime_model: "{{ postgres_runtime_model_command.stdout | from_json }}"
+  when: postgres_runtime_state == 'present'
+
+- name: Проверить секреты postgres_runtime на управляющем узле
+  ansible.builtin.stat:
+    path: "{{ postgres_runtime_model.secrets_file }}"
+  delegate_to: localhost
+  become: false
+  register: postgres_runtime_secrets_stat
+  when: postgres_runtime_state == 'present'
+
+- name: Остановиться при отсутствии секретов postgres_runtime
+  ansible.builtin.fail:
+    msg: "postgres_runtime requires secrets.env on control node. See operator/postgres/README.md."
+  when:
+    - postgres_runtime_state == 'present'
+    - not postgres_runtime_secrets_stat.stat.exists or not postgres_runtime_secrets_stat.stat.isreg
+
+- name: Загрузить секреты postgres_runtime с управляющего узла
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - <<'PY'
+    import json
+    import os
+    import sys
+    path = os.environ["SECRETS_FILE"]
+    required = {
+        "POSTGRES_SUPERUSER_PASSWORD",
+        "POSTGRES_APP_PASSWORD",
+        "POSTGRES_REPLICATION_PASSWORD",
+    }
+    managed_databases = json.loads(os.environ.get("MANAGED_DATABASES_JSON") or "[]")
+    required.update(item["password_secret"] for item in managed_databases)
+    values = {}
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            text = line.strip()
+            if not text or text.startswith("#") or "=" not in text:
+                continue
+            key, value = text.split("=", 1)
+            values[key.strip()] = value.strip()
+    missing = sorted(required - set(values))
+    if missing:
+        print("missing required postgres secret keys", file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps({key: values[key] for key in sorted(required)}))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    SECRETS_FILE: "{{ postgres_runtime_model.secrets_file }}"
+    MANAGED_DATABASES_JSON: "{{ postgres_runtime_model.managed_databases | to_json }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  no_log: true
+  register: postgres_runtime_secret_command
+  when: postgres_runtime_state == 'present'
+
+- name: Сохранить карту секретов postgres_runtime
+  ansible.builtin.set_fact:
+    postgres_runtime_secret_map: "{{ postgres_runtime_secret_command.stdout | from_json }}"
+  no_log: true
+  when: postgres_runtime_state == 'present'
+
+- name: Проверить Compose-файл postgres_runtime
+  ansible.builtin.stat:
+    path: "{{ postgres_runtime_compose_file }}"
+  register: postgres_runtime_compose_stat
+  when: postgres_runtime_state == 'absent'
+
+- name: Определить желаемое состояние восстановителя маршрутов postgres_runtime
+  ansible.builtin.set_fact:
+    postgres_runtime_route_reconcile_enabled: >-
+      {{ postgres_runtime_state == 'present'
+         and ((((postgres_runtime_model | default({})).service_routes | default([])) | length) > 0) }}
+
+- name: Проверить установленные модули systemd для восстановителя маршрутов postgres_runtime
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "/etc/systemd/system/{{ postgres_runtime_route_reconcile_service }}"
+    - "/etc/systemd/system/{{ postgres_runtime_route_reconcile_timer }}"
+  register: postgres_runtime_route_reconcile_unit_stats
+
+- name: Остановить отключённый таймер восстановителя маршрутов postgres_runtime
+  ansible.builtin.systemd:
+    name: "{{ postgres_runtime_route_reconcile_timer }}"
+    state: stopped
+    enabled: false
+  when:
+    - not postgres_runtime_route_reconcile_enabled
+    - postgres_runtime_route_reconcile_unit_stats.results[1].stat.exists
+    - not ansible_check_mode
+
+- name: Удалить отключённый восстановитель маршрутов postgres_runtime
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ postgres_runtime_route_reconcile_script }}"
+    - "/etc/systemd/system/{{ postgres_runtime_route_reconcile_service }}"
+    - "/etc/systemd/system/{{ postgres_runtime_route_reconcile_timer }}"
+  register: postgres_runtime_route_reconcile_remove
+  when: not postgres_runtime_route_reconcile_enabled
+
+- name: Перезагрузить systemd после удаления восстановителя маршрутов postgres_runtime
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when:
+    - postgres_runtime_route_reconcile_remove.changed | default(false)
+    - not ansible_check_mode
+
+- name: Подготовить каталоги postgres_runtime
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "/usr/local/sbin", mode: "0755" }
+    - { path: "{{ postgres_runtime_root_dir }}", mode: "0755" }
+    - { path: "{{ postgres_runtime_config_dir }}", mode: "0755" }
+  when: postgres_runtime_state == 'present'
+
+- name: Сформировать скрипт восстановителя маршрутов postgres_runtime
+  ansible.builtin.template:
+    src: postgres-route-reconcile.sh.j2
+    dest: "{{ postgres_runtime_route_reconcile_script }}"
+    mode: "0755"
+  register: postgres_runtime_route_reconcile_script_template
+  when: postgres_runtime_route_reconcile_enabled
+
+- name: Сформировать службу systemd восстановителя маршрутов postgres_runtime
+  ansible.builtin.template:
+    src: postgres-route-reconcile.service.j2
+    dest: "/etc/systemd/system/{{ postgres_runtime_route_reconcile_service }}"
+    mode: "0644"
+  register: postgres_runtime_route_reconcile_service_template
+  when: postgres_runtime_route_reconcile_enabled
+
+- name: Сформировать таймер systemd восстановителя маршрутов postgres_runtime
+  ansible.builtin.template:
+    src: postgres-route-reconcile.timer.j2
+    dest: "/etc/systemd/system/{{ postgres_runtime_route_reconcile_timer }}"
+    mode: "0644"
+  register: postgres_runtime_route_reconcile_timer_template
+  when: postgres_runtime_route_reconcile_enabled
+
+- name: Перезагрузить systemd для восстановителя маршрутов postgres_runtime
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when:
+    - postgres_runtime_route_reconcile_enabled
+    - >-
+      (postgres_runtime_route_reconcile_script_template.changed | default(false))
+      or (postgres_runtime_route_reconcile_service_template.changed | default(false))
+      or (postgres_runtime_route_reconcile_timer_template.changed | default(false))
+    - not ansible_check_mode
+
+- name: Сформировать переменные окружения postgres_runtime
+  ansible.builtin.template:
+    src: postgres.env.j2
+    dest: "{{ postgres_runtime_env_file }}"
+    mode: "0600"
+  no_log: true
+  register: postgres_runtime_env_template
+  when: postgres_runtime_state == 'present'
+
+- name: Сформировать postgresql.conf для postgres_runtime
+  ansible.builtin.template:
+    src: postgresql.conf.j2
+    dest: "{{ postgres_runtime_config_dir }}/postgresql.conf"
+    mode: "0644"
+  register: postgres_runtime_conf_template
+  when: postgres_runtime_state == 'present'
+
+- name: Сформировать pg_hba.conf для postgres_runtime
+  ansible.builtin.template:
+    src: pg_hba.conf.j2
+    dest: "{{ postgres_runtime_config_dir }}/pg_hba.conf"
+    mode: "0644"
+  register: postgres_runtime_hba_template
+  when: postgres_runtime_state == 'present'
+
+- name: Сформировать Docker Compose для postgres_runtime
+  ansible.builtin.template:
+    src: docker-compose.postgres.yml.j2
+    dest: "{{ postgres_runtime_compose_file }}"
+    mode: "0640"
+  register: postgres_runtime_compose_template
+  when: postgres_runtime_state == 'present'
+
+- name: Применить базовую конфигурацию Docker для postgres_runtime
+  ansible.builtin.include_role:
+    name: docker_runtime_baseline
+  when:
+    - not ansible_check_mode
+    - postgres_runtime_state == 'present' or (postgres_runtime_compose_stat.stat.exists | default(false))
+
+- name: Убедиться, что Docker запущен для postgres_runtime
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+  when:
+    - postgres_runtime_state == 'present'
+    - not ansible_check_mode
+
+- name: Включить таймер восстановителя маршрутов postgres_runtime
+  ansible.builtin.systemd:
+    name: "{{ postgres_runtime_route_reconcile_timer }}"
+    state: started
+    enabled: true
+  when:
+    - postgres_runtime_route_reconcile_enabled
+    - not ansible_check_mode
+
+- name: Проверить доступность модуля Docker Compose для postgres_runtime
+  ansible.builtin.command:
+    cmd: docker compose version
+  changed_when: false
+  when:
+    - postgres_runtime_state == 'present'
+    - not ansible_check_mode
+
+- name: Предварительно проверить контракт образа postgres_runtime
+  ansible.builtin.shell: |
+    set -euo pipefail
+    actual_version="$(
+      docker run --rm --entrypoint postgres "{{ postgres_runtime_model.image }}" --version \
+        | sed -E 's/^postgres \(PostgreSQL\) ([0-9]+\.[0-9]+).*/\1/'
+    )"
+    if [ "$actual_version" != "$EXPECTED_POSTGRES_VERSION" ]; then
+      echo "postgres image version mismatch: expected $EXPECTED_POSTGRES_VERSION, got $actual_version" >&2
+      exit 1
+    fi
+    docker run --rm \
+      --entrypoint sh \
+      -e REQUIRED_EXTENSIONS="$REQUIRED_EXTENSIONS" \
+      "{{ postgres_runtime_model.image }}" \
+      -ceu '
+        extension_dir="$(pg_config --sharedir)/extension"
+        for extension in $REQUIRED_EXTENSIONS; do
+          if [ ! -f "$extension_dir/$extension.control" ]; then
+            echo "required PostgreSQL extension is missing from image: $extension" >&2
+            exit 1
+          fi
+        done
+      '
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_POSTGRES_VERSION: "{{ postgres_runtime_model.image_contract.expected_postgres_version }}"
+    REQUIRED_EXTENSIONS: "{{ postgres_runtime_model.image_contract.required_extensions | join(' ') }}"
+  changed_when: false
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.image_contract.expected_postgres_version | length > 0
+    - not ansible_check_mode
+
+- name: Подготовить том данных postgres_runtime
+  ansible.builtin.command:
+    cmd: docker volume create "{{ postgres_runtime_model.volume_name }}"
+  register: postgres_runtime_volume_create
+  changed_when: "'already exists' not in (postgres_runtime_volume_create.stdout | default(''))"
+  when:
+    - postgres_runtime_state == 'present'
+    - not ansible_check_mode
+
+- name: Проверить инициализацию тома данных postgres_runtime
+  ansible.builtin.command:
+    cmd: docker run --rm -v "{{ postgres_runtime_model.volume_name }}:/var/lib/postgresql/data" "{{ postgres_runtime_model.image }}" sh -c "test -s /var/lib/postgresql/data/PG_VERSION"
+  register: postgres_runtime_pg_version_check
+  changed_when: false
+  failed_when: false
+  when:
+    - postgres_runtime_state == 'present'
+    - not ansible_check_mode
+
+- name: Сохранить состояние инициализации данных postgres_runtime
+  ansible.builtin.set_fact:
+    postgres_runtime_data_initialized: "{{ (postgres_runtime_pg_version_check.rc | default(1)) == 0 }}"
+  when: postgres_runtime_state == 'present'
+
+- name: Проверить точку монтирования тома данных postgres_runtime
+  ansible.builtin.command:
+    cmd: docker volume inspect -f {% raw %}'{{ .Mountpoint }}'{% endraw %} "{{ postgres_runtime_model.volume_name }}"
+  register: postgres_runtime_volume_mountpoint
+  changed_when: false
+  when:
+    - postgres_runtime_state == 'present'
+    - not ansible_check_mode
+
+- name: Проверить standby.signal в существующем томе данных postgres_runtime
+  ansible.builtin.command:
+    cmd: docker run --rm -v "{{ postgres_runtime_model.volume_name }}:/var/lib/postgresql/data" "{{ postgres_runtime_model.image }}" sh -c "test -f /var/lib/postgresql/data/standby.signal"
+  register: postgres_runtime_standby_signal_check
+  changed_when: false
+  failed_when: false
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'standby'
+    - postgres_runtime_data_initialized | default(false)
+    - not ansible_check_mode
+
+- name: Не допустить неявного преобразования данных основного узла в резервные
+  ansible.builtin.fail:
+    msg: >-
+      postgres_runtime refuses to convert initialized data volume on {{ inventory_hostname }}
+      into standby without explicit postgres_runtime_reinit_standby=true. Fence/backup
+      the old primary data first, then rerun the targeted standby reinit.
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'standby'
+    - postgres_runtime_data_initialized | default(false)
+    - (postgres_runtime_standby_signal_check.rc | default(1)) != 0
+    - not (postgres_runtime_reinit_standby | bool)
+    - not ansible_check_mode
+
+- name: Остановить postgres_runtime перед явной переинициализацией резервного узла
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ postgres_runtime_compose_file }}" down
+    chdir: "{{ postgres_runtime_root_dir }}"
+  changed_when: true
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'standby'
+    - postgres_runtime_data_initialized | default(false)
+    - (postgres_runtime_standby_signal_check.rc | default(1)) != 0
+    - postgres_runtime_reinit_standby | bool
+    - not ansible_check_mode
+
+- name: Очистить том данных postgres_runtime перед явной переинициализацией резервного узла
+  ansible.builtin.command:
+    cmd: docker run --rm -v "{{ postgres_runtime_model.volume_name }}:/var/lib/postgresql/data" "{{ postgres_runtime_model.image }}" sh -c "find /var/lib/postgresql/data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +"
+  changed_when: true
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'standby'
+    - postgres_runtime_data_initialized | default(false)
+    - (postgres_runtime_standby_signal_check.rc | default(1)) != 0
+    - postgres_runtime_reinit_standby | bool
+    - not ansible_check_mode
+
+- name: Отметить данные резервного узла postgres_runtime как неинициализированные после очистки
+  ansible.builtin.set_fact:
+    postgres_runtime_data_initialized: false
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'standby'
+    - postgres_runtime_data_initialized | default(false)
+    - (postgres_runtime_standby_signal_check.rc | default(1)) != 0
+    - postgres_runtime_reinit_standby | bool
+    - not ansible_check_mode
+
+- name: Запустить основной контейнер postgres_runtime перед инициализацией резервного узла
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ postgres_runtime_compose_file }}" up -d
+    chdir: "{{ postgres_runtime_root_dir }}"
+  register: postgres_runtime_primary_compose_up
+  changed_when: >
+    (postgres_runtime_primary_compose_up.stdout ~ postgres_runtime_primary_compose_up.stderr)
+    is search('(?i)(creating|created|recreating|recreated|starting|started|pulling|pulled|building|built)')
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.replication_mode == 'async_standby'
+    - postgres_runtime_model.role == 'primary'
+    - not ansible_check_mode
+
+- name: Дождаться готовности основного узла postgres_runtime перед инициализацией резервного
+  ansible.builtin.command:
+    cmd: docker exec "{{ postgres_runtime_model.container_name }}" pg_isready -U postgres -d postgres
+  register: postgres_runtime_primary_ready_before_standby
+  changed_when: false
+  until: postgres_runtime_primary_ready_before_standby.rc == 0
+  retries: "{{ postgres_runtime_startup_retries }}"
+  delay: "{{ postgres_runtime_startup_delay }}"
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.replication_mode == 'async_standby'
+    - postgres_runtime_model.role == 'primary'
+    - not ansible_check_mode
+
+- name: Подготовить пользователей основного узла и слоты репликации перед инициализацией резервного
+  ansible.builtin.template:
+    src: configure-primary.sql.j2
+    dest: "{{ postgres_runtime_root_dir }}/configure-primary.sql"
+    mode: "0600"
+  no_log: true
+  register: postgres_runtime_primary_sql_template_before_standby
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.replication_mode == 'async_standby'
+    - postgres_runtime_model.role == 'primary'
+    - not ansible_check_mode
+
+- name: Применить пользователей основного узла и слоты репликации перед инициализацией резервного
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker exec -i \
+      -e PGPASSWORD="${POSTGRES_SUPERUSER_PASSWORD}" \
+      "{{ postgres_runtime_model.container_name }}" \
+      psql -v ON_ERROR_STOP=1 -U postgres -d postgres < "{{ postgres_runtime_root_dir }}/configure-primary.sql"
+  args:
+    executable: /bin/bash
+  environment:
+    POSTGRES_SUPERUSER_PASSWORD: "{{ postgres_runtime_secret_map.POSTGRES_SUPERUSER_PASSWORD }}"
+  no_log: true
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.replication_mode == 'async_standby'
+    - postgres_runtime_model.role == 'primary'
+    - not ansible_check_mode
+
+- name: Предварительно проверить контейнерную сеть для резервного копирования standby
+  ansible.builtin.shell: |
+    set -euo pipefail
+    network="{{ postgres_runtime_model.standby_basebackup_network }}"
+    primary_host="{{ postgres_runtime_model.primary_expected_ip }}"
+    primary_port="{{ postgres_runtime_model.port }}"
+    case "$network" in
+      container:*)
+        container="${network#container:}"
+        state="$(docker inspect -f {% raw %}'{{ .State.Running }}'{% endraw %} "$container" 2>/dev/null || true)"
+        if [ "$state" != "true" ]; then
+          echo "$container is not running" >&2
+          exit 1
+        fi
+        if ! docker exec "$container" ip route get "$primary_host" >/dev/null 2>&1; then
+          echo "no route to primary endpoint from p2p client: $primary_host" >&2
+          exit 1
+        fi
+        if ! docker run --rm --network "$network" \
+          -e PRIMARY_HOST="$primary_host" \
+          -e PRIMARY_PORT="$primary_port" \
+          "{{ postgres_runtime_model.image }}" \
+          sh -ceu 'pg_isready -h "$PRIMARY_HOST" -p "$PRIMARY_PORT" -d postgres'; then
+          echo "primary endpoint tcp check failed: $primary_host:$primary_port" >&2
+          exit 1
+        fi
+        ;;
+    esac
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'standby'
+    - not (postgres_runtime_data_initialized | default(false))
+    - not ansible_check_mode
+
+- name: Инициализировать данные резервного узла с помощью pg_basebackup
+  ansible.builtin.shell: |
+    set -euo pipefail
+    log="$(mktemp)"
+    trap 'rm -f "$log"' EXIT
+    docker run --rm \
+      --network "{{ postgres_runtime_model.standby_basebackup_network }}" \
+      -e PGPASSWORD="${POSTGRES_REPLICATION_PASSWORD}" \
+      -e PRIMARY_HOST="${PRIMARY_HOST}" \
+      -e PRIMARY_PORT="${PRIMARY_PORT}" \
+      -e REPLICATION_USER="${REPLICATION_USER}" \
+      -e REPLICATION_SLOT="${REPLICATION_SLOT}" \
+      -v "{{ postgres_runtime_model.volume_name }}:/var/lib/postgresql/data" \
+      "{{ postgres_runtime_model.image }}" \
+      sh -ceu '
+        rm -rf /var/lib/postgresql/data/*
+        pg_basebackup -h "$PRIMARY_HOST" -p "$PRIMARY_PORT" -U "$REPLICATION_USER" -D /var/lib/postgresql/data -R -Xs -P --slot="$REPLICATION_SLOT"
+      ' >"$log" 2>&1 || {
+        rc="$?"
+        echo "pg_basebackup failed with rc=$rc" >&2
+        echo "--- pg_basebackup output tail ---" >&2
+        tail -80 "$log" >&2
+        echo "--- end pg_basebackup output tail ---" >&2
+        exit "$rc"
+      }
+  args:
+    executable: /bin/bash
+  environment:
+    POSTGRES_REPLICATION_PASSWORD: "{{ postgres_runtime_secret_map.POSTGRES_REPLICATION_PASSWORD }}"
+    PRIMARY_HOST: "{{ postgres_runtime_model.primary_expected_ip }}"
+    PRIMARY_PORT: "{{ postgres_runtime_model.port }}"
+    REPLICATION_USER: "{{ postgres_runtime_model.replication_user }}"
+    REPLICATION_SLOT: "{{ postgres_runtime_model.replication_slot }}"
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'standby'
+    - not (postgres_runtime_data_initialized | default(false))
+    - not ansible_check_mode
+
+- name: Сформировать параметры подключения резервного узла к основному
+  ansible.builtin.template:
+    src: standby-postgresql.auto.conf.j2
+    dest: "{{ postgres_runtime_volume_mountpoint.stdout | trim }}/postgresql.auto.conf"
+    mode: "0644"
+  no_log: true
+  register: postgres_runtime_standby_conninfo_template
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'standby'
+    - not ansible_check_mode
+
+- name: Подготовить файл standby.signal
+  ansible.builtin.file:
+    path: "{{ postgres_runtime_volume_mountpoint.stdout | trim }}/standby.signal"
+    state: touch
+    mode: "0644"
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'standby'
+    - not (postgres_runtime_data_initialized | default(false))
+    - not ansible_check_mode
+
+- name: Нормализовать владельца файлов восстановления резервного узла
+  ansible.builtin.command:
+    cmd: docker run --rm -v "{{ postgres_runtime_model.volume_name }}:/var/lib/postgresql/data" "{{ postgres_runtime_model.image }}" sh -c "chown postgres:postgres /var/lib/postgresql/data/postgresql.auto.conf /var/lib/postgresql/data/standby.signal"
+  changed_when: false
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'standby'
+    - not ansible_check_mode
+
+- name: Запустить контейнер postgres_runtime
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ postgres_runtime_compose_file }}" up -d
+    chdir: "{{ postgres_runtime_root_dir }}"
+  register: postgres_runtime_compose_up
+  changed_when: >
+    (postgres_runtime_compose_up.stdout ~ postgres_runtime_compose_up.stderr)
+    is search('(?i)(creating|created|recreating|recreated|starting|started|pulling|pulled|building|built)')
+  when:
+    - postgres_runtime_state == 'present'
+    - not ansible_check_mode
+
+- name: Перезапустить postgres_runtime при изменении конфигурации
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ postgres_runtime_compose_file }}" restart postgres
+    chdir: "{{ postgres_runtime_root_dir }}"
+  changed_when: true
+  when:
+    - postgres_runtime_state == 'present'
+    - not ansible_check_mode
+    - not postgres_runtime_compose_up.changed
+    - not (postgres_runtime_primary_compose_up.changed | default(false))
+    - >
+      (postgres_runtime_env_template.changed | default(false))
+      or (postgres_runtime_conf_template.changed | default(false))
+      or (postgres_runtime_compose_template.changed | default(false))
+      or (postgres_runtime_standby_conninfo_template.changed | default(false))
+
+- name: Применить обратные сервисные маршруты postgres_runtime
+  ansible.builtin.systemd:
+    name: "{{ postgres_runtime_route_reconcile_service }}"
+    state: started
+  register: postgres_runtime_route_reconcile_apply
+  changed_when: false
+  when:
+    - postgres_runtime_route_reconcile_enabled
+    - not ansible_check_mode
+
+- name: Дождаться готовности postgres_runtime
+  ansible.builtin.command:
+    cmd: docker exec "{{ postgres_runtime_model.container_name }}" pg_isready -U postgres -d postgres
+  register: postgres_runtime_ready
+  changed_when: false
+  until: postgres_runtime_ready.rc == 0
+  retries: "{{ postgres_runtime_startup_retries }}"
+  delay: "{{ postgres_runtime_startup_delay }}"
+  when:
+    - postgres_runtime_state == 'present'
+    - not ansible_check_mode
+
+- name: Перезагрузить HBA-конфигурацию postgres_runtime
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - "{{ postgres_runtime_model.container_name }}"
+      - psql
+      - -U
+      - postgres
+      - -d
+      - postgres
+      - -v
+      - ON_ERROR_STOP=1
+      - -tAc
+      - SELECT pg_reload_conf();
+  register: postgres_runtime_hba_reload
+  changed_when: false
+  failed_when: postgres_runtime_hba_reload.stdout | trim != 't'
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_hba_template.changed | default(false)
+    - not ansible_check_mode
+
+- name: Проверить активный mount каталога конфигурации postgres_runtime
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ postgres_runtime_model.container_name }}" | python3 -c '
+    import json
+    import os
+    import sys
+
+    container = json.load(sys.stdin)[0]
+    mounts = container.get("Mounts") or []
+    expected_source = os.environ["EXPECTED_CONFIG_DIR"]
+    directory_mounts = [
+        item for item in mounts
+        if item.get("Destination") == "/etc/postgresql"
+    ]
+    if len(directory_mounts) != 1:
+        raise SystemExit("ожидался единственный mount /etc/postgresql")
+    mount = directory_mounts[0]
+    if mount.get("Type") != "bind" or mount.get("Source") != expected_source:
+        raise SystemExit("источник mount каталога конфигурации не соответствует модели")
+    if mount.get("RW") is not False:
+        raise SystemExit("mount каталога конфигурации должен быть read-only")
+    forbidden = {"/etc/postgresql/postgresql.conf", "/etc/postgresql/pg_hba.conf"}
+    if any(item.get("Destination") in forbidden for item in mounts):
+        raise SystemExit("обнаружен устаревший file bind-mount конфигурации PostgreSQL")
+    '
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_CONFIG_DIR: "{{ postgres_runtime_config_dir }}"
+  changed_when: false
+  when:
+    - postgres_runtime_state == 'present'
+    - not ansible_check_mode
+
+- name: Проверить активные правила HBA postgres_runtime
+  ansible.builtin.shell: |
+    set -euo pipefail
+    hba_file="$({
+      docker exec "{{ postgres_runtime_model.container_name }}" \
+        psql -v ON_ERROR_STOP=1 -U postgres -d postgres -tAc 'SHOW hba_file'
+    } | xargs)"
+    test "$hba_file" = "/etc/postgresql/pg_hba.conf"
+
+    rules_json="$({
+      docker exec "{{ postgres_runtime_model.container_name }}" \
+        psql -v ON_ERROR_STOP=1 -U postgres -d postgres -tAc \
+        "SELECT coalesce(json_agg(json_build_object('type', type, 'database', database, 'user_name', user_name, 'address', address, 'netmask', netmask, 'auth_method', auth_method, 'error', error) ORDER BY line_number)::text, '[]') FROM pg_hba_file_rules;"
+    })"
+    HBA_RULES_JSON="$rules_json" python3 - <<'PY'
+    import ipaddress
+    import json
+    import os
+
+    rules = json.loads(os.environ["HBA_RULES_JSON"])
+    managed = json.loads(os.environ["EXPECTED_MANAGED_DATABASES"])
+    replication_user = os.environ["EXPECTED_REPLICATION_USER"]
+    replication_cidrs = json.loads(os.environ["EXPECTED_REPLICATION_CIDRS"])
+
+    errors = [rule for rule in rules if rule.get("error")]
+    if errors:
+        raise SystemExit("pg_hba_file_rules содержит ошибки разбора")
+
+    def normalized_cidr(rule):
+        address = rule.get("address")
+        netmask = rule.get("netmask")
+        if not address or not netmask:
+            return None
+        return str(ipaddress.ip_network(f"{address}/{netmask}", strict=False))
+
+    desired_products = {
+        (item["database"], item["owner_role"], cidr, "scram-sha-256")
+        for item in managed
+        for cidr in item["allowed_cidrs"]
+    }
+    product_identities = {
+        (item["database"], item["owner_role"])
+        for item in managed
+    }
+    actual_products = {
+        (
+            rule["database"][0],
+            rule["user_name"][0],
+            normalized_cidr(rule),
+            rule.get("auth_method"),
+        )
+        for rule in rules
+        if rule.get("type") == "host"
+        and len(rule.get("database") or []) == 1
+        and len(rule.get("user_name") or []) == 1
+        and (rule["database"][0], rule["user_name"][0]) in product_identities
+    }
+    if actual_products != desired_products:
+        raise SystemExit("активные продуктовые HBA-правила не соответствуют модели")
+
+    desired_replication = {
+        (cidr, "scram-sha-256") for cidr in replication_cidrs
+    }
+    actual_replication = {
+        (normalized_cidr(rule), rule.get("auth_method"))
+        for rule in rules
+        if rule.get("type") == "host"
+        and "replication" in (rule.get("database") or [])
+        and replication_user in (rule.get("user_name") or [])
+    }
+    if actual_replication != desired_replication:
+        raise SystemExit("активные replication HBA-правила не соответствуют модели")
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_MANAGED_DATABASES: "{{ postgres_runtime_model.managed_databases | to_json }}"
+    EXPECTED_REPLICATION_USER: "{{ postgres_runtime_model.replication_user }}"
+    EXPECTED_REPLICATION_CIDRS: "{{ postgres_runtime_model.replication_hba_cidrs | to_json }}"
+  changed_when: false
+  when:
+    - postgres_runtime_state == 'present'
+    - not ansible_check_mode
+
+- name: Проверить доступность обязательных расширений postgres_runtime
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - "{{ postgres_runtime_model.container_name }}"
+      - psql
+      - -U
+      - postgres
+      - -d
+      - postgres
+      - -v
+      - ON_ERROR_STOP=1
+      - -tAc
+      - >-
+        SELECT count(*) FROM pg_available_extensions
+        WHERE name = ANY (string_to_array('{{ postgres_runtime_model.image_contract.required_extensions | join(',') }}', ','));
+  register: postgres_runtime_available_extensions
+  changed_when: false
+  failed_when: >-
+    (postgres_runtime_available_extensions.stdout | trim | int)
+    != (postgres_runtime_model.image_contract.required_extensions | length)
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.image_contract.required_extensions | length > 0
+    - not ansible_check_mode
+
+- name: Проверить образ и версию сервера postgres_runtime после миграции
+  ansible.builtin.shell: |
+    set -euo pipefail
+    running_image="$(
+      docker inspect -f {% raw %}'{{ .Config.Image }}'{% endraw %} \
+        "{{ postgres_runtime_model.container_name }}"
+    )"
+    if [ "$running_image" != "$EXPECTED_IMAGE" ]; then
+      echo "running PostgreSQL image mismatch" >&2
+      exit 1
+    fi
+    actual_version="$(
+      docker exec "{{ postgres_runtime_model.container_name }}" \
+        psql -U postgres -d postgres -tAc 'SHOW server_version' \
+          | sed -E 's/^([0-9]+\.[0-9]+).*/\1/'
+    )"
+    if [ "$actual_version" != "$EXPECTED_POSTGRES_VERSION" ]; then
+      echo "running PostgreSQL version mismatch: expected $EXPECTED_POSTGRES_VERSION, got $actual_version" >&2
+      exit 1
+    fi
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_IMAGE: "{{ postgres_runtime_model.image }}"
+    EXPECTED_POSTGRES_VERSION: "{{ postgres_runtime_model.image_contract.expected_postgres_version }}"
+  changed_when: false
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.image_contract.expected_postgres_version | length > 0
+    - not ansible_check_mode
+
+- name: Подготовить пользователей основного узла и слоты репликации
+  ansible.builtin.template:
+    src: configure-primary.sql.j2
+    dest: "{{ postgres_runtime_root_dir }}/configure-primary.sql"
+    mode: "0600"
+  no_log: true
+  register: postgres_runtime_primary_sql_template
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'primary'
+    - not ansible_check_mode
+
+- name: Применить пользователей основного узла и слоты репликации
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker exec -i \
+      -e PGPASSWORD="${POSTGRES_SUPERUSER_PASSWORD}" \
+      "{{ postgres_runtime_model.container_name }}" \
+      psql -v ON_ERROR_STOP=1 -U postgres -d postgres < "{{ postgres_runtime_root_dir }}/configure-primary.sql"
+  args:
+    executable: /bin/bash
+  environment:
+    POSTGRES_SUPERUSER_PASSWORD: "{{ postgres_runtime_secret_map.POSTGRES_SUPERUSER_PASSWORD }}"
+  no_log: true
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'primary'
+    - not ansible_check_mode
+
+- name: Проверить управляемые продуктовые БД, роли, расширения и учётные данные
+  ansible.builtin.shell: |
+    set -euo pipefail
+    owner_count="$(
+      docker exec "{{ postgres_runtime_model.container_name }}" \
+        psql -v ON_ERROR_STOP=1 -U postgres -d postgres -tAc \
+        "SELECT count(*) FROM pg_database d JOIN pg_roles r ON r.oid = d.datdba WHERE d.datname = '{{ item.database }}' AND r.rolname = '{{ item.owner_role }}' AND r.rolcanlogin AND NOT r.rolsuper AND NOT r.rolcreatedb AND NOT r.rolcreaterole AND NOT r.rolreplication;"
+    )"
+    test "$owner_count" = "1"
+    extension_count="$(
+      docker exec "{{ postgres_runtime_model.container_name }}" \
+        psql -v ON_ERROR_STOP=1 -U postgres -d "{{ item.database }}" -tAc \
+        "SELECT count(*) FROM pg_extension WHERE extname = ANY (string_to_array('{{ item.extensions | join(',') }}', ','));"
+    )"
+    test "$extension_count" = "{{ item.extensions | length }}"
+    docker exec \
+      -e PGPASSWORD="$PRODUCT_PASSWORD" \
+      "{{ postgres_runtime_model.container_name }}" \
+      psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U "{{ item.owner_role }}" \
+      -d "{{ item.database }}" -tAc 'SELECT 1;' | grep -qx '1'
+  args:
+    executable: /bin/bash
+  environment:
+    PRODUCT_PASSWORD: "{{ postgres_runtime_secret_map[item.password_secret] }}"
+  loop: "{{ postgres_runtime_model.managed_databases }}"
+  loop_control:
+    label: "{{ item.instance }}"
+  changed_when: false
+  no_log: true
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'primary'
+    - not ansible_check_mode
+
+- name: Проверить роль основного узла postgres_runtime
+  ansible.builtin.command:
+    cmd: docker exec -e PGPASSWORD="{{ postgres_runtime_secret_map.POSTGRES_SUPERUSER_PASSWORD }}" "{{ postgres_runtime_model.container_name }}" psql -U postgres -d postgres -tAc "SELECT pg_is_in_recovery();"
+  register: postgres_runtime_primary_recovery
+  changed_when: false
+  failed_when: postgres_runtime_primary_recovery.stdout | trim != 'f'
+  no_log: true
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'primary'
+    - not ansible_check_mode
+
+- name: Дождаться восстановления streaming-репликации на основном узле
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - "{{ postgres_runtime_model.container_name }}"
+      - psql
+      - -U
+      - postgres
+      - -d
+      - postgres
+      - -v
+      - ON_ERROR_STOP=1
+      - -tAc
+      - >-
+        SELECT count(DISTINCT application_name) FROM pg_stat_replication
+        WHERE state = 'streaming'
+        AND application_name = ANY (string_to_array('{{ postgres_runtime_model.replication_slots.values() | join(',') }}', ','));
+  register: postgres_runtime_primary_streaming_standbys
+  changed_when: false
+  failed_when: false
+  until: >-
+    (postgres_runtime_primary_streaming_standbys.stdout | trim | int)
+    == (postgres_runtime_model.replication_slots | length)
+  retries: 24
+  delay: 5
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'primary'
+    - postgres_runtime_model.replication_mode == 'async_standby'
+    - postgres_runtime_model.replication_slots | length > 0
+    - not ansible_check_mode
+
+- name: Проверить роль резервного узла postgres_runtime
+  ansible.builtin.command:
+    cmd: docker exec -e PGPASSWORD="{{ postgres_runtime_secret_map.POSTGRES_SUPERUSER_PASSWORD }}" "{{ postgres_runtime_model.container_name }}" psql -U postgres -d postgres -tAc "SELECT pg_is_in_recovery();"
+  register: postgres_runtime_standby_recovery
+  changed_when: false
+  failed_when: postgres_runtime_standby_recovery.stdout | trim != 't'
+  no_log: true
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'standby'
+    - not ansible_check_mode
+
+- name: Проверить WAL receiver резервного узла postgres_runtime
+  ansible.builtin.command:
+    cmd: docker exec -e PGPASSWORD="{{ postgres_runtime_secret_map.POSTGRES_SUPERUSER_PASSWORD }}" "{{ postgres_runtime_model.container_name }}" psql -U postgres -d postgres -tAc "SELECT count(*) FROM pg_stat_wal_receiver WHERE status = 'streaming';"
+  register: postgres_runtime_wal_receiver
+  changed_when: false
+  failed_when: false
+  until: (postgres_runtime_wal_receiver.stdout | trim | int) >= 1
+  retries: 12
+  delay: 5
+  no_log: true
+  when:
+    - postgres_runtime_state == 'present'
+    - postgres_runtime_model.role == 'standby'
+    - not ansible_check_mode
+
+- name: Остановить контейнер postgres_runtime
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ postgres_runtime_compose_file }}" down
+    chdir: "{{ postgres_runtime_root_dir }}"
+  changed_when: true
+  when:
+    - postgres_runtime_state == 'absent'
+    - postgres_runtime_compose_stat.stat.exists | default(false)
+    - not ansible_check_mode
+
+- name: Удалить рабочий каталог postgres_runtime по явному запросу
+  ansible.builtin.file:
+    path: "{{ postgres_runtime_root_dir }}"
+    state: absent
+  when:
+    - postgres_runtime_state == 'absent'
+    - postgres_runtime_purge_data in [true, 'true', 'True']
+    - not ansible_check_mode
+
+- name: Удалить том данных postgres_runtime по явному запросу
+  ansible.builtin.command:
+    cmd: docker volume rm "{{ postgres_runtime_default_data_volume }}"
+  register: postgres_runtime_volume_purge
+  changed_when: postgres_runtime_volume_purge.rc == 0
+  failed_when:
+    - postgres_runtime_volume_purge.rc != 0
+    - "'No such volume' not in (postgres_runtime_volume_purge.stderr | default(''))"
+  when:
+    - postgres_runtime_state == 'absent'
+    - postgres_runtime_purge_data in [true, 'true', 'True']
+    - not ansible_check_mode

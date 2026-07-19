@@ -1,0 +1,38 @@
+# СГЕНЕРИРОВАННЫЙ ФАЙЛ — не редактируйте вручную.
+# Источник: services.yml + tools/render-compose/templates/telegram-bot.yml.j2
+# Стек: << instance_name >> (project: << project_name >>, type: telegram-bot)
+#
+# Заготовка под будущие Telegram-бот-инстансы на aiogram3
+# (см. defaults.bots в services.yml). Предполагается, что:
+#   * runtime_instances.<name>.containers.future содержит <name>-bot,
+#     <name>-redis и (опционально) <name>-nginx для приёма webhook-ов;
+#   * runtime_instances.<name>.webhook.{preprod,prod} заполнены согласно
+#     future_service_template.bot.required (валидатор это проверяет,
+#     когда у инстанса проставлен `type: telegram-bot`).
+
+services:
+  << bot_name >>:
+    image: "${<< env_prefix >>_BOT_IMAGE:-<< bot_name >>:dev}"
+    env_file:
+      - ../../<< env_file >>
+    environment:
+      BOT_MODE: "<< bot_mode >>"
+      BOT_WEBHOOK_PREPROD: "<< webhook_preprod >>"
+      BOT_WEBHOOK_PROD: "<< webhook_prod >>"
+    depends_on:
+      - << redis_name_service >>
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080<< healthcheck_path >>"]
+      interval: 30s
+      timeout: << healthcheck_timeout >>s
+      retries: 3
+    restart: unless-stopped
+
+  << redis_name_service >>:
+    image: redis:7-alpine
+    volumes:
+      - << redis_volume >>:/data
+    restart: unless-stopped
+
+volumes:
+  << redis_volume >>:

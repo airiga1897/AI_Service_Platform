@@ -1,0 +1,791 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+EXPECTED_CSV_HEADER="current_alias,endpoint,expected_ip,connection,ssh_port,root_password"
+EXPECTED_STATE_CSV_HEADER="kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state"
+
+print_header() {
+    echo ""
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}  $1${NC}"
+    echo -e "${BLUE}========================================${NC}"
+    echo ""
+}
+
+print_success() {
+    echo -e "${GREEN}[OK] $1${NC}"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[!] $1${NC}"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR] $1${NC}"
+}
+
+run_ansible() {
+    if [ "$(id -u)" -eq 0 ]; then
+        sudo -u ansible ansible "$@"
+    else
+        ansible "$@"
+    fi
+}
+
+usage() {
+    cat <<'USAGE'
+Usage:
+  sudo bash tools/bootstrap/create_inventory.sh \
+    --nodes-file /opt/ai-service-platform/operator/nodes.csv \
+    --include vps1,vps2,vps6 \
+    --check
+
+CSV header must be exactly:
+  current_alias,endpoint,expected_ip,connection,ssh_port,root_password
+
+CSV example:
+  vps1,vps01.example.com,ssh,22,
+  vps2,vps02.example.com,ssh,2222,
+  vps6,vps06.example.com,ssh,22,
+
+State CSV header must be exactly:
+  kind,name,ansible_group,active_aliases,candidate_aliases,old_aliases,state
+
+State CSV example:
+  platform_role,production,prod,vps1,,,present
+  platform_role,orchestration,orchestration,vps5,vps6,vps3,present
+  service,vpn_edge,vpn_edges,vps1+vps2+vps6,,vps3,present
+  service,vpn_cascade,vpn_cascades,,,,absent
+  service,edge_candidate_collector,edge_candidate_collectors,vps1+vps2+vps6+vps4+vps5,,vps3,present
+
+Fallback without CSV:
+  --active ROLE:NODE=ENDPOINT
+  --candidate ROLE:NODE=ENDPOINT
+  --old ROLE:NODE=ENDPOINT
+
+Options:
+  --nodes-file PATH  Operator CSV path. If omitted, fallback bindings are used.
+  --state-file PATH  Optional operator state CSV. Groups come from state active/candidate/old aliases.
+  --include LIST     Optional comma-separated aliases to include from CSV.
+  --output PATH      Inventory output path. Default: /opt/ai-service-platform/inventory.ini
+  --key-file PATH    Ansible private key path. Default: /home/ansible/.ssh/ansible_control
+  --ansible-user     Managed nodes SSH user. Default: ansible
+  --check            Run ansible ping after writing. If started as root, use local user ansible.
+  -h, --help         Show this help.
+
+Use connection=local for the management node when Ansible runs on that same node.
+This script writes a real operator inventory. Do not commit the generated file.
+USAGE
+}
+
+OUTPUT_PATH="/opt/ai-service-platform/inventory.ini"
+KEY_FILE="/home/ansible/.ssh/ansible_control"
+ANSIBLE_USER="ansible"
+NODES_FILE=""
+STATE_FILE=""
+INCLUDE_ALIASES=""
+RUN_CHECK="false"
+BINDINGS=()
+
+add_binding() {
+    local state="$1"
+    local binding="$2"
+    BINDINGS+=("${state}:${binding}")
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --nodes-file)
+            NODES_FILE="${2:-}"
+            shift 2
+            ;;
+        --state-file)
+            STATE_FILE="${2:-}"
+            shift 2
+            ;;
+        --include)
+            INCLUDE_ALIASES="${2:-}"
+            shift 2
+            ;;
+        --active)
+            add_binding "active" "${2:-}"
+            shift 2
+            ;;
+        --candidate)
+            add_binding "candidate" "${2:-}"
+            shift 2
+            ;;
+        --old)
+            add_binding "old" "${2:-}"
+            shift 2
+            ;;
+        --output)
+            OUTPUT_PATH="${2:-}"
+            shift 2
+            ;;
+        --key-file)
+            KEY_FILE="${2:-}"
+            shift 2
+            ;;
+        --ansible-user)
+            ANSIBLE_USER="${2:-}"
+            shift 2
+            ;;
+        --check)
+            RUN_CHECK="true"
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            print_error "Unknown option: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+require_value() {
+    local value="$1"
+    local option_name="$2"
+    if [ -z "$value" ]; then
+        print_error "$option_name is required."
+        usage
+        exit 1
+    fi
+    if printf '%s\n' "$value" | grep -Eq '[[:space:]]'; then
+        print_error "$option_name must not contain whitespace: $value"
+        exit 1
+    fi
+}
+
+require_csv_value() {
+    local value="$1"
+    local field_name="$2"
+    local line_number="$3"
+    if [ -z "$value" ]; then
+        print_error "nodes.csv line $line_number has empty required field: $field_name"
+        exit 1
+    fi
+}
+
+include_alias() {
+    local alias="$1"
+    if [ -z "$INCLUDE_ALIASES" ]; then
+        return 0
+    fi
+    case ",$INCLUDE_ALIASES," in
+        *",$alias,"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+role_to_group() {
+    case "$1" in
+        production|production-runtime) echo "prod" ;;
+        preprod-hot-standby-backup) echo "backup" ;;
+        management-monitoring-orchestration) echo "management" ;;
+        vpn-only-edge) echo "vpn_edges" ;;
+        *)
+            print_error "Unsupported platform role: $1"
+            exit 1
+            ;;
+    esac
+}
+
+state_group_name() {
+    local state="$1"
+    local base_group="$2"
+    if [ "$state" = "active" ]; then
+        echo "$base_group"
+    else
+        echo "${state}_${base_group}"
+    fi
+}
+
+node_to_host_alias() {
+    printf '%s\n' "$1" | tr '-' '_'
+}
+
+validate_connection() {
+    local connection="$1"
+    local line_number="$2"
+    case "$connection" in
+        ssh|local) ;;
+        *)
+            print_error "nodes.csv line $line_number has unsupported connection: $connection"
+            exit 1
+            ;;
+    esac
+}
+
+validate_ssh_port() {
+    local port="$1"
+    local connection="$2"
+    local line_number="$3"
+    if [ -z "$port" ]; then
+        port="22"
+    fi
+    if [ "$connection" = "local" ]; then
+        return 0
+    fi
+    if ! printf '%s\n' "$port" | grep -Eq '^[0-9]+$' || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        print_error "nodes.csv line $line_number has invalid ssh_port: $port"
+        exit 1
+    fi
+}
+
+validate_expected_ip() {
+    local alias="$1"
+    local endpoint="$2"
+    local expected_ip="$3"
+    local line_number="$4"
+    local resolved_ip
+
+    [ -n "$expected_ip" ] || return 0
+    [ "$endpoint" != "local" ] || return 0
+    if command -v getent >/dev/null 2>&1; then
+        resolved_ip="$(getent ahostsv4 "$endpoint" | awk '{print $1; exit}')"
+    elif command -v python >/dev/null 2>&1; then
+        resolved_ip="$(python -c 'import socket,sys; print(socket.gethostbyname(sys.argv[1]))' "$endpoint" 2>/dev/null || true)"
+    elif command -v python3 >/dev/null 2>&1; then
+        resolved_ip="$(python3 -c 'import socket,sys; print(socket.gethostbyname(sys.argv[1]))' "$endpoint" 2>/dev/null || true)"
+    else
+        print_warning "getent/python not found; skipping expected_ip check for $alias"
+        return 0
+    fi
+    if [ -z "$resolved_ip" ]; then
+        print_error "nodes.csv line $line_number could not resolve endpoint for expected_ip check: $endpoint"
+        exit 1
+    fi
+    if [ "$resolved_ip" != "$expected_ip" ]; then
+        print_error "nodes.csv line $line_number expected_ip mismatch for $alias: endpoint $endpoint resolved to $resolved_ip, expected $expected_ip"
+        exit 1
+    fi
+}
+
+validate_group() {
+    local group="$1"
+    local line_number="$2"
+    if ! printf '%s\n' "$group" | grep -Eq '^[a-z][a-z0-9_]*$'; then
+        print_error "CSV line $line_number has unsafe ansible_group: $group"
+        print_error "Group names must match: [a-z][a-z0-9_]*"
+        exit 1
+    fi
+}
+
+validate_state_kind() {
+    local kind="$1"
+    local line_number="$2"
+    case "$kind" in
+        platform_role|role|service|edge_route|cascade_topology) ;;
+        *)
+            print_error "state.csv line $line_number has unsupported kind: $kind"
+            print_error "Supported kinds: platform_role, service, edge_route, cascade_topology"
+            exit 1
+            ;;
+    esac
+}
+
+validate_state_value() {
+    local state="$1"
+    local line_number="$2"
+    case "$state" in
+        present|absent|purged) ;;
+        *)
+            print_error "state.csv line $line_number has unsupported state: $state"
+            exit 1
+            ;;
+    esac
+}
+
+split_aliases() {
+    local aliases="$1"
+    local old_ifs="$IFS"
+    local alias_item
+    IFS=+
+    for alias_item in $aliases; do
+        IFS="$old_ifs"
+        if [ -n "$alias_item" ]; then
+            printf '%s\n' "$alias_item"
+        fi
+        IFS=+
+    done
+    IFS="$old_ifs"
+}
+
+get_node_record() {
+    local alias="$1"
+    local record
+    for record in "${NODE_RECORDS[@]}"; do
+        IFS='|' read -r node_alias _endpoint _connection _ssh_port <<< "$record"
+        if [ "$node_alias" = "$alias" ]; then
+            printf '%s\n' "$record"
+            return 0
+        fi
+    done
+    return 1
+}
+
+array_contains() {
+    local needle="$1"
+    shift
+    local item
+    for item in "$@"; do
+        [ "$item" = "$needle" ] && return 0
+    done
+    return 1
+}
+
+register_group() {
+    local base_group="$1"
+    validate_group "$base_group" "generated"
+
+    if ! array_contains "$base_group" "${BASE_GROUP_NAMES[@]:-}"; then
+        BASE_GROUP_NAMES+=("$base_group")
+    fi
+    if ! array_contains "$base_group" "${GROUP_NAMES[@]:-}"; then
+        GROUP_NAMES+=("$base_group")
+    fi
+    if ! array_contains "candidate_$base_group" "${GROUP_NAMES[@]:-}"; then
+        GROUP_NAMES+=("candidate_$base_group")
+    fi
+    if ! array_contains "old_$base_group" "${GROUP_NAMES[@]:-}"; then
+        GROUP_NAMES+=("old_$base_group")
+    fi
+}
+
+add_state_alias_binding() {
+    local lifecycle="$1"
+    local kind="$2"
+    local name="$3"
+    local ansible_group="$4"
+    local alias="$5"
+    local line_number="$6"
+
+    if ! include_alias "$alias"; then
+        return 0
+    fi
+
+    local record
+    if ! record="$(get_node_record "$alias")"; then
+        if [ "$lifecycle" = "old" ]; then
+            print_warning "state.csv line $line_number old_aliases references retired alias not present in nodes.csv; skipping: $alias"
+            return 0
+        fi
+        print_error "state.csv line $line_number references unknown alias: $alias"
+        exit 1
+    fi
+
+    IFS='|' read -r node_alias endpoint connection ssh_port <<< "$record"
+    local group
+    group="$(state_group_name "$lifecycle" "$ansible_group")"
+    PARSED_BINDINGS+=("$lifecycle|$kind:$name|$group|$node_alias|$node_alias|$endpoint|$connection|$ssh_port")
+}
+
+validate_topology_endpoint_alias() {
+    local lifecycle="$1"
+    local edge="$2"
+    local alias="$3"
+    local line_number="$4"
+
+    if ! include_alias "$alias"; then
+        return 0
+    fi
+
+    if ! get_node_record "$alias" >/dev/null; then
+        if [ "$lifecycle" = "old" ]; then
+            print_warning "state.csv line $line_number old cascade_topology edge references retired alias not present in nodes.csv; skipping endpoint $alias in edge $edge"
+            return 0
+        fi
+        print_error "state.csv line $line_number cascade_topology edge references unknown alias: $edge"
+        exit 1
+    fi
+}
+
+validate_topology_edges() {
+    local lifecycle="$1"
+    local edges="$2"
+    local line_number="$3"
+    local edge
+    local old_ifs="$IFS"
+
+    IFS=+
+    for edge in $edges; do
+        IFS="$old_ifs"
+        if [ -z "$edge" ]; then
+            IFS=+
+            continue
+        fi
+        if [[ ! "$edge" =~ ^[A-Za-z0-9_.-]+\>[A-Za-z0-9_.-]+$ ]]; then
+            print_error "state.csv line $line_number has invalid cascade_topology edge: $edge"
+            print_error "Expected directed edge format: source_alias>target_alias"
+            exit 1
+        fi
+
+        validate_topology_endpoint_alias "$lifecycle" "$edge" "${edge%%>*}" "$line_number"
+        validate_topology_endpoint_alias "$lifecycle" "$edge" "${edge#*>}" "$line_number"
+        IFS=+
+    done
+    IFS="$old_ifs"
+}
+
+read_nodes_file() {
+    if [ ! -f "$NODES_FILE" ]; then
+        print_error "nodes file not found: $NODES_FILE"
+        exit 1
+    fi
+
+    local line_number=0
+    local matched_count=0
+    local matched_aliases=","
+    local header_seen="false"
+    local current_alias endpoint expected_ip connection ssh_port root_password extra
+    NODE_RECORDS=()
+
+    while IFS=, read -r current_alias endpoint expected_ip connection ssh_port root_password extra || [ -n "${current_alias:-}" ]; do
+        line_number=$((line_number + 1))
+        current_alias="${current_alias//$'\r'/}"
+        endpoint="${endpoint//$'\r'/}"
+        expected_ip="${expected_ip//$'\r'/}"
+        connection="${connection//$'\r'/}"
+        ssh_port="${ssh_port//$'\r'/}"
+        root_password="${root_password//$'\r'/}"
+        extra="${extra//$'\r'/}"
+
+        if [ "$line_number" -eq 1 ]; then
+            local header
+            header="$current_alias,$endpoint,$expected_ip,$connection,$ssh_port,$root_password"
+            if [ "$header" != "$EXPECTED_CSV_HEADER" ] || [ -n "$extra" ]; then
+                print_error "nodes.csv header must be exactly:"
+                echo "$EXPECTED_CSV_HEADER"
+                exit 1
+            fi
+            header_seen="true"
+            continue
+        fi
+
+        if [ -z "$current_alias" ] && [ -z "$endpoint" ] && [ -z "$connection" ] && [ -z "$ssh_port" ] && [ -z "$root_password" ]; then
+            continue
+        fi
+        if [ -n "$extra" ]; then
+            print_error "nodes.csv line $line_number has too many columns"
+            exit 1
+        fi
+
+        require_csv_value "$current_alias" "current_alias" "$line_number"
+        require_csv_value "$endpoint" "endpoint" "$line_number"
+        validate_expected_ip "$current_alias" "$endpoint" "$expected_ip" "$line_number"
+        require_csv_value "$connection" "connection" "$line_number"
+        validate_connection "$connection" "$line_number"
+        validate_ssh_port "$ssh_port" "$connection" "$line_number"
+        if [ -z "$ssh_port" ]; then
+            ssh_port="22"
+        fi
+
+        if [ "$connection" = "local" ] && [ "$endpoint" != "local" ]; then
+            print_error "nodes.csv line $line_number uses connection=local but endpoint is not local"
+            exit 1
+        fi
+
+        if include_alias "$current_alias"; then
+            matched_count=$((matched_count + 1))
+            matched_aliases="${matched_aliases}${current_alias},"
+        fi
+        NODE_RECORDS+=("$current_alias|$endpoint|$connection|$ssh_port")
+    done < "$NODES_FILE"
+
+    if [ "$header_seen" != "true" ]; then
+        print_error "nodes.csv is empty: $NODES_FILE"
+        exit 1
+    fi
+    if [ "$matched_count" -eq 0 ]; then
+        if [ -n "$INCLUDE_ALIASES" ]; then
+            print_error "No aliases from --include matched nodes file: $INCLUDE_ALIASES"
+        else
+            print_error "nodes.csv has no node rows: $NODES_FILE"
+        fi
+        exit 1
+    fi
+
+    if [ -n "$INCLUDE_ALIASES" ]; then
+        local include_alias_item
+        local old_ifs="$IFS"
+        IFS=,
+        for include_alias_item in $INCLUDE_ALIASES; do
+            IFS="$old_ifs"
+            if [ -z "$include_alias_item" ]; then
+                print_error "--include contains an empty alias: $INCLUDE_ALIASES"
+                exit 1
+            fi
+            case "$matched_aliases" in
+                *",$include_alias_item,"*) ;;
+                *)
+                    print_error "--include alias not found in nodes file: $include_alias_item"
+                    exit 1
+                    ;;
+            esac
+            IFS=,
+        done
+        IFS="$old_ifs"
+    fi
+}
+
+read_state_file() {
+    if [ ! -f "$STATE_FILE" ]; then
+        print_error "state file not found: $STATE_FILE"
+        exit 1
+    fi
+
+    local line_number=0
+    local matched_count=0
+    local header_seen="false"
+    local kind name ansible_group active_aliases candidate_aliases old_aliases state extra
+
+    while IFS=, read -r kind name ansible_group active_aliases candidate_aliases old_aliases state extra || [ -n "${kind:-}" ]; do
+        line_number=$((line_number + 1))
+        kind="${kind//$'\r'/}"
+        name="${name//$'\r'/}"
+        ansible_group="${ansible_group//$'\r'/}"
+        active_aliases="${active_aliases//$'\r'/}"
+        candidate_aliases="${candidate_aliases//$'\r'/}"
+        old_aliases="${old_aliases//$'\r'/}"
+        state="${state//$'\r'/}"
+        extra="${extra//$'\r'/}"
+
+        if [ "$line_number" -eq 1 ]; then
+            local header
+            header="$kind,$name,$ansible_group,$active_aliases,$candidate_aliases,$old_aliases,$state"
+            if [ "$header" != "$EXPECTED_STATE_CSV_HEADER" ] || [ -n "$extra" ]; then
+                print_error "state.csv header must be exactly:"
+                echo "$EXPECTED_STATE_CSV_HEADER"
+                exit 1
+            fi
+            header_seen="true"
+            continue
+        fi
+
+        if [ -z "$kind" ] && [ -z "$name" ] && [ -z "$ansible_group" ] && [ -z "$active_aliases" ] && [ -z "$candidate_aliases" ] && [ -z "$old_aliases" ] && [ -z "$state" ]; then
+            continue
+        fi
+        if [ -n "$extra" ]; then
+            print_error "state.csv line $line_number has too many columns"
+            exit 1
+        fi
+
+        require_csv_value "$kind" "kind" "$line_number"
+        require_csv_value "$name" "name" "$line_number"
+        require_csv_value "$ansible_group" "ansible_group" "$line_number"
+        require_csv_value "$state" "state" "$line_number"
+        validate_state_kind "$kind" "$line_number"
+        validate_state_value "$state" "$line_number"
+
+        if [ "$kind" = "cascade_topology" ]; then
+            validate_topology_edges "active" "$active_aliases" "$line_number"
+            validate_topology_edges "old" "$old_aliases" "$line_number"
+            continue
+        fi
+
+        validate_group "$ansible_group" "$line_number"
+        register_group "$ansible_group"
+
+        local alias_item
+        while IFS= read -r alias_item; do
+            matched_count=$((matched_count + 1))
+            add_state_alias_binding "active" "$kind" "$name" "$ansible_group" "$alias_item" "$line_number"
+        done < <(split_aliases "$active_aliases")
+        while IFS= read -r alias_item; do
+            matched_count=$((matched_count + 1))
+            add_state_alias_binding "candidate" "$kind" "$name" "$ansible_group" "$alias_item" "$line_number"
+        done < <(split_aliases "$candidate_aliases")
+        while IFS= read -r alias_item; do
+            matched_count=$((matched_count + 1))
+            add_state_alias_binding "old" "$kind" "$name" "$ansible_group" "$alias_item" "$line_number"
+        done < <(split_aliases "$old_aliases")
+    done < "$STATE_FILE"
+
+    if [ "$header_seen" != "true" ]; then
+        print_error "state.csv is empty: $STATE_FILE"
+        exit 1
+    fi
+    if [ "$matched_count" -eq 0 ]; then
+        print_error "state.csv has no active/candidate/old aliases: $STATE_FILE"
+        exit 1
+    fi
+    if [ "${#PARSED_BINDINGS[@]}" -eq 0 ]; then
+        print_error "state.csv aliases did not match selected --include aliases"
+        exit 1
+    fi
+}
+
+parse_fallback_binding() {
+    local raw="$1"
+    local state="${raw%%:*}"
+    local rest="${raw#*:}"
+    local role="${rest%%:*}"
+    local node_and_endpoint="${rest#*:}"
+    local node="${node_and_endpoint%%=*}"
+    local endpoint="${node_and_endpoint#*=}"
+
+    if [ "$rest" = "$raw" ] || [ "$node_and_endpoint" = "$rest" ] || [ "$endpoint" = "$node_and_endpoint" ]; then
+        print_error "Invalid binding format: $raw"
+        echo "Expected: STATE:ROLE:NODE=ENDPOINT"
+        exit 1
+    fi
+
+    case "$state" in
+        active|candidate|old) ;;
+        *)
+            print_error "Unsupported lifecycle state: $state"
+            exit 1
+            ;;
+    esac
+
+    require_value "$role" "ROLE in $raw"
+    require_value "$node" "NODE in $raw"
+    require_value "$endpoint" "ENDPOINT in $raw"
+
+    local base_group
+    local group
+    local host_alias
+    local connection
+    base_group="$(role_to_group "$role")"
+    register_group "$base_group"
+    group="$(state_group_name "$state" "$base_group")"
+    host_alias="$(node_to_host_alias "$node")"
+    connection="ssh"
+    if [ "$endpoint" = "local" ]; then
+        connection="local"
+    fi
+
+    PARSED_BINDINGS+=("$state|$role|$group|$node|$host_alias|$endpoint|$connection|22")
+}
+
+require_value "$OUTPUT_PATH" "--output"
+require_value "$KEY_FILE" "--key-file"
+require_value "$ANSIBLE_USER" "--ansible-user"
+if [ -n "$INCLUDE_ALIASES" ] && printf '%s\n' "$INCLUDE_ALIASES" | grep -Eq '[[:space:]]'; then
+    print_error "--include must be a comma-separated list without whitespace"
+    exit 1
+fi
+
+PARSED_BINDINGS=()
+GROUP_NAMES=()
+BASE_GROUP_NAMES=()
+    if [ -n "$NODES_FILE" ]; then
+    if [ "${#BINDINGS[@]}" -gt 0 ]; then
+        print_error "--nodes-file cannot be combined with --active/--candidate/--old fallback bindings"
+        exit 1
+    fi
+    read_nodes_file
+    if [ -n "$STATE_FILE" ]; then
+        read_state_file
+    else
+        print_error "--state-file is required with --nodes-file. nodes.csv is only an address book; assignments live in state.csv."
+        exit 1
+    fi
+else
+    if [ -n "$STATE_FILE" ]; then
+        print_error "--state-file requires --nodes-file"
+        exit 1
+    fi
+    if [ -n "$INCLUDE_ALIASES" ]; then
+        print_error "--include requires --nodes-file"
+        exit 1
+    fi
+    if [ "${#BINDINGS[@]}" -eq 0 ]; then
+        print_error "Either --nodes-file or at least one --active/--candidate/--old fallback binding is required."
+        usage
+        exit 1
+    fi
+    for binding in "${BINDINGS[@]}"; do
+        parse_fallback_binding "$binding"
+    done
+fi
+
+OUTPUT_DIR="$(dirname "$OUTPUT_PATH")"
+
+print_header "AI Service Platform Ansible inventory"
+
+echo "Inventory bindings:"
+for parsed in "${PARSED_BINDINGS[@]}"; do
+    IFS='|' read -r state role group node host_alias endpoint connection ssh_port <<< "$parsed"
+    echo "  $state $role -> $host_alias ($group, $connection): $endpoint:$ssh_port"
+done
+echo "  output:       $OUTPUT_PATH"
+echo "  ansible user: $ANSIBLE_USER"
+echo "  key file:     $KEY_FILE"
+echo ""
+
+mkdir -p "$OUTPUT_DIR"
+
+tmp_file="$(mktemp)"
+umask 077
+{
+    cat <<'EOF'
+# AI Service Platform real Ansible inventory.
+#
+# Generated by tools/bootstrap/create_inventory.sh.
+# Do not commit this file. It may contain real operator endpoints.
+
+EOF
+
+    for group in "${GROUP_NAMES[@]}"; do
+        echo "[$group]"
+        printed_hosts=","
+        for parsed in "${PARSED_BINDINGS[@]}"; do
+            IFS='|' read -r state role parsed_group node host_alias endpoint connection ssh_port <<< "$parsed"
+            if [ "$parsed_group" != "$group" ]; then
+                continue
+            fi
+            case "$printed_hosts" in
+                *",$host_alias,"*) continue ;;
+            esac
+            printed_hosts="${printed_hosts}${host_alias},"
+            if [ "$connection" = "local" ]; then
+                echo "$host_alias ansible_connection=local"
+            else
+                echo "$host_alias ansible_host=$endpoint ansible_port=$ssh_port ansible_user=$ANSIBLE_USER ansible_ssh_private_key_file=$KEY_FILE"
+            fi
+        done
+        echo ""
+    done
+
+    echo "[platform_nodes:children]"
+    for group in "${BASE_GROUP_NAMES[@]}"; do
+        echo "$group"
+    done
+    echo ""
+
+    cat <<'EOF'
+[all:vars]
+ansible_python_interpreter=/usr/bin/python3
+EOF
+} > "$tmp_file"
+
+mv "$tmp_file" "$OUTPUT_PATH"
+if id ansible >/dev/null 2>&1; then
+    chown ansible:ansible "$OUTPUT_PATH"
+fi
+chmod 600 "$OUTPUT_PATH"
+print_success "Inventory written: $OUTPUT_PATH"
+
+if [ "$RUN_CHECK" = "true" ]; then
+    if ! command -v ansible >/dev/null 2>&1; then
+        print_error "ansible command not found; cannot run --check."
+        exit 1
+    fi
+    print_header "Running Ansible connectivity check"
+    run_ansible -i "$OUTPUT_PATH" all -m ping
+    print_success "Ansible connectivity check completed"
+fi
+
+print_warning "Do not commit $OUTPUT_PATH. Real inventory belongs on active orchestration/operator storage only."

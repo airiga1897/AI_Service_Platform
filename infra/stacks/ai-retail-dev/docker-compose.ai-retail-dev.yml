@@ -1,0 +1,66 @@
+# СГЕНЕРИРОВАННЫЙ ФАЙЛ — не редактируйте вручную.
+# Источник: services.yml + tools/render-compose/templates/django-react-site.yml.j2
+# Стек: ai-retail-dev (project: ai_e_retail, type: django-react-site)
+
+services:
+  ai-retail-dev-web:
+    image: "${AI_RETAIL_DEV_WEB_IMAGE:-ai-retail-dev-web:dev}"
+    env_file:
+      - ../../.env.ai-retail.dev
+    environment:
+      DJANGO_DB_NAME: "ai_retail_dev"
+    ports:
+      - "8010:8000"
+    depends_on:
+      - ai-retail-dev-db
+      - ai-retail-dev-redis
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - ai_retail_dev_static:/app/static
+      - ai_retail_dev_media:/app/media
+    restart: unless-stopped
+
+  ai-retail-dev-frontend-dev:
+    image: "${AI_RETAIL_DEV_FRONTEND_IMAGE:-ai-retail-dev-frontend-dev:dev}"
+    env_file:
+      - ../../.env.ai-retail.dev
+    environment:
+      VITE_PROXY_TARGET: "http://host.docker.internal:8010"
+    ports:
+      - "5174:5173"
+    depends_on:
+      - ai-retail-dev-web
+    restart: unless-stopped
+
+  ai-retail-dev-db:
+    image: postgres:16-alpine
+    env_file:
+      - ../../.env.ai-retail.dev
+    environment:
+      POSTGRES_DB: "ai_retail_dev"
+    volumes:
+      - ai_retail_dev_postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  ai-retail-dev-redis:
+    image: redis:7-alpine
+    volumes:
+      - ai_retail_dev_redis:/data
+    restart: unless-stopped
+
+  ai-retail-dev-nginx:
+    image: nginx:alpine
+    depends_on:
+      - ai-retail-dev-web
+      - ai-retail-dev-frontend-dev
+    restart: unless-stopped
+
+volumes:
+  ai_retail_dev_static:
+  ai_retail_dev_media:
+  ai_retail_dev_postgres:
+  ai_retail_dev_redis:

@@ -1,0 +1,7 @@
+---
+- name: Выполнить ручной backup или репетицию восстановления site_runtime
+  hosts: site_runtimes
+  become: true
+  gather_facts: false
+  roles:
+    - site_runtime_backup

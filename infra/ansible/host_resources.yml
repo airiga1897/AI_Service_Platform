@@ -1,0 +1,8 @@
+---
+- name: Host resource policy rollout
+  hosts: host_resources
+  become: true
+  vars:
+    host_resources_state: present
+  roles:
+    - host_resources

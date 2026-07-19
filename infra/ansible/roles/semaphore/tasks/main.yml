@@ -1,0 +1,40 @@
+---
+# ============================================================
+# Ansible Semaphore — веб-GUI для запуска Ansible плейбуков
+# Запускается на active orchestration node в Docker, доступен на порту 3001
+# Inventory и playbooks уже размещены ролью management
+# ============================================================
+
+- name: Создать директории Semaphore
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ semaphore_dir }}"
+    - "{{ semaphore_dir }}/db"
+    - "{{ semaphore_dir }}/tmp"
+
+- name: Скопировать SSH ключ для Semaphore
+  copy:
+    content: "{{ vault_ssh_private_key }}"
+    dest: "{{ semaphore_dir }}/ansible_id_rsa"
+    mode: "0600"
+
+- name: Скопировать docker-compose для Semaphore
+  template:
+    src: docker-compose.semaphore.yml.j2
+    dest: "{{ semaphore_dir }}/docker-compose.yml"
+    mode: "0644"
+
+- name: Запустить Semaphore
+  community.docker.docker_compose_v2:
+    project_src: "{{ semaphore_dir }}"
+    state: present
+    pull: always
+
+- name: Открыть порт Semaphore в UFW
+  ufw:
+    rule: allow
+    port: "{{ semaphore_port }}"
+    proto: tcp

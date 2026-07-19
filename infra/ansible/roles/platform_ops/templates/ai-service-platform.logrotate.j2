@@ -1,0 +1,10 @@
+{{ platform_ops_log_dir }}/*.log {{ platform_ops_job_log_dir }}/*.log {
+    daily
+    rotate {{ platform_ops_logrotate_retention }}
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    su {{ platform_ops_user }} {{ platform_ops_group }}
+}

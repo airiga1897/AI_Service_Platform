@@ -1,0 +1,17 @@
+---
+# SoftEther cascade/site-to-site service rollout entrypoint.
+#
+# This playbook is intentionally separate from vpn_edge. It manages a distinct
+# SoftEther container, config volume, logs, and Docker network. It does not
+# publish public ports or change routing policy.
+
+- name: SoftEther vpn_cascade service rollout
+  hosts: vpn_cascades
+  become: true
+  gather_facts: false
+  vars:
+    vpn_cascade_state: present
+    vpn_cascade_purge_data: false
+    vpn_cascade_reseed_config: false
+  roles:
+    - vpn_cascade

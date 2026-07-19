@@ -1,0 +1,522 @@
+version: 2
+platform:
+  name: AI Service Platform
+  repository_name: AI_Service_Platform
+  repository_note: Этот репозиторий владеет только платформенной оркестрацией; продуктовый
+    код остаётся в продуктовых репозиториях.
+  source_policy:
+    deploy_from_archives: false
+    source_from_git_only: true
+    deploy_from_git_only: false
+    preferred_deploy_artifact: immutable_docker_image_ref
+    branch_names_are_build_policy_only: true
+  vps_layout:
+    VPS1:
+      role: production-runtime
+      country: Netherlands
+      initial_runtime: aromaflow-work
+      resources_hint: 4cpu-4gb-40gb
+      notes: первичный продакшн-трафик и основные данные живут здесь
+    VPS2:
+      role: preprod-hot-standby-backup
+      country: Kazakhstan
+      resources_hint: 4cpu-4gb-80gb
+      notes: preprod-валидация, hot standby, локальные бэкапы, цель failover
+    VPS3:
+      role: management-monitoring-orchestration
+      country: Russia
+      resources_hint: 2cpu-2gb-40gb
+      notes: control-нода Ansible, мониторинг, оркестрация бэкапов; не используется
+        как application runtime
+  edge_vpn:
+    provider: softether
+    status: required-platform-component
+    ownership: infrastructure
+    not_owned_by_runtime_instances: true
+    preserve_during_migration: true
+    deployment_scope:
+      target_nodes:
+      - VPS1
+      - VPS2
+      - VPS3
+      bootstrap_node: VPS1
+      per_node_role: client-ingress-and-controlled-egress
+      supports_vpn_only_expansion_nodes: true
+      expansion_node_contract:
+        role: vpn-only-edge
+        product_runtime_allowed: false
+        required_layers:
+        - haproxy-tcp-entrypoints
+        - softether
+        - monitoring-agent
+        - backup-agent-for-softether-config
+      note: SoftEther задуман на каждом VPS; текущий известный набор listener'ов —
+        только TCP, и он унаследован от существующей конфигурации VPS1.
+    sni_routing:
+      router: haproxy
+      tls_entrypoint: 443
+    ports:
+      tcp:
+      - 443
+      - 992
+      - 5555
+      future_optional_udp:
+        note: Не активен в текущем наборе listener'ов SoftEther. Использовать только
+          если позднее включат IPsec, L2TP или L2TP.
+        ports:
+        - 500
+        - 4500
+        - 1701
+    publish_model:
+      external_owner: haproxy
+      softether_container_publish_directly: false
+      softether_container_visibility: docker-network-only
+      routing:
+        443/tcp: haproxy-sni-to-softether-or-site
+        992/tcp: haproxy-port-to-softether
+        5555/tcp: haproxy-port-to-softether-management-allowlist
+      udp_domain_routing_supported: false
+      udp_currently_enabled: false
+    tls:
+      source: certbot_nginx_tls_copy
+      mounted_path: /etc/ssl/vpn
+    volumes:
+      config: softether_data
+      logs: softether_logs
+    backup_scope:
+    - softether_data
+    - softether_logs
+    - certbot_conf
+    - haproxy_vpn_routing
+    - vpn_management_allowlist
+    monitoring:
+      healthcheck: tcp-endpoint-check
+      include_in_alerting: true
+    security:
+      management_port: 5555
+      management_access: ip-allowlist-only
+      note: do-not-commit-vpn-server-config-with-secrets
+  edge_protection:
+    status: required-platform-capability
+    owner: infrastructure
+    source_hint: historical-aromaflowai-siteproject01-haproxy
+    layers:
+      geoip:
+        purpose: country-based access control for selected public services
+        current_reference: ru_networks.lst
+        update_strategy: generated-list-with-scheduled-refresh
+        geo_policy_relation: shared-data-source-separate-enforcement
+      manual_ip_lists:
+        blacklist: blocked_ips.lst
+        management_allowlist: vpn_mgmt_ips.lst
+      rate_limiting:
+        tcp: stick-table-connection-rate
+        http: stick-table-request-and-error-rate
+      acme_bypass:
+        enabled: true
+        path_prefix: /.well-known/acme-challenge/
+    note: GeoIP — это возможность защиты/фильтрации, она не равнозначна VPN GeoDNS
+      или выбору страны egress.
+  site_cdn:
+    status: future-optional
+    owner: infrastructure
+    applies_to:
+    - public-web-sites
+    - static-assets
+    - media-assets-after-storage-policy
+    does_not_apply_to:
+    - softether-vpn-through-standard-web-cdn
+    - vpn-management
+    - database-traffic
+    - private-overlay-traffic
+    origin_strategy:
+      primary_origin: haproxy-web-entrypoint
+      failover_origin: planned-after-vps2-standby-readiness
+    protection_features:
+    - cache-static-assets
+    - tls-edge
+    - waf-or-basic-bot-filtering
+    - rate-limiting
+    - origin-ip-shielding-when-supported
+    note: Стандартный web-CDN отвечает за доставку сайта и защиту. VPN-трафик может
+      рассматриваться позднее только через L4 TCP-прокси, Anycast или сервисы типа
+      GeoDNS.
+  geo_policy:
+    status: planned-shared-platform-service
+    owner: infrastructure
+    purpose: one shared geo decision source for edge protection, VPN nearest routing,
+      egress policy, and CDN policy inputs
+    data_outputs:
+    - haproxy_country_lists
+    - vpn_geodns_targets
+    - egress_country_rules
+    - cdn_country_policy_inputs
+    enforcement_boundaries:
+      site_protection: haproxy-or-cdn
+      vpn_nearest_ingress: geodns
+      vpn_egress_selection: routing-policy-controller
+      product_ha: not-handled-by-geo-policy
+    safety:
+      dry_run_first: true
+      audit_log_required: true
+      manual_override_required: true
+    note: Использовать один общий сервис geo-политики для данных и рекомендаций, но
+      политики применения держать раздельно по типу трафика.
+  vpn_acceleration:
+    status: future-research
+    owner: infrastructure
+    candidates:
+    - geodns
+    - anycast-l4-provider
+    - tcp-l4-proxy-provider
+    not_standard_site_cdn: true
+    applies_to:
+    - softether-443-tcp
+    - softether-992-tcp
+    excludes:
+    - softether-management-5555
+    note: Оценивать отдельно от website-CDN, потому что VPN-трафик — это не обычный
+      HTTP-трафик сайта.
+  legacy_edge_colocation:
+    source_hint: historical-aromaflowai-mypet01-compose
+    ownership_after_migration: infrastructure
+    containers:
+    - haproxy
+    - certbot
+    - softether
+    note: Эти контейнеры могут существовать в историческом продуктовом compose, но
+      после миграции их владелец — платформа.
+defaults:
+  platform_structure:
+    services: services/
+    bots: bots/
+    packages: packages/
+    edge: infra/edge/
+    tools: tools/
+  edge:
+    router: haproxy
+    site_proxy: per-site-nginx
+    vpn:
+      provider: softether
+      status: required-platform-component
+      preserve_during_migration: true
+  docker:
+    compose_strategy: profiles-and-fragments
+  local:
+    cache_backend: locmem
+    postgres_strategy: one-local-server-multiple-databases
+  vps:
+    cache_backend: dedicated-redis-per-stack
+  bots:
+    framework: aiogram3
+    dev_mode: polling
+    preprod_mode: webhook
+    prod_mode: webhook
+projects:
+  aromaflowai:
+    display_name: AromaFlowAI
+    type: django-site
+    status: legacy-root-service
+    owner: airiga1897
+    source:
+      policy: github
+      repository: https://github.com/airiga1897/AromaFlowAI
+      bootstrap_ref: codex/feature/new_infra02
+      current_path: .
+      stable_branches:
+        development: develop
+        production: main
+      release_policy:
+        production: release-tag-or-main
+        demo: develop-or-release-tag
+      deploy_refs:
+        preferred: image_ref
+        allowed_source_refs:
+        - codex/feature/new_infra02
+        - develop
+        - main
+        - release/*
+        note: bootstrap_ref — временный, пока не будут промоутнуты продуктовые ветки.
+    future_paths:
+      backend: services/aromaflow/backend
+      frontend: services/aromaflow/frontend
+    runtime_legacy_names:
+      django_package: mypet_project
+      deploy_dir: /opt/mypet01
+      compose_project_hint: mypet01
+      note: do-not-rename-without-data-and-deploy-migration
+  ai_e_retail:
+    display_name: AI_E_Retail
+    type: django-react-site
+    status: external-github-managed
+    owner: airiga1897
+    source_policy: github-only
+    source:
+      policy: github
+      repository: https://github.com/airiga1897/AI_E_Retail
+      bootstrap_ref: codex/feature/fixmvp08
+      stable_branches:
+        development: develop
+        production: main
+      release_policy:
+        mvp: frozen-release-tag
+        dev: develop
+      deploy_refs:
+        preferred: image_ref
+        allowed_source_refs:
+        - codex/feature/fixmvp08
+        - develop
+        - main
+        - release/*
+        - ai-retail-mvp-v*
+        note: bootstrap_ref — временный, пока не будут промоутнуты ветки или теги
+          MVP/dev.
+      mvp_source: frozen-release-tag-from-bootstrap-ref
+      dev_source: develop-after-bootstrap-promotion
+      archive_usage: read-only-reference-only
+    future_paths:
+      backend: services/ai-retail/backend
+      frontend: services/ai-retail/frontend
+runtime_instances:
+  aromaflow-work:
+    project: aromaflowai
+    role: working-site
+    profile: aromaflow-work
+    env:
+      prefix: AROMAFLOW_WORK
+      file: .env.aromaflow.work
+      example_file: .env.aromaflow.work.example
+    local:
+      backend_port: 8020
+      frontend_port: 5170
+      cache_backend: locmem
+    domains:
+      local:
+      - http://localhost:8020
+      preprod:
+      - site.mine-craft.su
+      prod:
+      - www.mine-craft.su
+      - mine-craft.su
+    containers:
+      current:
+      - web
+      - db
+      - nginx
+      future:
+      - aromaflow-work-backend
+      - aromaflow-work-frontend
+      - aromaflow-work-db
+      - aromaflow-work-redis
+      - aromaflow-work-nginx
+    healthcheck:
+      path: /health/
+      expected_status: 200
+      timeout_seconds: 5
+    data:
+      database: aromaflow_work
+      cache:
+        local: locmem
+        vps: dedicated-redis
+      volumes:
+        static: aromaflow_work_static
+        media: aromaflow_work_media
+        postgres: aromaflow_work_postgres
+        redis: aromaflow_work_redis
+    seed:
+      automatic_demo_data: false
+  aromaflow-demo:
+    project: aromaflowai
+    role: demo-data-site
+    profile: aromaflow-demo
+    env:
+      prefix: AROMAFLOW_DEMO
+      file: .env.aromaflow.demo
+      example_file: .env.aromaflow.demo.example
+    local:
+      backend_port: 5010
+      frontend_port: 5171
+      cache_backend: locmem
+    domains:
+      local:
+      - http://localhost:5010
+      preprod:
+      - demo-aromaflow.example.invalid
+      prod: []
+    containers:
+      future:
+      - aromaflow-demo-backend
+      - aromaflow-demo-frontend
+      - aromaflow-demo-db
+      - aromaflow-demo-redis
+      - aromaflow-demo-nginx
+    healthcheck:
+      path: /health/
+      expected_status: 200
+      timeout_seconds: 5
+    data:
+      database: aromaflow_demo
+      cache:
+        local: locmem
+        vps: dedicated-redis
+      volumes:
+        static: aromaflow_demo_static
+        media: aromaflow_demo_media
+        postgres: aromaflow_demo_postgres
+        redis: aromaflow_demo_redis
+    seed:
+      automatic_demo_data: true
+      command: python manage.py setup_demo_content
+    deploy:
+      allowed_image_ref_pattern: ^ghcr\.io/airiga1897/aromaflow[^:]*(:[0-9a-f]{40}|@sha256:[0-9a-f]{64})$
+      frozen: false
+      frozen_image_ref_pattern: null
+      branches:
+        preprod: release/*
+      environments:
+        preprod:
+          vps: VPS2
+          compose_file: infra/stacks/aromaflow-demo/docker-compose.aromaflow-demo.yml
+          deploy_dir: /opt/stacks/aromaflow-demo-preprod
+          deploy_state_tag_prefix: deploy/aromaflow-demo/preprod/
+  ai-retail-mvp:
+    project: ai_e_retail
+    role: frozen-mvp
+    profile: ai-retail-mvp
+    source_policy: github-only
+    env:
+      prefix: AI_RETAIL_MVP
+      file: .env.ai-retail.mvp
+      example_file: .env.ai-retail.mvp.example
+    local:
+      backend_port: 8000
+      frontend_port: 5173
+      vite_proxy_target: http://host.docker.internal:8000
+      cache_backend: locmem
+    domains:
+      local:
+      - http://localhost:5173
+      preprod:
+      - mvp-ai-retail.example.invalid
+      prod: []
+    containers:
+      future:
+      - ai-retail-mvp-web
+      - ai-retail-mvp-frontend-dev
+      - ai-retail-mvp-db
+      - ai-retail-mvp-redis
+      - ai-retail-mvp-nginx
+    healthcheck:
+      path: /health/
+      expected_status: 200
+      timeout_seconds: 5
+    data:
+      database: ai_retail_mvp
+      cache:
+        local: locmem
+        vps: dedicated-redis
+      volumes:
+        static: ai_retail_mvp_static
+        media: ai_retail_mvp_media
+        postgres: ai_retail_mvp_postgres
+        redis: ai_retail_mvp_redis
+    seed:
+      automatic_demo_data: true
+      command: python manage.py load_demo_data
+    deploy:
+      allowed_image_ref_pattern: ^ghcr\.io/airiga1897/ai[_-]e[_-]retail[^:]*:ai-retail-mvp-v[0-9a-zA-Z._-]+$
+      frozen: true
+      frozen_image_ref_pattern: ^ghcr\.io/airiga1897/ai[_-]e[_-]retail[^:]*:ai-retail-mvp-v[0-9a-zA-Z._-]+$
+      source:
+        repository: https://github.com/airiga1897/AI_E_Retail
+        bootstrap_ref: codex/feature/fixmvp08
+        future_mvp_tag: ai-retail-mvp-v1
+        preferred_deploy_artifact: image_ref
+      branches:
+        preprod: release/*
+      environments:
+        preprod:
+          vps: VPS2
+          compose_file: infra/stacks/ai-retail-mvp/docker-compose.ai-retail-mvp.yml
+          deploy_dir: /opt/stacks/ai-retail-mvp-preprod
+          deploy_state_tag_prefix: deploy/ai-retail-mvp/preprod/
+  ai-retail-dev:
+    project: ai_e_retail
+    role: future-development
+    profile: ai-retail-dev
+    source_policy: github-only
+    env:
+      prefix: AI_RETAIL_DEV
+      file: .env.ai-retail.dev
+      example_file: .env.ai-retail.dev.example
+    local:
+      backend_port: 8010
+      frontend_port: 5174
+      vite_proxy_target: http://host.docker.internal:8010
+      cache_backend: locmem
+    domains:
+      local:
+      - http://localhost:5174
+      preprod:
+      - dev-ai-retail.example.invalid
+      prod: []
+    containers:
+      future:
+      - ai-retail-dev-web
+      - ai-retail-dev-frontend-dev
+      - ai-retail-dev-db
+      - ai-retail-dev-redis
+      - ai-retail-dev-nginx
+    healthcheck:
+      path: /health/
+      expected_status: 200
+      timeout_seconds: 5
+    data:
+      database: ai_retail_dev
+      cache:
+        local: locmem
+        vps: dedicated-redis
+      volumes:
+        static: ai_retail_dev_static
+        media: ai_retail_dev_media
+        postgres: ai_retail_dev_postgres
+        redis: ai_retail_dev_redis
+    seed:
+      automatic_demo_data: false
+    deploy:
+      allowed_image_ref_pattern: ^ghcr\.io/airiga1897/ai[_-]e[_-]retail[^:]*(:[0-9a-f]{40}|[a-zA-Z0-9._-]+|@sha256:[0-9a-f]{64})$
+      frozen: false
+      frozen_image_ref_pattern: null
+      source:
+        repository: https://github.com/airiga1897/AI_E_Retail
+        bootstrap_ref: codex/feature/fixmvp08
+        future_branch: develop
+        preferred_deploy_artifact: image_ref
+      branches:
+        preprod: release/*
+      environments:
+        preprod:
+          vps: VPS2
+          compose_file: infra/stacks/ai-retail-dev/docker-compose.ai-retail-dev.yml
+          deploy_dir: /opt/stacks/ai-retail-dev-preprod
+          deploy_state_tag_prefix: deploy/ai-retail-dev/preprod/
+future_service_template:
+  site:
+    type: site
+    required:
+    - profile
+    - env.prefix
+    - domains
+    - healthcheck
+    - containers
+    - data.database
+    - data.cache
+  bot:
+    type: telegram-bot
+    required:
+    - profile
+    - env.prefix
+    - webhook.preprod
+    - webhook.prod
+    - containers
+    - healthcheck

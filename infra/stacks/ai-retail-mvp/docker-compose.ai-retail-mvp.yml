@@ -1,0 +1,66 @@
+# СГЕНЕРИРОВАННЫЙ ФАЙЛ — не редактируйте вручную.
+# Источник: services.yml + tools/render-compose/templates/django-react-site.yml.j2
+# Стек: ai-retail-mvp (project: ai_e_retail, type: django-react-site)
+
+services:
+  ai-retail-mvp-web:
+    image: "${AI_RETAIL_MVP_WEB_IMAGE:-ai-retail-mvp-web:dev}"
+    env_file:
+      - ../../.env.ai-retail.mvp
+    environment:
+      DJANGO_DB_NAME: "ai_retail_mvp"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - ai-retail-mvp-db
+      - ai-retail-mvp-redis
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - ai_retail_mvp_static:/app/static
+      - ai_retail_mvp_media:/app/media
+    restart: unless-stopped
+
+  ai-retail-mvp-frontend-dev:
+    image: "${AI_RETAIL_MVP_FRONTEND_IMAGE:-ai-retail-mvp-frontend-dev:dev}"
+    env_file:
+      - ../../.env.ai-retail.mvp
+    environment:
+      VITE_PROXY_TARGET: "http://host.docker.internal:8000"
+    ports:
+      - "5173:5173"
+    depends_on:
+      - ai-retail-mvp-web
+    restart: unless-stopped
+
+  ai-retail-mvp-db:
+    image: postgres:16-alpine
+    env_file:
+      - ../../.env.ai-retail.mvp
+    environment:
+      POSTGRES_DB: "ai_retail_mvp"
+    volumes:
+      - ai_retail_mvp_postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  ai-retail-mvp-redis:
+    image: redis:7-alpine
+    volumes:
+      - ai_retail_mvp_redis:/data
+    restart: unless-stopped
+
+  ai-retail-mvp-nginx:
+    image: nginx:alpine
+    depends_on:
+      - ai-retail-mvp-web
+      - ai-retail-mvp-frontend-dev
+    restart: unless-stopped
+
+volumes:
+  ai_retail_mvp_static:
+  ai_retail_mvp_media:
+  ai_retail_mvp_postgres:
+  ai_retail_mvp_redis:

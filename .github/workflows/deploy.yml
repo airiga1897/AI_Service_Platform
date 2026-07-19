@@ -1,0 +1,161 @@
+# Workflow CI «Deploy».
+#
+# Preflight + guarded rollout. Фактический SSH-деплой включён только для
+# ai-retail-dev / preprod. Остальные комбинации instance/environment
+# завершаются с явным сообщением, что rollout намеренно отключён.
+#
+# Поля description инпутов workflow_dispatch оставлены на английском —
+# значения options — машинные идентификаторы.
+
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance:
+        description: Runtime instance to deploy
+        required: true
+        type: choice
+        options:
+          - aromaflow-work
+          - aromaflow-demo
+          - ai-retail-mvp
+          - ai-retail-dev
+      environment:
+        description: Deploy environment
+        required: true
+        type: choice
+        options:
+          - preprod
+          - prod
+      image_ref:
+        description: Immutable container image ref to deploy
+        required: true
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_metadata: ${{ steps.preflight.outputs.metadata }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установка Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Установка Python-зависимостей
+        run: python -m pip install --upgrade pip pyyaml jinja2
+
+      - name: Проверка репозитория (make check)
+        run: make check
+
+      - name: Deploy preflight
+        id: preflight
+        run: |
+          python tools/deploy/preflight.py \
+            --instance "${{ inputs.instance }}" \
+            --environment "${{ inputs.environment }}" \
+            --image-ref "${{ inputs.image_ref }}" \
+            > preflight.json
+          echo "metadata<<EOF" >> "$GITHUB_OUTPUT"
+          cat preflight.json >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Публикация preflight JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-preflight-${{ inputs.instance }}-${{ inputs.environment }}
+          path: preflight.json
+
+  unsupported-rollout:
+    needs: preflight
+    runs-on: ubuntu-latest
+    if: ${{ inputs.instance != 'ai-retail-dev' || inputs.environment != 'preprod' }}
+    steps:
+      - name: Проверка разрешённого rollout
+        run: |
+          echo "Rollout is intentionally not enabled for instance=${{ inputs.instance }} environment=${{ inputs.environment }}."
+          echo "Only ai-retail-dev/preprod is enabled in this milestone."
+          exit 1
+
+  deploy:
+    needs: preflight
+    runs-on: ubuntu-latest
+    if: ${{ inputs.instance == 'ai-retail-dev' && inputs.environment == 'preprod' }}
+    environment:
+      name: ai-retail-dev-preprod
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Скачать preflight JSON
+        uses: actions/download-artifact@v4
+        with:
+          name: deploy-preflight-${{ inputs.instance }}-${{ inputs.environment }}
+
+      - name: Guarded SSH deploy (требуются secrets)
+        env:
+          IMAGE_REF: ${{ inputs.image_ref }}
+          DEPLOY_DIR: ${{ fromJson(needs.preflight.outputs.deploy_metadata).deploy_dir }}
+          COMPOSE_FILE: ${{ fromJson(needs.preflight.outputs.deploy_metadata).compose_file }}
+          ENV_FILE: ${{ fromJson(needs.preflight.outputs.deploy_metadata).env_file }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+        run: |
+          echo "Resolved deploy metadata:"
+          cat preflight.json
+          if [ -z "${SSH_HOST:-}" ] || [ -z "${SSH_USER:-}" ] || [ -z "${SSH_KEY:-}" ]; then
+            echo "SSH deploy skipped: set SSH_HOST, SSH_USER, and SSH_KEY in GitHub Environment secrets."
+            echo "When secrets are present, the steps below will run on the target host:"
+            echo "  1. Copy/render compose file: ${COMPOSE_FILE}"
+            echo "  2. Export IMAGE_REF=${IMAGE_REF}"
+            echo "  3. docker compose -f ... pull"
+            echo "  4. docker compose -f ... up -d"
+            echo "  5. tools/healthcheck/ against the instance"
+            exit 0
+          fi
+          SSH_PORT="${SSH_PORT:-22}"
+          mkdir -p deploy-bundle
+          cp "${COMPOSE_FILE}" deploy-bundle/docker-compose.yml
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          compose_path = Path("deploy-bundle/docker-compose.yml")
+          env_file = os.environ["ENV_FILE"]
+          text = compose_path.read_text(encoding="utf-8")
+          text = text.replace(f"../../{env_file}", env_file)
+          compose_path.write_text(text, encoding="utf-8")
+
+          deploy_env = Path("deploy-bundle/.env.deploy")
+          deploy_env.write_text(
+              f"AI_RETAIL_DEV_WEB_IMAGE={os.environ['IMAGE_REF']}\n",
+              encoding="utf-8",
+          )
+          PY
+
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${SSH_KEY}" > ~/.ssh/ai-service-platform-deploy
+          chmod 600 ~/.ssh/ai-service-platform-deploy
+          ssh-keyscan -p "${SSH_PORT}" -H "${SSH_HOST}" >> ~/.ssh/known_hosts
+
+          ssh -i ~/.ssh/ai-service-platform-deploy -p "${SSH_PORT}" "${SSH_USER}@${SSH_HOST}" \
+            "mkdir -p '${DEPLOY_DIR}'"
+          scp -i ~/.ssh/ai-service-platform-deploy -P "${SSH_PORT}" \
+            deploy-bundle/docker-compose.yml deploy-bundle/.env.deploy \
+            "${SSH_USER}@${SSH_HOST}:${DEPLOY_DIR}/"
+          ssh -i ~/.ssh/ai-service-platform-deploy -p "${SSH_PORT}" "${SSH_USER}@${SSH_HOST}" \
+            "test -f '${DEPLOY_DIR}/${ENV_FILE}'"
+          ssh -i ~/.ssh/ai-service-platform-deploy -p "${SSH_PORT}" "${SSH_USER}@${SSH_HOST}" \
+            "cd '${DEPLOY_DIR}' && docker compose --env-file .env.deploy -f docker-compose.yml config >/tmp/ai-retail-dev-preprod.compose.yml"
+          echo "Remote predeploy passed: compose bundle uploaded and docker compose config succeeded."
+
+      - name: Post-deploy healthcheck (локально из репозитория)
+        if: success()
+        run: |
+          echo "Post-deploy healthcheck is intentionally deferred until pull/up is enabled."
+          echo "This milestone validates SSH access and docker compose config only."

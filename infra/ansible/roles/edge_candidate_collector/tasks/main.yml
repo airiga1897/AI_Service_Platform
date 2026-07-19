@@ -1,0 +1,196 @@
+---
+- name: Validate edge_candidate_collector state
+  ansible.builtin.assert:
+    that:
+      - edge_candidate_collector_state in ['present', 'absent']
+      - edge_candidate_collector_purge_data in [true, false, 'true', 'false', 'True', 'False']
+    fail_msg: "edge_candidate_collector_state must be present|absent and purge flag must be boolean-like."
+
+- name: Check local edge candidate collector script
+  ansible.builtin.stat:
+    path: "{{ edge_candidate_collector_local_script }}"
+  delegate_to: localhost
+  become: false
+  register: edge_candidate_collector_local_script_stat
+  when: edge_candidate_collector_state == 'present'
+
+- name: Require local edge candidate collector script
+  ansible.builtin.assert:
+    that:
+      - edge_candidate_collector_local_script_stat.stat.exists
+      - edge_candidate_collector_local_script_stat.stat.isreg
+    fail_msg: "Missing local collector script: {{ edge_candidate_collector_local_script }}"
+  when: edge_candidate_collector_state == 'present'
+
+- name: Ensure edge candidate collector public evidence directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ edge_candidate_collector_root_dir }}"
+    - "{{ edge_candidate_collector_state_dir }}"
+    - "{{ edge_candidate_collector_candidate_dir }}"
+    - "{{ edge_candidate_collector_processed_dir }}"
+  when: edge_candidate_collector_state == 'present'
+
+- name: Ensure edge candidate collector private state directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+  loop:
+    - "{{ edge_candidate_collector_log_dir }}"
+    - "{{ edge_candidate_collector_observation_dir }}"
+  when: edge_candidate_collector_state == 'present'
+
+- name: Install tcpdump for edge candidate collector sampler
+  ansible.builtin.package:
+    name: tcpdump
+    state: present
+  when:
+    - edge_candidate_collector_state == 'present'
+    - edge_candidate_collector_tcpdump_enabled | bool
+
+- name: Ensure existing edge candidate collector candidate files are readable
+  ansible.builtin.shell: |
+    set -euo pipefail
+    existing_dirs=""
+    for candidate_dir in "$CANDIDATE_DIR" "$PROCESSED_DIR"; do
+      if [ -d "$candidate_dir" ]; then
+        existing_dirs="${existing_dirs}${existing_dirs:+ }$candidate_dir"
+      fi
+    done
+    if [ -z "$existing_dirs" ]; then
+      if [ "$CHECK_MODE" = "true" ]; then
+        echo "candidate_files_requiring_chmod=0"
+      else
+        echo "candidate_files_chmodded=0"
+      fi
+      exit 0
+    fi
+    changed_count="$(
+      find $existing_dirs \
+        -type f -name '*.jsonl' ! -perm 0644 \
+        -printf '.\n' | wc -l
+    )"
+    if [ "$CHECK_MODE" = "true" ]; then
+      echo "candidate_files_requiring_chmod=$changed_count"
+      exit 0
+    fi
+    if [ "$changed_count" -gt 0 ]; then
+      find $existing_dirs \
+        -type f -name '*.jsonl' ! -perm 0644 \
+        -exec chmod 0644 {} +
+    fi
+    echo "candidate_files_chmodded=$changed_count"
+  args:
+    executable: /bin/bash
+  environment:
+    CANDIDATE_DIR: "{{ edge_candidate_collector_candidate_dir }}"
+    PROCESSED_DIR: "{{ edge_candidate_collector_processed_dir }}"
+    CHECK_MODE: "{{ ansible_check_mode | ternary('true', 'false') }}"
+  register: edge_candidate_collector_candidate_chmod
+  check_mode: false
+  changed_when: >
+    (
+      'candidate_files_requiring_chmod=0' not in edge_candidate_collector_candidate_chmod.stdout
+      and 'candidate_files_chmodded=0' not in edge_candidate_collector_candidate_chmod.stdout
+    )
+  when: edge_candidate_collector_state == 'present'
+
+- name: Install edge candidate collector script
+  ansible.builtin.copy:
+    src: "{{ edge_candidate_collector_local_script }}"
+    dest: "{{ edge_candidate_collector_script }}"
+    mode: "0750"
+  when: edge_candidate_collector_state == 'present'
+
+- name: Install edge candidate collector runner
+  ansible.builtin.template:
+    src: run_edge_candidate_collector.sh.j2
+    dest: "{{ edge_candidate_collector_runner }}"
+    mode: "0750"
+  when: edge_candidate_collector_state == 'present'
+
+- name: Install edge candidate collector systemd service
+  ansible.builtin.template:
+    src: edge-candidate-collector.service.j2
+    dest: "/etc/systemd/system/{{ edge_candidate_collector_systemd_service }}"
+    mode: "0644"
+  register: edge_candidate_collector_service_unit
+  when: edge_candidate_collector_state == 'present'
+
+- name: Install edge candidate collector systemd timer
+  ansible.builtin.template:
+    src: edge-candidate-collector.timer.j2
+    dest: "/etc/systemd/system/{{ edge_candidate_collector_systemd_timer }}"
+    mode: "0644"
+  register: edge_candidate_collector_timer_unit
+  when: edge_candidate_collector_state == 'present'
+
+- name: Reload systemd for edge candidate collector install
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when:
+    - edge_candidate_collector_state == 'present'
+    - not ansible_check_mode
+    - edge_candidate_collector_service_unit.changed or edge_candidate_collector_timer_unit.changed
+
+- name: Enable and start edge candidate collector timer
+  ansible.builtin.systemd:
+    name: "{{ edge_candidate_collector_systemd_timer }}"
+    state: started
+    enabled: true
+  when:
+    - edge_candidate_collector_state == 'present'
+    - not ansible_check_mode
+
+- name: Stop and disable edge candidate collector timer
+  ansible.builtin.systemd:
+    name: "{{ edge_candidate_collector_systemd_timer }}"
+    state: stopped
+    enabled: false
+  failed_when: false
+  when:
+    - edge_candidate_collector_state == 'absent'
+    - not ansible_check_mode
+
+- name: Stop edge candidate collector service
+  ansible.builtin.systemd:
+    name: "{{ edge_candidate_collector_systemd_service }}"
+    state: stopped
+  failed_when: false
+  when:
+    - edge_candidate_collector_state == 'absent'
+    - not ansible_check_mode
+
+- name: Remove edge candidate collector unit files
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item }}"
+    state: absent
+  loop:
+    - "{{ edge_candidate_collector_systemd_service }}"
+    - "{{ edge_candidate_collector_systemd_timer }}"
+  when: edge_candidate_collector_state == 'absent'
+
+- name: Reload systemd after edge candidate collector removal
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when:
+    - edge_candidate_collector_state == 'absent'
+    - not ansible_check_mode
+
+- name: Remove edge candidate collector install directory
+  ansible.builtin.file:
+    path: "{{ edge_candidate_collector_root_dir }}"
+    state: absent
+  when: edge_candidate_collector_state == 'absent'
+
+- name: Purge edge candidate collector state directory
+  ansible.builtin.file:
+    path: "{{ edge_candidate_collector_state_dir }}"
+    state: absent
+  when:
+    - edge_candidate_collector_state == 'absent'
+    - edge_candidate_collector_purge_data | bool

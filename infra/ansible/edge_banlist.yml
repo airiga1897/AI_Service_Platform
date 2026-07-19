@@ -1,0 +1,10 @@
+---
+- name: Edge generated banlist rollout
+  hosts: edge_banlists
+  become: true
+  gather_facts: false
+  vars:
+    edge_banlist_state: present
+    edge_banlist_purge_data: false
+  roles:
+    - edge_banlist

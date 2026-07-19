@@ -1,0 +1,188 @@
+---
+- name: Validate host_resources state
+  ansible.builtin.assert:
+    that:
+      - host_resources_state == 'present'
+    fail_msg: "host_resources v1 supports only state=present; absent/purge are intentionally disabled."
+
+- name: Check host_resources operator config on control node
+  ansible.builtin.stat:
+    path: "{{ host_resources_operator_config_file }}"
+  delegate_to: localhost
+  become: false
+  register: host_resources_config_stat
+
+- name: Require host_resources operator config
+  ansible.builtin.assert:
+    that:
+      - host_resources_config_stat.stat.exists
+      - host_resources_config_stat.stat.isreg
+    fail_msg: "Missing host_resources config: {{ host_resources_operator_config_file }}"
+
+- name: Build host_resources model
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - <<'PY'
+    import json
+    import os
+    import sys
+
+    try:
+        import yaml
+    except Exception as exc:
+        print(f"PyYAML is required to read host_resources config: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    alias = os.environ["INVENTORY_HOSTNAME"]
+    path = os.environ["CONFIG_FILE"]
+
+    def fail(message):
+        print(message, file=sys.stderr)
+        sys.exit(1)
+
+    def strict_int(value, field, minimum, maximum):
+        if isinstance(value, bool) or not isinstance(value, int):
+            fail(f"host_resources.{field} must be an integer")
+        if value < minimum or value > maximum:
+            fail(f"host_resources.{field} must be between {minimum} and {maximum}")
+        return value
+
+    with open(path, encoding="utf-8") as handle:
+        root = yaml.safe_load(handle) or {}
+    config = root.get("host_resources") or {}
+    if not isinstance(config, dict):
+        fail("host_resources must be a map")
+
+    swap_path = str(config.get("swap_path") or "/swapfile").strip()
+    if swap_path != "/swapfile":
+        fail("host_resources.swap_path must be /swapfile in v1")
+
+    nodes = config.get("nodes") or {}
+    if not isinstance(nodes, dict):
+        fail("host_resources.nodes must be a map")
+    node = nodes.get(alias)
+    if not isinstance(node, dict):
+        fail(f"host_resources config has no node entry for {alias}")
+
+    legacy_swap_paths = node.get("legacy_swap_paths") or []
+    if not isinstance(legacy_swap_paths, list):
+        fail(f"host_resources.nodes.{alias}.legacy_swap_paths must be a list")
+    normalized_legacy_paths = []
+    for value in legacy_swap_paths:
+        legacy_path = str(value or "").strip()
+        if not legacy_path.startswith("/") or any(char.isspace() for char in legacy_path):
+            fail(f"host_resources.nodes.{alias}.legacy_swap_paths contains an unsafe path")
+        if legacy_path == swap_path or legacy_path in normalized_legacy_paths:
+            fail(f"host_resources.nodes.{alias}.legacy_swap_paths contains a duplicate path")
+        normalized_legacy_paths.append(legacy_path)
+
+    model = {
+        "alias": alias,
+        "swap_path": swap_path,
+        "swap_size_mb": strict_int(node.get("swap_size_mb"), f"nodes.{alias}.swap_size_mb", 128, 8192),
+        "swappiness": strict_int(node.get("swappiness"), f"nodes.{alias}.swappiness", 0, 100),
+        "minimum_free_disk_mb": strict_int(
+            config.get("minimum_free_disk_mb"), "minimum_free_disk_mb", 512, 102400
+        ),
+        "minimum_available_memory_after_swapoff_mb": strict_int(
+            config.get("minimum_available_memory_after_swapoff_mb"),
+            "minimum_available_memory_after_swapoff_mb",
+            64,
+            16384,
+        ),
+        "legacy_swap_paths": normalized_legacy_paths,
+    }
+    print(json.dumps(model, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    INVENTORY_HOSTNAME: "{{ inventory_hostname }}"
+    CONFIG_FILE: "{{ host_resources_operator_config_file }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  register: host_resources_model_command
+
+- name: Store host_resources model
+  ansible.builtin.set_fact:
+    host_resources_model: "{{ host_resources_model_command.stdout | trim | from_json }}"
+
+- name: Inspect host resource runtime prerequisites
+  ansible.builtin.shell: |
+    set -euo pipefail
+    test "$(uname -s)" = "Linux"
+    for command in findmnt swapon swapoff mkswap fallocate stat df python3; do
+      command -v "$command" >/dev/null
+    done
+    filesystem="$(findmnt -n -o FSTYPE --target /)"
+    case "$filesystem" in
+      ext4|xfs) ;;
+      *) echo "unsupported root filesystem for managed swapfile: $filesystem" >&2; exit 1 ;;
+    esac
+    allowed=("{{ host_resources_model.swap_path }}"{% for legacy_path in host_resources_model.legacy_swap_paths %} "{{ legacy_path }}"{% endfor %})
+    unknown="$(swapon --show=NAME --noheadings --raw | while IFS= read -r source; do
+      [ -z "$source" ] && continue
+      resolved="$(readlink -f "$source")"
+      matched=false
+      for candidate in "${allowed[@]}"; do
+        [ "$resolved" != "$candidate" ] || matched=true
+      done
+      [ "$matched" = "true" ] || printf '%s\n' "$source"
+    done)"
+    if [ -n "$unknown" ]; then
+      echo "host_resources refuses unknown active swap source(s):" >&2
+      printf '%s\n' "$unknown" >&2
+      exit 1
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Render host swap reconciler
+  ansible.builtin.template:
+    src: swap-reconcile.sh.j2
+    dest: "{{ host_resources_reconcile_script }}"
+    owner: root
+    group: root
+    mode: "0755"
+  register: host_resources_reconcile_template
+  when: not ansible_check_mode
+
+- name: Reconcile managed host swapfile
+  ansible.builtin.command:
+    cmd: "{{ host_resources_reconcile_script }}"
+  register: host_resources_reconcile
+  changed_when: "'changed=true' in host_resources_reconcile.stdout"
+  when: not ansible_check_mode
+
+- name: Manage host swappiness
+  ansible.posix.sysctl:
+    name: vm.swappiness
+    value: "{{ host_resources_model.swappiness | string }}"
+    sysctl_file: "{{ host_resources_sysctl_file }}"
+    state: present
+    sysctl_set: true
+    reload: true
+  when: not ansible_check_mode
+
+- name: Verify managed host swap policy
+  ansible.builtin.shell: |
+    set -euo pipefail
+    path="{{ host_resources_model.swap_path }}"
+    legacy_paths=({% for legacy_path in host_resources_model.legacy_swap_paths %}"{{ legacy_path }}" {% endfor %})
+    desired_bytes="$(({{ host_resources_model.swap_size_mb }} * 1024 * 1024))"
+    test -f "$path"
+    test "$(stat -c %s "$path")" -eq "$desired_bytes"
+    test "$(stat -c %a "$path")" = "600"
+    test "$(swapon --show=NAME --noheadings --raw | grep -Fxc "$path")" -eq 1
+    test "$(awk -v path="$path" '$1 == path && $3 == "swap" { count++ } END { print count + 0 }' /etc/fstab)" -eq 1
+    for legacy_path in "${legacy_paths[@]}"; do
+      test "$(awk -v path="$legacy_path" '$1 == path && $3 == "swap" { count++ } END { print count + 0 }' /etc/fstab)" -eq 0
+    done
+    test "$(sysctl -n vm.swappiness)" -eq "{{ host_resources_model.swappiness }}"
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when: not ansible_check_mode

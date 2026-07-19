@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "name": "example_service_fallback",
+      "state": "probe",
+      "behavior": "fallback_on_ingress_egress_failure",
+      "reason": "Probe a restricted or unreliable service with ingress-local egress first; consider cascade only when the ingress-local path fails or degrades.",
+      "rollback": "Probe-only stage has no runtime effect; disable this profile or remove future approved fallback rules to return to ingress-local egress.",
+      "ingress_anchor_aliases": [
+        "vps1"
+      ],
+      "targets": [
+        {
+          "type": "domain",
+          "value": "example.org",
+          "protocol": "https",
+          "port": 443,
+          "path": "/"
+        },
+        {
+          "type": "domain",
+          "value": "www.example.org",
+          "protocol": "https",
+          "port": 443,
+          "path": "/"
+        },
+        {
+          "type": "domain",
+          "value": "example.net",
+          "protocol": "http",
+          "port": 80,
+          "path": "/"
+        },
+        {
+          "type": "domain",
+          "value": "example.org",
+          "protocol": "tcp",
+          "port": 443,
+          "path": "/"
+        },
+        {
+          "type": "domain",
+          "value": "example.org",
+          "protocol": "udp",
+          "port": 53,
+          "path": "/"
+        },
+        {
+          "type": "ip",
+          "value": "192.0.2.10",
+          "protocol": "icmp",
+          "port": 0,
+          "path": "/"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+# Workflow CI «Validate».
+#
+# Запускается на каждом pull request, push в main и вручную.
+# Повторяет локальную команду `make check`: строгая валидация
+# `services.yml`, проверка дрейфа сгенерированных compose-файлов и
+# smoke-тесты всех инструментов.
+#
+# Имена шагов (`name:`) переведены на русский. Идентификаторы actions,
+# имена интерпретаторов, флаги CLI и пути файлов остаются на
+# английском — это машинный контракт.
+
+name: Validate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установка Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Установка Python-зависимостей
+        run: python -m pip install --upgrade pip pyyaml jinja2
+
+      - name: Проверка раскладки репозитория
+        run: |
+          test -f services.yml
+          test -f README.md
+          test -d infra/stacks/aromaflow-work
+          test -d infra/stacks/aromaflow-demo
+          test -d infra/stacks/ai-retail-mvp
+          test -d infra/stacks/ai-retail-dev
+          test -d infra/edge/softether
+
+      - name: Валидация реестра сервисов (services.yml)
+        run: make validate
+
+      - name: Проверка дрейфа render-compose
+        run: make render-check
+
+      - name: Проверка дрейфа render-edge
+        run: make render-edge-check
+
+      - name: Smoke-тесты инструментов
+        run: make test

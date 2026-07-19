@@ -1,0 +1,278 @@
+---
+- name: Check ingress-side vpn_cascade connection
+  ansible.builtin.shell: |
+    set -uo pipefail
+    tmp_file="$(mktemp)"
+    trap 'rm -f "$tmp_file"' EXIT
+    printf 'Hub %s\nCascadeGet %s\n' "$HUB_NAME" "$CONNECTION_NAME" > "$tmp_file"
+    output="$(timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file"' < "$tmp_file" 2>&1)"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      exit "$rc"
+    fi
+    if printf '%s\n' "$output" | grep -Eq "(^|[^A-Za-z0-9_.-])${CONNECTION_NAME}([^A-Za-z0-9_.-]|$)"; then
+      exit 0
+    fi
+    exit 1
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
+    CONNECTION_NAME: "{{ vpn_cascade_link.connection_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  register: vpn_cascade_connection_get
+  failed_when: false
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Check ingress-side vpn_cascade egress TCP reachability
+  ansible.builtin.shell: |
+    set -euo pipefail
+    timeout "${VPNCMD_TIMEOUT}s" python3 -c 'import socket, sys; s = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=5); s.close()' "$EGRESS_HOST" "$EGRESS_PORT"
+  args:
+    executable: /bin/bash
+  environment:
+    EGRESS_HOST: "{{ vpn_cascade_link.egress_host }}"
+    EGRESS_PORT: "{{ vpn_cascade_link.egress_port }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  register: vpn_cascade_egress_tcp_check
+  failed_when: false
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - (vpn_cascade_connection_get.rc | default(0)) != 0
+    - not ansible_check_mode
+
+- name: Create ingress-side vpn_cascade connection
+  ansible.builtin.shell: |
+    set -euo pipefail
+    tmp_file="$(mktemp)"
+    trap 'rm -f "$tmp_file"' EXIT
+    printf 'Hub %s\nCascadeCreate %s /SERVER:%s:%s /HUB:%s /USERNAME:%s\nFlush\n' "$HUB_NAME" "$CONNECTION_NAME" "$EGRESS_HOST" "$EGRESS_PORT" "$HUB_NAME" "$CASCADE_USER" > "$tmp_file"
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file" >/dev/null' < "$tmp_file"
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
+    CONNECTION_NAME: "{{ vpn_cascade_link.connection_name }}"
+    CASCADE_USER: "{{ vpn_cascade_config.cascade_user }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    EGRESS_HOST: "{{ vpn_cascade_link.egress_host }}"
+    EGRESS_PORT: "{{ vpn_cascade_link.egress_port }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  register: vpn_cascade_connection_create
+  failed_when: false
+  no_log: true
+  changed_when: true
+  when:
+    - vpn_cascade_state == 'present'
+    - (vpn_cascade_connection_get.rc | default(0)) != 0
+    - not ansible_check_mode
+
+- name: Fail on ingress-side vpn_cascade connection create failure
+  ansible.builtin.fail:
+    msg: "vpn_cascade CascadeCreate failed for {{ vpn_cascade_link.connection_name }}. Egress TCP {{ vpn_cascade_link.egress_host }}:{{ vpn_cascade_link.egress_port }} check rc={{ vpn_cascade_egress_tcp_check.rc | default('skipped') }}. Verify hub/user on egress and CascadeCreate arguments."
+  when:
+    - vpn_cascade_state == 'present'
+    - (vpn_cascade_connection_get.rc | default(0)) != 0
+    - vpn_cascade_connection_create.rc | default(1) != 0
+    - not ansible_check_mode
+
+- name: Verify ingress-side vpn_cascade connection exists after create
+  ansible.builtin.shell: |
+    set -uo pipefail
+    tmp_file="$(mktemp)"
+    trap 'rm -f "$tmp_file"' EXIT
+    printf 'Hub %s\nCascadeGet %s\n' "$HUB_NAME" "$CONNECTION_NAME" > "$tmp_file"
+    output="$(timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file"' < "$tmp_file" 2>&1)"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      exit "$rc"
+    fi
+    if printf '%s\n' "$output" | grep -Eq "(^|[^A-Za-z0-9_.-])${CONNECTION_NAME}([^A-Za-z0-9_.-]|$)"; then
+      exit 0
+    fi
+    exit 1
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
+    CONNECTION_NAME: "{{ vpn_cascade_link.connection_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  register: vpn_cascade_connection_create_get
+  failed_when: false
+  changed_when: false
+  no_log: true
+  when:
+    - vpn_cascade_state == 'present'
+    - (vpn_cascade_connection_get.rc | default(0)) != 0
+    - vpn_cascade_connection_create.rc | default(1) == 0
+    - not ansible_check_mode
+
+- name: Fail when ingress-side vpn_cascade connection is missing after create
+  ansible.builtin.fail:
+    msg: "vpn_cascade connection missing after create/configure: {{ vpn_cascade_link.connection_name }}. CascadeCreate returned successfully, but CascadeGet did not find the ingress-side SoftEther connection object on {{ inventory_hostname }}."
+  when:
+    - vpn_cascade_state == 'present'
+    - (vpn_cascade_connection_get.rc | default(0)) != 0
+    - vpn_cascade_connection_create.rc | default(1) == 0
+    - vpn_cascade_connection_create_get.rc | default(1) != 0
+    - not ansible_check_mode
+
+- name: Set ingress-side vpn_cascade connection password
+  ansible.builtin.shell: |
+    set -euo pipefail
+    tmp_file="$(mktemp)"
+    trap 'rm -f "$tmp_file"' EXIT
+    printf 'Hub %s\nCascadePasswordSet %s /PASSWORD:%s /TYPE:standard\nFlush\n' "$HUB_NAME" "$CONNECTION_NAME" "$CASCADE_USER_PASSWORD" > "$tmp_file"
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file" >/dev/null' < "$tmp_file"
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
+    CONNECTION_NAME: "{{ vpn_cascade_link.connection_name }}"
+    CASCADE_USER_PASSWORD: "{{ vpn_cascade_config.cascade_user_password }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  register: vpn_cascade_password_set
+  failed_when: false
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - >
+      ((vpn_cascade_connection_get.rc | default(1)) == 0)
+      or ((vpn_cascade_connection_create_get.rc | default(1)) == 0)
+    - not ansible_check_mode
+
+- name: Fail on ingress-side vpn_cascade password update failure
+  ansible.builtin.fail:
+    msg: "vpn_cascade CascadePasswordSet failed for {{ vpn_cascade_link.connection_name }} with rc={{ vpn_cascade_password_set.rc | default('not-run') }}."
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_password_set is defined
+    - vpn_cascade_password_set.rc | default(1) != 0
+    - not ansible_check_mode
+
+- name: Bring ingress-side vpn_cascade connection online
+  ansible.builtin.shell: |
+    set -euo pipefail
+    tmp_file="$(mktemp)"
+    trap 'rm -f "$tmp_file"' EXIT
+    printf 'Hub %s\nCascadeOnline %s\nFlush\n' "$HUB_NAME" "$CONNECTION_NAME" > "$tmp_file"
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file" >/dev/null' < "$tmp_file"
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
+    CONNECTION_NAME: "{{ vpn_cascade_link.connection_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  register: vpn_cascade_online
+  failed_when: false
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_password_set is defined
+    - vpn_cascade_password_set.rc | default(1) == 0
+    - not ansible_check_mode
+
+- name: Fail on ingress-side vpn_cascade online failure
+  ansible.builtin.fail:
+    msg: "vpn_cascade CascadeOnline failed for {{ vpn_cascade_link.connection_name }} with rc={{ vpn_cascade_online.rc | default('not-run') }}."
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_online is defined
+    - vpn_cascade_online.rc | default(1) != 0
+    - not ansible_check_mode
+
+- name: Verify ingress-side vpn_cascade connection exists after configure
+  ansible.builtin.shell: |
+    set -uo pipefail
+    tmp_file="$(mktemp)"
+    trap 'rm -f "$tmp_file"' EXIT
+    printf 'Hub %s\nCascadeGet %s\n' "$HUB_NAME" "$CONNECTION_NAME" > "$tmp_file"
+    output="$(timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file"' < "$tmp_file" 2>&1)"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      exit "$rc"
+    fi
+    if printf '%s\n' "$output" | grep -Eq "(^|[^A-Za-z0-9_.-])${CONNECTION_NAME}([^A-Za-z0-9_.-]|$)"; then
+      exit 0
+    fi
+    exit 1
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
+    CONNECTION_NAME: "{{ vpn_cascade_link.connection_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  register: vpn_cascade_connection_verify_get
+  failed_when: false
+  changed_when: false
+  no_log: true
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Fail when ingress-side vpn_cascade connection is missing after configure
+  ansible.builtin.fail:
+    msg: "vpn_cascade connection missing after create/configure: {{ vpn_cascade_link.connection_name }}. The ingress-side SoftEther connection object was not persisted on {{ inventory_hostname }}; inspect CascadeList and the latest service job log."
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+    - vpn_cascade_connection_verify_get.rc | default(1) != 0
+
+- name: Verify ingress-side vpn_cascade connection is online
+  ansible.builtin.shell: |
+    set -uo pipefail
+    tmp_file="$(mktemp)"
+    trap 'rm -f "$tmp_file"' EXIT
+    printf 'Hub %s\nCascadeStatusGet %s\n' "$HUB_NAME" "$CONNECTION_NAME" > "$tmp_file"
+    output="$(timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file"' < "$tmp_file" 2>&1)"
+    rc=$?
+    printf '%s\n' "$output"
+    if [ "$rc" -ne 0 ]; then
+      exit "$rc"
+    fi
+    status_text="$(printf '%s\n' "$output" | grep -m 1 'Session Status' | cut -d'|' -f2- | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ -n "$status_text" ] || exit 1
+    printf '%s\n' "$status_text" | grep -Eiq 'Connection Completed|Session Established'
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
+    CONNECTION_NAME: "{{ vpn_cascade_link.connection_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  register: vpn_cascade_status
+  changed_when: false
+  no_log: true
+  failed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_connection_verify_get.rc | default(1) == 0
+    - not ansible_check_mode
+
+- name: Fail when ingress-side vpn_cascade connection is not online
+  ansible.builtin.fail:
+    msg: "vpn_cascade connection exists but is not online: {{ vpn_cascade_link.connection_name }}. TCP to {{ vpn_cascade_link.egress_host }}:{{ vpn_cascade_link.egress_port }} may work, but SoftEther did not report Connection Completed/Online. Status rc={{ vpn_cascade_status.rc | default('not-run') }}."
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_connection_verify_get.rc | default(1) == 0
+    - vpn_cascade_status.rc | default(1) != 0
+    - not ansible_check_mode

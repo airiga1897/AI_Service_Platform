@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "id": "fallback-available-example-service-fallback-example-org-443",
+  "type": "fallback_available",
+  "human_type": "Fallback доступен",
+  "status": "suggested",
+  "human_status": "Требует решения",
+  "created_at_utc": "2026-05-29T00:00:00Z",
+  "source": "suggest_egress_policy.ps1",
+  "profile": "example_service_fallback",
+  "target": {
+    "type": "domain",
+    "value": "example.org",
+    "protocol": "https",
+    "port": 443,
+    "path": "/"
+  },
+  "recommended_path": {
+    "mode": "cascade",
+    "ingress_alias": "vps5",
+    "egress_alias": "vps4",
+    "cascade_connection": "vps5-to-vps4",
+    "effective_country": "NL",
+    "http_status": 200,
+    "response_ms": 250.0
+  },
+  "reason": "Ingress-local egress did not produce a good stable result, and a cascade fallback candidate is available for operator review.",
+  "human_summary": "Локальный egress не дал хорошего результата, но fallback через cascade доступен.",
+  "rollback": "This is proposal-only state. Delete or reject this proposal; no runtime route exists until an operator applies a separate approved policy.",
+  "evidence": {
+    "source_history_file": "operator/egress_policy/history/egress-probes-YYYYMMDDTHHMMSSZ.jsonl",
+    "run_id": "YYYYMMDDTHHMMSSZ",
+    "summary": "Example proposal with sanitized probe facts only.",
+    "observations": [
+      {
+        "mode": "cascade",
+        "ingress_alias": "vps5",
+        "egress_alias": "vps4",
+        "cascade_connection": "vps5-to-vps4",
+        "effective_country": "NL",
+        "effective_ip": "203.0.113.10",
+        "http_status": 200,
+        "response_ms": 250.0,
+        "recommendation": "fallback_available"
+      }
+    ]
+  },
+  "ai_advisory": null,
+  "operator_decision": {
+    "status": "accepted",
+    "previous_status": "suggested",
+    "reason": "Example decision record only; accepting a proposal does not apply runtime policy.",
+    "operator": "operator",
+    "decided_at_utc": "2026-05-29T00:10:00Z"
+  }
+}

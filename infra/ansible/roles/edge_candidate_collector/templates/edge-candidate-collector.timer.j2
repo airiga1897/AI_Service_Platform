@@ -1,0 +1,11 @@
+[Unit]
+Description=Run AI Service Platform edge candidate collector
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec={{ edge_candidate_collector_interval }}
+RandomizedDelaySec={{ edge_candidate_collector_randomized_delay }}
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,23 @@
+services:
+  semaphore:
+    image: semaphoreui/semaphore:latest
+    container_name: semaphore
+    restart: always
+    ports:
+      - "{{ semaphore_port }}:3000"
+    environment:
+      SEMAPHORE_DB_DIALECT:         bolt
+      SEMAPHORE_DB:                 /etc/semaphore/db/semaphore.db
+      SEMAPHORE_TMP_PATH:           /tmp/semaphore
+      SEMAPHORE_ADMIN:              "{{ semaphore_admin_user }}"
+      SEMAPHORE_ADMIN_PASSWORD:     "{{ semaphore_admin_password }}"
+      SEMAPHORE_ADMIN_NAME:         "Admin"
+      SEMAPHORE_ADMIN_EMAIL:        "{{ semaphore_admin_email }}"
+      SEMAPHORE_ACCESS_KEY_ENCRYPTION: "{{ semaphore_secret_key }}"
+      SEMAPHORE_COOKIE_HASH:           "{{ semaphore_cookie_hash }}"
+      SEMAPHORE_COOKIE_ENCRYPTION:     "{{ semaphore_cookie_encryption }}"
+    volumes:
+      - "{{ semaphore_dir }}/db:/etc/semaphore/db"
+      - "{{ semaphore_dir }}/tmp:/tmp/semaphore"
+      - "{{ semaphore_playbook_dir }}:/opt/ansible:ro"
+      - "{{ semaphore_dir }}/ansible_id_rsa:/root/.ssh/id_rsa:ro"

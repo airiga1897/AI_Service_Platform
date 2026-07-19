@@ -1,0 +1,72 @@
+services:
+  edge-haproxy:
+    image: {{ edge_haproxy_image }}
+    container_name: {{ edge_haproxy_container_name }}
+    ports:
+      - "80:80/tcp"
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+      - "{{ edge_haproxy_route_model.vpn_ingress.ports.sstp }}:{{ edge_haproxy_route_model.vpn_ingress.ports.sstp }}/tcp"
+      - "{{ edge_haproxy_route_model.vpn_ingress.ports.softether_alt }}:{{ edge_haproxy_route_model.vpn_ingress.ports.softether_alt }}/tcp"
+      - "{{ edge_haproxy_route_model.vpn_ingress.ports.management }}:{{ edge_haproxy_route_model.vpn_ingress.ports.management }}/tcp"
+{% elif edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+      - "443:443/tcp"
+      - "992:992/tcp"
+      - "5555:5555/tcp"
+{% elif edge_haproxy_route_model.softether_l3_vps_enabled | default(false) %}
+      - "443:443/tcp"
+      - "5555:5555/tcp"
+{% endif %}
+{% if edge_haproxy_route_model.minecraft_enabled | default(false) %}
+      - "{{ edge_haproxy_route_model.minecraft.ports.game }}:{{ edge_haproxy_route_model.minecraft.ports.game }}/tcp"
+{% if edge_haproxy_route_model.minecraft.policy.rcon_public | default(true) %}
+      - "{{ edge_haproxy_route_model.minecraft.ports.rcon }}:{{ edge_haproxy_route_model.minecraft.ports.rcon }}/tcp"
+{% endif %}
+{% endif %}
+    volumes:
+      - ./haproxy:/usr/local/etc/haproxy:ro
+      - ./run:/run/haproxy
+      - /etc/localtime:/etc/localtime:ro
+    restart: always
+    networks:
+      {{ edge_haproxy_network_name }}:
+        ipv4_address: {{ edge_haproxy_container_ipv4 }}
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+      {{ edge_haproxy_management_network_name }}:
+        ipv4_address: {{ edge_haproxy_management_container_ipv4 }}
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+      {{ edge_haproxy_cascade_network_name }}:
+        ipv4_address: {{ edge_haproxy_cascade_container_ipv4 }}
+      {{ edge_haproxy_cascade_management_network_name }}:
+        ipv4_address: {{ edge_haproxy_cascade_management_container_ipv4 }}
+{% endif %}
+{% if edge_haproxy_route_model.softether_l3_vps_enabled | default(false) %}
+      {{ edge_haproxy_p2p_network_name }}:
+        ipv4_address: {{ edge_haproxy_p2p_container_ipv4 }}
+{% if (edge_haproxy_route_model.softether_l3_vps.management_sni | default([]) | length) > 0 %}
+      {{ edge_haproxy_p2p_management_network_name }}:
+        ipv4_address: {{ edge_haproxy_p2p_management_container_ipv4 }}
+{% endif %}
+{% endif %}
+
+networks:
+  {{ edge_haproxy_network_name }}:
+    external: true
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+  {{ edge_haproxy_management_network_name }}:
+    external: true
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+  {{ edge_haproxy_cascade_network_name }}:
+    external: true
+  {{ edge_haproxy_cascade_management_network_name }}:
+    external: true
+{% endif %}
+{% if edge_haproxy_route_model.softether_l3_vps_enabled | default(false) %}
+  {{ edge_haproxy_p2p_network_name }}:
+    external: true
+{% if (edge_haproxy_route_model.softether_l3_vps.management_sni | default([]) | length) > 0 %}
+  {{ edge_haproxy_p2p_management_network_name }}:
+    external: true
+{% endif %}
+{% endif %}

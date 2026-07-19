@@ -1,0 +1,35 @@
+---
+services:
+  postgres:
+    image: "{{ postgres_runtime_model.image }}"
+    container_name: "{{ postgres_runtime_model.container_name }}"
+    restart: unless-stopped
+    env_file:
+      - "{{ postgres_runtime_env_file }}"
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+{% if postgres_runtime_model.role == 'standby' and postgres_runtime_model.standby_network_mode %}
+    network_mode: "{{ postgres_runtime_model.standby_network_mode }}"
+{% else %}
+    networks:
+      postgres_data:
+        ipv4_address: "{{ postgres_runtime_model.container_ipv4 }}"
+{% endif %}
+    volumes:
+      - "{{ postgres_runtime_model.volume_name }}:/var/lib/postgresql/data"
+      - "{{ postgres_runtime_config_dir }}:/etc/postgresql:ro"
+
+volumes:
+  {{ postgres_runtime_model.volume_name }}:
+    external: true
+
+{% if not (postgres_runtime_model.role == 'standby' and postgres_runtime_model.standby_network_mode) %}
+networks:
+  postgres_data:
+    external: true
+    name: "{{ postgres_runtime_model.docker_network_name }}"
+{% endif %}

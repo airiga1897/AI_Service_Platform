@@ -1,0 +1,15 @@
+local   all             all                                     trust
+host    all             all             127.0.0.1/32            scram-sha-256
+host    all             all             ::1/128                 scram-sha-256
+
+{% for cidr in postgres_runtime_model.allowed_app_cidrs %}
+host    all             {{ postgres_runtime_model.app_user }}   {{ cidr }}   scram-sha-256
+{% endfor %}
+{% for product in postgres_runtime_model.managed_databases %}
+{% for cidr in product.allowed_cidrs %}
+host    {{ product.database }}   {{ product.owner_role }}   {{ cidr }}   scram-sha-256
+{% endfor %}
+{% endfor %}
+{% for cidr in postgres_runtime_model.replication_hba_cidrs %}
+host    replication     {{ postgres_runtime_model.replication_user }}   {{ cidr }}   scram-sha-256
+{% endfor %}

@@ -1,0 +1,206 @@
+---
+# ============================================================
+# VPS2 — Горячий резерв (hot standby)
+# PostgreSQL streaming replication + контейнеры в режиме ожидания
+# ============================================================
+
+- name: Preflight — проверить, что обязательные переменные заданы
+  assert:
+    that:
+      - app_name is defined
+      - app_name | length > 0
+      - app_name != 'REPLACE_ME'
+      - app_image is defined
+      - app_image != 'ghcr.io/REPLACE_ME/REPLACE_ME'
+      - app_wsgi_module is defined
+      - app_wsgi_module != 'REPLACE_ME.wsgi:application'
+    fail_msg: >-
+      Не заданы обязательные переменные `app_name` / `app_image` /
+      `app_wsgi_module` (или они равны placeholder'ам). Задайте их в
+      host_vars/<host>.yml или через --extra-vars (см.
+      infra/ansible/host_vars/aromaflow-work.yml.example).
+    quiet: true
+
+- name: Установить пакеты
+  apt:
+    name:
+      - rsync
+      - postgresql-client
+    state: present
+    update_cache: true
+
+# --- Директории ---
+- name: Создать директорию приложения
+  file:
+    path: "{{ app_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Создать директорию бэкапов
+  file:
+    path: "{{ backup_dir }}/{{ item }}"
+    state: directory
+    mode: "0750"
+  loop:
+    - db
+    - media
+    - volumes
+    - configs
+
+# --- Скопировать стек приложения (как на VPS1, но standby) ---
+- name: Скопировать docker-compose.prod.yml
+  copy:
+    src: "{{ playbook_dir }}/../docker-compose.prod.yml"
+    dest: "{{ app_dir }}/docker-compose.prod.yml"
+    mode: "0644"
+
+- name: Скопировать HAProxy конфиги
+  copy:
+    src: "{{ playbook_dir }}/../haproxy/"
+    dest: "{{ app_dir }}/haproxy/"
+    mode: "0644"
+
+- name: Скопировать Nginx конфиги
+  copy:
+    src: "{{ playbook_dir }}/../nginx/"
+    dest: "{{ app_dir }}/nginx/"
+    mode: "0644"
+
+- name: Скопировать .env (те же настройки что на VPS1)
+  template:
+    src: env.j2
+    dest: "{{ app_dir }}/.env"
+    mode: "0600"
+
+# --- PostgreSQL Primary: создать пользователя репликации (выполняется на VPS1) ---
+- name: Создать пользователя репликации на Primary (VPS1)
+  community.docker.docker_container_exec:
+    container: "{{ db_container_name }}"
+    command: >
+      psql -U {{ vault_db_user }} -c
+      "DO $$BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ pg_replication_user }}') THEN
+          CREATE ROLE {{ pg_replication_user }} WITH REPLICATION LOGIN
+          PASSWORD '{{ vault_pg_replication_password }}';
+        END IF;
+      END$$;"
+  delegate_to: "{{ groups['prod'][0] }}"
+  run_once: true
+
+# --- PostgreSQL Primary: конфиг репликации ---
+- name: Скопировать postgresql.conf для primary (VPS1)
+  template:
+    src: postgresql-primary.conf.j2
+    dest: "{{ app_dir }}/postgres/postgresql.conf"
+    mode: "0644"
+  delegate_to: "{{ groups['prod'][0] }}"
+
+- name: Скопировать pg_hba.conf для primary (VPS1)
+  template:
+    src: pg_hba.conf.j2
+    dest: "{{ app_dir }}/postgres/pg_hba.conf"
+    mode: "0644"
+  delegate_to: "{{ groups['prod'][0] }}"
+
+- name: Перезапустить PostgreSQL на VPS1 для применения конфига репликации
+  community.docker.docker_container:
+    name: "{{ db_container_name }}"
+    state: started
+    restart: true
+  delegate_to: "{{ groups['prod'][0] }}"
+
+# --- PostgreSQL Standby: инициализация через pg_basebackup ---
+- name: Создать Docker volume для standby PostgreSQL
+  community.docker.docker_volume:
+    name: "{{ db_standby_volume }}"
+    state: present
+
+- name: Инициализировать standby через pg_basebackup
+  community.docker.docker_container:
+    name: pg_basebackup_init
+    image: postgres:15-alpine
+    state: started
+    detach: false
+    cleanup: true
+    volumes:
+      - "{{ db_standby_volume }}:/var/lib/postgresql/data"
+    env:
+      PGPASSWORD: "{{ vault_pg_replication_password }}"
+    command: >
+      pg_basebackup
+      -h {{ pg_primary_host }}
+      -p {{ pg_primary_port }}
+      -U {{ pg_replication_user }}
+      -D /var/lib/postgresql/data
+      -R -Xs -P --slot={{ pg_replication_slot }}
+  register: basebackup_result
+  failed_when: basebackup_result.rc is defined and basebackup_result.rc != 0
+
+# --- Запустить standby-контейнеры (БД реплицируется, остальные — ожидание) ---
+- name: Скопировать docker-compose для standby (PostgreSQL в hot standby режиме)
+  template:
+    src: docker-compose.standby.yml.j2
+    dest: "{{ app_dir }}/docker-compose.standby.yml"
+    mode: "0644"
+
+- name: Запустить PostgreSQL standby
+  community.docker.docker_compose_v2:
+    project_src: "{{ app_dir }}"
+    files:
+      - docker-compose.standby.yml
+    state: present
+
+# --- Uptime Kuma для мониторинга VPS1 ---
+- name: Запустить Uptime Kuma
+  community.docker.docker_container:
+    name: uptime-kuma
+    image: louislam/uptime-kuma:latest
+    state: started
+    restart_policy: always
+    ports:
+      - "127.0.0.1:{{ uptime_kuma_port }}:3001"
+    volumes:
+      - "{{ uptime_kuma_data }}:/app/data"
+
+# --- Rsync медиафайлов каждые 10 минут ---
+- name: Настроить частый rsync медиафайлов VPS1 → VPS2
+  cron:
+    name: "Rsync медиафайлов с VPS1"
+    cron_file: media-rsync
+    user: root
+    job: >
+      rsync -avz --delete
+      -e "ssh -i /root/.ssh/id_rsa -o StrictHostKeyChecking=no"
+      root@{{ pg_primary_host }}:{{ media_src }}
+      {{ media_dst }}
+      >> /var/log/media-rsync.log 2>&1
+    minute: "*/{{ media_rsync_interval_minutes }}"
+
+# --- Ротация старых бэкапов ---
+- name: Настроить ротацию бэкапов
+  cron:
+    name: "Ротация бэкапов — удалить старше {{ backup_retention_days }} дней"
+    cron_file: backup-rotation
+    user: root
+    job: "find {{ backup_dir }} -type f -mtime +{{ backup_retention_days }} -delete >> /var/log/backup-rotation.log 2>&1"
+    hour: "4"
+    minute: "0"
+
+# --- Скрипты failover / failback ---
+- name: Создать директорию скриптов
+  file:
+    path: /opt/scripts
+    state: directory
+    mode: "0755"
+
+- name: Скопировать скрипт failover
+  template:
+    src: failover.sh.j2
+    dest: /opt/scripts/failover.sh
+    mode: "0755"
+
+- name: Скопировать скрипт failback
+  template:
+    src: failback.sh.j2
+    dest: /opt/scripts/failback.sh
+    mode: "0755"

@@ -1,0 +1,33 @@
+# Copy to vault.yml and encrypt it with ansible-vault before use.
+# This file documents required secret names only. Do not commit real values.
+
+vault_allowed_hosts: "example.invalid"
+vault_csrf_trusted_origins: "https://example.invalid"
+
+vault_db_user: "replace-me"
+vault_db_password: "replace-me"
+vault_db_name: "replace-me"
+vault_pg_replication_password: "replace-me"
+
+vault_grafana_password: "replace-me"
+
+vault_s3_access_key: ""
+vault_s3_secret_key: ""
+
+vault_telegram_token: ""
+vault_telegram_chat_id: ""
+
+# Store real SSH material outside the repository or in encrypted vault storage.
+vault_ssh_private_key_ref: "external-secret-ref"
+
+vault_semaphore_admin_user: "admin"
+vault_semaphore_admin_password: "replace-me"
+vault_semaphore_admin_email: "admin@example.invalid"
+vault_semaphore_secret_key: "replace-me"
+vault_semaphore_cookie_hash: "replace-me"
+vault_semaphore_cookie_encryption: "replace-me"
+
+# SoftEther is a platform edge/VPN component. Real VPN users, passwords,
+# server config, and private keys must never be committed.
+vault_softether_management_password_ref: "external-secret-ref"
+vault_softether_server_config_ref: "external-secret-ref"

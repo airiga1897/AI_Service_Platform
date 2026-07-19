@@ -1,0 +1,16 @@
+listen_addresses = '{{ postgres_runtime_model.listen_addresses }}'
+port = 5432
+
+wal_level = replica
+max_wal_senders = {{ postgres_runtime_model.max_wal_senders }}
+max_replication_slots = {{ postgres_runtime_model.max_replication_slots }}
+wal_keep_size = '{{ postgres_runtime_model.wal_keep_size }}'
+wal_compression = on
+synchronous_commit = on
+{% if postgres_runtime_model.role == 'standby' %}
+wal_receiver_timeout = '{{ postgres_runtime_model.standby_connection.wal_receiver_timeout }}'
+{% endif %}
+
+log_replication_commands = on
+log_connections = on
+log_disconnections = on

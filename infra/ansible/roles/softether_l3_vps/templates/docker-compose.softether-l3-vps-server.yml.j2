@@ -1,0 +1,29 @@
+---
+services:
+  softether-l3-vps-server:
+    image: {{ softether_l3_vps_server_image }}
+    container_name: {{ softether_l3_vps_server_container_name }}
+    expose:
+      - "443/tcp"
+      - "5555/tcp"
+    volumes:
+      - ./softether_data:/mnt
+      - ./softether_logs:/usr/local/bin/server_log
+      - ./adminip.txt:/usr/local/bin/adminip.txt:ro
+      - /etc/localtime:/etc/localtime:ro
+    restart: always
+    networks:
+      {{ softether_l3_vps_model.network_name }}:
+        ipv4_address: {{ softether_l3_vps_model.container_ipv4 }}
+{% if softether_l3_vps_model.management_network.name | default('') %}
+      {{ softether_l3_vps_model.management_network.name }}:
+        ipv4_address: {{ softether_l3_vps_model.management_network.container_ipv4 }}
+{% endif %}
+
+networks:
+  {{ softether_l3_vps_model.network_name }}:
+    external: true
+{% if softether_l3_vps_model.management_network.name | default('') %}
+  {{ softether_l3_vps_model.management_network.name }}:
+    external: true
+{% endif %}

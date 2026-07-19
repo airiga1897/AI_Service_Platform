@@ -1,0 +1,41 @@
+---
+# Корневой плейбук Ansible для платформенных VPS-нод.
+#
+# Применяется со control-ноды (активный orchestration alias из state.csv). Группы хостов определены в
+# инвентаре оператора (этот репозиторий каркасный, реальный inventory
+# не коммитим). Параметризация ролей `backup_client`/`backup_server`
+# выполняется через `group_vars`/`host_vars` (имена приложений и
+# контейнеров — без захардкоженных legacy-значений).
+
+- name: Базовая настройка всех платформенных VPS-нод
+  hosts: all
+  become: true
+  roles:
+    - platform_ops
+    - docker
+    - security
+
+- name: Обязанности backup-клиента на продакшн-ноде
+  hosts: prod
+  become: true
+  roles:
+    - backup_client
+
+- name: Обязанности preprod / standby / backup-нод
+  hosts: backup
+  become: true
+  roles:
+    - backup_server
+
+- name: Обязанности control/management-ноды
+  hosts: management
+  become: true
+  roles:
+    - management
+    - semaphore
+
+- name: Monitoring stack
+  hosts: monitoring
+  become: true
+  roles:
+    - monitoring

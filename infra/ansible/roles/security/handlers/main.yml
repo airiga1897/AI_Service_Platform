@@ -1,0 +1,25 @@
+---
+- name: restart sshd
+  ansible.builtin.shell: |
+    set -e
+    if systemctl list-unit-files ssh.service >/dev/null 2>&1; then
+      systemctl restart ssh
+    elif systemctl list-unit-files sshd.service >/dev/null 2>&1; then
+      systemctl restart sshd
+    else
+      systemctl restart ssh || systemctl restart sshd
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: true
+
+- name: restart fail2ban
+  ansible.builtin.systemd:
+    name: fail2ban
+    state: restarted
+
+- name: restart systemd-resolved
+  ansible.builtin.systemd:
+    name: systemd-resolved
+    state: restarted
+  when: ansible_service_mgr == "systemd"

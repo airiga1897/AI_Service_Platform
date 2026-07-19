@@ -1,0 +1,759 @@
+---
+- name: Validate vpn_edge state
+  ansible.builtin.assert:
+    that:
+      - vpn_state in ['present', 'absent']
+      - vpn_purge_data in [true, false, 'true', 'false', 'True', 'False']
+      - (vpn_reseed_config | default(false)) in [true, false, 'true', 'false', 'True', 'False']
+    fail_msg: "vpn_state must be present|absent and vpn_purge_data/vpn_reseed_config must be boolean-like."
+
+- name: Check VPN network plan on control node
+  ansible.builtin.stat:
+    path: "{{ vpn_edge_operator_networks_file }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_edge_networks_file_stat
+  when: vpn_state == 'present'
+
+- name: Check vpn_edge operator config on control node
+  ansible.builtin.stat:
+    path: "{{ vpn_edge_operator_config_file }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_edge_operator_config_stat
+  when: vpn_state == 'present'
+
+- name: Load vpn_edge operator config
+  ansible.builtin.set_fact:
+    vpn_edge_operator_config: "{{ (lookup('file', vpn_edge_operator_config_file) | from_yaml) if (vpn_edge_operator_config_stat.stat.exists | default(false)) else {} }}"
+  when: vpn_state == 'present'
+
+- name: Store vpn_edge policy network mode
+  ansible.builtin.set_fact:
+    vpn_edge_disable_policy_network_aliases: "{{ vpn_edge_operator_config.disable_policy_network_aliases | default(vpn_edge_disable_policy_network_aliases) }}"
+    vpn_edge_policy_network_enabled: "{{ inventory_hostname not in (vpn_edge_operator_config.disable_policy_network_aliases | default(vpn_edge_disable_policy_network_aliases)) }}"
+  when: vpn_state == 'present'
+
+- name: Require VPN network plan for vpn_edge
+  ansible.builtin.assert:
+    that:
+      - vpn_edge_networks_file_stat.stat.exists
+      - vpn_edge_networks_file_stat.stat.isreg
+    fail_msg: "Missing generated VPN network plan on control node: {{ vpn_edge_operator_networks_file }}. Run sync/generate network plan before vpn_edge rollout."
+  when: vpn_state == 'present'
+
+- name: Resolve vpn_edge policy network assignment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    NETWORKS_FILE="{{ vpn_edge_operator_networks_file }}"
+    ALIAS="{{ inventory_hostname }}"
+    python3 - <<'PY'
+    import csv
+    import json
+    import os
+    import sys
+
+    path = os.environ["NETWORKS_FILE"]
+    alias = os.environ["ALIAS"]
+    with open(path, newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    for row in rows:
+        if row.get("alias") == alias:
+            required = ["policy_subnet", "edge_ip", "cascade_ip", "cascade_router_ip"]
+            missing = [key for key in required if not row.get(key)]
+            if missing:
+                print(f"network plan row for {alias} is missing: {', '.join(missing)}", file=sys.stderr)
+                raise SystemExit(1)
+            print(json.dumps(row, sort_keys=True))
+            raise SystemExit(0)
+    print(f"network plan has no row for alias: {alias}", file=sys.stderr)
+    raise SystemExit(1)
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    NETWORKS_FILE: "{{ vpn_edge_operator_networks_file }}"
+    ALIAS: "{{ inventory_hostname }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  register: vpn_edge_network_plan_command
+  changed_when: false
+  when: vpn_state == 'present'
+
+- name: Store vpn_edge policy network assignment
+  ansible.builtin.set_fact:
+    vpn_edge_policy_network_subnet: "{{ (vpn_edge_network_plan_command.stdout | from_json).policy_subnet }}"
+    vpn_edge_policy_container_ipv4: "{{ (vpn_edge_network_plan_command.stdout | from_json).edge_ip }}"
+    vpn_edge_policy_gateway_ipv4: "{{ (vpn_edge_network_plan_command.stdout | from_json).cascade_ip }}"
+  when: vpn_state == 'present'
+
+- name: Check vpn_edge compose file
+  ansible.builtin.stat:
+    path: "{{ vpn_edge_compose_file }}"
+  register: vpn_edge_compose_stat
+  when: vpn_state == 'absent' or ((vpn_reseed_config | default(false)) in [true, 'true', 'True'])
+
+- name: Check edge seed config on control node
+  ansible.builtin.stat:
+    path: "{{ vpn_edge_seed_config }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_edge_seed_stat
+  when: vpn_state == 'present'
+
+- name: Require edge seed config
+  ansible.builtin.assert:
+    that:
+      - vpn_edge_seed_stat.stat.exists
+      - vpn_edge_seed_stat.stat.isreg
+    fail_msg: "Missing SoftEther edge seed config on control node: {{ vpn_edge_seed_config }}"
+  when: vpn_state == 'present'
+
+- name: Check node-specific edge overrides on control node
+  ansible.builtin.stat:
+    path: "{{ vpn_edge_local_override_dir }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_edge_override_stat
+  when: vpn_state == 'present'
+
+- name: Ensure vpn_edge runtime directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+  loop:
+    - "{{ vpn_edge_root_dir }}"
+    - "{{ vpn_edge_data_dir }}"
+    - "{{ vpn_edge_logs_dir }}"
+    - "{{ vpn_edge_backup_dir }}"
+    - "{{ vpn_edge_overrides_dir }}"
+    - "{{ vpn_edge_tls_dir }}"
+  when: vpn_state == 'present'
+
+- name: Check existing remote edge config
+  ansible.builtin.stat:
+    path: "{{ vpn_edge_data_dir }}/vpn_server.config"
+  register: vpn_edge_remote_config_stat
+  when: vpn_state == 'present'
+
+- name: Require installed vpn_edge before reseeding config
+  ansible.builtin.assert:
+    that:
+      - vpn_edge_compose_stat.stat.exists
+      - vpn_edge_remote_config_stat.stat.exists
+    fail_msg: "vpn_edge reseed requires an installed service with compose file and existing vpn_server.config on {{ inventory_hostname }}"
+  when:
+    - vpn_state == 'present'
+    - (vpn_reseed_config | default(false)) in [true, 'true', 'True']
+
+- name: Backup existing remote edge config before explicit reseed
+  ansible.builtin.copy:
+    src: "{{ vpn_edge_data_dir }}/vpn_server.config"
+    dest: "{{ vpn_edge_backup_dir }}/vpn_server.config.pre-reseed-{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}"
+    remote_src: true
+    mode: "0600"
+  register: vpn_edge_reseed_backup
+  when:
+    - vpn_state == 'present'
+    - vpn_edge_remote_config_stat.stat.exists
+    - (vpn_reseed_config | default(false)) in [true, 'true', 'True']
+    - not ansible_check_mode
+
+- name: Install opaque SoftEther edge seed config
+  ansible.builtin.copy:
+    src: "{{ vpn_edge_seed_config }}"
+    dest: "{{ vpn_edge_data_dir }}/vpn_server.config"
+    mode: "0600"
+  register: vpn_edge_seed_config_copy
+  no_log: true
+  when:
+    - vpn_state == 'present'
+    - >
+      (not vpn_edge_remote_config_stat.stat.exists)
+      or ((vpn_reseed_config | default(false)) in [true, 'true', 'True'])
+
+- name: Report SoftEther config reseed backup path
+  ansible.builtin.debug:
+    msg: "SoftEther config backup created before reseed: {{ vpn_edge_reseed_backup.dest }}"
+  when:
+    - vpn_edge_reseed_backup is defined
+    - vpn_edge_reseed_backup.dest is defined
+
+- name: Stage node-specific edge overrides when present
+  ansible.builtin.copy:
+    src: "{{ vpn_edge_local_override_dir }}/"
+    dest: "{{ vpn_edge_overrides_dir }}/"
+    mode: preserve
+  register: vpn_edge_overrides_copy
+  no_log: true
+  when:
+    - vpn_state == 'present'
+    - vpn_edge_override_stat.stat.exists
+    - vpn_edge_override_stat.stat.isdir
+
+- name: Install vpn_edge SoftEther admin IP allowlist
+  ansible.builtin.copy:
+    dest: "{{ vpn_edge_root_dir }}/adminip.txt"
+    mode: "0640"
+    content: |
+      {% for ip in vpn_edge_admin_source_ips | unique %}
+      {{ ip }}
+      {% endfor %}
+  register: vpn_edge_adminip_copy
+  when: vpn_state == 'present'
+
+- name: Render vpn_edge Docker Compose
+  ansible.builtin.template:
+    src: docker-compose.vpn-edge.yml.j2
+    dest: "{{ vpn_edge_compose_file }}"
+    mode: "0640"
+  register: vpn_edge_compose_template
+  when: vpn_state == 'present'
+
+- name: Ensure Docker runtime baseline for vpn_edge
+  ansible.builtin.include_role:
+    name: docker_runtime_baseline
+  when:
+    - not ansible_check_mode
+    - vpn_state == 'present' or (vpn_edge_compose_stat.stat.exists | default(false))
+
+- name: Ensure Docker service is running for vpn_edge
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify Docker Compose plugin is available for vpn_edge
+  ansible.builtin.command:
+    cmd: docker compose version
+  changed_when: false
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+
+- name: Inspect existing VPN policy Docker network
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker network inspect "{{ vpn_edge_policy_network_name }}" --format '{{ "{{" }}json (index .IPAM.Config 0){{ "}}" }}' 2>/dev/null || true
+  args:
+    executable: /bin/bash
+  register: vpn_edge_policy_network_inspect
+  changed_when: false
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+
+- name: Recreate stale VPN policy Docker network for vpn_edge
+  ansible.builtin.shell: |
+    set -euo pipefail
+    expected="{{ vpn_edge_policy_network_subnet }}"
+    current_json='{{ vpn_edge_policy_network_inspect.stdout | default("") }}'
+    current="$(CURRENT_JSON="$current_json" python3 - <<'PY'
+    import json
+    import os
+    raw = os.environ.get("CURRENT_JSON", "").strip()
+    if not raw:
+        print("")
+    else:
+        print(json.loads(raw).get("Subnet", ""))
+    PY
+    )"
+    if [ -z "$current" ] || [ "$current" = "$expected" ]; then
+      exit 0
+    fi
+    docker ps -a --filter "network={{ vpn_edge_policy_network_name }}" --format '{{ "{{" }}.Names{{ "}}" }}' | while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      docker stop "$name" >/dev/null 2>&1 || true
+      docker network disconnect -f "{{ vpn_edge_policy_network_name }}" "$name" >/dev/null 2>&1 || true
+    done
+    docker network rm "{{ vpn_edge_policy_network_name }}"
+    echo "recreated"
+  args:
+    executable: /bin/bash
+  register: vpn_edge_policy_network_recreate
+  changed_when: "'recreated' in vpn_edge_policy_network_recreate.stdout"
+  when:
+    - vpn_state == 'present'
+    - vpn_edge_policy_network_enabled | bool
+    - not ansible_check_mode
+
+- name: Ensure shared edge Docker network exists
+  ansible.builtin.command:
+    cmd: docker network create --subnet "{{ vpn_edge_network_subnet }}" "{{ vpn_edge_network_name }}"
+  register: vpn_edge_network_create
+  changed_when: vpn_edge_network_create.rc == 0
+  failed_when:
+    - vpn_edge_network_create.rc != 0
+    - "'already exists' not in (vpn_edge_network_create.stderr | default(''))"
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+
+- name: Ensure edge management Docker network exists
+  ansible.builtin.command:
+    cmd: docker network create --subnet "{{ vpn_edge_management_network_subnet }}" "{{ vpn_edge_management_network_name }}"
+  register: vpn_edge_management_network_create
+  changed_when: vpn_edge_management_network_create.rc == 0
+  failed_when:
+    - vpn_edge_management_network_create.rc != 0
+    - "'already exists' not in (vpn_edge_management_network_create.stderr | default(''))"
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+
+- name: Ensure VPN policy Docker network exists
+  ansible.builtin.command:
+    cmd: docker network create --subnet "{{ vpn_edge_policy_network_subnet }}" "{{ vpn_edge_policy_network_name }}"
+  register: vpn_edge_policy_network_create
+  changed_when: vpn_edge_policy_network_create.rc == 0
+  failed_when:
+    - vpn_edge_policy_network_create.rc != 0
+    - "'already exists' not in (vpn_edge_policy_network_create.stderr | default(''))"
+  when:
+    - vpn_state == 'present'
+    - vpn_edge_policy_network_enabled | bool
+    - not ansible_check_mode
+
+- name: Check retired SoftEther edge listener migration marker
+  ansible.builtin.stat:
+    path: "{{ vpn_edge_retired_tcp_listeners_marker_file }}"
+  register: vpn_edge_retired_listener_marker_stat
+  when:
+    - vpn_state == 'present'
+    - vpn_edge_retired_tcp_listeners | length > 0
+
+- name: Check MainSrv01 group CheckIP migration marker
+  ansible.builtin.stat:
+    path: "{{ vpn_edge_main_srv01_checkip_marker_file }}"
+  register: vpn_edge_main_srv01_checkip_marker_stat
+  when: vpn_state == 'present'
+
+- name: Disable MainSrv01 AllowAccess group CheckIP in live config
+  ansible.builtin.shell: |
+    set -euo pipefail
+    config="{{ vpn_edge_data_dir }}/vpn_server.config"
+    if [ ! -f "$config" ]; then
+      exit 0
+    fi
+    if ! grep -q "bool[[:space:]]\+CheckIP[[:space:]]\+true" "$config"; then
+      exit 0
+    fi
+    if ! CONFIG_PATH="$config" python3 - <<'PY'
+    import os
+    import re
+    from pathlib import Path
+
+    path = Path(os.environ["CONFIG_PATH"])
+    lines = path.read_text(encoding="utf-8").splitlines()
+    stack = []
+    pending = None
+    for line in lines:
+        match = re.match(r"^\s*declare\s+([A-Za-z0-9_.-]+)\s*$", line)
+        if match:
+            pending = match.group(1)
+            continue
+        stripped = line.strip()
+        if stripped == "{":
+            stack.append(pending or "{")
+            pending = None
+            continue
+        if stripped == "}":
+            if stack:
+                stack.pop()
+            pending = None
+            continue
+        if (
+            len(stack) >= 6
+            and stack[-5:] == ["MainSrv01", "SecurityAccountDatabase", "GroupList", "AllowAccess", "Policy"]
+            and re.match(r"^\s*bool\s+CheckIP\s+true\s*$", line)
+        ):
+            raise SystemExit(0)
+    raise SystemExit(1)
+    PY
+    then
+      exit 0
+    fi
+    docker compose -f "{{ vpn_edge_compose_file }}" stop "{{ vpn_edge_container_name }}" >/dev/null 2>&1 || true
+    backup="{{ vpn_edge_backup_dir }}/vpn_server.config.pre-main-srv01-checkip-$(date -u +%Y%m%dT%H%M%SZ)"
+    cp "$config" "$backup"
+    chmod 0600 "$backup"
+    CONFIG_PATH="$config" python3 - <<'PY'
+    import os
+    import re
+    from pathlib import Path
+
+    path = Path(os.environ["CONFIG_PATH"])
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    stack = []
+    pending = None
+    changed = False
+    out = []
+
+    for line in lines:
+        match = re.match(r"^\s*declare\s+([A-Za-z0-9_.-]+)\s*$", line)
+        if match:
+            pending = match.group(1)
+            out.append(line)
+            continue
+        stripped = line.strip()
+        if stripped == "{":
+            stack.append(pending or "{")
+            pending = None
+            out.append(line)
+            continue
+        if stripped == "}":
+            if stack:
+                stack.pop()
+            pending = None
+            out.append(line)
+            continue
+        if (
+            len(stack) >= 6
+            and stack[-5:] == ["MainSrv01", "SecurityAccountDatabase", "GroupList", "AllowAccess", "Policy"]
+            and re.match(r"^\s*bool\s+CheckIP\s+true\s*$", line)
+        ):
+            out.append(re.sub(r"\btrue\b", "false", line, count=1))
+            changed = True
+            continue
+        out.append(line)
+
+    if changed:
+        path.write_text("".join(out), encoding="utf-8")
+        print("disabled")
+    PY
+  args:
+    executable: /bin/bash
+  register: vpn_edge_main_srv01_checkip_migration
+  changed_when: "'disabled' in vpn_edge_main_srv01_checkip_migration.stdout"
+  when:
+    - vpn_state == 'present'
+    - not vpn_edge_main_srv01_checkip_marker_stat.stat.exists
+    - not ansible_check_mode
+
+- name: Remove retired SoftEther edge TCP listeners from live config
+  ansible.builtin.shell: |
+    set -euo pipefail
+    config="{{ vpn_edge_data_dir }}/vpn_server.config"
+    ports="{{ vpn_edge_retired_tcp_listeners | join(' ') }}"
+    if [ ! -f "$config" ]; then
+      exit 0
+    fi
+    if ! grep -Eq "uint[[:space:]]+Port[[:space:]]+($(echo "$ports" | tr ' ' '|'))" "$config"; then
+      exit 0
+    fi
+    docker compose -f "{{ vpn_edge_compose_file }}" stop "{{ vpn_edge_container_name }}" >/dev/null 2>&1 || true
+    backup="{{ vpn_edge_backup_dir }}/vpn_server.config.pre-retired-listener-$(date -u +%Y%m%dT%H%M%SZ)"
+    cp "$config" "$backup"
+    chmod 0600 "$backup"
+    CONFIG_PATH="$config" RETIRED_PORTS="$ports" python3 - <<'PY'
+    import os
+    import re
+    from pathlib import Path
+
+    path = Path(os.environ["CONFIG_PATH"])
+    retired = {int(item) for item in os.environ["RETIRED_PORTS"].split() if item.strip()}
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    out = []
+    i = 0
+    removed = False
+    listener_re = re.compile(r"^\s*declare\s+Listener\d+\s*$")
+    port_re = re.compile(r"\buint\s+Port\s+(\d+)\b")
+
+    while i < len(lines):
+        line = lines[i]
+        if not listener_re.match(line):
+            out.append(line)
+            i += 1
+            continue
+
+        block = [line]
+        i += 1
+        depth = 0
+        started = False
+        while i < len(lines):
+            current = lines[i]
+            block.append(current)
+            depth += current.count("{") - current.count("}")
+            started = started or "{" in current
+            i += 1
+            if started and depth <= 0:
+                break
+
+        block_ports = {
+            int(match.group(1))
+            for block_line in block
+            for match in [port_re.search(block_line)]
+            if match
+        }
+        if block_ports & retired:
+            removed = True
+            continue
+        out.extend(block)
+
+    if removed:
+        path.write_text("".join(out), encoding="utf-8")
+        print("removed")
+    PY
+  args:
+    executable: /bin/bash
+  register: vpn_edge_retired_listener_cleanup
+  changed_when: "'removed' in vpn_edge_retired_listener_cleanup.stdout"
+  when:
+    - vpn_state == 'present'
+    - vpn_edge_retired_tcp_listeners | length > 0
+    - not vpn_edge_retired_listener_marker_stat.stat.exists
+    - not ansible_check_mode
+
+- name: Start vpn_edge container
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ vpn_edge_compose_file }}" up -d
+    chdir: "{{ vpn_edge_root_dir }}"
+  register: vpn_edge_compose_up
+  changed_when: >
+    (vpn_edge_compose_up.stdout ~ vpn_edge_compose_up.stderr)
+    is search('(?i)(creating|created|recreating|recreated|starting|started|pulling|pulled|building|built)')
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+
+- name: Restart vpn_edge when bind-mounted runtime files changed
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ vpn_edge_compose_file }}" restart "{{ vpn_edge_container_name }}"
+    chdir: "{{ vpn_edge_root_dir }}"
+  changed_when: true
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+    - not vpn_edge_compose_up.changed
+    - >
+      ((vpn_reseed_config | default(false)) in [true, 'true', 'True'])
+      or (vpn_edge_overrides_copy.changed | default(false))
+      or (vpn_edge_adminip_copy.changed | default(false))
+
+- name: Verify running vpn_edge container network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ vpn_edge_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ vpn_edge_network_name }}"
+    EXPECTED_IP: "{{ vpn_edge_container_ipv4 }}"
+  changed_when: false
+  register: vpn_edge_container_ready
+  until: vpn_edge_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify running vpn_edge policy network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ vpn_edge_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ vpn_edge_policy_network_name }}"
+    EXPECTED_IP: "{{ vpn_edge_policy_container_ipv4 }}"
+  changed_when: false
+  register: vpn_edge_policy_container_ready
+  until: vpn_edge_policy_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - vpn_state == 'present'
+    - vpn_edge_policy_network_enabled | bool
+    - not ansible_check_mode
+
+- name: Remove empty disabled VPN policy Docker network
+  ansible.builtin.shell: |
+    set -euo pipefail
+    name="{{ vpn_edge_policy_network_name }}"
+    if ! docker network inspect "$name" >/dev/null 2>&1; then
+      exit 0
+    fi
+    count="$(docker network inspect -f {% raw %}'{{ len .Containers }}'{% endraw %} "$name")"
+    if [ "$count" = "0" ]; then
+      docker network rm "$name"
+      echo "removed empty disabled vpn_edge policy network $name"
+    else
+      echo "disabled vpn_edge policy network still has $count endpoint(s): $name"
+    fi
+  args:
+    executable: /bin/bash
+  register: vpn_edge_disabled_policy_network_cleanup
+  changed_when: >
+    (vpn_edge_disabled_policy_network_cleanup.stdout | default(''))
+    is search('removed empty disabled vpn_edge policy network')
+  when:
+    - vpn_state == 'present'
+    - not (vpn_edge_policy_network_enabled | bool)
+    - not ansible_check_mode
+
+- name: Verify running vpn_edge management network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ vpn_edge_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ vpn_edge_management_network_name }}"
+    EXPECTED_IP: "{{ vpn_edge_management_container_ipv4 }}"
+  changed_when: false
+  register: vpn_edge_management_container_ready
+  until: vpn_edge_management_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify vpn_edge adminip.txt is mounted
+  ansible.builtin.command:
+    cmd: docker exec "{{ vpn_edge_container_name }}" test -r /usr/local/bin/adminip.txt
+  changed_when: false
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify MainSrv01 AllowAccess group CheckIP is disabled
+  ansible.builtin.shell: |
+    set -euo pipefail
+    config="{{ vpn_edge_data_dir }}/vpn_server.config"
+    [ -f "$config" ] || exit 0
+    CONFIG_PATH="$config" python3 - <<'PY'
+    import os
+    import re
+    from pathlib import Path
+
+    path = Path(os.environ["CONFIG_PATH"])
+    lines = path.read_text(encoding="utf-8").splitlines()
+    stack = []
+    pending = None
+    found = False
+
+    for line in lines:
+        match = re.match(r"^\s*declare\s+([A-Za-z0-9_.-]+)\s*$", line)
+        if match:
+            pending = match.group(1)
+            continue
+        stripped = line.strip()
+        if stripped == "{":
+            stack.append(pending or "{")
+            pending = None
+            continue
+        if stripped == "}":
+            if stack:
+                stack.pop()
+            pending = None
+            continue
+        if (
+            len(stack) >= 6
+            and stack[-5:] == ["MainSrv01", "SecurityAccountDatabase", "GroupList", "AllowAccess", "Policy"]
+            and re.match(r"^\s*bool\s+CheckIP\s+(true|false)\s*$", line)
+        ):
+            found = True
+            if " true" in line:
+                raise SystemExit("MainSrv01 AllowAccess CheckIP is still true")
+
+    if not found:
+        raise SystemExit("MainSrv01 AllowAccess CheckIP policy was not found")
+    PY
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - vpn_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify retired SoftEther edge TCP listeners are absent from config
+  ansible.builtin.shell: |
+    set -euo pipefail
+    config="{{ vpn_edge_data_dir }}/vpn_server.config"
+    ports="{{ vpn_edge_retired_tcp_listeners | join(' ') }}"
+    [ -f "$config" ] || exit 0
+    if grep -Eq "uint[[:space:]]+Port[[:space:]]+($(echo "$ports" | tr ' ' '|'))" "$config"; then
+      echo "Retired SoftEther TCP listener still exists in live config. Remove it intentionally or clear {{ vpn_edge_retired_tcp_listeners_marker_file }} to re-run one-time migration." >&2
+      exit 1
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - vpn_state == 'present'
+    - vpn_edge_retired_tcp_listeners | length > 0
+    - not ansible_check_mode
+
+- name: Mark MainSrv01 group CheckIP migration complete
+  ansible.builtin.copy:
+    dest: "{{ vpn_edge_main_srv01_checkip_marker_file }}"
+    content: |
+      MainSrv01 AllowAccess group CheckIP has been disabled.
+      Management access is controlled by HAProxy vpn_mgmt_ips.lst.
+    mode: "0644"
+  when:
+    - vpn_state == 'present'
+    - not vpn_edge_main_srv01_checkip_marker_stat.stat.exists
+    - not ansible_check_mode
+
+- name: Mark retired SoftEther edge listener migration complete
+  ansible.builtin.copy:
+    dest: "{{ vpn_edge_retired_tcp_listeners_marker_file }}"
+    content: |
+      Retired SoftEther TCP listeners have been migrated once.
+      Ports: {{ vpn_edge_retired_tcp_listeners | join(', ') }}
+    mode: "0644"
+  when:
+    - vpn_state == 'present'
+    - vpn_edge_retired_tcp_listeners | length > 0
+    - not vpn_edge_retired_listener_marker_stat.stat.exists
+    - not ansible_check_mode
+
+- name: Ensure Docker service is running before stopping vpn_edge
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+  when:
+    - vpn_state == 'absent'
+    - vpn_edge_compose_stat.stat.exists | default(false)
+    - not ansible_check_mode
+
+- name: Verify Docker Compose plugin is available before stopping vpn_edge
+  ansible.builtin.command:
+    cmd: docker compose version
+  changed_when: false
+  when:
+    - vpn_state == 'absent'
+    - vpn_edge_compose_stat.stat.exists | default(false)
+    - not ansible_check_mode
+
+- name: Stop vpn_edge container
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ vpn_edge_compose_file }}" down
+    chdir: "{{ vpn_edge_root_dir }}"
+  changed_when: true
+  when:
+    - vpn_state == 'absent'
+    - vpn_edge_compose_stat.stat.exists | default(false)
+    - not ansible_check_mode
+
+- name: Purge vpn_edge runtime data when explicitly requested
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ vpn_edge_data_dir }}"
+    - "{{ vpn_edge_logs_dir }}"
+    - "{{ vpn_edge_overrides_dir }}"
+  when:
+    - vpn_state == 'absent'
+    - vpn_purge_data in [true, 'true', 'True']
+    - not ansible_check_mode

@@ -1,0 +1,46 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alert-rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:{{ alertmanager_port }}"]
+
+scrape_configs:
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:{{ prometheus_port }}"]
+
+  - job_name: "node_vps1"
+    static_configs:
+      - targets: ["{{ groups['prod'][0] }}:{{ hostvars[groups['prod'][0]]['node_exporter_port'] }}"]
+        labels:
+          instance: "VPS1-prod"
+
+  - job_name: "node_vps6"
+    static_configs:
+      - targets: ["localhost:{{ node_exporter_port }}"]
+        labels:
+          instance: "VPS6-management"
+
+  - job_name: "postgres_vps1"
+    static_configs:
+      - targets: ["{{ groups['prod'][0] }}:{{ hostvars[groups['prod'][0]]['postgres_exporter_port'] }}"]
+        labels:
+          instance: "VPS1-postgres"
+
+  - job_name: "nginx_vps1"
+    static_configs:
+      - targets: ["{{ groups['prod'][0] }}:{{ hostvars[groups['prod'][0]]['nginx_exporter_port'] }}"]
+        labels:
+          instance: "VPS1-nginx"
+
+  - job_name: "haproxy_vps1"
+    static_configs:
+      - targets: ["{{ groups['prod'][0] }}:{{ hostvars[groups['prod'][0]]['haproxy_exporter_port'] }}"]
+        labels:
+          instance: "VPS1-haproxy"

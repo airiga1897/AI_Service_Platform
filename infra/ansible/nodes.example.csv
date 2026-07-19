@@ -1,0 +1,4 @@
+current_alias,endpoint,expected_ip,connection,ssh_port,root_password
+vps1,vps01.example.com,203.0.113.11,ssh,22,
+vps2,vps02.example.com,203.0.113.12,ssh,22,
+vps6,vps06.example.com,203.0.113.16,ssh,22,

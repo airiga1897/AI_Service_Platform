@@ -1,0 +1,71 @@
+---
+- name: Preflight — проверить, что обязательные переменные заданы
+  assert:
+    that:
+      - app_name is defined
+      - app_name | length > 0
+      - app_name != 'REPLACE_ME'
+    fail_msg: >-
+      Переменная `app_name` не задана или равна placeholder 'REPLACE_ME'.
+      Задайте её в host_vars/<host>.yml или через --extra-vars
+      (см. infra/ansible/host_vars/aromaflow-work.yml.example).
+    quiet: true
+
+- name: Установить зависимости бэкап-клиента
+  apt:
+    name:
+      - rsync
+      - python3
+      - python3-pip
+    state: present
+    update_cache: true
+
+- name: Установить boto3 и зависимости для S3
+  pip:
+    name:
+      - boto3
+      - requests
+      - python-dotenv
+    state: present
+
+- name: Создать директорию скриптов
+  file:
+    path: /opt/scripts
+    state: directory
+    mode: "0755"
+
+- name: Скопировать backup.py
+  copy:
+    src: "{{ playbook_dir }}/../scripts/backup.py"
+    dest: /opt/scripts/backup.py
+    mode: "0750"
+
+- name: Скопировать конфиг backup (.env)
+  template:
+    src: backup.env.j2
+    dest: /opt/scripts/backup.env
+    mode: "0600"
+
+- name: Настроить cron для ежедневных бэкапов
+  cron:
+    name: "Ежедневный бэкап {{ app_name }}"
+    cron_file: "{{ backup_cron_prefix }}-backup"
+    user: root
+    job: "python3 /opt/scripts/backup.py >> /var/log/{{ backup_cron_prefix }}-backup.log 2>&1"
+    hour: "2"
+    minute: "0"
+
+- name: Скопировать скрипт pg_backup
+  template:
+    src: pg_backup.sh.j2
+    dest: /opt/scripts/pg_backup.sh
+    mode: "0750"
+
+- name: Настроить cron для pg_dump
+  cron:
+    name: "Ежедневный pg_dump PostgreSQL"
+    cron_file: "{{ backup_cron_prefix }}-pgbackup"
+    user: root
+    job: "bash /opt/scripts/pg_backup.sh >> /var/log/pg-backup.log 2>&1"
+    hour: "3"
+    minute: "0"

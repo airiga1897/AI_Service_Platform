@@ -1,0 +1,927 @@
+---
+- name: Validate edge_haproxy state
+  ansible.builtin.assert:
+    that:
+      - edge_haproxy_state in ['present', 'absent']
+      - edge_haproxy_purge_data in [true, false, 'true', 'false', 'True', 'False']
+    fail_msg: "edge_haproxy_state must be present|absent and edge_haproxy_purge_data must be boolean-like."
+
+- name: Check edge_haproxy compose file
+  ansible.builtin.stat:
+    path: "{{ edge_haproxy_compose_file }}"
+  register: edge_haproxy_compose_stat
+  when: edge_haproxy_state == 'absent'
+
+- name: Check operator HAProxy management allowlist on control node
+  ansible.builtin.stat:
+    path: "{{ edge_haproxy_operator_vpn_mgmt_ips }}"
+  delegate_to: localhost
+  become: false
+  register: edge_haproxy_mgmt_allowlist_stat
+  when: edge_haproxy_state == 'present'
+
+- name: Check operator HAProxy blacklist on control node
+  ansible.builtin.stat:
+    path: "{{ edge_haproxy_operator_blocked_ips }}"
+  delegate_to: localhost
+  become: false
+  register: edge_haproxy_blacklist_stat
+  when: edge_haproxy_state == 'present'
+
+- name: Check operator HAProxy GeoIP networks on control node
+  ansible.builtin.stat:
+    path: "{{ edge_haproxy_operator_ru_networks }}"
+  delegate_to: localhost
+  become: false
+  register: edge_haproxy_ru_networks_stat
+  when: edge_haproxy_state == 'present'
+
+- name: Check operator state.csv on control node
+  ansible.builtin.stat:
+    path: "{{ edge_haproxy_operator_state_file }}"
+  delegate_to: localhost
+  become: false
+  register: edge_haproxy_state_file_stat
+  when: edge_haproxy_state == 'present'
+
+- name: Check operator HAProxy routes.yml on control node
+  ansible.builtin.stat:
+    path: "{{ edge_haproxy_operator_routes_file }}"
+  delegate_to: localhost
+  become: false
+  register: edge_haproxy_routes_file_stat
+  when: edge_haproxy_state == 'present'
+
+- name: Check PyYAML on control node for route rendering
+  ansible.builtin.command:
+    cmd: python3 -c "import yaml"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  failed_when: false
+  register: edge_haproxy_pyyaml_check
+  when: edge_haproxy_state == 'present'
+
+- name: Install PyYAML on control node for route rendering
+  ansible.builtin.apt:
+    name: python3-yaml
+    state: present
+    update_cache: true
+  delegate_to: localhost
+  become: true
+  check_mode: false
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_pyyaml_check.rc != 0
+
+- name: Build edge_haproxy route model
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - <<'PY'
+    import csv
+    import json
+    import os
+    import sys
+
+    try:
+        import yaml
+    except Exception as exc:
+        print(f"PyYAML is required to read routes.yml: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    alias = os.environ["EDGE_ALIAS"]
+    state_file = os.environ["STATE_FILE"]
+    routes_file = os.environ["ROUTES_FILE"]
+    default_softether_host = os.environ["DEFAULT_SOFTETHER_HOST"]
+    default_softether_management_host = os.environ["DEFAULT_SOFTETHER_MANAGEMENT_HOST"]
+    default_cascade_host = os.environ["DEFAULT_CASCADE_HOST"]
+    default_cascade_management_host = os.environ["DEFAULT_CASCADE_MANAGEMENT_HOST"]
+    default_p2p_host = os.environ["DEFAULT_P2P_HOST"]
+    default_p2p_management_host = os.environ["DEFAULT_P2P_MANAGEMENT_HOST"]
+    default_sni_domain = os.environ["DEFAULT_SNI_DOMAIN"]
+    default_game_rate = int(os.environ["DEFAULT_GAME_RATE"])
+    default_rcon_rate = int(os.environ["DEFAULT_RCON_RATE"])
+
+    def split_aliases(value):
+        return [item for item in (value or "").split("+") if item]
+
+    def fail(message):
+        print(message, file=sys.stderr)
+        sys.exit(1)
+
+    if not os.path.isfile(state_file):
+        fail(f"state.csv not found for edge_haproxy route rendering: {state_file}")
+
+    with open(state_file, newline="", encoding="utf-8-sig") as handle:
+        rows = list(csv.DictReader(handle))
+
+    def present_on(kind, name, node_alias):
+        for row in rows:
+            if row.get("kind") != kind or row.get("name") != name or row.get("state") != "present":
+                continue
+            aliases = split_aliases(row.get("active_aliases"))
+            if name == "softether_l3_vps":
+                aliases += split_aliases(row.get("candidate_aliases"))
+            if node_alias in aliases:
+                return True
+        return False
+
+    present_routes = [
+        row.get("name")
+        for row in rows
+        if row.get("kind") == "edge_route"
+        and row.get("state") == "present"
+        and alias in split_aliases(row.get("active_aliases"))
+    ]
+
+    if present_routes and not present_on("service", "edge_haproxy", alias):
+        fail(f"edge_route present on {alias}, but service edge_haproxy is not present on the same alias")
+    if "vpn_ingress" in present_routes and not present_on("service", "vpn_edge", alias):
+        fail(f"edge_route vpn_ingress is present on {alias}, but service vpn_edge is not present on the same alias")
+    if "vpn_cascade" in present_routes and not present_on("service", "vpn_cascade", alias):
+        fail(f"edge_route vpn_cascade is present on {alias}, but service vpn_cascade is not present on the same alias")
+    if "softether_l3_vps" in present_routes and not present_on("service", "softether_l3_vps", alias):
+        fail(f"edge_route softether_l3_vps is present on {alias}, but service softether_l3_vps is not present on the same alias")
+
+    route_config = {}
+    if present_routes:
+        if not os.path.isfile(routes_file):
+            fail(f"operator HAProxy routes.yml is required when edge_route is present: {routes_file}")
+        with open(routes_file, encoding="utf-8") as handle:
+            route_config = yaml.safe_load(handle) or {}
+
+    model = {
+        "present_routes": present_routes,
+        "vpn_ingress_enabled": False,
+        "vpn_cascade_enabled": False,
+        "softether_l3_vps_enabled": False,
+        "minecraft_enabled": False,
+    }
+
+    def unique_strings(values):
+        result = []
+        seen = set()
+        for value in values or []:
+            text = str(value).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+        return result
+
+    if "vpn_ingress" in present_routes:
+        cfg = route_config.get("vpn_ingress") or {}
+        per_alias = (cfg.get("per_alias") or {}).get(alias) or {}
+        sni = unique_strings(per_alias.get("sni") or [])
+        if not sni:
+            sni = [f"vpn-{alias}.{default_sni_domain}"]
+        ports = {
+            "sstp": 443,
+            "softether_alt": 992,
+            "management": 5555,
+        }
+        ports.update(cfg.get("ports") or {})
+        backend_host = (cfg.get("backend") or {}).get("host") or default_softether_host
+        backend_management_host = (cfg.get("backend") or {}).get("management_host") or default_softether_management_host
+        model.update({
+            "vpn_ingress_enabled": True,
+            "vpn_ingress": {
+                "sni": sni,
+                "backend_host": backend_host,
+                "backend_management_host": backend_management_host,
+                "ports": ports,
+            },
+        })
+
+    if "vpn_cascade" in present_routes:
+        cfg = route_config.get("vpn_cascade") or {}
+        per_alias = (cfg.get("per_alias") or {}).get(alias) or {}
+        sni = unique_strings(per_alias.get("sni") or [])
+        if not sni:
+            sni = [f"cascade-{alias}.{default_sni_domain}"]
+        ports = {
+            "https": 443,
+            "softether_alt": 992,
+            "management": 5555,
+            "backend_https": 443,
+            "backend_alt": 992,
+            "backend_management": 5555,
+        }
+        ports.update(cfg.get("ports") or {})
+        backend_host = (cfg.get("backend") or {}).get("host") or default_cascade_host
+        backend_management_host = (cfg.get("backend") or {}).get("management_host") or default_cascade_management_host
+        model.update({
+            "vpn_cascade_enabled": True,
+            "vpn_cascade": {
+                "sni": sni,
+                "backend_host": backend_host,
+                "backend_management_host": backend_management_host,
+                "ports": ports,
+            },
+        })
+
+    if "softether_l3_vps" in present_routes:
+        cfg = route_config.get("softether_l3_vps") or {}
+        per_alias = (cfg.get("per_alias") or {}).get(alias) or {}
+        sni = unique_strings(per_alias.get("sni") or [])
+        if not sni:
+            sni = [f"l3-{alias}.{default_sni_domain}"]
+        management_sni = unique_strings(per_alias.get("management_sni") or [])
+        ports = {
+            "https": 443,
+            "management": 5555,
+            "backend_https": 443,
+            "backend_management": 5555,
+        }
+        ports.update(cfg.get("ports") or {})
+        backend_host = (cfg.get("backend") or {}).get("host") or default_p2p_host
+        management_backend_host = (cfg.get("backend") or {}).get("management_host") or default_p2p_management_host
+        postgres_cfg = cfg.get("postgres") or {}
+        postgres = {
+            "enabled": bool(postgres_cfg),
+            "listen_host": str(postgres_cfg.get("listen_host") or ""),
+            "listen_port": int(postgres_cfg.get("listen_port") or 5432),
+            "backend_host": str(postgres_cfg.get("backend_host") or ""),
+            "backend_port": int(postgres_cfg.get("backend_port") or 5432),
+        }
+        if postgres["enabled"] and (not postgres["listen_host"] or not postgres["backend_host"]):
+            fail(f"routes.yml softether_l3_vps.postgres requires listen_host and backend_host for alias {alias}")
+        model.update({
+            "softether_l3_vps_enabled": True,
+            "softether_l3_vps": {
+                "sni": sni,
+                "management_sni": management_sni,
+                "backend_host": backend_host,
+                "backend_management_host": management_backend_host,
+                "ports": ports,
+                "postgres": postgres,
+            },
+        })
+
+    if "minecraft" in present_routes:
+        cfg = route_config.get("minecraft") or {}
+        per_alias = (cfg.get("per_alias") or {}).get(alias) or {}
+        defaults = cfg.get("defaults") or {}
+        backends = per_alias.get("backends") or defaults.get("backends") or {}
+        vpn_sni = unique_strings(per_alias.get("vpn_sni") or defaults.get("vpn_sni") or [])
+        game = backends.get("game") or {}
+        rcon = backends.get("rcon") or {}
+        if not game.get("primary"):
+            fail(f"routes.yml minecraft.per_alias.{alias}.backends.game or minecraft.defaults.backends.game primary is required")
+        ports = {"game": 25565, "rcon": 25575}
+        ports.update(cfg.get("ports") or {})
+        policy = {
+            "blacklist": True,
+            "rate_limit": "soft",
+            "rcon_public": True,
+            "rcon_rate_limit": "strict",
+            "geoip": "disabled",
+        }
+        policy.update(cfg.get("policy") or {})
+        if policy.get("rcon_public", True) and not rcon.get("primary"):
+            fail(f"routes.yml minecraft.per_alias.{alias}.backends.rcon or minecraft.defaults.backends.rcon primary is required when rcon_public=true")
+        if vpn_sni and model.get("vpn_ingress_enabled"):
+            model["vpn_ingress"]["sni"] = unique_strings(model["vpn_ingress"]["sni"] + vpn_sni)
+        model.update({
+            "minecraft_enabled": True,
+            "minecraft": {
+                "public_names": per_alias.get("public_names") or [],
+                "vpn_sni": vpn_sni,
+                "ports": ports,
+                "policy": policy,
+                "game": {
+                    "primary": game["primary"],
+                    "fallback": game.get("fallback"),
+                    "rate_limit": default_game_rate,
+                },
+                "rcon": {
+                    "primary": rcon.get("primary"),
+                    "fallback": rcon.get("fallback"),
+                    "rate_limit": default_rcon_rate,
+                },
+            },
+        })
+
+    https_acl_conditions = []
+    if model.get("vpn_ingress_enabled"):
+        https_acl_conditions.append("is_softether")
+    if model.get("vpn_cascade_enabled"):
+        https_acl_conditions.append("is_cascade_https_sni")
+    if model.get("softether_l3_vps_enabled"):
+        https_acl_conditions.append("is_softether_l3_vps_https_sni")
+    model["https_allowed_condition"] = " or ".join(https_acl_conditions)
+
+    management_acl_conditions = []
+    if model.get("vpn_ingress_enabled"):
+        management_acl_conditions.append("is_softether_mgmt_sni")
+    if model.get("vpn_cascade_enabled"):
+        management_acl_conditions.append("is_cascade_mgmt_sni")
+    if model.get("softether_l3_vps_enabled") and model.get("softether_l3_vps", {}).get("management_sni"):
+        management_acl_conditions.append("is_softether_l3_vps_mgmt_sni")
+    model["management_allowed_condition"] = " or ".join(management_acl_conditions)
+
+    print(json.dumps(model, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    EDGE_ALIAS: "{{ inventory_hostname }}"
+    STATE_FILE: "{{ edge_haproxy_operator_state_file }}"
+    ROUTES_FILE: "{{ edge_haproxy_operator_routes_file }}"
+    DEFAULT_SOFTETHER_HOST: "{{ edge_haproxy_softether_host }}"
+    DEFAULT_SOFTETHER_MANAGEMENT_HOST: "{{ edge_haproxy_softether_management_host }}"
+    DEFAULT_CASCADE_HOST: "{{ edge_haproxy_softether_cascade_host }}"
+    DEFAULT_CASCADE_MANAGEMENT_HOST: "{{ edge_haproxy_softether_cascade_management_host }}"
+    DEFAULT_P2P_HOST: "{{ edge_haproxy_softether_l3_vps_host }}"
+    DEFAULT_P2P_MANAGEMENT_HOST: "{{ edge_haproxy_softether_l3_vps_management_host }}"
+    DEFAULT_SNI_DOMAIN: "{{ edge_haproxy_default_sni_domain }}"
+    DEFAULT_GAME_RATE: "{{ edge_haproxy_minecraft_game_rate_limit }}"
+    DEFAULT_RCON_RATE: "{{ edge_haproxy_minecraft_rcon_rate_limit }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  failed_when:
+    - edge_haproxy_route_model_command.rc != 0
+      or (edge_haproxy_route_model_command.stdout | trim | length) == 0
+  register: edge_haproxy_route_model_command
+  when: edge_haproxy_state == 'present'
+
+- name: Store edge_haproxy route model
+  ansible.builtin.set_fact:
+    edge_haproxy_route_model: "{{ edge_haproxy_route_model_command.stdout | trim | from_json }}"
+  when: edge_haproxy_state == 'present'
+
+- name: Ensure edge_haproxy runtime directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ edge_haproxy_root_dir }}"
+    - "{{ edge_haproxy_config_dir }}"
+    - "{{ edge_haproxy_lists_dir }}"
+  when: edge_haproxy_state == 'present'
+
+- name: Ensure edge_haproxy runtime socket directory is writable by container
+  ansible.builtin.file:
+    path: "{{ edge_haproxy_run_dir }}"
+    state: directory
+    mode: "0777"
+  when: edge_haproxy_state == 'present'
+
+- name: Install VPN management allowlist when provided
+  ansible.builtin.copy:
+    src: "{{ edge_haproxy_operator_vpn_mgmt_ips }}"
+    dest: "{{ edge_haproxy_lists_dir }}/vpn_mgmt_ips.lst"
+    mode: "0644"
+  register: edge_haproxy_vpn_mgmt_ips_copy
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_mgmt_allowlist_stat.stat.exists
+    - edge_haproxy_mgmt_allowlist_stat.stat.isreg
+
+- name: Close VPN management allowlist when operator file is missing
+  ansible.builtin.copy:
+    dest: "{{ edge_haproxy_lists_dir }}/vpn_mgmt_ips.lst"
+    content: ""
+    mode: "0644"
+  register: edge_haproxy_vpn_mgmt_ips_empty
+  when:
+    - edge_haproxy_state == 'present'
+    - not edge_haproxy_mgmt_allowlist_stat.stat.exists or not edge_haproxy_mgmt_allowlist_stat.stat.isreg
+
+- name: Install manual blacklist when provided
+  ansible.builtin.copy:
+    src: "{{ edge_haproxy_operator_blocked_ips }}"
+    dest: "{{ edge_haproxy_lists_dir }}/blocked_ips.lst"
+    mode: "0644"
+  register: edge_haproxy_blocked_ips_copy
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_blacklist_stat.stat.exists
+    - edge_haproxy_blacklist_stat.stat.isreg
+
+- name: Create empty manual blacklist when operator file is missing
+  ansible.builtin.copy:
+    dest: "{{ edge_haproxy_lists_dir }}/blocked_ips.lst"
+    content: ""
+    mode: "0644"
+  register: edge_haproxy_blocked_ips_empty
+  when:
+    - edge_haproxy_state == 'present'
+    - not edge_haproxy_blacklist_stat.stat.exists or not edge_haproxy_blacklist_stat.stat.isreg
+
+- name: Ensure generated blacklist exists for edge_banlist
+  ansible.builtin.copy:
+    dest: "{{ edge_haproxy_lists_dir }}/{{ edge_haproxy_generated_blocked_ips_file }}"
+    content: ""
+    force: false
+    mode: "0644"
+  register: edge_haproxy_generated_blocked_ips_seed
+  when: edge_haproxy_state == 'present'
+
+- name: Install GeoIP RU network list when provided
+  ansible.builtin.copy:
+    src: "{{ edge_haproxy_operator_ru_networks }}"
+    dest: "{{ edge_haproxy_lists_dir }}/ru_networks.lst"
+    mode: "0644"
+  register: edge_haproxy_ru_networks_copy
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_ru_networks_stat.stat.exists
+    - edge_haproxy_ru_networks_stat.stat.isreg
+
+- name: Create empty GeoIP RU network list when operator file is missing
+  ansible.builtin.copy:
+    dest: "{{ edge_haproxy_lists_dir }}/ru_networks.lst"
+    content: ""
+    mode: "0644"
+  register: edge_haproxy_ru_networks_empty
+  when:
+    - edge_haproxy_state == 'present'
+    - not edge_haproxy_ru_networks_stat.stat.exists or not edge_haproxy_ru_networks_stat.stat.isreg
+
+- name: Render edge_haproxy config
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: "{{ edge_haproxy_config_dir }}/haproxy.cfg"
+    mode: "0644"
+  register: edge_haproxy_config_template
+  when: edge_haproxy_state == 'present'
+
+- name: Render edge_haproxy Docker Compose
+  ansible.builtin.template:
+    src: docker-compose.edge-haproxy.yml.j2
+    dest: "{{ edge_haproxy_compose_file }}"
+    mode: "0640"
+  register: edge_haproxy_compose_template
+  when: edge_haproxy_state == 'present'
+
+- name: Ensure Docker runtime baseline for edge_haproxy
+  ansible.builtin.include_role:
+    name: docker_runtime_baseline
+  when:
+    - not ansible_check_mode
+    - edge_haproxy_state == 'present' or (edge_haproxy_compose_stat.stat.exists | default(false))
+
+- name: Ensure Docker service is running for edge_haproxy
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify Docker Compose plugin is available for edge_haproxy
+  ansible.builtin.command:
+    cmd: docker compose version
+  changed_when: false
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+
+- name: Ensure shared edge Docker network exists
+  ansible.builtin.command:
+    cmd: docker network create --subnet "{{ edge_haproxy_network_subnet }}" "{{ edge_haproxy_network_name }}"
+  register: edge_haproxy_network_create
+  changed_when: edge_haproxy_network_create.rc == 0
+  failed_when:
+    - edge_haproxy_network_create.rc != 0
+    - "'already exists' not in (edge_haproxy_network_create.stderr | default(''))"
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+
+- name: Ensure edge management Docker network exists
+  ansible.builtin.command:
+    cmd: docker network create --subnet "{{ edge_haproxy_management_network_subnet }}" "{{ edge_haproxy_management_network_name }}"
+  register: edge_haproxy_management_network_create
+  changed_when: edge_haproxy_management_network_create.rc == 0
+  failed_when:
+    - edge_haproxy_management_network_create.rc != 0
+    - "'already exists' not in (edge_haproxy_management_network_create.stderr | default(''))"
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.vpn_ingress_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Ensure cascade Docker network exists for HAProxy route
+  ansible.builtin.command:
+    cmd: docker network create --subnet "{{ edge_haproxy_cascade_network_subnet }}" "{{ edge_haproxy_cascade_network_name }}"
+  register: edge_haproxy_cascade_network_create
+  changed_when: edge_haproxy_cascade_network_create.rc == 0
+  failed_when:
+    - edge_haproxy_cascade_network_create.rc != 0
+    - "'already exists' not in (edge_haproxy_cascade_network_create.stderr | default(''))"
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.vpn_cascade_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Ensure cascade management Docker network exists for HAProxy route
+  ansible.builtin.command:
+    cmd: docker network create --subnet "{{ edge_haproxy_cascade_management_network_subnet }}" "{{ edge_haproxy_cascade_management_network_name }}"
+  register: edge_haproxy_cascade_management_network_create
+  changed_when: edge_haproxy_cascade_management_network_create.rc == 0
+  failed_when:
+    - edge_haproxy_cascade_management_network_create.rc != 0
+    - "'already exists' not in (edge_haproxy_cascade_management_network_create.stderr | default(''))"
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.vpn_cascade_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Remove empty legacy SoftEther P2P Docker networks that overlap canonical L3 VPS routes
+  ansible.builtin.shell: |
+    set -euo pipefail
+    desired_transport_name="{{ edge_haproxy_p2p_network_name }}"
+    desired_transport_subnet="{{ edge_haproxy_p2p_network_subnet }}"
+    desired_management_name="{{ edge_haproxy_p2p_management_network_name }}"
+    desired_management_subnet="{{ edge_haproxy_p2p_management_network_subnet }}"
+    for name in ai_service_softether_p2p_pg48_transport ai_service_softether_p2p_pg48_mgmt ai_service_softether_p2p ai_service_softether_p2p_services ai_service_softether_l3; do
+      case "$name" in
+        "$desired_transport_name"|"$desired_management_name") continue ;;
+      esac
+      current="$(docker network inspect -f {% raw %}'{{ (index .IPAM.Config 0).Subnet }}'{% endraw %} "$name" 2>/dev/null || true)"
+      [ -n "$current" ] || continue
+      if [ "$current" != "$desired_transport_subnet" ] && [ "$current" != "$desired_management_subnet" ]; then
+        continue
+      fi
+      count="$(docker network inspect -f {% raw %}'{{ len .Containers }}'{% endraw %} "$name")"
+      if [ "$count" = "0" ]; then
+        docker network rm "$name"
+        echo "removed empty legacy softether p2p network $name ($current)"
+      else
+        echo "legacy softether p2p network overlaps desired subnet but still has $count endpoint(s): $name" >&2
+        docker network inspect -f {% raw %}'{{ range $id, $c := .Containers }}{{ $c.Name }} {{ end }}'{% endraw %} "$name" >&2 || true
+        exit 1
+      fi
+    done
+  args:
+    executable: /bin/bash
+  register: edge_haproxy_legacy_p2p_network_cleanup
+  changed_when: >
+    (edge_haproxy_legacy_p2p_network_cleanup.stdout | default(''))
+    is search('removed empty legacy softether p2p network')
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.softether_l3_vps_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Ensure SoftEther P2P Docker network exists for HAProxy route
+  ansible.builtin.shell: |
+    set -euo pipefail
+    name="{{ edge_haproxy_p2p_network_name }}"
+    subnet="{{ edge_haproxy_p2p_network_subnet }}"
+    current="$(docker network inspect -f {% raw %}'{{ (index .IPAM.Config 0).Subnet }}'{% endraw %} "$name" 2>/dev/null || true)"
+    if [ -n "$current" ] && [ "$current" != "$subnet" ]; then
+      if [ -f "{{ edge_haproxy_compose_file }}" ]; then
+        docker compose -f "{{ edge_haproxy_compose_file }}" down
+      fi
+      docker network rm "$name"
+      echo "removed mismatched edge_haproxy p2p network $name ($current != $subnet)"
+      current=""
+    fi
+    if [ -z "$current" ]; then
+      docker network create --subnet "$subnet" "$name"
+      echo "created edge_haproxy p2p network $name ($subnet)"
+    else
+      echo "edge_haproxy p2p network already exists: $name ($current)"
+    fi
+  args:
+    executable: /bin/bash
+  register: edge_haproxy_p2p_network_create
+  changed_when: >
+    (edge_haproxy_p2p_network_create.stdout | default(''))
+    is search('(?i)(created edge_haproxy p2p network|removed mismatched edge_haproxy p2p network)')
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.softether_l3_vps_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Ensure SoftEther P2P management Docker network exists for HAProxy route
+  ansible.builtin.shell: |
+    set -euo pipefail
+    name="{{ edge_haproxy_p2p_management_network_name }}"
+    subnet="{{ edge_haproxy_p2p_management_network_subnet }}"
+    current="$(docker network inspect -f {% raw %}'{{ (index .IPAM.Config 0).Subnet }}'{% endraw %} "$name" 2>/dev/null || true)"
+    if [ -n "$current" ] && [ "$current" != "$subnet" ]; then
+      if [ -f "{{ edge_haproxy_compose_file }}" ]; then
+        docker compose -f "{{ edge_haproxy_compose_file }}" down
+      fi
+      docker network rm "$name"
+      echo "removed mismatched edge_haproxy p2p management network $name ($current != $subnet)"
+      current=""
+    fi
+    if [ -z "$current" ]; then
+      docker network create --subnet "$subnet" "$name"
+      echo "created edge_haproxy p2p management network $name ($subnet)"
+    else
+      echo "edge_haproxy p2p management network already exists: $name ($current)"
+    fi
+  args:
+    executable: /bin/bash
+  register: edge_haproxy_p2p_management_network_create
+  changed_when: >
+    (edge_haproxy_p2p_management_network_create.stdout | default(''))
+    is search('(?i)(created edge_haproxy p2p management network|removed mismatched edge_haproxy p2p management network)')
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.softether_l3_vps_enabled | default(false)
+    - (edge_haproxy_route_model.softether_l3_vps.management_sni | default([]) | length) > 0
+    - not ansible_check_mode
+
+- name: Validate edge_haproxy config
+  ansible.builtin.command:
+    cmd: docker run --rm -v "{{ edge_haproxy_config_dir }}:/usr/local/etc/haproxy:ro" "{{ edge_haproxy_image }}" haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
+  changed_when: false
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+
+- name: Inspect existing edge_haproxy container status before start
+  ansible.builtin.command:
+    cmd: docker inspect -f {% raw %}'{{.State.Status}}'{% endraw %} "{{ edge_haproxy_container_name }}"
+  register: edge_haproxy_existing_status
+  changed_when: false
+  failed_when: false
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+
+- name: Remove stale edge_haproxy admin socket before container start
+  ansible.builtin.file:
+    path: "{{ edge_haproxy_run_dir }}/admin.sock"
+    state: absent
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+    - >
+      (edge_haproxy_existing_status.rc | default(1)) != 0
+      or (edge_haproxy_existing_status.stdout | default('') | trim) != 'running'
+      or (edge_haproxy_compose_template.changed | default(false))
+
+- name: Start edge_haproxy container
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ edge_haproxy_compose_file }}" up -d
+    chdir: "{{ edge_haproxy_root_dir }}"
+  register: edge_haproxy_compose_up
+  changed_when: >
+    (edge_haproxy_compose_up.stdout ~ edge_haproxy_compose_up.stderr)
+    is search('(?i)(creating|created|recreating|recreated|starting|started|pulling|pulled|building|built)')
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+
+- name: Remove stale edge_haproxy admin socket before runtime-file restart
+  ansible.builtin.file:
+    path: "{{ edge_haproxy_run_dir }}/admin.sock"
+    state: absent
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+    - not edge_haproxy_compose_up.changed
+    - >
+      (edge_haproxy_vpn_mgmt_ips_copy.changed | default(false))
+      or (edge_haproxy_vpn_mgmt_ips_empty.changed | default(false))
+      or (edge_haproxy_blocked_ips_copy.changed | default(false))
+      or (edge_haproxy_blocked_ips_empty.changed | default(false))
+      or (edge_haproxy_generated_blocked_ips_seed.changed | default(false))
+      or (edge_haproxy_ru_networks_copy.changed | default(false))
+      or (edge_haproxy_ru_networks_empty.changed | default(false))
+      or (edge_haproxy_config_template.changed | default(false))
+
+- name: Restart edge_haproxy when bind-mounted runtime files changed
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ edge_haproxy_compose_file }}" restart "{{ edge_haproxy_container_name }}"
+    chdir: "{{ edge_haproxy_root_dir }}"
+  changed_when: true
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+    - not edge_haproxy_compose_up.changed
+    - >
+      (edge_haproxy_vpn_mgmt_ips_copy.changed | default(false))
+      or (edge_haproxy_vpn_mgmt_ips_empty.changed | default(false))
+      or (edge_haproxy_blocked_ips_copy.changed | default(false))
+      or (edge_haproxy_blocked_ips_empty.changed | default(false))
+      or (edge_haproxy_generated_blocked_ips_seed.changed | default(false))
+      or (edge_haproxy_ru_networks_copy.changed | default(false))
+      or (edge_haproxy_ru_networks_empty.changed | default(false))
+      or (edge_haproxy_config_template.changed | default(false))
+
+- name: Verify running edge_haproxy container network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ edge_haproxy_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ edge_haproxy_network_name }}"
+    EXPECTED_IP: "{{ edge_haproxy_container_ipv4 }}"
+  changed_when: false
+  register: edge_haproxy_container_ready
+  until: edge_haproxy_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify running edge_haproxy management network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ edge_haproxy_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ edge_haproxy_management_network_name }}"
+    EXPECTED_IP: "{{ edge_haproxy_management_container_ipv4 }}"
+  changed_when: false
+  register: edge_haproxy_management_container_ready
+  until: edge_haproxy_management_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.vpn_ingress_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Verify running edge_haproxy cascade network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ edge_haproxy_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ edge_haproxy_cascade_network_name }}"
+    EXPECTED_IP: "{{ edge_haproxy_cascade_container_ipv4 }}"
+  changed_when: false
+  register: edge_haproxy_cascade_container_ready
+  until: edge_haproxy_cascade_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.vpn_cascade_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Verify running edge_haproxy cascade management network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ edge_haproxy_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ edge_haproxy_cascade_management_network_name }}"
+    EXPECTED_IP: "{{ edge_haproxy_cascade_management_container_ipv4 }}"
+  changed_when: false
+  register: edge_haproxy_cascade_management_container_ready
+  until: edge_haproxy_cascade_management_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.vpn_cascade_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Verify running edge_haproxy SoftEther P2P network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ edge_haproxy_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ edge_haproxy_p2p_network_name }}"
+    EXPECTED_IP: "{{ edge_haproxy_p2p_container_ipv4 }}"
+  changed_when: false
+  register: edge_haproxy_p2p_container_ready
+  until: edge_haproxy_p2p_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.softether_l3_vps_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Verify running edge_haproxy SoftEther P2P management network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ edge_haproxy_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ edge_haproxy_p2p_management_network_name }}"
+    EXPECTED_IP: "{{ edge_haproxy_p2p_management_container_ipv4 }}"
+  changed_when: false
+  register: edge_haproxy_p2p_management_container_ready
+  until: edge_haproxy_p2p_management_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.softether_l3_vps_enabled | default(false)
+    - (edge_haproxy_route_model.softether_l3_vps.management_sni | default([]) | length) > 0
+    - not ansible_check_mode
+
+- name: Verify edge_haproxy config inside running container
+  ansible.builtin.command:
+    cmd: docker exec "{{ edge_haproxy_container_name }}" haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
+  changed_when: false
+  when:
+    - edge_haproxy_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify cascade SNI surface is absent when vpn_cascade route is disabled
+  ansible.builtin.shell: |
+    set -euo pipefail
+    ! docker exec "{{ edge_haproxy_container_name }}" grep -nE 'is_cascade|be_cascade' /usr/local/etc/haproxy/haproxy.cfg
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - edge_haproxy_state == 'present'
+    - not (edge_haproxy_route_model.vpn_cascade_enabled | default(false))
+    - not ansible_check_mode
+
+- name: Verify edge_haproxy published VPN ports when vpn_ingress is enabled
+  ansible.builtin.command:
+    cmd: docker port "{{ edge_haproxy_container_name }}"
+  register: edge_haproxy_docker_ports
+  changed_when: false
+  failed_when: >
+    ('443/tcp' not in edge_haproxy_docker_ports.stdout)
+    or ('992/tcp' not in edge_haproxy_docker_ports.stdout)
+    or ('5555/tcp' not in edge_haproxy_docker_ports.stdout)
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.vpn_ingress_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Verify edge_haproxy published Minecraft ports when minecraft route is enabled
+  ansible.builtin.command:
+    cmd: docker port "{{ edge_haproxy_container_name }}"
+  register: edge_haproxy_minecraft_ports
+  changed_when: false
+  failed_when: >
+    ('25565/tcp' not in edge_haproxy_minecraft_ports.stdout)
+    or ('25575/tcp' not in edge_haproxy_minecraft_ports.stdout)
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.minecraft_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Verify edge_haproxy published shared VPN ports when vpn_cascade route is enabled
+  ansible.builtin.command:
+    cmd: docker port "{{ edge_haproxy_container_name }}"
+  register: edge_haproxy_cascade_ports
+  changed_when: false
+  failed_when: >
+    ('443/tcp' not in edge_haproxy_cascade_ports.stdout)
+    or ('992/tcp' not in edge_haproxy_cascade_ports.stdout)
+    or ('5555/tcp' not in edge_haproxy_cascade_ports.stdout)
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.vpn_cascade_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Ensure Docker service is running before stopping edge_haproxy
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+  when:
+    - edge_haproxy_state == 'absent'
+    - edge_haproxy_compose_stat.stat.exists | default(false)
+    - not ansible_check_mode
+
+- name: Verify Docker Compose plugin is available before stopping edge_haproxy
+  ansible.builtin.command:
+    cmd: docker compose version
+  changed_when: false
+  when:
+    - edge_haproxy_state == 'absent'
+    - edge_haproxy_compose_stat.stat.exists | default(false)
+    - not ansible_check_mode
+
+- name: Stop edge_haproxy container
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ edge_haproxy_compose_file }}" down
+    chdir: "{{ edge_haproxy_root_dir }}"
+  changed_when: true
+  when:
+    - edge_haproxy_state == 'absent'
+    - edge_haproxy_compose_stat.stat.exists | default(false)
+    - not ansible_check_mode
+
+- name: Purge edge_haproxy runtime data when explicitly requested
+  ansible.builtin.file:
+    path: "{{ edge_haproxy_root_dir }}"
+    state: absent
+  when:
+    - edge_haproxy_state == 'absent'
+    - edge_haproxy_purge_data in [true, 'true', 'True']
+    - not ansible_check_mode

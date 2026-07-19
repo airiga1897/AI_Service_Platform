@@ -1,0 +1,18 @@
+---
+- name: SoftEther L3 VPS server rollout
+  hosts: softether_l3_vps
+  become: true
+  vars:
+    softether_l3_vps_state: present
+    softether_l3_vps_purge_data: false
+  roles:
+    - softether_l3_vps
+
+- name: SoftEther L3 VPS client rollout
+  hosts: candidate_softether_l3_vps
+  become: true
+  vars:
+    softether_l3_vps_state: present
+    softether_l3_vps_purge_data: false
+  roles:
+    - softether_l3_vps

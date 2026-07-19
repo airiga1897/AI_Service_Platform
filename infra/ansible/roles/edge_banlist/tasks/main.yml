@@ -1,0 +1,180 @@
+---
+- name: Validate edge_banlist state
+  ansible.builtin.assert:
+    that:
+      - edge_banlist_state in ['present', 'absent']
+      - edge_banlist_purge_data in [true, false, 'true', 'false', 'True', 'False']
+    fail_msg: "edge_banlist_state must be present|absent and purge flag must be boolean-like."
+
+- name: Check operator edge_banlist config on control node
+  ansible.builtin.stat:
+    path: "{{ edge_banlist_config_path }}"
+  delegate_to: localhost
+  become: false
+  register: edge_banlist_config_stat
+  when: edge_banlist_state == 'present'
+
+- name: Load operator edge_banlist config
+  ansible.builtin.set_fact:
+    edge_banlist_effective_config: "{{ lookup('file', edge_banlist_config_path) | from_yaml }}"
+  when:
+    - edge_banlist_state == 'present'
+    - edge_banlist_config_stat.stat.exists
+    - edge_banlist_config_stat.stat.isreg
+
+- name: Use default edge_banlist config
+  ansible.builtin.set_fact:
+    edge_banlist_effective_config: {}
+  when:
+    - edge_banlist_state == 'present'
+    - not edge_banlist_config_stat.stat.exists or not edge_banlist_config_stat.stat.isreg
+
+- name: Validate edge_banlist mode
+  ansible.builtin.assert:
+    that:
+      - (edge_banlist_effective_config.mode | default(edge_banlist_mode)) in ['observe', 'enforce']
+    fail_msg: "edge_banlist mode must be observe|enforce."
+  when: edge_banlist_state == 'present'
+
+- name: Ensure edge_banlist directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ edge_banlist_root_dir }}", mode: "0755" }
+    - { path: "{{ edge_banlist_state_dir }}", mode: "0750" }
+    - { path: "{{ edge_banlist_log_file | dirname }}", mode: "0755" }
+    - { path: "{{ edge_banlist_generated_blocked_file | dirname }}", mode: "0755" }
+  when: edge_banlist_state == 'present'
+
+- name: Install edge_banlist dependencies
+  ansible.builtin.package:
+    name:
+      - socat
+      - python3
+    state: present
+  when: edge_banlist_state == 'present'
+
+- name: Install edge_banlist collector
+  ansible.builtin.copy:
+    src: edge_banlist.py
+    dest: "{{ edge_banlist_script }}"
+    mode: "0750"
+  register: edge_banlist_script_copy
+  when: edge_banlist_state == 'present'
+
+- name: Ensure generated edge banlist file exists
+  ansible.builtin.copy:
+    dest: "{{ edge_banlist_generated_blocked_file }}"
+    content: ""
+    force: false
+    mode: "0644"
+  when: edge_banlist_state == 'present'
+
+- name: Install edge_banlist systemd service
+  ansible.builtin.template:
+    src: edge-banlist.service.j2
+    dest: /etc/systemd/system/edge-banlist.service
+    mode: "0644"
+  register: edge_banlist_service_unit
+  when: edge_banlist_state == 'present'
+
+- name: Install edge_banlist systemd timer
+  ansible.builtin.template:
+    src: edge-banlist.timer.j2
+    dest: /etc/systemd/system/edge-banlist.timer
+    mode: "0644"
+  register: edge_banlist_timer_unit
+  when: edge_banlist_state == 'present'
+
+- name: Reload systemd for edge_banlist install
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when:
+    - edge_banlist_state == 'present'
+    - not ansible_check_mode
+    - edge_banlist_service_unit.changed or edge_banlist_timer_unit.changed
+
+- name: Enable and start edge_banlist timer
+  ansible.builtin.systemd:
+    name: edge-banlist.timer
+    state: started
+    enabled: true
+  when:
+    - edge_banlist_state == 'present'
+    - not ansible_check_mode
+
+- name: Run edge_banlist once after install
+  ansible.builtin.systemd:
+    name: edge-banlist.service
+    state: started
+  when:
+    - edge_banlist_state == 'present'
+    - not ansible_check_mode
+
+- name: Stop and disable edge_banlist timer
+  ansible.builtin.systemd:
+    name: edge-banlist.timer
+    state: stopped
+    enabled: false
+  failed_when: false
+  when:
+    - edge_banlist_state == 'absent'
+    - not ansible_check_mode
+
+- name: Stop edge_banlist service
+  ansible.builtin.systemd:
+    name: edge-banlist.service
+    state: stopped
+  failed_when: false
+  when:
+    - edge_banlist_state == 'absent'
+    - not ansible_check_mode
+
+- name: Clear generated edge banlist when edge_banlist is absent
+  ansible.builtin.copy:
+    dest: "{{ edge_banlist_generated_blocked_file }}"
+    content: ""
+    mode: "0644"
+  register: edge_banlist_generated_cleared
+  when: edge_banlist_state == 'absent'
+
+- name: Restart edge_haproxy after clearing generated edge banlist
+  ansible.builtin.command:
+    cmd: "{{ edge_banlist_reload_command }}"
+  changed_when: true
+  when:
+    - edge_banlist_state == 'absent'
+    - not ansible_check_mode
+    - edge_banlist_generated_cleared.changed | default(false)
+
+- name: Remove edge_banlist unit files
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item }}"
+    state: absent
+  loop:
+    - edge-banlist.service
+    - edge-banlist.timer
+  when: edge_banlist_state == 'absent'
+
+- name: Reload systemd after edge_banlist removal
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when:
+    - edge_banlist_state == 'absent'
+    - not ansible_check_mode
+
+- name: Remove edge_banlist install directory
+  ansible.builtin.file:
+    path: "{{ edge_banlist_root_dir }}"
+    state: absent
+  when: edge_banlist_state == 'absent'
+
+- name: Purge edge_banlist state directory when requested
+  ansible.builtin.file:
+    path: "{{ edge_banlist_state_dir }}"
+    state: absent
+  when:
+    - edge_banlist_state == 'absent'
+    - edge_banlist_purge_data | bool

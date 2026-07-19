@@ -1,0 +1,294 @@
+global
+    log stdout format raw local0
+    maxconn 4096
+    tune.ssl.default-dh-param 2048
+    stats socket /run/haproxy/admin.sock mode 660 level admin expose-fd listeners
+
+defaults
+    log global
+    option dontlognull
+    timeout connect 5s
+    timeout client  50s
+    timeout server  50s
+
+frontend stats_local
+    bind {{ edge_haproxy_stats_bind }}
+    mode http
+    stats enable
+    stats uri /stats
+    stats refresh 10s
+
+backend be_acme_placeholder
+    mode http
+    http-request return status 404 content-type text/plain string "ACME backend is not configured yet"
+
+frontend http_in
+    bind *:80
+    mode http
+    acl is_acme path_beg /.well-known/acme-challenge/
+    http-request deny deny_status 403 if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst } !is_acme
+    http-request deny deny_status 403 if { src -f /usr/local/etc/haproxy/lists/generated_blocked_ips.lst } !is_acme
+    http-request track-sc1 src table st_http_rates if !is_acme
+    acl is_http_banned src_get_gpc0(st_http_rates) gt 0
+    http-request deny deny_status 403 if !is_acme is_http_banned
+    acl has_high_error_rate sc1_http_err_rate(st_http_rates) gt {{ edge_haproxy_http_error_rate_limit }}
+    http-request sc-inc-gpc0(1) if !is_acme has_high_error_rate
+    http-request deny deny_status 403 if !is_acme has_high_error_rate
+    acl http_req_rate_abuse sc1_http_req_rate(st_http_rates) gt {{ edge_haproxy_http_rate_limit }}
+    http-request deny deny_status 429 if !is_acme http_req_rate_abuse
+{% for scanner_path in edge_haproxy_http_scanner_paths %}
+    acl is_scanner_path path_beg -i {{ scanner_path }}
+{% endfor %}
+    http-request sc-inc-gpc0(1) if !is_acme is_scanner_path
+    http-request deny deny_status 403 if !is_acme is_scanner_path
+    http-request redirect scheme https code 301 unless is_acme
+    use_backend be_acme_placeholder if is_acme
+
+{% if (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) or (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) or (edge_haproxy_route_model.softether_l3_vps_enabled | default(false)) %}
+frontend https_in
+    bind *:443
+    mode tcp
+    option tcplog
+    tcp-request connection silent-drop if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
+    tcp-request connection silent-drop if { src -f /usr/local/etc/haproxy/lists/generated_blocked_ips.lst }
+    tcp-request inspect-delay 5s
+    tcp-request content track-sc0 src table st_tcp_rates
+    tcp-request content silent-drop if { sc0_conn_rate gt {{ edge_haproxy_tcp_rate_limit }} }
+    tcp-request content silent-drop if { sc0_conn_cur gt {{ edge_haproxy_tcp_conn_cur_limit }} }
+
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+    acl is_softether req_ssl_sni -i {{ edge_haproxy_route_model.vpn_ingress.sni | join(' ') }}
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    acl is_cascade_https_sni req_ssl_sni -i {{ edge_haproxy_route_model.vpn_cascade.sni | join(' ') }}
+{% endif %}
+{% if edge_haproxy_route_model.softether_l3_vps_enabled | default(false) %}
+    acl is_softether_l3_vps_https_sni req_ssl_sni -i {{ edge_haproxy_route_model.softether_l3_vps.sni | join(' ') }}
+{% endif %}
+{% if edge_haproxy_route_model.https_allowed_condition | default('') | length > 0 %}
+    tcp-request content silent-drop unless {{ edge_haproxy_route_model.https_allowed_condition }}
+{% endif %}
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+    tcp-request content silent-drop if is_softether { nbsrv(be_softether_https) lt 1 }
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    tcp-request content silent-drop if is_cascade_https_sni { nbsrv(be_cascade_https) lt 1 }
+{% endif %}
+{% if edge_haproxy_route_model.softether_l3_vps_enabled | default(false) %}
+    tcp-request content silent-drop if is_softether_l3_vps_https_sni { nbsrv(be_softether_l3_vps_https) lt 1 }
+{% endif %}
+    tcp-request content accept if { req_ssl_hello_type 1 }
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+    use_backend be_softether_https if is_softether
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    use_backend be_cascade_https if is_cascade_https_sni
+{% endif %}
+{% if edge_haproxy_route_model.softether_l3_vps_enabled | default(false) %}
+    use_backend be_softether_l3_vps_https if is_softether_l3_vps_https_sni
+{% endif %}
+
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+backend be_softether_https
+    mode tcp
+    option tcp-check
+    server softether {{ edge_haproxy_route_model.vpn_ingress.backend_host }}:443 check inter 5s fall 3 rise 2
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+backend be_cascade_https
+    mode tcp
+    option tcp-check
+    server softether-cascade {{ edge_haproxy_route_model.vpn_cascade.backend_host }}:{{ edge_haproxy_route_model.vpn_cascade.ports.backend_https }} check inter 5s fall 3 rise 2
+{% endif %}
+{% if edge_haproxy_route_model.softether_l3_vps_enabled | default(false) %}
+backend be_softether_l3_vps_https
+    mode tcp
+    option tcp-check
+    server softether-l3-vps {{ edge_haproxy_route_model.softether_l3_vps.backend_host }}:{{ edge_haproxy_route_model.softether_l3_vps.ports.backend_https }} check inter 5s fall 3 rise 2
+{% endif %}
+
+frontend softether_tcp_992
+    bind *:992
+    mode tcp
+    option tcplog
+    tcp-request connection silent-drop if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
+    tcp-request connection silent-drop if { src -f /usr/local/etc/haproxy/lists/generated_blocked_ips.lst }
+    tcp-request inspect-delay 5s
+    tcp-request content track-sc0 src table st_tcp_rates
+    tcp-request content silent-drop if { sc0_conn_rate gt {{ edge_haproxy_tcp_rate_limit }} }
+    tcp-request content silent-drop if { sc0_conn_cur gt {{ edge_haproxy_tcp_conn_cur_limit }} }
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+    acl is_softether_992_sni req_ssl_sni -i {{ edge_haproxy_route_model.vpn_ingress.sni | join(' ') }}
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    acl is_cascade_992_sni req_ssl_sni -i {{ edge_haproxy_route_model.vpn_cascade.sni | join(' ') }}
+{% endif %}
+{% if (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) and (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) %}
+    tcp-request content silent-drop unless is_softether_992_sni or is_cascade_992_sni
+{% elif edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+    tcp-request content silent-drop unless is_softether_992_sni
+{% elif edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    tcp-request content silent-drop unless is_cascade_992_sni
+{% endif %}
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+    tcp-request content silent-drop if is_softether_992_sni { nbsrv(be_softether_992) lt 1 }
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    tcp-request content silent-drop if is_cascade_992_sni { nbsrv(be_cascade_992) lt 1 }
+{% endif %}
+    tcp-request content accept if { req_ssl_hello_type 1 }
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+    use_backend be_softether_992 if is_softether_992_sni
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    use_backend be_cascade_992 if is_cascade_992_sni
+{% endif %}
+
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+backend be_softether_992
+    mode tcp
+    option tcp-check
+    server softether {{ edge_haproxy_route_model.vpn_ingress.backend_host }}:992 check inter 5s fall 3 rise 2
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+backend be_cascade_992
+    mode tcp
+    option tcp-check
+    server softether-cascade {{ edge_haproxy_route_model.vpn_cascade.backend_host }}:{{ edge_haproxy_route_model.vpn_cascade.ports.backend_alt }} check inter 5s fall 3 rise 2
+{% endif %}
+
+frontend softether_mgmt
+    bind *:5555
+    mode tcp
+    option tcplog
+    tcp-request connection silent-drop if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
+    tcp-request connection silent-drop if { src -f /usr/local/etc/haproxy/lists/generated_blocked_ips.lst }
+    tcp-request connection silent-drop if !{ src -f /usr/local/etc/haproxy/lists/vpn_mgmt_ips.lst }
+    tcp-request inspect-delay 5s
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+    acl is_softether_mgmt_sni req_ssl_sni -i {{ edge_haproxy_route_model.vpn_ingress.sni | join(' ') }}
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    acl is_cascade_mgmt_sni req_ssl_sni -i {{ edge_haproxy_route_model.vpn_cascade.sni | join(' ') }}
+{% endif %}
+{% if (edge_haproxy_route_model.softether_l3_vps_enabled | default(false)) and ((edge_haproxy_route_model.softether_l3_vps.management_sni | default([])) | length > 0) %}
+    acl is_softether_l3_vps_mgmt_sni req_ssl_sni -i {{ edge_haproxy_route_model.softether_l3_vps.management_sni | join(' ') }}
+{% endif %}
+{% if edge_haproxy_route_model.management_allowed_condition | default('') | length > 0 %}
+    tcp-request content silent-drop unless {{ edge_haproxy_route_model.management_allowed_condition }}
+{% endif %}
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+    tcp-request content silent-drop if is_softether_mgmt_sni { nbsrv(be_softether_mgmt) lt 1 }
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    tcp-request content silent-drop if is_cascade_mgmt_sni { nbsrv(be_cascade_mgmt) lt 1 }
+{% endif %}
+{% if (edge_haproxy_route_model.softether_l3_vps_enabled | default(false)) and ((edge_haproxy_route_model.softether_l3_vps.management_sni | default([])) | length > 0) %}
+    tcp-request content silent-drop if is_softether_l3_vps_mgmt_sni { nbsrv(be_softether_l3_vps_mgmt) lt 1 }
+{% endif %}
+    tcp-request content accept if { req_ssl_hello_type 1 }
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+    use_backend be_softether_mgmt if is_softether_mgmt_sni
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+    use_backend be_cascade_mgmt if is_cascade_mgmt_sni
+{% endif %}
+{% if (edge_haproxy_route_model.softether_l3_vps_enabled | default(false)) and ((edge_haproxy_route_model.softether_l3_vps.management_sni | default([])) | length > 0) %}
+    use_backend be_softether_l3_vps_mgmt if is_softether_l3_vps_mgmt_sni
+{% endif %}
+
+{% if edge_haproxy_route_model.vpn_ingress_enabled | default(false) %}
+backend be_softether_mgmt
+    mode tcp
+    option tcp-check
+    server softether {{ edge_haproxy_route_model.vpn_ingress.backend_management_host }}:5555 check inter 5s fall 3 rise 2
+{% endif %}
+{% if edge_haproxy_route_model.vpn_cascade_enabled | default(false) %}
+backend be_cascade_mgmt
+    mode tcp
+    option tcp-check
+    server softether-cascade {{ edge_haproxy_route_model.vpn_cascade.backend_management_host }}:{{ edge_haproxy_route_model.vpn_cascade.ports.backend_management }} check inter 5s fall 3 rise 2
+{% endif %}
+{% if (edge_haproxy_route_model.softether_l3_vps_enabled | default(false)) and ((edge_haproxy_route_model.softether_l3_vps.management_sni | default([])) | length > 0) %}
+backend be_softether_l3_vps_mgmt
+    mode tcp
+    option tcp-check
+    server softether-l3-vps {{ edge_haproxy_route_model.softether_l3_vps.backend_management_host }}:{{ edge_haproxy_route_model.softether_l3_vps.ports.backend_management }} check inter 5s fall 3 rise 2
+{% endif %}
+{% endif %}
+
+{% if (edge_haproxy_route_model.softether_l3_vps_enabled | default(false)) and (edge_haproxy_route_model.softether_l3_vps.postgres.enabled | default(false)) %}
+frontend postgres_p2p_replication
+    bind {{ edge_haproxy_route_model.softether_l3_vps.postgres.listen_host }}:{{ edge_haproxy_route_model.softether_l3_vps.postgres.listen_port }}
+    mode tcp
+    option tcplog
+    default_backend be_postgres_p2p_primary
+
+backend be_postgres_p2p_primary
+    mode tcp
+    option tcp-check
+    server postgres-primary {{ edge_haproxy_route_model.softether_l3_vps.postgres.backend_host }}:{{ edge_haproxy_route_model.softether_l3_vps.postgres.backend_port }} check inter 5s fall 3 rise 2
+{% endif %}
+
+{% if edge_haproxy_route_model.minecraft_enabled | default(false) %}
+frontend minecraft_game
+    bind *:{{ edge_haproxy_route_model.minecraft.ports.game }}
+    mode tcp
+    option tcplog
+    tcp-request connection silent-drop if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
+    tcp-request connection silent-drop if { src -f /usr/local/etc/haproxy/lists/generated_blocked_ips.lst }
+    tcp-request connection track-sc0 src table st_minecraft_game_rates
+    tcp-request connection silent-drop if { sc0_conn_rate gt {{ edge_haproxy_route_model.minecraft.game.rate_limit }} }
+{% if edge_haproxy_route_model.minecraft.policy.geoip | default('disabled') == 'ru_only' %}
+    tcp-request connection silent-drop if !{ src -f /usr/local/etc/haproxy/lists/ru_networks.lst }
+{% endif %}
+    default_backend be_minecraft_game
+
+backend be_minecraft_game
+    mode tcp
+    option tcp-check
+    server primary {{ edge_haproxy_route_model.minecraft.game.primary }} check inter 5s fall 3 rise 2 init-addr last,libc,none
+{% if edge_haproxy_route_model.minecraft.game.fallback %}
+    server fallback {{ edge_haproxy_route_model.minecraft.game.fallback }} check backup inter 5s fall 3 rise 2 init-addr last,libc,none
+{% endif %}
+
+{% if edge_haproxy_route_model.minecraft.policy.rcon_public | default(true) %}
+frontend minecraft_rcon
+    bind *:{{ edge_haproxy_route_model.minecraft.ports.rcon }}
+    mode tcp
+    option tcplog
+    tcp-request connection silent-drop if { src -f /usr/local/etc/haproxy/lists/blocked_ips.lst }
+    tcp-request connection silent-drop if { src -f /usr/local/etc/haproxy/lists/generated_blocked_ips.lst }
+    tcp-request connection track-sc0 src table st_minecraft_rcon_rates
+    tcp-request connection silent-drop if { sc0_conn_rate gt {{ edge_haproxy_route_model.minecraft.rcon.rate_limit }} }
+{% if edge_haproxy_route_model.minecraft.policy.geoip | default('disabled') == 'ru_only' %}
+    tcp-request connection silent-drop if !{ src -f /usr/local/etc/haproxy/lists/ru_networks.lst }
+{% endif %}
+    default_backend be_minecraft_rcon
+
+backend be_minecraft_rcon
+    mode tcp
+    option tcp-check
+    server primary {{ edge_haproxy_route_model.minecraft.rcon.primary }} check inter 5s fall 3 rise 2 init-addr last,libc,none
+{% if edge_haproxy_route_model.minecraft.rcon.fallback %}
+    server fallback {{ edge_haproxy_route_model.minecraft.rcon.fallback }} check backup inter 5s fall 3 rise 2 init-addr last,libc,none
+{% endif %}
+{% endif %}
+{% endif %}
+
+{% if (edge_haproxy_route_model.vpn_ingress_enabled | default(false)) or (edge_haproxy_route_model.vpn_cascade_enabled | default(false)) %}
+backend st_tcp_rates
+    stick-table type ip size 100k expire 5m store conn_rate({{ edge_haproxy_tcp_rate_window }}),conn_cur
+{% endif %}
+backend st_http_rates
+    stick-table type ip size 100k expire {{ edge_haproxy_http_ban_expire }} store http_req_rate({{ edge_haproxy_http_rate_window }}),http_err_rate({{ edge_haproxy_http_rate_window }}),gpc0,conn_rate({{ edge_haproxy_http_rate_window }})
+
+{% if edge_haproxy_route_model.minecraft_enabled | default(false) %}
+backend st_minecraft_game_rates
+    stick-table type ip size 100k expire 5m store conn_rate({{ edge_haproxy_tcp_rate_window }})
+
+{% if edge_haproxy_route_model.minecraft.policy.rcon_public | default(true) %}
+backend st_minecraft_rcon_rates
+    stick-table type ip size 50k expire 5m store conn_rate({{ edge_haproxy_tcp_rate_window }})
+{% endif %}
+{% endif %}

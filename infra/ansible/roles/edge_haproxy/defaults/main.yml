@@ -1,0 +1,87 @@
+---
+edge_haproxy_root_dir: /opt/ai-service-platform/edge_haproxy
+edge_haproxy_config_dir: "{{ edge_haproxy_root_dir }}/haproxy"
+edge_haproxy_lists_dir: "{{ edge_haproxy_config_dir }}/lists"
+edge_haproxy_run_dir: "{{ edge_haproxy_root_dir }}/run"
+edge_haproxy_compose_file: "{{ edge_haproxy_root_dir }}/docker-compose.yml"
+
+edge_haproxy_operator_dir: "{{ playbook_dir }}/../../operator/haproxy"
+edge_haproxy_operator_lists_dir: "{{ edge_haproxy_operator_dir }}/lists"
+edge_haproxy_operator_routes_file: "{{ edge_haproxy_operator_dir }}/routes.yml"
+edge_haproxy_operator_state_file: "{{ playbook_dir }}/../../operator/state.csv"
+edge_haproxy_operator_vpn_mgmt_ips: "{{ edge_haproxy_operator_lists_dir }}/vpn_mgmt_ips.lst"
+edge_haproxy_operator_blocked_ips: "{{ edge_haproxy_operator_lists_dir }}/blocked_ips.lst"
+edge_haproxy_operator_ru_networks: "{{ edge_haproxy_operator_lists_dir }}/ru_networks.lst"
+edge_haproxy_generated_blocked_ips_file: generated_blocked_ips.lst
+
+edge_haproxy_image: haproxy:2.9-alpine
+edge_haproxy_container_name: edge-haproxy
+edge_haproxy_network_name: ai_service_edge
+edge_haproxy_network_subnet: 172.20.0.0/24
+edge_haproxy_container_ipv4: 172.20.0.3
+edge_haproxy_management_network_name: ai_service_edge_mgmt
+edge_haproxy_management_network_subnet: 172.24.0.0/24
+edge_haproxy_management_container_ipv4: 172.24.0.3
+
+edge_haproxy_cascade_network_name: ai_service_cascade
+edge_haproxy_cascade_network_subnet: 172.21.0.0/24
+edge_haproxy_cascade_container_ipv4: 172.21.0.3
+edge_haproxy_cascade_management_network_name: ai_service_cascade_mgmt
+edge_haproxy_cascade_management_network_subnet: 172.25.0.0/24
+edge_haproxy_cascade_management_container_ipv4: 172.25.0.3
+
+edge_haproxy_p2p_network_name: ai_service_softether_l3_vps_pg48_transport
+edge_haproxy_p2p_network_subnet: 172.27.48.0/24
+edge_haproxy_p2p_container_ipv4: 172.27.48.3
+edge_haproxy_p2p_management_network_name: ai_service_softether_l3_vps_pg48_mgmt
+edge_haproxy_p2p_management_network_subnet: 172.29.48.0/24
+edge_haproxy_p2p_management_container_ipv4: 172.29.48.3
+edge_haproxy_softether_l3_vps_management_host: 172.29.48.2
+
+edge_haproxy_softether_host: 172.20.0.2
+edge_haproxy_softether_management_host: 172.24.0.2
+edge_haproxy_softether_cascade_host: 172.21.0.2
+edge_haproxy_softether_cascade_management_host: 172.25.0.2
+edge_haproxy_softether_l3_vps_host: 172.27.48.2
+edge_haproxy_default_sni_domain: mine-craft.su
+edge_haproxy_stats_bind: 127.0.0.1:8404
+
+edge_haproxy_tcp_rate_limit: 60
+edge_haproxy_tcp_rate_window: 10s
+edge_haproxy_tcp_conn_cur_limit: 80
+edge_haproxy_http_rate_limit: 50
+edge_haproxy_http_error_rate_limit: 5
+edge_haproxy_http_rate_window: 10s
+edge_haproxy_http_ban_expire: 30m
+edge_haproxy_http_scanner_paths:
+  - /SDK/webLanguage
+  - /hudson
+  - /wp-admin
+  - /wp-login
+  - /wp-content
+  - /wp-includes
+  - /xmlrpc.php
+  - /phpmyadmin
+  - /pma
+  - /administrator
+  - /cgi-bin
+  - /.env
+  - /.git
+  - /vendor
+  - /telescope
+  - /debug
+  - /console
+  - /solr
+  - /manager
+  - /jmx-console
+  - /invoker
+  - /jenkins
+  - /actuator
+  - /api/v1/pods
+  - /remote/fgt_lang
+  - /boaform
+  - /HNAP1
+  - /config
+  - /admin
+edge_haproxy_minecraft_game_rate_limit: 10
+edge_haproxy_minecraft_rcon_rate_limit: 5

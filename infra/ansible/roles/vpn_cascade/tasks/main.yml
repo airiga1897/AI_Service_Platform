@@ -1,0 +1,1920 @@
+---
+- name: Validate vpn_cascade state
+  ansible.builtin.assert:
+    that:
+      - vpn_cascade_state in ['present', 'absent']
+      - vpn_cascade_purge_data in [true, false, 'true', 'false', 'True', 'False']
+      - (vpn_cascade_reseed_config | default(false)) in [true, false, 'true', 'false', 'True', 'False']
+      - (vpn_cascade_build_policy_router_image | default(false)) in [true, false, 'true', 'false', 'True', 'False']
+      - (vpn_cascade_policy_router_image_explicit | default(false)) in [true, false, 'true', 'false', 'True', 'False']
+      - vpn_cascade_policy_router_image_mode in ['auto', 'always', 'never']
+    fail_msg: "vpn_cascade_state must be present|absent, vpn_cascade boolean flags must be boolean-like, and policy-router image mode must be auto|always|never."
+
+- name: Check VPN network plan on control node
+  ansible.builtin.stat:
+    path: "{{ vpn_cascade_operator_networks_file }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_cascade_networks_file_stat
+  when: vpn_cascade_state == 'present'
+
+- name: Require VPN network plan for vpn_cascade
+  ansible.builtin.assert:
+    that:
+      - vpn_cascade_networks_file_stat.stat.exists
+      - vpn_cascade_networks_file_stat.stat.isreg
+    fail_msg: "Missing generated VPN network plan on control node: {{ vpn_cascade_operator_networks_file }}. Run sync/generate network plan before vpn_cascade rollout."
+  when: vpn_cascade_state == 'present'
+
+- name: Resolve vpn_cascade policy network assignment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - <<'PY'
+    import csv
+    import json
+    import os
+    import sys
+
+    path = os.environ["NETWORKS_FILE"]
+    alias = os.environ["ALIAS"]
+    with open(path, newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    for row in rows:
+        if row.get("alias") == alias:
+            required = ["policy_subnet", "edge_ip", "cascade_ip", "cascade_router_ip"]
+            missing = [key for key in required if not row.get(key)]
+            if missing:
+                print(f"network plan row for {alias} is missing: {', '.join(missing)}", file=sys.stderr)
+                raise SystemExit(1)
+            print(json.dumps(row, sort_keys=True))
+            raise SystemExit(0)
+    print(f"network plan has no row for alias: {alias}", file=sys.stderr)
+    raise SystemExit(1)
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    NETWORKS_FILE: "{{ vpn_cascade_operator_networks_file }}"
+    ALIAS: "{{ inventory_hostname }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  register: vpn_cascade_network_plan_command
+  changed_when: false
+  when: vpn_cascade_state == 'present'
+
+- name: Store vpn_cascade policy network assignment
+  ansible.builtin.set_fact:
+    vpn_cascade_policy_network_subnet: "{{ (vpn_cascade_network_plan_command.stdout | from_json).policy_subnet }}"
+    vpn_cascade_policy_container_ipv4: "{{ (vpn_cascade_network_plan_command.stdout | from_json).cascade_ip }}"
+    vpn_cascade_policy_router_ipv4: "{{ (vpn_cascade_network_plan_command.stdout | from_json).cascade_router_ip }}"
+  when: vpn_cascade_state == 'present'
+
+- name: Check vpn_cascade compose file
+  ansible.builtin.stat:
+    path: "{{ vpn_cascade_compose_file }}"
+  register: vpn_cascade_compose_stat
+  when: vpn_cascade_state == 'absent' or ((vpn_cascade_reseed_config | default(false)) in [true, 'true', 'True'])
+
+- name: Check cascade seed config on control node
+  ansible.builtin.stat:
+    path: "{{ vpn_cascade_seed_config }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_cascade_seed_stat
+  when: vpn_cascade_state == 'present'
+
+- name: Report clean vpn_cascade bootstrap without seed
+  ansible.builtin.debug:
+    msg: "No cascade seed config found on control node; vpn_cascade will bootstrap clean if remote config is also missing: {{ vpn_cascade_seed_config }}"
+  when:
+    - vpn_cascade_state == 'present'
+    - not vpn_cascade_seed_stat.stat.exists
+
+- name: Check node-specific cascade overrides on control node
+  ansible.builtin.stat:
+    path: "{{ vpn_cascade_local_override_dir }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_cascade_override_stat
+  when: vpn_cascade_state == 'present'
+
+- name: Check vpn_cascade link secret on control node
+  ansible.builtin.stat:
+    path: "{{ vpn_cascade_link_secret_file }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_cascade_link_secret_stat
+  when: vpn_cascade_state == 'present'
+
+- name: Require vpn_cascade link secret
+  ansible.builtin.assert:
+    that:
+      - vpn_cascade_link_secret_stat.stat.exists
+      - vpn_cascade_link_secret_stat.stat.isreg
+    fail_msg: "Missing vpn_cascade link secret JSON on control node: {{ vpn_cascade_link_secret_file }}"
+  when: vpn_cascade_state == 'present'
+
+- name: Read vpn_cascade link secret
+  ansible.builtin.slurp:
+    src: "{{ vpn_cascade_link_secret_file }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_cascade_link_secret_content
+  no_log: true
+  when: vpn_cascade_state == 'present'
+
+- name: Store vpn_cascade secret facts
+  ansible.builtin.set_fact:
+    vpn_cascade_secret: "{{ vpn_cascade_link_secret_content.content | b64decode | from_json }}"
+  no_log: true
+  when: vpn_cascade_state == 'present'
+
+- name: Store vpn_cascade shared config
+  ansible.builtin.set_fact:
+    vpn_cascade_config:
+      hub_name: "{{ vpn_cascade_secret.hub_name }}"
+      cascade_user: "{{ vpn_cascade_secret.cascade_user }}"
+      cascade_user_password: "{{ vpn_cascade_secret.cascade_user_password }}"
+      server_password: "{{ vpn_cascade_secret.server_password }}"
+      hub_password: "{{ vpn_cascade_secret.hub_password }}"
+    vpn_cascade_links_all: []
+    vpn_cascade_active_links: []
+  no_log: true
+  when: vpn_cascade_state == 'present'
+
+- name: Store vpn_cascade link list
+  ansible.builtin.set_fact:
+    vpn_cascade_links_all: "{{ vpn_cascade_links_all + [item | combine({'state': (item.state | default(vpn_cascade_secret.state | default('active')))})] }}"
+  loop: "{{ vpn_cascade_secret.links | default([vpn_cascade_secret]) }}"
+  no_log: true
+  when: vpn_cascade_state == 'present'
+
+- name: Store active vpn_cascade links
+  ansible.builtin.set_fact:
+    vpn_cascade_active_links: "{{ vpn_cascade_active_links + [item] }}"
+  loop: "{{ vpn_cascade_links_all }}"
+  no_log: true
+  when:
+    - vpn_cascade_state == 'present'
+    - item.state == 'active'
+
+- name: Parse cascade topology from state.csv
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - "$STATE_FILE" "$TOPOLOGY_NAME" <<'PY'
+    import csv
+    import json
+    import re
+    import sys
+
+    state_file = sys.argv[1]
+    topology_name = sys.argv[2]
+
+    def split_edges(value):
+        if not value:
+            return []
+        return [item.strip() for item in value.split("+") if item.strip()]
+
+    rows = []
+    with open(state_file, newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            if row.get("kind") == "cascade_topology" and row.get("name") == topology_name and row.get("state") == "present":
+                rows.append(row)
+    if not rows:
+        print(json.dumps({"present": False, "active_edges": [], "old_edges": []}, sort_keys=True))
+        sys.exit(0)
+    if len(rows) > 1:
+        raise SystemExit(f"multiple present cascade_topology rows found for {topology_name}")
+    row = rows[0]
+    edge_re = re.compile(r"^[A-Za-z0-9_.-]+>[A-Za-z0-9_.-]+$")
+    active_edges = split_edges(row.get("active_aliases", ""))
+    old_edges = split_edges(row.get("old_aliases", ""))
+    for edge in active_edges + old_edges:
+        if not edge_re.match(edge):
+            raise SystemExit(f"invalid cascade_topology edge: {edge}")
+    overlap = sorted(set(active_edges).intersection(old_edges))
+    if overlap:
+        raise SystemExit(f"cascade_topology edge(s) listed as active and old: {', '.join(overlap)}")
+    print(json.dumps({
+        "present": True,
+        "active_edges": active_edges,
+        "old_edges": old_edges,
+    }, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    STATE_FILE: "{{ vpn_cascade_operator_state_file }}"
+    TOPOLOGY_NAME: "{{ vpn_cascade_topology_name }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_cascade_topology_command
+  changed_when: false
+  check_mode: false
+  when: vpn_cascade_state == 'present'
+
+- name: Store cascade topology facts
+  ansible.builtin.set_fact:
+    vpn_cascade_topology: "{{ vpn_cascade_topology_command.stdout | from_json }}"
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_topology_command.stdout is defined
+    - vpn_cascade_topology_command.stdout | length > 0
+
+- name: Resolve vpn_cascade HAProxy runtime mode
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - <<'PY'
+    import csv
+    import os
+
+    alias = os.environ["ALIAS"]
+    state_file = os.environ["STATE_FILE"]
+
+    def split_aliases(value):
+        return [item for item in (value or "").split("+") if item]
+
+    with open(state_file, newline="", encoding="utf-8-sig") as handle:
+        rows = list(csv.DictReader(handle))
+
+    enabled = any(
+        row.get("kind") == "service"
+        and row.get("name") == "edge_haproxy"
+        and row.get("state") == "present"
+        and alias in split_aliases(row.get("active_aliases"))
+        for row in rows
+    )
+    print("true" if enabled else "false")
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    ALIAS: "{{ inventory_hostname }}"
+    STATE_FILE: "{{ vpn_cascade_operator_state_file }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_cascade_haproxy_entrypoints_command
+  changed_when: false
+  check_mode: false
+  when: vpn_cascade_state == 'present'
+
+- name: Store vpn_cascade HAProxy entrypoint fact
+  ansible.builtin.set_fact:
+    vpn_cascade_haproxy_entrypoints_enabled: "{{ (vpn_cascade_haproxy_entrypoints_command.stdout | trim) == 'true' }}"
+  when: vpn_cascade_state == 'present'
+
+- name: Store node-scoped vpn_cascade links
+  ansible.builtin.set_fact:
+    vpn_cascade_ingress_links: "{{ vpn_cascade_active_links | selectattr('ingress_alias', 'equalto', inventory_hostname) | list }}"
+    vpn_cascade_egress_links: "{{ vpn_cascade_active_links | selectattr('egress_alias', 'equalto', inventory_hostname) | list }}"
+    vpn_cascade_node_links: "{{ (vpn_cascade_active_links | selectattr('ingress_alias', 'equalto', inventory_hostname) | list) + (vpn_cascade_active_links | selectattr('egress_alias', 'equalto', inventory_hostname) | list) }}"
+    vpn_cascade_egress_aliases: "{{ vpn_cascade_active_links | map(attribute='egress_alias') | list | unique }}"
+    vpn_cascade_ingress_aliases: "{{ vpn_cascade_active_links | map(attribute='ingress_alias') | list | unique }}"
+    vpn_cascade_peer_aliases: "{{ ((vpn_cascade_active_links | selectattr('ingress_alias', 'equalto', inventory_hostname) | map(attribute='egress_alias') | list) + (vpn_cascade_active_links | selectattr('egress_alias', 'equalto', inventory_hostname) | map(attribute='ingress_alias') | list)) | unique }}"
+    vpn_cascade_peer_hosts: []
+  no_log: true
+  when: vpn_cascade_state == 'present'
+
+- name: Store node-scoped cascade topology cleanup facts
+  ansible.builtin.set_fact:
+    vpn_cascade_desired_connection_names: "{{ vpn_cascade_ingress_links | map(attribute='connection_name') | list | unique }}"
+    vpn_cascade_retired_connection_names: >-
+      {{
+        (vpn_cascade_topology.old_edges | default([]))
+        | select('match', '^' ~ inventory_hostname ~ '>')
+        | map('regex_replace', '^([A-Za-z0-9_.-]+)>([A-Za-z0-9_.-]+)$', '\1-to-\2')
+        | list
+        | unique
+      }}
+  when: vpn_cascade_state == 'present'
+
+- name: Store ingress-side vpn_cascade peer endpoints
+  ansible.builtin.set_fact:
+    vpn_cascade_peer_hosts: "{{ (vpn_cascade_peer_hosts + [item.egress_host]) | unique }}"
+  loop: "{{ vpn_cascade_ingress_links }}"
+  no_log: true
+  when: vpn_cascade_state == 'present'
+
+- name: Store egress-side vpn_cascade peer endpoints
+  ansible.builtin.set_fact:
+    vpn_cascade_peer_hosts: "{{ (vpn_cascade_peer_hosts + [item.ingress_host]) | unique }}"
+  loop: "{{ vpn_cascade_egress_links }}"
+  no_log: true
+  when: vpn_cascade_state == 'present'
+
+- name: Validate vpn_cascade shared secret facts
+  ansible.builtin.assert:
+    that:
+      - vpn_cascade_config.hub_name is defined
+      - vpn_cascade_config.cascade_user is defined
+      - vpn_cascade_config.cascade_user_password is defined
+      - vpn_cascade_config.server_password is defined
+      - vpn_cascade_config.hub_password is defined
+      - vpn_cascade_config.server_password is match('^[A-Za-z0-9_-]{32,48}$')
+      - vpn_cascade_config.cascade_user_password is match('^[A-Za-z0-9_-]{32,48}$')
+      - vpn_cascade_config.hub_password is match('^[A-Za-z0-9_-]{32,48}$')
+      - vpn_cascade_active_links | length > 0
+      - vpn_cascade_node_links | length > 0
+    fail_msg: "vpn_cascade secret must include shared passwords and at least one active link for this host."
+  no_log: true
+  when: vpn_cascade_state == 'present'
+
+- name: Validate active vpn_cascade link facts
+  ansible.builtin.assert:
+    that:
+      - item.connection_name is defined
+      - item.ingress_alias is defined
+      - item.ingress_host is defined
+      - item.ingress_host | string | length > 0
+      - item.egress_alias is defined
+      - item.egress_host is defined
+      - item.egress_host | string | length > 0
+      - item.egress_port is defined
+      - item.ingress_alias != item.egress_alias
+    fail_msg: "Each active vpn_cascade link must include connection_name, ingress_alias, egress_alias, egress_host, and egress_port."
+  loop: "{{ vpn_cascade_active_links }}"
+  no_log: true
+  when: vpn_cascade_state == 'present'
+
+- name: Check cascade management allowlist on control node
+  ansible.builtin.stat:
+    path: "{{ vpn_cascade_operator_mgmt_ips }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_cascade_mgmt_allowlist_stat
+  when: vpn_cascade_state == 'present'
+
+- name: Read cascade management allowlist
+  ansible.builtin.slurp:
+    src: "{{ vpn_cascade_operator_mgmt_ips }}"
+  delegate_to: localhost
+  become: false
+  register: vpn_cascade_mgmt_allowlist_content
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_mgmt_allowlist_stat.stat.exists
+    - vpn_cascade_mgmt_allowlist_stat.stat.isreg
+
+- name: Store cascade management allowlist facts
+  ansible.builtin.set_fact:
+    vpn_cascade_mgmt_allowlist: "{{ (vpn_cascade_mgmt_allowlist_content.content | default('') | b64decode).splitlines() | map('trim') | reject('equalto', '') | reject('match', '^#') | list }}"
+  when: vpn_cascade_state == 'present'
+
+- name: Store vpn_cascade admin source IP facts
+  ansible.builtin.set_fact:
+    vpn_cascade_admin_source_ips: >-
+      {{
+        (
+          ['127.0.0.1', vpn_cascade_haproxy_management_source_ip]
+          + ((not (vpn_cascade_haproxy_entrypoints_enabled | default(false))) | ternary(vpn_cascade_mgmt_allowlist | default([]), []))
+        )
+        | unique
+      }}
+  when: vpn_cascade_state == 'present'
+
+- name: Ensure vpn_cascade runtime directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+  loop:
+    - "{{ vpn_cascade_root_dir }}"
+    - "{{ vpn_cascade_data_dir }}"
+    - "{{ vpn_cascade_logs_dir }}"
+    - "{{ vpn_cascade_backup_dir }}"
+    - "{{ vpn_cascade_overrides_dir }}"
+  when: vpn_cascade_state == 'present'
+
+- name: Check existing remote cascade config
+  ansible.builtin.stat:
+    path: "{{ vpn_cascade_data_dir }}/vpn_server.config"
+  register: vpn_cascade_remote_config_stat
+  when: vpn_cascade_state == 'present'
+
+- name: Require installed vpn_cascade before reseeding config
+  ansible.builtin.assert:
+    that:
+      - vpn_cascade_compose_stat.stat.exists
+      - vpn_cascade_remote_config_stat.stat.exists
+      - vpn_cascade_seed_stat.stat.exists
+      - vpn_cascade_seed_stat.stat.isreg
+    fail_msg: "vpn_cascade reseed requires an installed service and a node-specific seed config on the control node: {{ vpn_cascade_seed_config }}"
+  when:
+    - vpn_cascade_state == 'present'
+    - (vpn_cascade_reseed_config | default(false)) in [true, 'true', 'True']
+
+- name: Backup existing remote cascade config before explicit reseed
+  ansible.builtin.copy:
+    src: "{{ vpn_cascade_data_dir }}/vpn_server.config"
+    dest: "{{ vpn_cascade_backup_dir }}/vpn_server.config.pre-reseed-{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}"
+    remote_src: true
+    mode: "0600"
+  register: vpn_cascade_reseed_backup
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_remote_config_stat.stat.exists
+    - (vpn_cascade_reseed_config | default(false)) in [true, 'true', 'True']
+    - not ansible_check_mode
+
+- name: Install opaque SoftEther cascade seed config
+  ansible.builtin.copy:
+    src: "{{ vpn_cascade_seed_config }}"
+    dest: "{{ vpn_cascade_data_dir }}/vpn_server.config"
+    mode: "0600"
+  register: vpn_cascade_seed_config_copy
+  no_log: true
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_seed_stat.stat.exists
+    - vpn_cascade_seed_stat.stat.isreg
+    - >
+      (not vpn_cascade_remote_config_stat.stat.exists)
+      or ((vpn_cascade_reseed_config | default(false)) in [true, 'true', 'True'])
+
+- name: Report SoftEther cascade config reseed backup path
+  ansible.builtin.debug:
+    msg: "SoftEther cascade config backup created before reseed: {{ vpn_cascade_reseed_backup.dest }}"
+  when:
+    - vpn_cascade_reseed_backup is defined
+    - vpn_cascade_reseed_backup.dest is defined
+
+- name: Stage node-specific cascade overrides when present
+  ansible.builtin.copy:
+    src: "{{ vpn_cascade_local_override_dir }}/"
+    dest: "{{ vpn_cascade_overrides_dir }}/"
+    mode: preserve
+  register: vpn_cascade_overrides_copy
+  no_log: true
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_override_stat.stat.exists
+    - vpn_cascade_override_stat.stat.isdir
+
+- name: Install vpn_cascade SoftEther admin IP allowlist
+  ansible.builtin.copy:
+    dest: "{{ vpn_cascade_root_dir }}/adminip.txt"
+    mode: "0640"
+    content: |
+      {% for ip in vpn_cascade_admin_source_ips | unique %}
+      {{ ip }}
+      {% endfor %}
+  register: vpn_cascade_adminip_copy
+  when: vpn_cascade_state == 'present'
+
+- name: Normalize policy-router image mode
+  ansible.builtin.set_fact:
+    vpn_cascade_policy_router_effective_image_mode: "{{ 'always' if (vpn_cascade_build_policy_router_image | bool) else vpn_cascade_policy_router_image_mode }}"
+  run_once: true
+  when: vpn_cascade_state == 'present'
+
+- name: Plan policy-router image on orchestration controller
+  ansible.builtin.shell: |
+    set -euo pipefail
+    test -f "$CONTEXT/Dockerfile"
+    dockerfile_hash="$(sha256sum "$CONTEXT/Dockerfile" | awk '{print substr($1, 1, 12)}')"
+    git_ref="$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2>/dev/null || true)"
+    if [ -z "$git_ref" ]; then
+      git_ref="nogit"
+    fi
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    image_ref="${IMAGE_REPOSITORY}:${stamp}-${git_ref}-${dockerfile_hash}"
+    python3 - "$image_ref" "$CONTEXT" "$dockerfile_hash" "$MODE" <<'PY'
+    import json
+    import sys
+    print(json.dumps({
+        "image_ref": sys.argv[1],
+        "context": sys.argv[2],
+        "dockerfile_hash": sys.argv[3],
+        "mode": sys.argv[4],
+    }, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    CONTEXT: "{{ vpn_cascade_policy_router_build_context }}"
+    IMAGE_REPOSITORY: "{{ vpn_cascade_policy_router_image_repository }}"
+    REPO_ROOT: "{{ playbook_dir }}/../.."
+    MODE: "{{ hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_effective_image_mode }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: vpn_cascade_policy_router_build_plan_command
+  check_mode: false
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not (vpn_cascade_policy_router_image_explicit | bool)
+
+- name: Store policy-router image plan
+  ansible.builtin.set_fact:
+    vpn_cascade_policy_router_build_plan: "{{ vpn_cascade_policy_router_build_plan_command.stdout | from_json }}"
+  run_once: true
+  when:
+    - vpn_cascade_state == 'present'
+    - not (vpn_cascade_policy_router_image_explicit | bool)
+
+- name: Initialize reusable policy-router image discovery
+  ansible.builtin.set_fact:
+    vpn_cascade_policy_router_discovery:
+      found: false
+      image_ref: ""
+      created_at: ""
+  run_once: true
+  when:
+    - vpn_cascade_state == 'present'
+    - not (vpn_cascade_policy_router_image_explicit | bool)
+
+- name: Discover reusable policy-router image on orchestration controller
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - "$IMAGE_REPOSITORY" "$DOCKERFILE_HASH" <<'PY'
+    import json
+    import subprocess
+    import sys
+
+    repository = sys.argv[1]
+    dockerfile_hash = sys.argv[2]
+    suffix = "-" + dockerfile_hash
+
+    result = subprocess.run(
+        ["docker", "images", repository, "--format", "{{ '{{' }}.Repository{{ '}}' }}:{{ '{{' }}.Tag{{ '}}' }}\t{{ '{{' }}.CreatedAt{{ '}}' }}"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    candidates = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        image_ref, created_at = line.split("\t", 1)
+        tag = image_ref.rsplit(":", 1)[-1]
+        if tag == "<none>" or not tag.endswith(suffix):
+            continue
+        smoke = subprocess.run(
+            ["docker", "run", "--rm", "--network", "none", image_ref, "sh", "-c", "ip -V >/dev/null && iptables --version >/dev/null"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if smoke.returncode == 0:
+            candidates.append({"image_ref": image_ref, "created_at": created_at})
+    candidates.sort(key=lambda item: item["created_at"], reverse=True)
+    print(json.dumps({
+        "found": bool(candidates),
+        "image_ref": candidates[0]["image_ref"] if candidates else "",
+        "created_at": candidates[0]["created_at"] if candidates else "",
+    }, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    IMAGE_REPOSITORY: "{{ vpn_cascade_policy_router_image_repository }}"
+    DOCKERFILE_HASH: "{{ hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_build_plan.dockerfile_hash }}"
+  delegate_to: localhost
+  become: true
+  run_once: true
+  register: vpn_cascade_policy_router_discovery_command
+  check_mode: false
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not (vpn_cascade_policy_router_image_explicit | bool)
+    - hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_effective_image_mode in ['auto', 'never']
+
+- name: Store reusable policy-router image discovery
+  ansible.builtin.set_fact:
+    vpn_cascade_policy_router_discovery: "{{ vpn_cascade_policy_router_discovery_command.stdout | from_json }}"
+  run_once: true
+  when:
+    - vpn_cascade_state == 'present'
+    - not (vpn_cascade_policy_router_image_explicit | bool)
+    - hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_effective_image_mode in ['auto', 'never']
+
+- name: Require reusable policy-router image when build is disabled
+  ansible.builtin.assert:
+    that:
+      - hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_discovery.found | bool
+    fail_msg: "No valid local {{ vpn_cascade_policy_router_image_repository }} image found for Dockerfile hash {{ hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_build_plan.dockerfile_hash }}, and policy-router image mode is never. Pass -PolicyRouterImageRef or allow auto/always build."
+  run_once: true
+  when:
+    - vpn_cascade_state == 'present'
+    - not (vpn_cascade_policy_router_image_explicit | bool)
+    - hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_effective_image_mode == 'never'
+
+- name: Store policy-router image action
+  ansible.builtin.set_fact:
+    vpn_cascade_policy_router_should_build: >-
+      {{
+        (not (vpn_cascade_policy_router_image_explicit | bool))
+        and (
+          hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_effective_image_mode == 'always'
+          or (
+            hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_effective_image_mode == 'auto'
+            and not (hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_discovery.found | default(false) | bool)
+          )
+        )
+      }}
+    vpn_cascade_policy_router_selected_image: >-
+      {{
+        vpn_cascade_policy_router_image
+        if (vpn_cascade_policy_router_image_explicit | bool)
+        else (
+          hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_build_plan.image_ref
+          if (
+            hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_effective_image_mode == 'always'
+            or not (hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_discovery.found | default(false) | bool)
+          )
+          else hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_discovery.image_ref
+        )
+      }}
+  when: vpn_cascade_state == 'present'
+
+- name: Use selected policy-router image ref for this rollout
+  ansible.builtin.set_fact:
+    vpn_cascade_policy_router_image: "{{ vpn_cascade_policy_router_selected_image }}"
+    vpn_cascade_policy_router_remote_archive: "/tmp/ai-sp-policy-router-{{ vpn_cascade_policy_router_selected_image | hash('sha1') }}.tar"
+  when:
+    - vpn_cascade_state == 'present'
+    - not (vpn_cascade_policy_router_image_explicit | bool)
+
+- name: Report policy-router image plan
+  ansible.builtin.debug:
+    msg: >-
+      policy-router image mode={{ hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_effective_image_mode }};
+      selected={{ vpn_cascade_policy_router_image }};
+      action={{ 'build' if (vpn_cascade_policy_router_should_build | default(false) | bool) else ('explicit' if (vpn_cascade_policy_router_image_explicit | bool) else 'reuse') }}
+  run_once: true
+  when: vpn_cascade_state == 'present'
+
+- name: Render vpn_cascade Docker Compose
+  ansible.builtin.template:
+    src: docker-compose.vpn-cascade.yml.j2
+    dest: "{{ vpn_cascade_compose_file }}"
+    mode: "0640"
+  register: vpn_cascade_compose_template
+  when: vpn_cascade_state == 'present'
+
+- name: Ensure Docker runtime baseline for vpn_cascade
+  ansible.builtin.include_role:
+    name: docker_runtime_baseline
+  when:
+    - not ansible_check_mode
+    - vpn_cascade_state == 'present' or (vpn_cascade_compose_stat.stat.exists | default(false))
+
+- name: Ensure Docker service is running for vpn_cascade
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify Docker Compose plugin is available for vpn_cascade
+  ansible.builtin.command:
+    cmd: docker compose version
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Build policy-router image on orchestration controller
+  ansible.builtin.shell: |
+    set -euo pipefail
+    archive="$(mktemp /tmp/ai-sp-policy-router.XXXXXX.tar)"
+    build_log="$(mktemp /tmp/ai-sp-policy-router-build.XXXXXX.log)"
+    if ! docker build -t "$IMAGE_REF" -f "$CONTEXT/Dockerfile" "$CONTEXT" >"$build_log" 2>&1; then
+      echo "policy-router docker build failed for $IMAGE_REF" >&2
+      echo "build log: $build_log" >&2
+      echo "--- policy-router build log tail ---" >&2
+      tail -n 80 "$build_log" >&2 || true
+      echo "--- end policy-router build log tail ---" >&2
+      exit 1
+    fi
+    image_id="$(docker image inspect --format '{{ "{{" }}.Id{{ "}}" }}' "$IMAGE_REF")"
+    docker save -o "$archive" "$IMAGE_REF"
+    chmod 0644 "$archive"
+    python3 - "$IMAGE_REF" "$image_id" "$archive" "$build_log" <<'PY'
+    import json
+    import sys
+    print(json.dumps({
+        "image_ref": sys.argv[1],
+        "image_id": sys.argv[2],
+        "archive": sys.argv[3],
+        "build_log": sys.argv[4],
+    }, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    CONTEXT: "{{ hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_build_plan.context }}"
+    IMAGE_REF: "{{ hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_build_plan.image_ref }}"
+  delegate_to: localhost
+  become: true
+  run_once: true
+  register: vpn_cascade_policy_router_build_command
+  changed_when: true
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_policy_router_should_build | bool
+    - not ansible_check_mode
+
+- name: Store policy-router image build artifact
+  ansible.builtin.set_fact:
+    vpn_cascade_policy_router_build_artifact: "{{ vpn_cascade_policy_router_build_command.stdout | from_json }}"
+  run_once: true
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_policy_router_should_build | bool
+    - not ansible_check_mode
+
+- name: Save reused policy-router image on orchestration controller
+  ansible.builtin.shell: |
+    set -euo pipefail
+    archive="$(mktemp /tmp/ai-sp-policy-router.XXXXXX.tar)"
+    image_id="$(docker image inspect --format '{{ "{{" }}.Id{{ "}}" }}' "$IMAGE_REF")"
+    docker run --rm --network none "$IMAGE_REF" sh -c 'ip -V >/dev/null && iptables --version >/dev/null'
+    docker save -o "$archive" "$IMAGE_REF"
+    chmod 0644 "$archive"
+    python3 - "$IMAGE_REF" "$image_id" "$archive" <<'PY'
+    import json
+    import sys
+    print(json.dumps({
+        "image_ref": sys.argv[1],
+        "image_id": sys.argv[2],
+        "archive": sys.argv[3],
+    }, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    IMAGE_REF: "{{ vpn_cascade_policy_router_image }}"
+  delegate_to: localhost
+  become: true
+  run_once: true
+  register: vpn_cascade_policy_router_reuse_command
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not (vpn_cascade_policy_router_image_explicit | bool)
+    - not (vpn_cascade_policy_router_should_build | bool)
+    - not ansible_check_mode
+
+- name: Store reused policy-router image artifact
+  ansible.builtin.set_fact:
+    vpn_cascade_policy_router_build_artifact: "{{ vpn_cascade_policy_router_reuse_command.stdout | from_json }}"
+  run_once: true
+  when:
+    - vpn_cascade_state == 'present'
+    - not (vpn_cascade_policy_router_image_explicit | bool)
+    - not (vpn_cascade_policy_router_should_build | bool)
+    - not ansible_check_mode
+
+- name: Copy policy-router image archive to vpn_cascade host
+  ansible.builtin.copy:
+    src: "{{ hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_build_artifact.archive }}"
+    dest: "{{ vpn_cascade_policy_router_remote_archive }}"
+    mode: "0600"
+  when:
+    - vpn_cascade_state == 'present'
+    - not (vpn_cascade_policy_router_image_explicit | bool)
+    - not ansible_check_mode
+
+- name: Load policy-router image archive on vpn_cascade host
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker load -i "$ARCHIVE" >/dev/null
+    actual="$(docker image inspect --format '{{ "{{" }}.Id{{ "}}" }}' "$IMAGE_REF")"
+    if [ "$actual" != "$EXPECTED_IMAGE_ID" ]; then
+      echo "policy-router image ID mismatch for $IMAGE_REF: expected $EXPECTED_IMAGE_ID, got $actual" >&2
+      exit 1
+    fi
+    docker run --rm --network none "$IMAGE_REF" sh -c 'ip -V >/dev/null && iptables --version >/dev/null'
+  args:
+    executable: /bin/bash
+  environment:
+    ARCHIVE: "{{ vpn_cascade_policy_router_remote_archive }}"
+    IMAGE_REF: "{{ hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_build_artifact.image_ref }}"
+    EXPECTED_IMAGE_ID: "{{ hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_build_artifact.image_id }}"
+  changed_when: true
+  when:
+    - vpn_cascade_state == 'present'
+    - not (vpn_cascade_policy_router_image_explicit | bool)
+    - not ansible_check_mode
+
+- name: Remove staged policy-router image archive from vpn_cascade host
+  ansible.builtin.file:
+    path: "{{ vpn_cascade_policy_router_remote_archive }}"
+    state: absent
+  when:
+    - not (vpn_cascade_policy_router_image_explicit | bool)
+    - vpn_cascade_policy_router_remote_archive is defined
+    - not ansible_check_mode
+
+- name: Remove policy-router image archive from orchestration controller
+  ansible.builtin.file:
+    path: "{{ hostvars[ansible_play_hosts_all[0]].vpn_cascade_policy_router_build_artifact.archive }}"
+    state: absent
+  delegate_to: localhost
+  become: true
+  run_once: true
+  when:
+    - vpn_cascade_state == 'present'
+    - not (vpn_cascade_policy_router_image_explicit | bool)
+    - vpn_cascade_policy_router_build_artifact is defined
+    - not ansible_check_mode
+
+- name: Inspect existing VPN policy Docker network
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker network inspect "{{ vpn_cascade_policy_network_name }}" --format '{{ "{{" }}json (index .IPAM.Config 0){{ "}}" }}' 2>/dev/null || true
+  args:
+    executable: /bin/bash
+  register: vpn_cascade_policy_network_inspect
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Recreate stale VPN policy Docker network for vpn_cascade
+  ansible.builtin.shell: |
+    set -euo pipefail
+    expected="{{ vpn_cascade_policy_network_subnet }}"
+    current_json='{{ vpn_cascade_policy_network_inspect.stdout | default("") }}'
+    current="$(CURRENT_JSON="$current_json" python3 - <<'PY'
+    import json
+    import os
+    raw = os.environ.get("CURRENT_JSON", "").strip()
+    if not raw:
+        print("")
+    else:
+        print(json.loads(raw).get("Subnet", ""))
+    PY
+    )"
+    if [ -z "$current" ] || [ "$current" = "$expected" ]; then
+      exit 0
+    fi
+    docker ps -a --filter "network={{ vpn_cascade_policy_network_name }}" --format '{{ "{{" }}.Names{{ "}}" }}' | while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      docker stop "$name" >/dev/null 2>&1 || true
+      docker network disconnect -f "{{ vpn_cascade_policy_network_name }}" "$name" >/dev/null 2>&1 || true
+    done
+    docker network rm "{{ vpn_cascade_policy_network_name }}"
+    echo "recreated"
+  args:
+    executable: /bin/bash
+  register: vpn_cascade_policy_network_recreate
+  changed_when: "'recreated' in vpn_cascade_policy_network_recreate.stdout"
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Ensure cascade Docker network exists
+  ansible.builtin.command:
+    cmd: docker network create --subnet "{{ vpn_cascade_network_subnet }}" "{{ vpn_cascade_network_name }}"
+  register: vpn_cascade_network_create
+  changed_when: vpn_cascade_network_create.rc == 0
+  failed_when:
+    - vpn_cascade_network_create.rc != 0
+    - "'already exists' not in (vpn_cascade_network_create.stderr | default(''))"
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Ensure cascade management Docker network exists
+  ansible.builtin.command:
+    cmd: docker network create --subnet "{{ vpn_cascade_management_network_subnet }}" "{{ vpn_cascade_management_network_name }}"
+  register: vpn_cascade_management_network_create
+  changed_when: vpn_cascade_management_network_create.rc == 0
+  failed_when:
+    - vpn_cascade_management_network_create.rc != 0
+    - "'already exists' not in (vpn_cascade_management_network_create.stderr | default(''))"
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Ensure VPN policy Docker network exists
+  ansible.builtin.command:
+    cmd: docker network create --subnet "{{ vpn_cascade_policy_network_subnet }}" "{{ vpn_cascade_policy_network_name }}"
+  register: vpn_cascade_policy_network_create
+  changed_when: vpn_cascade_policy_network_create.rc == 0
+  failed_when:
+    - vpn_cascade_policy_network_create.rc != 0
+    - "'already exists' not in (vpn_cascade_policy_network_create.stderr | default(''))"
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Start vpn_cascade container
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ vpn_cascade_compose_file }}" up -d
+    chdir: "{{ vpn_cascade_root_dir }}"
+  register: vpn_cascade_compose_up
+  changed_when: >
+    (vpn_cascade_compose_up.stdout ~ vpn_cascade_compose_up.stderr)
+    is search('(?i)(creating|created|recreating|recreated|starting|started|pulling|pulled|building|built)')
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Restart vpn_cascade when bind-mounted runtime files changed
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ vpn_cascade_compose_file }}" restart "{{ vpn_cascade_container_name }}"
+    chdir: "{{ vpn_cascade_root_dir }}"
+  changed_when: true
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+    - not vpn_cascade_compose_up.changed
+    - >
+      (vpn_cascade_overrides_copy.changed | default(false))
+      or (vpn_cascade_seed_config_copy.changed | default(false))
+      or (vpn_cascade_adminip_copy.changed | default(false))
+
+- name: Verify running vpn_cascade container network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ vpn_cascade_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ vpn_cascade_network_name }}"
+    EXPECTED_IP: "{{ vpn_cascade_container_ipv4 }}"
+  changed_when: false
+  register: vpn_cascade_container_ready
+  until: vpn_cascade_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify running vpn_cascade policy network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ vpn_cascade_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ vpn_cascade_policy_network_name }}"
+    EXPECTED_IP: "{{ vpn_cascade_policy_container_ipv4 }}"
+  changed_when: false
+  register: vpn_cascade_policy_container_ready
+  until: vpn_cascade_policy_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify running vpn_cascade policy-router sidecar namespace
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cascade_pid="$(docker inspect -f '{{ "{{" }}.State.Pid{{ "}}" }}' "$CASCADE_CONTAINER")"
+    router_pid="$(docker inspect -f '{{ "{{" }}.State.Pid{{ "}}" }}' "$POLICY_ROUTER_CONTAINER")"
+    test -n "$cascade_pid" -a -n "$router_pid"
+    test "$(readlink "/proc/$cascade_pid/ns/net")" = "$(readlink "/proc/$router_pid/ns/net")"
+  args:
+    executable: /bin/bash
+  environment:
+    CASCADE_CONTAINER: "{{ vpn_cascade_container_name }}"
+    POLICY_ROUTER_CONTAINER: "{{ vpn_cascade_policy_router_container_name }}"
+  changed_when: false
+  register: vpn_cascade_policy_router_ready
+  until: vpn_cascade_policy_router_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify running vpn_cascade management network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ vpn_cascade_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ vpn_cascade_management_network_name }}"
+    EXPECTED_IP: "{{ vpn_cascade_management_container_ipv4 }}"
+  changed_when: false
+  register: vpn_cascade_management_container_ready
+  until: vpn_cascade_management_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify vpn_cascade adminip.txt is mounted
+  ansible.builtin.command:
+    cmd: docker exec "{{ vpn_cascade_container_name }}" test -r /usr/local/bin/adminip.txt
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Check retired SoftEther cascade listener migration marker
+  ansible.builtin.stat:
+    path: "{{ vpn_cascade_retired_tcp_listeners_marker_file }}"
+  register: vpn_cascade_retired_listener_marker_stat
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_retired_tcp_listeners | length > 0
+
+- name: Remove retired SoftEther cascade TCP listeners from live config
+  ansible.builtin.shell: |
+    set -euo pipefail
+    config="{{ vpn_cascade_data_dir }}/vpn_server.config"
+    ports="{{ vpn_cascade_retired_tcp_listeners | join(' ') }}"
+    if [ ! -f "$config" ]; then
+      exit 0
+    fi
+    if ! grep -Eq "uint[[:space:]]+Port[[:space:]]+($(echo "$ports" | tr ' ' '|'))" "$config"; then
+      exit 0
+    fi
+    docker compose -f "{{ vpn_cascade_compose_file }}" stop "{{ vpn_cascade_container_name }}" >/dev/null 2>&1 || true
+    backup="{{ vpn_cascade_backup_dir }}/vpn_server.config.pre-retired-listener-$(date -u +%Y%m%dT%H%M%SZ)"
+    cp "$config" "$backup"
+    chmod 0600 "$backup"
+    CONFIG_PATH="$config" RETIRED_PORTS="$ports" python3 - <<'PY'
+    import os
+    import re
+    from pathlib import Path
+
+    path = Path(os.environ["CONFIG_PATH"])
+    retired = {int(item) for item in os.environ["RETIRED_PORTS"].split() if item.strip()}
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    out = []
+    i = 0
+    removed = False
+    listener_re = re.compile(r"^\s*declare\s+Listener\d+\s*$")
+    port_re = re.compile(r"\buint\s+Port\s+(\d+)\b")
+
+    while i < len(lines):
+        line = lines[i]
+        if not listener_re.match(line):
+            out.append(line)
+            i += 1
+            continue
+
+        block = [line]
+        i += 1
+        depth = 0
+        started = False
+        while i < len(lines):
+            current = lines[i]
+            block.append(current)
+            depth += current.count("{") - current.count("}")
+            if "{" in current:
+                started = True
+            i += 1
+            if started and depth <= 0:
+                break
+
+        block_ports = {int(match.group(1)) for item in block for match in [port_re.search(item)] if match}
+        if block_ports & retired:
+            removed = True
+            continue
+        out.extend(block)
+
+    if removed:
+        path.write_text("".join(out), encoding="utf-8")
+        print("removed")
+    else:
+        print("unchanged")
+    PY
+  args:
+    executable: /bin/bash
+  register: vpn_cascade_retired_listener_cleanup
+  changed_when: "'removed' in vpn_cascade_retired_listener_cleanup.stdout"
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_retired_tcp_listeners | length > 0
+    - not vpn_cascade_retired_listener_marker_stat.stat.exists
+    - not ansible_check_mode
+
+- name: Restart vpn_cascade after retired listener cleanup
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ vpn_cascade_compose_file }}" up -d
+    chdir: "{{ vpn_cascade_root_dir }}"
+  changed_when: true
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_retired_listener_cleanup.changed | default(false)
+    - not ansible_check_mode
+
+- name: Verify running vpn_cascade container network attachment after cleanup
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "{{ vpn_cascade_container_name }}" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["EXPECTED_NETWORK"]; expected_ip = os.environ["EXPECTED_IP"]; actual_ip = data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress"); running = data.get("State", {}).get("Running"); sys.exit(0 if running and actual_ip == expected_ip else 1)'
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_NETWORK: "{{ vpn_cascade_network_name }}"
+    EXPECTED_IP: "{{ vpn_cascade_container_ipv4 }}"
+  changed_when: false
+  register: vpn_cascade_container_ready_after_cleanup
+  until: vpn_cascade_container_ready_after_cleanup.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_retired_listener_cleanup.changed | default(false)
+    - not ansible_check_mode
+
+- name: Resolve vpn_cascade peer addresses
+  ansible.builtin.shell: |
+    set -euo pipefail
+    getent ahostsv4 "$PEER_HOST" | awk 'NR == 1 { print $1; exit }'
+  args:
+    executable: /bin/bash
+  environment:
+    PEER_HOST: "{{ item }}"
+  loop: "{{ vpn_cascade_peer_hosts | default([]) }}"
+  register: vpn_cascade_peer_address_results
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Allow vpn_cascade transport ports from peer only
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item.0 | trim }}"
+    to_port: "{{ item.1 }}"
+    comment: "ai-service-platform vpn_cascade peer"
+  loop: "{{ (vpn_cascade_peer_address_results.results | default([]) | map(attribute='stdout') | map('trim') | reject('equalto', '') | list) | product([vpn_cascade_host_https_port, vpn_cascade_host_alt_port, vpn_cascade_host_management_port]) | list }}"
+  when:
+    - vpn_cascade_state == 'present'
+    - not (vpn_cascade_haproxy_entrypoints_enabled | default(false))
+    - not ansible_check_mode
+
+- name: Allow vpn_cascade management from operator allowlist
+  community.general.ufw:
+    rule: allow
+    proto: tcp
+    from_ip: "{{ item }}"
+    to_port: "{{ vpn_cascade_host_management_port }}"
+    comment: "ai-service-platform vpn_cascade management"
+  loop: "{{ vpn_cascade_mgmt_allowlist | default([]) }}"
+  when:
+    - vpn_cascade_state == 'present'
+    - not (vpn_cascade_haproxy_entrypoints_enabled | default(false))
+    - not ansible_check_mode
+
+- name: Wait for vpn_cascade management TCP listener
+  ansible.builtin.shell: |
+    set -euo pipefail
+    container_ip="$(docker inspect "$CONTAINER" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["NETWORK"]; print(data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress", ""))')"
+    [ -n "$container_ip" ] || {
+      echo "Could not resolve vpn_cascade container IP" >&2
+      exit 1
+    }
+    timeout "${VPNCMD_TIMEOUT}s" python3 -c 'import socket, sys; s = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=2); s.close()' "$container_ip" 5555
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    NETWORK: "{{ vpn_cascade_management_network_name }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  changed_when: false
+  register: vpn_cascade_management_listener_ready
+  until: vpn_cascade_management_listener_ready.rc == 0
+  retries: 6
+  delay: 5
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Check configured vpn_cascade SoftEther admin password
+  ansible.builtin.shell: |
+    set -euo pipefail
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD ServerInfoGet < /dev/null >/dev/null 2>&1
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  register: vpn_cascade_configured_password_check
+  failed_when: false
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Check blank vpn_cascade SoftEther admin password
+  ansible.builtin.shell: |
+    set -euo pipefail
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD: /CMD ServerInfoGet < /dev/null >/dev/null 2>&1
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  register: vpn_cascade_blank_password_check
+  failed_when: false
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Fail on vpn_cascade SoftEther admin password mismatch
+  ansible.builtin.fail:
+    msg: "vpn_cascade existing SoftEther config has a different admin password. Purge /opt/ai-service-platform/vpn_cascade/softether_data for this lab service or update {{ vpn_cascade_link_secret_file }}."
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+    - vpn_cascade_configured_password_check.rc != 0
+    - vpn_cascade_blank_password_check.rc != 0
+
+- name: Set vpn_cascade SoftEther admin password from blank state
+  ansible.builtin.shell: |
+    set -euo pipefail
+    tmp_file="$(mktemp)"
+    trap 'rm -f "$tmp_file"' EXIT
+    printf 'ServerPasswordSet %s\n' "$SERVER_PASSWORD" > "$tmp_file"
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD: /IN:"$tmp_file" >/dev/null' < "$tmp_file"
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+    - (vpn_cascade_configured_password_check.rc | default(0)) != 0
+    - (vpn_cascade_blank_password_check.rc | default(1)) == 0
+
+- name: Verify vpn_cascade SoftEther server password
+  ansible.builtin.shell: |
+    set -euo pipefail
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD ServerInfoGet < /dev/null >/dev/null
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Ensure vpn_cascade SoftEther listeners
+  ansible.builtin.shell: |
+    set -euo pipefail
+    set +e
+    listener_output="$(timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD ListenerList < /dev/null 2>/dev/null)"
+    rc=$?
+    set -e
+    if [ "$rc" -eq 124 ]; then
+      echo "vpncmd ListenerList timed out" >&2
+      exit 124
+    fi
+    if printf '%s\n' "$listener_output" | grep -Eq "(^|[^0-9])${LISTENER_PORT}([^0-9]|$)"; then
+      exit 0
+    fi
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD ListenerCreate "$LISTENER_PORT" < /dev/null >/dev/null
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    LISTENER_PORT: "{{ item }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  loop:
+    - "443"
+    - "992"
+    - "5555"
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Remove default vpn_cascade SoftEther hub
+  ansible.builtin.shell: |
+    set -euo pipefail
+    set +e
+    hub_output="$(timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD HubList < /dev/null 2>/dev/null)"
+    rc=$?
+    set -e
+    if [ "$rc" -eq 124 ]; then
+      echo "vpncmd HubList timed out" >&2
+      exit 124
+    fi
+    if ! printf '%s\n' "$hub_output" | grep -Fq "DEFAULT"; then
+      exit 0
+    fi
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD HubDelete DEFAULT < /dev/null >/dev/null
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Ensure vpn_cascade SoftEther hub exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    set +e
+    hub_output="$(timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD HubList < /dev/null 2>/dev/null)"
+    rc=$?
+    set -e
+    if [ "$rc" -eq 124 ]; then
+      echo "vpncmd HubList timed out" >&2
+      exit 124
+    fi
+    if printf '%s\n' "$hub_output" | grep -Fq "$HUB_NAME"; then
+      exit 0
+    fi
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD HubCreate "$HUB_NAME" /PASSWORD:"$HUB_PASSWORD" < /dev/null >/dev/null
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
+    HUB_PASSWORD: "{{ vpn_cascade_config.hub_password }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Flush vpn_cascade SoftEther config after hub setup
+  ansible.builtin.shell: |
+    set -euo pipefail
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD Flush < /dev/null >/dev/null
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Deny anonymous enumeration for vpn_cascade SoftEther hub
+  ansible.builtin.shell: |
+    set -euo pipefail
+    tmp_file="$(mktemp)"
+    trap 'rm -f "$tmp_file"' EXIT
+    printf 'Hub %s\nSetEnumDeny\n' "$HUB_NAME" > "$tmp_file"
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file" >/dev/null' < "$tmp_file"
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD Flush < /dev/null >/dev/null
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  register: vpn_cascade_hub_noenum_patch
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Restart vpn_cascade after hub anonymous enumeration update
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ vpn_cascade_compose_file }}" restart "{{ vpn_cascade_container_name }}"
+    chdir: "{{ vpn_cascade_root_dir }}"
+  changed_when: true
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_hub_noenum_patch.changed | default(false)
+    - not ansible_check_mode
+
+- name: Wait for vpn_cascade management TCP listener after hub anonymous enumeration update
+  ansible.builtin.shell: |
+    set -euo pipefail
+    container_ip="$(docker inspect "$CONTAINER" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["NETWORK"]; print(data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress", ""))')"
+    timeout "${VPNCMD_TIMEOUT}s" python3 -c 'import socket, sys; s = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=5); s.close()' "$container_ip" 5555
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    NETWORK: "{{ vpn_cascade_management_network_name }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  register: vpn_cascade_mgmt_tcp_after_noenum
+  changed_when: false
+  until: vpn_cascade_mgmt_tcp_after_noenum.rc == 0
+  retries: 12
+  delay: 3
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_hub_noenum_patch.changed | default(false)
+    - not ansible_check_mode
+
+- name: Ensure vpn_cascade policy LocalBridge TAP exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    bridge_output="$(timeout "${VPNCMD_TIMEOUT}s" docker exec "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD BridgeList 2>/dev/null)"
+    if printf '%s\n' "$bridge_output" | grep -Fq "$TAP_DEVICE"; then
+      exit 0
+    fi
+    timeout "${VPNCMD_TIMEOUT}s" docker exec "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD BridgeCreate "$HUB_NAME" /DEVICE:"$TAP_DEVICE" /TAP:yes >/dev/null
+    timeout "${VPNCMD_TIMEOUT}s" docker exec "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD Flush >/dev/null
+    bridge_output="$(timeout "${VPNCMD_TIMEOUT}s" docker exec "$CONTAINER" vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /CMD BridgeList 2>/dev/null)"
+    if ! printf '%s\n' "$bridge_output" | grep -Fq "$TAP_DEVICE"; then
+      echo "SoftEther LocalBridge for TAP device $TAP_DEVICE was not found after BridgeCreate" >&2
+      exit 1
+    fi
+    echo "created"
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    TAP_DEVICE: "{{ vpn_cascade_policy_tap_device }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  register: vpn_cascade_policy_bridge
+  no_log: true
+  changed_when: "'created' in vpn_cascade_policy_bridge.stdout"
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Check vpn_cascade policy TAP interface before bridge restart
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker exec -u 0 -e TAP_IFACE="$TAP_IFACE" "$CONTAINER" sh -c 'ip link show "$TAP_IFACE" >/dev/null 2>&1'
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_policy_router_container_name }}"
+    TAP_IFACE: "{{ vpn_cascade_policy_tap_interface }}"
+  register: vpn_cascade_policy_tap_check
+  changed_when: false
+  failed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Restart vpn_cascade after policy bridge creation
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ vpn_cascade_compose_file }}" up -d --force-recreate softether-cascade policy-router
+    chdir: "{{ vpn_cascade_root_dir }}"
+  changed_when: true
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+    - vpn_cascade_policy_bridge.changed | default(false) or (vpn_cascade_policy_tap_check.rc | default(0)) != 0
+
+- name: Wait for vpn_cascade management TCP listener after policy bridge restart
+  ansible.builtin.shell: |
+    set -euo pipefail
+    container_ip="$(docker inspect "$CONTAINER" | python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; network = os.environ["NETWORK"]; print(data.get("NetworkSettings", {}).get("Networks", {}).get(network, {}).get("IPAddress", ""))')"
+    [ -n "$container_ip" ] || {
+      echo "Could not resolve vpn_cascade management IP" >&2
+      exit 1
+    }
+    timeout "${VPNCMD_TIMEOUT}s" python3 -c 'import socket, sys; s = socket.create_connection((sys.argv[1], 5555), timeout=2); s.close()' "$container_ip"
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    NETWORK: "{{ vpn_cascade_management_network_name }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  changed_when: false
+  register: vpn_cascade_mgmt_after_policy_bridge
+  until: vpn_cascade_mgmt_after_policy_bridge.rc == 0
+  retries: 12
+  delay: 3
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+    - vpn_cascade_policy_bridge.changed | default(false) or (vpn_cascade_policy_tap_check.rc | default(0)) != 0
+
+- name: Verify vpn_cascade policy TAP interface exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker exec -u 0 -e TAP_IFACE="$TAP_IFACE" "$CONTAINER" sh -c 'ip link show "$TAP_IFACE" >/dev/null'
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_policy_router_container_name }}"
+    TAP_IFACE: "{{ vpn_cascade_policy_tap_interface }}"
+  changed_when: false
+  register: vpn_cascade_policy_tap_ready
+  until: vpn_cascade_policy_tap_ready.rc == 0
+  retries: 30
+  delay: 2
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Configure vpn_cascade policy router interface
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker exec -u 0 -e TAP_IFACE="$TAP_IFACE" -e ROUTER_IP="$ROUTER_IP" "$CONTAINER" sh -c '
+      set -eu
+      ip link set "$TAP_IFACE" up
+      ip addr replace "$ROUTER_IP/24" dev "$TAP_IFACE"
+    '
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_policy_router_container_name }}"
+    TAP_IFACE: "{{ vpn_cascade_policy_tap_interface }}"
+    ROUTER_IP: "{{ vpn_cascade_policy_router_ipv4 }}"
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_policy_router_ipv4 | length > 0
+    - not ansible_check_mode
+
+- name: Verify vpn_cascade policy-router dataplane tools
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker exec -u 0 "$CONTAINER" sh -c 'ip route >/dev/null && iptables -t nat -S POSTROUTING >/dev/null'
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_policy_router_container_name }}"
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - not ansible_check_mode
+
+- name: Check egress-side vpn_cascade user
+  ansible.builtin.shell: |
+    set -euo pipefail
+    tmp_file="$(mktemp)"
+    trap 'rm -f "$tmp_file"' EXIT
+    printf 'Hub %s\nUserGet %s\n' "$HUB_NAME" "$CASCADE_USER" > "$tmp_file"
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file" >/dev/null' < "$tmp_file"
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
+    CASCADE_USER: "{{ vpn_cascade_config.cascade_user }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  register: vpn_cascade_egress_user_get
+  failed_when: false
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - inventory_hostname in vpn_cascade_egress_aliases
+    - not ansible_check_mode
+
+- name: Create egress-side vpn_cascade user
+  ansible.builtin.shell: |
+    set -euo pipefail
+    tmp_file="$(mktemp)"
+    trap 'rm -f "$tmp_file"' EXIT
+    printf 'Hub %s\nUserCreate %s /GROUP: /REALNAME: /NOTE:\n' "$HUB_NAME" "$CASCADE_USER" > "$tmp_file"
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file" >/dev/null' < "$tmp_file"
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
+    CASCADE_USER: "{{ vpn_cascade_config.cascade_user }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  register: vpn_cascade_egress_user_create
+  failed_when: false
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - inventory_hostname in vpn_cascade_egress_aliases
+    - not ansible_check_mode
+    - (vpn_cascade_egress_user_get.rc | default(0)) != 0
+
+- name: Fail on egress-side vpn_cascade user create failure
+  ansible.builtin.fail:
+    msg: "vpn_cascade could not create cascade user in hub {{ vpn_cascade_config.hub_name }} on {{ inventory_hostname }}. UserGet rc={{ vpn_cascade_egress_user_get.rc }}; UserCreate rc={{ vpn_cascade_egress_user_create.rc | default('not-run') }}. Verify that the hub exists and the SoftEther user schema is clean, or purge /opt/ai-service-platform/vpn_cascade/softether_data for this lab service."
+  when:
+    - vpn_cascade_state == 'present'
+    - inventory_hostname in vpn_cascade_egress_aliases
+    - not ansible_check_mode
+    - (vpn_cascade_egress_user_get.rc | default(0)) != 0
+    - (vpn_cascade_egress_user_create.rc | default(1)) != 0
+
+- name: Set egress-side vpn_cascade user password
+  ansible.builtin.shell: |
+    set -euo pipefail
+    tmp_file="$(mktemp)"
+    trap 'rm -f "$tmp_file"' EXIT
+    printf 'Hub %s\nUserPasswordSet %s /PASSWORD:%s\n' "$HUB_NAME" "$CASCADE_USER" "$CASCADE_USER_PASSWORD" > "$tmp_file"
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file" >/dev/null' < "$tmp_file"
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
+    CASCADE_USER: "{{ vpn_cascade_config.cascade_user }}"
+    CASCADE_USER_PASSWORD: "{{ vpn_cascade_config.cascade_user_password }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+  no_log: true
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - inventory_hostname in vpn_cascade_egress_aliases
+    - not ansible_check_mode
+
+- name: Configure ingress-side vpn_cascade links
+  ansible.builtin.include_tasks: link.yml
+  loop: "{{ vpn_cascade_ingress_links }}"
+  loop_control:
+    loop_var: vpn_cascade_link
+    label: "{{ vpn_cascade_link.connection_name }}"
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_ingress_links | length > 0
+
+- name: Discover retired ingress-side vpn_cascade connections
+  ansible.builtin.shell: |
+    set -euo pipefail
+    tmp_file="$(mktemp)"
+    output_file="$(mktemp)"
+    trap 'rm -f "$tmp_file" "$output_file"' EXIT
+    printf 'Hub %s\nCascadeList\n' "$HUB_NAME" > "$tmp_file"
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file"' < "$tmp_file" > "$output_file" 2>/dev/null
+    python3 - "$output_file" <<'PY'
+    import json
+    import os
+    import re
+    import sys
+
+    output_path = sys.argv[1]
+
+    def load_names(env_name):
+        raw = os.environ.get(env_name, "[]")
+        try:
+            values = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"invalid JSON in {env_name}: {exc}") from exc
+        return {str(item).strip() for item in values if str(item).strip()}
+
+    desired = load_names("DESIRED_CONNECTION_NAMES_JSON")
+    explicit_retired = load_names("RETIRED_CONNECTION_NAMES_JSON")
+    text = open(output_path, encoding="utf-8", errors="replace").read()
+    actual = set(re.findall(r"\b[A-Za-z0-9_.-]+-to-[A-Za-z0-9_.-]+\b", text))
+    retired = (actual - desired) | explicit_retired
+    for name in sorted(retired):
+        print(name)
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+    DESIRED_CONNECTION_NAMES_JSON: "{{ vpn_cascade_desired_connection_names | default([]) | to_json }}"
+    RETIRED_CONNECTION_NAMES_JSON: "{{ vpn_cascade_retired_connection_names | default([]) | to_json }}"
+  register: vpn_cascade_retired_connections_command
+  changed_when: false
+  no_log: "{{ vpn_cascade_no_log | bool }}"
+  check_mode: false
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_topology.present | default(false)
+    - not ansible_check_mode
+
+- name: Store retired ingress-side vpn_cascade connections
+  ansible.builtin.set_fact:
+    vpn_cascade_retired_connections: >-
+      {{
+        (
+          (vpn_cascade_retired_connection_names | default([]))
+          + (vpn_cascade_retired_connections_command.stdout_lines | default([]))
+        )
+        | reject('equalto', '')
+        | list
+        | unique
+      }}
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_topology.present | default(false)
+
+- name: Report retired ingress-side vpn_cascade connections
+  ansible.builtin.debug:
+    msg: "would remove retired cascade connection {{ item }}"
+  loop: "{{ vpn_cascade_retired_connections | default([]) }}"
+  changed_when: ansible_check_mode
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_topology.present | default(false)
+    - vpn_cascade_retired_connections | default([]) | length > 0
+
+- name: Remove retired ingress-side vpn_cascade connections
+  ansible.builtin.shell: |
+    set -euo pipefail
+    tmp_file="$(mktemp)"
+    output_file="$(mktemp)"
+    trap 'rm -f "$tmp_file" "$output_file"' EXIT
+    python3 - <<'PY'
+    import json
+    import os
+    import sys
+
+    candidate = os.environ["CONNECTION_NAME"].strip()
+    desired = {str(item).strip() for item in json.loads(os.environ.get("DESIRED_CONNECTION_NAMES_JSON", "[]")) if str(item).strip()}
+    if candidate in desired:
+        print(f"Refusing to delete desired active cascade connection: {candidate}", file=sys.stderr)
+        sys.exit(2)
+    PY
+    printf 'Hub %s\nCascadeList\n' "$HUB_NAME" > "$tmp_file"
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file"' < "$tmp_file" > "$output_file" 2>/dev/null
+    if ! python3 - "$output_file" "$CONNECTION_NAME" <<'PY'
+    import re
+    import sys
+
+    text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+    name = sys.argv[2]
+    actual = set(re.findall(r"\b[A-Za-z0-9_.-]+-to-[A-Za-z0-9_.-]+\b", text))
+    sys.exit(0 if name in actual else 1)
+    PY
+    then
+      printf 'absent\n'
+      exit 0
+    fi
+    printf 'Hub %s\nCascadeOffline %s\nCascadeDelete %s\nFlush\n' "$HUB_NAME" "$CONNECTION_NAME" "$CONNECTION_NAME" > "$tmp_file"
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file" >/dev/null' < "$tmp_file"
+    printf 'removed\n'
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
+    CONNECTION_NAME: "{{ item }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+    DESIRED_CONNECTION_NAMES_JSON: "{{ vpn_cascade_desired_connection_names | default([]) | to_json }}"
+  loop: "{{ vpn_cascade_retired_connections | default([]) }}"
+  no_log: true
+  register: vpn_cascade_remove_retired_connections
+  changed_when: "'removed' in vpn_cascade_remove_retired_connections.stdout"
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_topology.present | default(false)
+    - vpn_cascade_retired_connections | default([]) | length > 0
+    - not ansible_check_mode
+
+- name: Verify retired ingress-side vpn_cascade connections are absent
+  ansible.builtin.shell: |
+    set -euo pipefail
+    tmp_file="$(mktemp)"
+    output_file="$(mktemp)"
+    trap 'rm -f "$tmp_file" "$output_file"' EXIT
+    printf 'Hub %s\nCascadeList\n' "$HUB_NAME" > "$tmp_file"
+    timeout "${VPNCMD_TIMEOUT}s" docker exec -i -e SERVER_PASSWORD="$SERVER_PASSWORD" "$CONTAINER" sh -c 'tmp_file="$(mktemp)"; trap "rm -f \"$tmp_file\"" EXIT; cat > "$tmp_file"; vpncmd localhost:5555 /SERVER /PASSWORD:"$SERVER_PASSWORD" /IN:"$tmp_file"' < "$tmp_file" > "$output_file" 2>/dev/null
+    python3 - "$output_file" <<'PY'
+    import json
+    import os
+    import re
+    import sys
+
+    text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+    actual = set(re.findall(r"\b[A-Za-z0-9_.-]+-to-[A-Za-z0-9_.-]+\b", text))
+    retired = {str(item).strip() for item in json.loads(os.environ.get("RETIRED_CONNECTION_NAMES_JSON", "[]")) if str(item).strip()}
+    remaining = sorted(actual & retired)
+    if remaining:
+        print("Retired cascade connection(s) still exist: " + ", ".join(remaining), file=sys.stderr)
+        sys.exit(1)
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ vpn_cascade_container_name }}"
+    HUB_NAME: "{{ vpn_cascade_config.hub_name }}"
+    SERVER_PASSWORD: "{{ vpn_cascade_config.server_password }}"
+    VPNCMD_TIMEOUT: "{{ vpn_cascade_vpncmd_timeout_seconds }}"
+    RETIRED_CONNECTION_NAMES_JSON: "{{ vpn_cascade_retired_connections | default([]) | to_json }}"
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_topology.present | default(false)
+    - vpn_cascade_retired_connections | default([]) | length > 0
+    - not ansible_check_mode
+
+- name: Verify vpn_cascade published transport ports
+  ansible.builtin.command:
+    cmd: docker port "{{ vpn_cascade_container_name }}"
+  register: vpn_cascade_docker_ports
+  changed_when: false
+  failed_when: >
+    ('443/tcp' not in vpn_cascade_docker_ports.stdout)
+    or ('992/tcp' not in vpn_cascade_docker_ports.stdout)
+    or ('5555/tcp' not in vpn_cascade_docker_ports.stdout)
+    or ((':' ~ (vpn_cascade_host_https_port | string)) not in vpn_cascade_docker_ports.stdout)
+    or ((':' ~ (vpn_cascade_host_alt_port | string)) not in vpn_cascade_docker_ports.stdout)
+    or ((':' ~ (vpn_cascade_host_management_port | string)) not in vpn_cascade_docker_ports.stdout)
+  when:
+    - vpn_cascade_state == 'present'
+    - not (vpn_cascade_haproxy_entrypoints_enabled | default(false))
+    - not ansible_check_mode
+
+- name: Verify vpn_cascade has no direct published ports when HAProxy owns entrypoints
+  ansible.builtin.command:
+    cmd: docker port "{{ vpn_cascade_container_name }}"
+  register: vpn_cascade_haproxy_docker_ports
+  changed_when: false
+  failed_when: vpn_cascade_haproxy_docker_ports.stdout | trim | length > 0
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_haproxy_entrypoints_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Verify retired SoftEther cascade TCP listeners are absent from config
+  ansible.builtin.shell: |
+    set -euo pipefail
+    config="{{ vpn_cascade_data_dir }}/vpn_server.config"
+    ports="{{ vpn_cascade_retired_tcp_listeners | join(' ') }}"
+    if [ ! -f "$config" ]; then
+      exit 0
+    fi
+    if grep -Eq "uint[[:space:]]+Port[[:space:]]+($(echo "$ports" | tr ' ' '|'))" "$config"; then
+      echo "Retired SoftEther cascade TCP listener still exists in live config. Remove it intentionally or clear {{ vpn_cascade_retired_tcp_listeners_marker_file }} to re-run one-time migration." >&2
+      exit 1
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_retired_tcp_listeners | length > 0
+    - not ansible_check_mode
+
+- name: Mark retired SoftEther cascade listener migration complete
+  ansible.builtin.copy:
+    dest: "{{ vpn_cascade_retired_tcp_listeners_marker_file }}"
+    mode: "0640"
+    content: |
+      Retired SoftEther cascade listeners removed.
+      Ports: {{ vpn_cascade_retired_tcp_listeners | join(', ') }}
+  when:
+    - vpn_cascade_state == 'present'
+    - vpn_cascade_retired_tcp_listeners | length > 0
+    - not vpn_cascade_retired_listener_marker_stat.stat.exists
+    - not ansible_check_mode
+
+- name: Ensure Docker service is running before stopping vpn_cascade
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+  when:
+    - vpn_cascade_state == 'absent'
+    - vpn_cascade_compose_stat.stat.exists | default(false)
+    - not ansible_check_mode
+
+- name: Verify Docker Compose plugin is available before stopping vpn_cascade
+  ansible.builtin.command:
+    cmd: docker compose version
+  changed_when: false
+  when:
+    - vpn_cascade_state == 'absent'
+    - vpn_cascade_compose_stat.stat.exists | default(false)
+    - not ansible_check_mode
+
+- name: Stop vpn_cascade container
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ vpn_cascade_compose_file }}" down
+    chdir: "{{ vpn_cascade_root_dir }}"
+  changed_when: true
+  when:
+    - vpn_cascade_state == 'absent'
+    - vpn_cascade_compose_stat.stat.exists | default(false)
+    - not ansible_check_mode
+
+- name: Purge vpn_cascade runtime data when explicitly requested
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ vpn_cascade_data_dir }}"
+    - "{{ vpn_cascade_logs_dir }}"
+    - "{{ vpn_cascade_overrides_dir }}"
+  when:
+    - vpn_cascade_state == 'absent'
+    - vpn_cascade_purge_data in [true, 'true', 'True']
+    - not ansible_check_mode

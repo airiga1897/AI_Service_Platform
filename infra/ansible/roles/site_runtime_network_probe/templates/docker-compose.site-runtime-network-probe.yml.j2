@@ -1,0 +1,42 @@
+---
+services:
+  anchor:
+    image: {{ site_runtime_network_probe_image }}
+    pull_policy: never
+    container_name: {{ site_runtime_network_probe_anchor_name }}
+    cap_add:
+      - NET_ADMIN
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        while true; do
+          ip route replace {{ site_runtime_network_probe_destination_ipv4 }}/32 via {{ site_runtime_network_probe_router_ipv4 }}
+          sleep {{ site_runtime_network_probe_route_reconcile_seconds }}
+        done
+    restart: unless-stopped
+    networks:
+      app:
+        ipv4_address: {{ site_runtime_network_probe_anchor_ipv4 }}
+
+  tcp-probe:
+    image: {{ site_runtime_network_probe_image }}
+    pull_policy: never
+    network_mode: service:anchor
+    cap_drop:
+      - ALL
+    entrypoint:
+      - /bin/sh
+      - -ec
+    command:
+      - "nc -w {{ site_runtime_network_probe_tcp_timeout_seconds }} {{ site_runtime_network_probe_destination_ipv4 }} {{ site_runtime_network_probe_destination_port }} </dev/null"
+    depends_on:
+      anchor:
+        condition: service_started
+    profiles:
+      - probe
+
+networks:
+  app:
+    external: true
+    name: {{ site_runtime_network_probe_app_network }}

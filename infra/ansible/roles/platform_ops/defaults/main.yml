@@ -1,0 +1,8 @@
+---
+platform_ops_user: useradmin
+platform_ops_group: useradmin
+platform_ops_log_dir: /var/log/ai-service-platform
+platform_ops_job_log_dir: "{{ platform_ops_log_dir }}/jobs"
+platform_ops_state_dir: /var/lib/ai-service-platform
+platform_ops_job_state_dir: "{{ platform_ops_state_dir }}/jobs"
+platform_ops_logrotate_retention: 14

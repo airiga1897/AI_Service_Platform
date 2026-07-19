@@ -1,0 +1,127 @@
+#!/bin/bash
+# failback.sh — Возврат VPS2 в режим hot standby после восстановления VPS1
+#
+# Запускать ВРУЧНУЮ только после того как:
+#   1. VPS1 полностью восстановлен и работает
+#   2. DNS переключён обратно на VPS1
+#   3. Трафик идёт через VPS1
+#
+# Запуск:
+#   /opt/scripts/failback.sh
+#
+# Что делает:
+#   1. Проверяет доступность VPS1
+#   2. Останавливает production стек на VPS2
+#   3. Пересинхронизирует PostgreSQL через pg_basebackup
+#   4. Запускает VPS2 обратно в режиме hot standby
+
+set -euo pipefail
+
+APP_DIR="{{ app_dir }}"
+LOG="/var/log/failback.log"
+VPS1_IP="{{ pg_primary_host }}"
+VPS1_PORT="{{ pg_primary_port }}"
+PG_REPLICATION_USER="{{ pg_replication_user }}"
+PG_REPLICATION_SLOT="{{ pg_replication_slot }}"
+STANDBY_VOLUME="{{ db_standby_volume }}"
+
+log()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
+fail() { log "ОШИБКА: $*"; exit 1; }
+
+log "========================================="
+log "FAILBACK VPS2 → РЕЖИМ HOT STANDBY"
+log "========================================="
+
+# 0. Предупреждение
+log ""
+log "ВНИМАНИЕ: убедись что:"
+log "  - DNS уже переключён обратно на VPS1 ($VPS1_IP)"
+log "  - VPS1 принимает трафик и работает стабильно"
+log "  - Нет незавершённых транзакций на VPS2"
+log ""
+read -rp "Продолжить? [y/N] " CONFIRM
+if [[ "${CONFIRM,,}" != "y" ]]; then
+    log "Failback отменён пользователем."
+    exit 0
+fi
+
+# 1. Проверить доступность VPS1
+log "Проверяю доступность VPS1 ($VPS1_IP)..."
+if ! nc -z -w5 "$VPS1_IP" "$VPS1_PORT" 2>/dev/null; then
+    fail "VPS1 ($VPS1_IP:$VPS1_PORT) недоступен. Failback невозможен."
+fi
+log "VPS1 доступен."
+
+# 2. Проверить что PostgreSQL на VPS1 — primary
+log "Проверяю роль PostgreSQL на VPS1..."
+PG_ROLE=$(PGPASSWORD="{{ vault_pg_replication_password }}" psql \
+    -h "$VPS1_IP" -p "$VPS1_PORT" \
+    -U "$PG_REPLICATION_USER" \
+    -d postgres \
+    -tAc "SELECT CASE WHEN pg_is_in_recovery() THEN 'standby' ELSE 'primary' END;" 2>/dev/null || echo "error")
+
+if [[ "$PG_ROLE" != "primary" ]]; then
+    fail "PostgreSQL на VPS1 не является primary (роль: $PG_ROLE). Проверь состояние VPS1."
+fi
+log "PostgreSQL на VPS1 — primary. Продолжаю."
+
+# 3. Остановить production стек на VPS2 (оставить только подготовку к standby)
+log "Останавливаю production стек на VPS2..."
+cd "$APP_DIR"
+docker compose -f docker-compose.prod.yml down \
+    && log "Production стек остановлен." \
+    || fail "Не удалось остановить production стек."
+
+# 4. Удалить старый standby volume и пересинхронизироваться с VPS1
+log "Удаляю старый PostgreSQL volume (данные будут заменены с VPS1)..."
+docker volume rm "$STANDBY_VOLUME" 2>/dev/null || true
+docker volume create "$STANDBY_VOLUME" \
+    && log "Volume пересоздан." \
+    || fail "Не удалось пересоздать volume."
+
+log "Запускаю pg_basebackup с VPS1 (это может занять несколько минут)..."
+docker run --rm \
+    -e PGPASSWORD="{{ vault_pg_replication_password }}" \
+    -v "${STANDBY_VOLUME}:/var/lib/postgresql/data" \
+    postgres:15-alpine \
+    pg_basebackup \
+        -h "$VPS1_IP" \
+        -p "$VPS1_PORT" \
+        -U "$PG_REPLICATION_USER" \
+        -D /var/lib/postgresql/data \
+        -R -Xs -P \
+        --slot="$PG_REPLICATION_SLOT" \
+    && log "pg_basebackup завершён успешно." \
+    || fail "pg_basebackup завершился с ошибкой. Проверь подключение и права репликации."
+
+# 5. Запустить VPS2 обратно в режиме standby
+log "Запускаю VPS2 в режиме hot standby..."
+docker compose -f docker-compose.standby.yml up -d \
+    && log "Hot standby запущен." \
+    || fail "Не удалось запустить hot standby."
+
+# 6. Проверить что репликация установлена
+log "Проверяю статус репликации..."
+sleep 5
+REPLICATION_STATUS=$(PGPASSWORD="{{ vault_pg_replication_password }}" psql \
+    -h "$VPS1_IP" -p "$VPS1_PORT" \
+    -U "$PG_REPLICATION_USER" \
+    -d postgres \
+    -tAc "SELECT state FROM pg_stat_replication WHERE application_name LIKE '%standby%' OR client_addr = (SELECT inet_server_addr() FROM pg_stat_activity LIMIT 1) LIMIT 1;" 2>/dev/null || echo "unknown")
+
+log "Статус репликации на VPS1: ${REPLICATION_STATUS:-не определён (проверь вручную)}"
+
+log ""
+log "========================================="
+log "FAILBACK ЗАВЕРШЁН"
+log "========================================="
+log ""
+log "VPS2 работает в режиме hot standby."
+log "PostgreSQL реплицируется с VPS1 ($VPS1_IP)."
+log ""
+log "Проверить статус репликации на VPS1:"
+log "  docker exec {{ db_container_name }} psql -U {{ vault_db_user }} -c 'SELECT * FROM pg_stat_replication;'"
+log ""
+log "Проверить статус standby на VPS2:"
+log "  docker exec {{ db_standby_container_name }} psql -U {{ vault_db_user }} -c 'SELECT pg_is_in_recovery();'"
+log ""

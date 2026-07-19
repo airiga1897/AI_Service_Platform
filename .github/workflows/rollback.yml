@@ -1,0 +1,108 @@
+# Workflow CI «Rollback».
+#
+# Консервативный откат: re-deploy предыдущего image ref (не git checkout).
+# Требуется явный to_ref; lookup deploy-state по тегам — follow-up.
+# Фактический SSH-откат включён только для ai-retail-dev / preprod.
+
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance:
+        description: Runtime instance to roll back
+        required: true
+        type: choice
+        options:
+          - aromaflow-work
+          - aromaflow-demo
+          - ai-retail-mvp
+          - ai-retail-dev
+      environment:
+        description: Deploy environment
+        required: true
+        type: choice
+        options:
+          - preprod
+          - prod
+      to_ref:
+        description: Previous immutable image ref to re-deploy (required)
+        required: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_metadata: ${{ steps.preflight.outputs.metadata }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Проверка to_ref
+        id: resolve_ref
+        run: |
+          if [ -z "${{ inputs.to_ref }}" ]; then
+            echo "to_ref is required. Deploy-state tag lookup is not implemented yet."
+            echo "Pass the previous immutable image ref explicitly."
+            exit 1
+          fi
+          echo "image_ref=${{ inputs.to_ref }}" >> "$GITHUB_OUTPUT"
+
+      - name: Установка Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Установка Python-зависимостей
+        run: python -m pip install --upgrade pip pyyaml jinja2
+
+      - name: Проверка репозитория (make check)
+        run: make check
+
+      - name: Rollback preflight
+        id: preflight
+        run: |
+          python tools/deploy/preflight.py \
+            --instance "${{ inputs.instance }}" \
+            --environment "${{ inputs.environment }}" \
+            --image-ref "${{ steps.resolve_ref.outputs.image_ref }}" \
+            > preflight.json
+          echo "metadata<<EOF" >> "$GITHUB_OUTPUT"
+          cat preflight.json >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+  unsupported-rollback:
+    needs: preflight
+    runs-on: ubuntu-latest
+    if: ${{ inputs.instance != 'ai-retail-dev' || inputs.environment != 'preprod' }}
+    steps:
+      - name: Проверка разрешённого rollback
+        run: |
+          echo "Rollback is intentionally not enabled for instance=${{ inputs.instance }} environment=${{ inputs.environment }}."
+          echo "Only ai-retail-dev/preprod is enabled in this milestone."
+          exit 1
+
+  rollback:
+    needs: preflight
+    runs-on: ubuntu-latest
+    if: ${{ inputs.instance == 'ai-retail-dev' && inputs.environment == 'preprod' }}
+    environment:
+      name: ai-retail-dev-preprod
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guarded SSH rollback (re-deploy to_ref)
+        env:
+          IMAGE_REF: ${{ inputs.to_ref }}
+          DEPLOY_DIR: ${{ fromJson(needs.preflight.outputs.deploy_metadata).deploy_dir }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+        run: |
+          if [ -z "${SSH_HOST:-}" ] || [ -z "${SSH_USER:-}" ] || [ -z "${SSH_KEY:-}" ]; then
+            echo "SSH rollback skipped: set SSH_HOST, SSH_USER, and SSH_KEY in GitHub Environment secrets."
+            echo "Rollback policy: re-deploy previous image ref (not git checkout)."
+            echo "Target ref: ${IMAGE_REF}"
+            exit 0
+          fi
+          echo "SSH rollback would re-deploy ${IMAGE_REF} here."

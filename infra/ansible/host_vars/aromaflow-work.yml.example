@@ -1,0 +1,28 @@
+---
+# Пример host_vars для конкретного хоста, на котором развёрнут
+# инстанс `aromaflow-work` (см. `services.yml`).
+#
+# Скопировать в `host_vars/<inventory-host>.yml` и заполнить под
+# свой инвентарь. Реальные host_vars в этот репозиторий **не**
+# коммитятся (там IP, имена внутренних хостов, при необходимости —
+# vault-ссылки).
+
+# Имя приложения. Используется как префикс контейнеров, volume'ов
+# и cron-job'ов — должно совпадать с runtime instance name из
+# `services.yml`.
+app_name: aromaflow-work
+
+# Путь к каталогу приложения на хосте. По умолчанию — `/opt/{{ app_name }}`.
+# app_dir: /opt/aromaflow-work
+
+# Образ, который запускается на standby-ноде (тег подставляется при запуске).
+app_image: "ghcr.io/airiga1897/aromaflowai"
+
+# WSGI-модуль приложения (используется в gunicorn-команде standby-стека).
+app_wsgi_module: "aromaflow_project.wsgi:application"
+
+# Production-домены, на которые failover-скрипт предложит переключить DNS.
+# Источник истины — `services.yml.runtime_instances.aromaflow-work.domains.prod`.
+app_domains:
+  - mine-craft.su
+  - www.mine-craft.su

@@ -1,0 +1,20 @@
+---
+- name: Развёртывание основного узла PostgreSQL runtime
+  hosts: postgres_runtimes
+  become: true
+  gather_facts: false
+  vars:
+    postgres_runtime_state: present
+    postgres_runtime_purge_data: false
+  roles:
+    - postgres_runtime
+
+- name: Развёртывание резервных узлов PostgreSQL runtime
+  hosts: candidate_postgres_runtimes
+  become: true
+  gather_facts: false
+  vars:
+    postgres_runtime_state: present
+    postgres_runtime_purge_data: false
+  roles:
+    - postgres_runtime

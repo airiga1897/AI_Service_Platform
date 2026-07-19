@@ -1,0 +1,1217 @@
+---
+- name: Validate platform_router state
+  ansible.builtin.assert:
+    that:
+      - platform_router_state in ['present', 'absent']
+      - platform_router_purge_data in [true, false, 'true', 'false', 'True', 'False']
+      - (platform_router_build_image | default(false)) in [true, false, 'true', 'false', 'True', 'False']
+      - (platform_router_softether_runtime_build_image | default(false)) in [true, false, 'true', 'false', 'True', 'False']
+      - (platform_router_softether_client_build_image | default(false)) in [true, false, 'true', 'false', 'True', 'False']
+    fail_msg: "platform_router_state must be present|absent and platform_router boolean flags must be boolean-like."
+
+- name: Check platform_router compose file
+  ansible.builtin.stat:
+    path: "{{ platform_router_compose_file }}"
+  register: platform_router_compose_stat
+  when: platform_router_state == 'absent'
+
+- name: Check platform_router operator files on control node
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+  delegate_to: localhost
+  become: false
+  register: platform_router_operator_file_stats
+  loop:
+    - { path: "{{ platform_router_operator_config_file }}", label: "platform_router config" }
+    - { path: "{{ platform_router_operator_platform_networks_file }}", label: "platform_networks config" }
+    - { path: "{{ platform_router_operator_l3_vps_links_file }}", label: "softether l3-vps links" }
+  when: platform_router_state == 'present'
+
+- name: Require platform_router operator files
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg
+    fail_msg: "Missing {{ item.item.label }}: {{ item.item.path }}"
+  loop: "{{ platform_router_operator_file_stats.results }}"
+  when: platform_router_state == 'present'
+
+- name: Plan platform_router SoftEther runtime image build on orchestration controller
+  ansible.builtin.shell: |
+    set -euo pipefail
+    test -f "$CONTEXT/Dockerfile"
+    context_hash="$(find "$CONTEXT" -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print substr($1, 1, 12)}')"
+    git_ref="$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2>/dev/null || true)"
+    if [ -z "$git_ref" ]; then
+      git_ref="nogit"
+    fi
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    image_ref="${IMAGE_REPOSITORY}:${stamp}-${git_ref}-${context_hash}"
+    python3 - "$image_ref" "$CONTEXT" <<'PY'
+    import json
+    import sys
+    print(json.dumps({"image_ref": sys.argv[1], "context": sys.argv[2]}, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    CONTEXT: "{{ platform_router_softether_client_build_context }}"
+    IMAGE_REPOSITORY: "{{ platform_router_softether_client_image_repository }}"
+    REPO_ROOT: "{{ playbook_dir }}/../.."
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  run_once: true
+  register: platform_router_softether_client_build_plan_command
+  changed_when: false
+  when:
+    - platform_router_state == 'present'
+    - platform_router_softether_runtime_build_image | bool
+
+- name: Store platform_router SoftEther runtime image build plan
+  ansible.builtin.set_fact:
+    platform_router_softether_client_build_plan: "{{ platform_router_softether_client_build_plan_command.stdout | from_json }}"
+  run_once: true
+  when:
+    - platform_router_state == 'present'
+    - platform_router_softether_runtime_build_image | bool
+
+- name: Use generated platform_router SoftEther runtime image ref for this rollout
+  ansible.builtin.set_fact:
+    platform_router_softether_client_image: "{{ hostvars[ansible_play_hosts_all[0]].platform_router_softether_client_build_plan.image_ref }}"
+    platform_router_softether_server_image: "{{ hostvars[ansible_play_hosts_all[0]].platform_router_softether_client_build_plan.image_ref }}"
+    platform_router_softether_client_remote_archive: "/tmp/ai-sp-softether-runtime-{{ hostvars[ansible_play_hosts_all[0]].platform_router_softether_client_build_plan.image_ref | hash('sha1') }}.tar"
+  when:
+    - platform_router_state == 'present'
+    - platform_router_softether_runtime_build_image | bool
+
+- name: Build platform_router model
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - <<'PY'
+    import ipaddress
+    import json
+    import os
+    import sys
+
+    try:
+        import yaml
+    except Exception as exc:
+        print(f"PyYAML is required to read platform_router config: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    alias = os.environ["INVENTORY_HOSTNAME"]
+    config_file = os.environ["CONFIG_FILE"]
+    platform_networks_file = os.environ["PLATFORM_NETWORKS_FILE"]
+    l3_links_file = os.environ["L3_LINKS_FILE"]
+    l3_secrets_dir = os.environ["L3_SECRETS_DIR"]
+
+    def fail(message):
+        print(message, file=sys.stderr)
+        sys.exit(1)
+
+    def load_yaml(path):
+        with open(path, encoding="utf-8") as handle:
+            return yaml.safe_load(handle) or {}
+
+    config = load_yaml(config_file).get("platform_router") or {}
+    platform_networks = load_yaml(platform_networks_file).get("nodes") or {}
+    l3_links = [
+        item for item in (load_yaml(l3_links_file).get("links") or [])
+        if str(item.get("state", "present")).lower() == "present"
+    ]
+
+    selected = [
+        link for link in (config.get("links") or [])
+        if str(link.get("state", "present")).lower() == "present"
+        and alias in (
+            {str(link.get("source_alias") or ""), str(link.get("target_alias") or "")}
+            | {str(item) for item in (link.get("source_aliases") or [])}
+        )
+    ]
+    if not selected:
+        fail(f"{alias} must participate in at least one present platform_router link")
+
+    if alias not in platform_networks:
+        fail(f"platform_networks config has no node entry for {alias}")
+    node_networks = platform_networks[alias]
+    for network_role in ("data", "app"):
+        item = node_networks.get(network_role) or {}
+        if not item.get("name") or not item.get("subnet"):
+            fail(f"platform_networks {alias}.{network_role} requires name and subnet")
+
+    data_subnet = ipaddress.ip_network(str(node_networks["data"]["subnet"]), strict=True)
+    app_subnet = ipaddress.ip_network(str(node_networks["app"]["subnet"]), strict=True)
+
+    def link_suffix(link_name):
+        digits = "".join(ch for ch in str(link_name) if ch.isdigit())
+        return "pg" + digits if digits else str(link_name).replace("_", "-").replace(".", "-")
+
+    def sidecar_value(base, suffix, default_suffix):
+        return base if suffix == default_suffix else f"{base}-{suffix}"
+
+    def compose_network_name(prefix, suffix):
+        return prefix if suffix == "pg48" else f"{prefix}_{suffix}"
+
+    data_ipv4 = None
+    app_ipv4 = None
+    transport_networks = []
+    management_networks = []
+    policies = []
+    softether_clients = []
+    softether_servers = []
+
+    for link in selected:
+        link_name = str(link.get("l3_vps_link") or link.get("name") or "").strip()
+        suffix = link_suffix(link_name)
+        l3_matches = [item for item in l3_links if str(item.get("name") or "") == link_name]
+        if len(l3_matches) != 1:
+            fail(f"platform_router link {link.get('name')} references missing/non-unique l3_vps_link: {link_name}")
+        l3_link = l3_matches[0]
+        l3_client_aliases = {str(l3_link.get("client_alias") or "")} | {str(item) for item in (l3_link.get("client_aliases") or [])}
+        if isinstance(l3_link.get("standby_clients"), dict):
+            l3_client_aliases |= {str(item) for item in l3_link.get("standby_clients")}
+        if alias not in ({str(l3_link.get("server_alias") or "")} | l3_client_aliases):
+            fail(f"{alias} is not a participant in softether_l3_vps link {link_name}")
+
+        role = "server" if alias == str(l3_link.get("server_alias") or "") else "client"
+        runtime_mode = str(l3_link.get("runtime_mode") or "standalone").strip().lower()
+        if runtime_mode not in {"standalone", "platform_router_sidecar"}:
+            fail(f"softether_l3_vps link {link_name} has unsupported runtime_mode: {runtime_mode}")
+        l3_network_name = str(l3_link.get(f"{role}_network_name") or "").strip()
+        l3_network_subnet = ipaddress.ip_network(str(l3_link.get(f"{role}_network_subnet") or ""), strict=True)
+        if not l3_network_name:
+            fail(f"softether_l3_vps link {link_name} has no {role}_network_name")
+
+        management_network = {"enabled": False}
+        if role == "server":
+            management_network_name = str(l3_link.get("server_management_network_name") or "").strip()
+            management_network_subnet = str(l3_link.get("server_management_network_subnet") or "").strip()
+            management_container_ipv4 = str(l3_link.get("server_management_container_ipv4") or "").strip()
+            management_allowed_source_ipv4 = str(l3_link.get("server_management_allowed_source_ipv4") or "").strip()
+            if any([management_network_name, management_network_subnet, management_container_ipv4, management_allowed_source_ipv4]):
+                if not all([management_network_name, management_network_subnet, management_container_ipv4, management_allowed_source_ipv4]):
+                    fail(f"softether_l3_vps link {link_name} server management network requires name, subnet, container IP, and allowed source IP")
+                parsed_management_subnet = ipaddress.ip_network(management_network_subnet, strict=True)
+                parsed_management_ip = ipaddress.ip_address(management_container_ipv4)
+                parsed_management_source_ip = ipaddress.ip_address(management_allowed_source_ipv4)
+                if parsed_management_ip not in parsed_management_subnet:
+                    fail(f"softether_l3_vps link {link_name} management IP {parsed_management_ip} must be inside {parsed_management_subnet}")
+                if parsed_management_source_ip not in parsed_management_subnet:
+                    fail(f"softether_l3_vps link {link_name} management allowed source IP {parsed_management_source_ip} must be inside {parsed_management_subnet}")
+                if parsed_management_subnet.overlaps(l3_network_subnet):
+                    fail(f"softether_l3_vps link {link_name} management network {parsed_management_subnet} must not overlap transport network {l3_network_subnet}")
+                management_network = {
+                    "enabled": True,
+                    "compose_name": compose_network_name("l3_mgmt", suffix),
+                    "name": management_network_name,
+                    "subnet": str(parsed_management_subnet),
+                    "container_ipv4": str(parsed_management_ip),
+                    "allowed_source_ipv4": str(parsed_management_source_ip),
+                }
+
+        router = (link.get("routers") or {}).get(alias) or {}
+        if not router:
+            fail(f"platform_router link {link.get('name')} has no routers.{alias} entry")
+
+        link_data_ipv4 = ipaddress.ip_address(str(router.get("data_ipv4") or ""))
+        link_app_ipv4 = ipaddress.ip_address(str(router.get("app_ipv4") or ""))
+        if link_data_ipv4 not in data_subnet:
+            fail(f"platform_router {alias} data IP {link_data_ipv4} must be inside {data_subnet}")
+        if link_app_ipv4 not in app_subnet:
+            fail(f"platform_router {alias} app IP {link_app_ipv4} must be inside {app_subnet}")
+        if data_ipv4 is None:
+            data_ipv4 = link_data_ipv4
+        elif data_ipv4 != link_data_ipv4:
+            fail(f"platform_router {alias} data_ipv4 must be identical across links")
+        if app_ipv4 is None:
+            app_ipv4 = link_app_ipv4
+        elif app_ipv4 != link_app_ipv4:
+            fail(f"platform_router {alias} app_ipv4 must be identical across links")
+
+        transport_network_enabled = role == "server"
+        transport_ipv4 = None
+        if router.get("transport_ipv4"):
+            transport_ipv4 = ipaddress.ip_address(str(router["transport_ipv4"]))
+        next_hop_ipv4 = None
+        if router.get("next_hop_ipv4"):
+            next_hop_ipv4 = ipaddress.ip_address(str(router["next_hop_ipv4"]))
+        if transport_network_enabled:
+            if transport_ipv4 not in l3_network_subnet:
+                fail(f"platform_router {alias} transport IP {transport_ipv4} must be inside {l3_network_subnet}")
+            transport_networks.append({
+                "compose_name": compose_network_name("l3_transport", suffix),
+                "name": l3_network_name,
+                "container_ipv4": str(transport_ipv4),
+            })
+        if transport_network_enabled and runtime_mode != "platform_router_sidecar" and next_hop_ipv4 not in l3_network_subnet:
+            fail(f"platform_router {alias} next hop {next_hop_ipv4} must be inside {l3_network_subnet}")
+        if management_network.get("enabled"):
+            management_networks.append(management_network)
+
+        client_name = None
+        client_iface = ""
+        client_server_ip = ""
+        source_aliases = {str(link.get("source_alias") or "")} | {str(item) for item in (link.get("source_aliases") or [])}
+        if alias in source_aliases and runtime_mode == "platform_router_sidecar":
+            vpn_subnet = ipaddress.ip_network(str(l3_link["subnet"]), strict=True)
+            server_ip = ipaddress.ip_address(str(l3_link["server_ip"]))
+            standby_clients = l3_link.get("standby_clients") or {}
+            standby_client = standby_clients.get(alias) if isinstance(standby_clients, dict) else {}
+            client_ip = ipaddress.ip_address(str((standby_client or {}).get("client_ip") or l3_link["client_ip"]))
+            client_user = str((standby_client or {}).get("client_user") or "")
+            if server_ip not in vpn_subnet or client_ip not in vpn_subnet:
+                fail(f"softether_l3_vps link {link_name} VPN endpoint IPs must be inside {vpn_subnet}")
+            nic_name = sidecar_value(os.environ["SOFTETHER_CLIENT_NIC"], suffix, "pg48")
+            client_name = str(link.get("name") or link_name)
+            client_iface = "vpn_" + nic_name
+            client_server_ip = str(server_ip)
+            softether_clients.append({
+                "enabled": True,
+                "name": client_name,
+                "container_name": sidecar_value(os.environ["SOFTETHER_CLIENT_CONTAINER"], suffix, "pg48"),
+                "image": os.environ["SOFTETHER_CLIENT_IMAGE"],
+                "legacy_container_name": os.environ["LEGACY_SOFTETHER_CLIENT_CONTAINER"],
+                "account_name": sidecar_value(os.environ["SOFTETHER_CLIENT_ACCOUNT"], suffix, "pg48"),
+                "nic_name": nic_name,
+                "iface": client_iface,
+                "server": str(l3_link["server_sni"]) + ":" + str(int(l3_link.get("public_port") or 443)),
+                "hub": str(l3_link["hub"]),
+                "client_ip": str(client_ip),
+                "client_alias": alias,
+                "client_user": client_user,
+                "server_ip": client_server_ip,
+                "prefixlen": vpn_subnet.prefixlen,
+                "secret_file": os.path.join(l3_secrets_dir, str(l3_link["name"]) + ".json"),
+                "vpncmd_timeout_seconds": int(os.environ["SOFTETHER_CLIENT_VPNCMD_TIMEOUT_SECONDS"]),
+                "data_dir": sidecar_value("softether_client_data", suffix, "pg48"),
+            })
+
+        if alias == str(link.get("target_alias") or "") and runtime_mode == "platform_router_sidecar":
+            vpn_subnet = ipaddress.ip_network(str(l3_link["subnet"]), strict=True)
+            server_ip = ipaddress.ip_address(str(l3_link["server_ip"]))
+            client_ip = ipaddress.ip_address(str(l3_link["client_ip"]))
+            if server_ip not in vpn_subnet or client_ip not in vpn_subnet:
+                fail(f"softether_l3_vps link {link_name} VPN endpoint IPs must be inside {vpn_subnet}")
+            if not management_network.get("enabled"):
+                fail(f"softether_l3_vps link {link_name} server sidecar requires server management network")
+            softether_servers.append({
+                "enabled": True,
+                "name": str(link.get("name") or link_name),
+                "container_name": os.environ["SOFTETHER_SERVER_CONTAINER"],
+                "image": os.environ["SOFTETHER_SERVER_IMAGE"],
+                "legacy_container_name": os.environ["LEGACY_SOFTETHER_SERVER_CONTAINER"],
+                "hub": str(l3_link["hub"]),
+                "public_port": int(l3_link.get("public_port") or 443),
+                "management_port": 5555,
+                "extra_listeners": [992],
+                "server_ip": str(server_ip),
+                "client_ip": str(client_ip),
+                "netmask": str(vpn_subnet.netmask),
+                "secret_file": os.path.join(l3_secrets_dir, str(l3_link["name"]) + ".json"),
+                "vpncmd_timeout_seconds": int(os.environ["SOFTETHER_CLIENT_VPNCMD_TIMEOUT_SECONDS"]),
+                "management_allowed_source_ipv4": management_network["allowed_source_ipv4"],
+            })
+
+        for policy in link.get("policies") or []:
+            if str(policy.get("state", "present")).lower() != "present":
+                continue
+            destination_ipv4 = ipaddress.ip_address(str(policy.get("destination_ipv4") or ""))
+            source_cidr = ipaddress.ip_network(str(policy.get("source_cidr") or "0.0.0.0/0"), strict=False)
+            destination_port = int(policy.get("destination_port") or 0)
+            if destination_port < 1 or destination_port > 65535:
+                fail(f"platform_router policy {policy.get('name')} has invalid destination_port")
+            protocol = str(policy.get("protocol") or "tcp").lower()
+            if protocol not in {"tcp", "udp"}:
+                fail(f"platform_router policy {policy.get('name')} protocol must be tcp or udp")
+            source_alias = str(policy.get("source_alias") or link.get("source_alias"))
+            target_alias = str(policy.get("target_alias") or link.get("target_alias"))
+            if alias not in {source_alias, target_alias}:
+                continue
+            target_source_cidr = ipaddress.ip_network(str(policy.get("target_source_cidr") or source_cidr), strict=False)
+            effective_source_cidr = target_source_cidr if alias == target_alias else source_cidr
+            policies.append({
+                "name": str(policy.get("name") or f"{protocol}-{destination_ipv4}-{destination_port}"),
+                "link_name": str(link.get("name") or link_name),
+                "source_alias": source_alias,
+                "target_alias": target_alias,
+                "protocol": protocol,
+                "source_cidr": str(effective_source_cidr),
+                "destination_ipv4": str(destination_ipv4),
+                "destination_port": destination_port,
+                "route_destination": alias == source_alias,
+                "softether_client_name": client_name or "",
+                "softether_client_iface": client_iface,
+                "softether_client_server_ip": client_server_ip,
+            })
+
+    if data_ipv4 is None or app_ipv4 is None:
+        fail(f"platform_router {alias} has no data/app router addresses")
+
+    softether_server_runtime = {
+        "enabled": bool(softether_servers),
+        "container_name": os.environ["SOFTETHER_SERVER_CONTAINER"],
+        "image": os.environ["SOFTETHER_SERVER_IMAGE"],
+        "legacy_container_name": os.environ["LEGACY_SOFTETHER_SERVER_CONTAINER"],
+        "data_dir": "softether_server_data",
+        "logs_dir": "softether_server_logs",
+        "adminip_file": "softether_server_adminip.txt",
+    }
+    softether_client = softether_clients[0] if len(softether_clients) == 1 else {"enabled": False}
+    softether_server = softether_server_runtime if softether_servers else {"enabled": False}
+    management_network = management_networks[0] if len(management_networks) == 1 else {"enabled": False}
+    transport_network_enabled = bool(transport_networks)
+    transport_network_name = transport_networks[0]["name"] if len(transport_networks) == 1 else ""
+    transport_ipv4 = transport_networks[0]["container_ipv4"] if len(transport_networks) == 1 else ""
+    next_hop_ipv4 = ""
+
+    model = {
+        "alias": alias,
+        "container_name": str(config.get("container_name") or os.environ["DEFAULT_CONTAINER_NAME"]),
+        "link_name": str(selected[0].get("name") or selected[0].get("l3_vps_link") or ""),
+        "role": "multi" if len(selected) > 1 else ("server" if softether_servers else "client"),
+        "runtime_mode": "multi" if len(selected) > 1 else str((l3_links[0].get("runtime_mode") if l3_links else "standalone") or "standalone"),
+        "transport_network_enabled": transport_network_enabled,
+        "transport_network_name": transport_network_name,
+        "transport_ipv4": str(transport_ipv4) if transport_ipv4 else "",
+        "next_hop_ipv4": str(next_hop_ipv4) if next_hop_ipv4 else "",
+        "management_network": management_network,
+        "transport_networks": transport_networks,
+        "management_networks": management_networks,
+        "data_network_name": str(node_networks["data"]["name"]),
+        "data_ipv4": str(data_ipv4),
+        "app_network_name": str(node_networks["app"]["name"]),
+        "app_ipv4": str(app_ipv4),
+        "policies": policies,
+        "softether_client": softether_client,
+        "softether_server": softether_server,
+        "softether_server_runtime": softether_server_runtime,
+        "softether_clients": softether_clients,
+        "softether_servers": softether_servers,
+    }
+    print(json.dumps(model, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    INVENTORY_HOSTNAME: "{{ inventory_hostname }}"
+    CONFIG_FILE: "{{ platform_router_operator_config_file }}"
+    PLATFORM_NETWORKS_FILE: "{{ platform_router_operator_platform_networks_file }}"
+    L3_LINKS_FILE: "{{ platform_router_operator_l3_vps_links_file }}"
+    L3_SECRETS_DIR: "{{ platform_router_operator_l3_vps_secrets_dir }}"
+    DEFAULT_CONTAINER_NAME: "{{ platform_router_container_name }}"
+    SOFTETHER_CLIENT_IMAGE: "{{ platform_router_softether_client_image }}"
+    SOFTETHER_CLIENT_CONTAINER: "{{ platform_router_softether_client_container_name }}"
+    SOFTETHER_CLIENT_NIC: "{{ platform_router_softether_client_nic_name }}"
+    SOFTETHER_CLIENT_ACCOUNT: "{{ platform_router_softether_client_account_name }}"
+    SOFTETHER_CLIENT_VPNCMD_TIMEOUT_SECONDS: "{{ platform_router_softether_client_vpncmd_timeout_seconds }}"
+    LEGACY_SOFTETHER_CLIENT_CONTAINER: "{{ platform_router_legacy_softether_l3_vps_client_container_name }}"
+    SOFTETHER_SERVER_IMAGE: "{{ platform_router_softether_server_image }}"
+    SOFTETHER_SERVER_CONTAINER: "{{ platform_router_softether_server_container_name }}"
+    LEGACY_SOFTETHER_SERVER_CONTAINER: "{{ platform_router_legacy_softether_l3_vps_server_container_name }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  register: platform_router_model_command
+  when: platform_router_state == 'present'
+
+- name: Store platform_router model
+  ansible.builtin.set_fact:
+    platform_router_model: "{{ platform_router_model_command.stdout | from_json }}"
+  when: platform_router_state == 'present'
+
+- name: Validate platform_router SoftEther client secret presence
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - "$MODEL_JSON" <<'PY'
+    import json
+    import os
+    import sys
+    model = json.loads(sys.argv[1])
+    paths = []
+    for item in model.get("softether_clients", []) + model.get("softether_servers", []):
+        path = str(item.get("secret_file") or "")
+        if path and path not in paths:
+            paths.append(path)
+    for path in paths:
+        if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+            print(f"missing or empty SoftEther secret: {path}", file=sys.stderr)
+            sys.exit(1)
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    MODEL_JSON: "{{ platform_router_model | to_json }}"
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  when:
+    - platform_router_state == 'present'
+    - ((platform_router_model.softether_clients | default([])) | length > 0) or ((platform_router_model.softether_servers | default([])) | length > 0)
+    - not ansible_check_mode
+
+- name: Load platform_router SoftEther client secret
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - '{{ platform_router_model | to_json }}' <<'PY'
+    import json
+    import sys
+
+    model = json.loads(sys.argv[1])
+    required = ["server_password", "hub_password", "client_user", "client_password"]
+    paths = []
+    for item in model.get("softether_clients", []) + model.get("softether_servers", []):
+        path = str(item.get("secret_file") or "")
+        if path and path not in paths:
+            paths.append(path)
+    result = {}
+    for path in paths:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        missing = [key for key in ["server_password", "hub_password"] if not str(data.get(key) or "")]
+        client_users = data.get("client_users") or {}
+        if not client_users:
+            missing.extend([key for key in ["client_user", "client_password"] if not str(data.get(key) or "")])
+        elif not isinstance(client_users, dict):
+            print(f"client_users in {path} must be a map", file=sys.stderr)
+            sys.exit(1)
+        else:
+            for alias, client in client_users.items():
+                if not isinstance(client, dict) or not str(client.get("client_user") or "") or not str(client.get("client_password") or ""):
+                    print(f"client_users.{alias} in {path} requires client_user and client_password", file=sys.stderr)
+                    sys.exit(1)
+        if missing:
+            print(f"missing keys in {path}: {', '.join(missing)}", file=sys.stderr)
+            sys.exit(1)
+        item = {key: str(data[key]) for key in ["server_password", "hub_password"]}
+        item["client_user"] = str(data.get("client_user") or "")
+        item["client_password"] = str(data.get("client_password") or "")
+        item["client_users"] = data.get("client_users") or {}
+        result[path] = item
+    print(json.dumps(result, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  no_log: true
+  register: platform_router_softether_client_secret_command
+  when:
+    - platform_router_state == 'present'
+    - ((platform_router_model.softether_clients | default([])) | length > 0) or ((platform_router_model.softether_servers | default([])) | length > 0)
+    - not ansible_check_mode
+
+- name: Store platform_router SoftEther client secret
+  ansible.builtin.set_fact:
+    platform_router_softether_secrets: "{{ platform_router_softether_client_secret_command.stdout | from_json }}"
+    platform_router_softether_client_secret: "{{ ((platform_router_softether_client_secret_command.stdout | from_json).values() | list | first) | default({}) }}"
+  no_log: true
+  when:
+    - platform_router_state == 'present'
+    - ((platform_router_model.softether_clients | default([])) | length > 0) or ((platform_router_model.softether_servers | default([])) | length > 0)
+    - platform_router_softether_client_secret_command is defined
+    - not (platform_router_softether_client_secret_command.skipped | default(false))
+    - not ansible_check_mode
+
+- name: Plan platform_router image build on orchestration controller
+  ansible.builtin.shell: |
+    set -euo pipefail
+    test -f "$CONTEXT/Dockerfile"
+    dockerfile_hash="$(sha256sum "$CONTEXT/Dockerfile" | awk '{print substr($1, 1, 12)}')"
+    git_ref="$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2>/dev/null || true)"
+    if [ -z "$git_ref" ]; then
+      git_ref="nogit"
+    fi
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    image_ref="${IMAGE_REPOSITORY}:${stamp}-${git_ref}-${dockerfile_hash}"
+    python3 - "$image_ref" "$CONTEXT" <<'PY'
+    import json
+    import sys
+    print(json.dumps({"image_ref": sys.argv[1], "context": sys.argv[2]}, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    CONTEXT: "{{ platform_router_build_context }}"
+    IMAGE_REPOSITORY: "{{ platform_router_image_repository }}"
+    REPO_ROOT: "{{ playbook_dir }}/../.."
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  run_once: true
+  register: platform_router_build_plan_command
+  changed_when: false
+  when:
+    - platform_router_state == 'present'
+    - platform_router_build_image | bool
+
+- name: Store platform_router image build plan
+  ansible.builtin.set_fact:
+    platform_router_build_plan: "{{ platform_router_build_plan_command.stdout | from_json }}"
+  run_once: true
+  when:
+    - platform_router_state == 'present'
+    - platform_router_build_image | bool
+
+- name: Use generated platform_router image ref for this rollout
+  ansible.builtin.set_fact:
+    platform_router_image: "{{ hostvars[ansible_play_hosts_all[0]].platform_router_build_plan.image_ref }}"
+    platform_router_remote_archive: "/tmp/ai-sp-platform-router-{{ hostvars[ansible_play_hosts_all[0]].platform_router_build_plan.image_ref | hash('sha1') }}.tar"
+  when:
+    - platform_router_state == 'present'
+    - platform_router_build_image | bool
+
+- name: Ensure platform_router runtime directory
+  ansible.builtin.file:
+    path: "{{ platform_router_root_dir }}"
+    state: directory
+    mode: "0750"
+  when: platform_router_state == 'present'
+
+- name: Render platform_router Docker Compose
+  ansible.builtin.template:
+    src: docker-compose.platform-router.yml.j2
+    dest: "{{ platform_router_compose_file }}"
+    mode: "0640"
+  register: platform_router_compose_template
+  when: platform_router_state == 'present'
+
+- name: Render platform_router route reconciler
+  ansible.builtin.template:
+    src: platform-router-reconcile.sh.j2
+    dest: "{{ platform_router_root_dir }}/platform-router-reconcile.sh"
+    mode: "0755"
+  register: platform_router_reconcile_template
+  when: platform_router_state == 'present'
+
+- name: Render platform_router SoftEther server admin IP allowlist
+  ansible.builtin.copy:
+    dest: "{{ platform_router_root_dir }}/{{ platform_router_model.softether_server_runtime.adminip_file }}"
+    content: "{{ (['127.0.0.1'] + (platform_router_model.softether_servers | default([]) | map(attribute='management_allowed_source_ipv4') | list)) | unique | reject('equalto', '') | join('\n') }}\n"
+    mode: "0644"
+  when:
+    - platform_router_state == 'present'
+    - (platform_router_model.softether_servers | default([])) | length > 0
+
+- name: Ensure Docker runtime baseline for platform_router
+  ansible.builtin.include_role:
+    name: docker_runtime_baseline
+  when:
+    - not ansible_check_mode
+    - platform_router_state == 'present' or (platform_router_compose_stat.stat.exists | default(false))
+
+- name: Ensure Docker service is running for platform_router
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+  when:
+    - platform_router_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify Docker Compose plugin is available for platform_router
+  ansible.builtin.command:
+    cmd: docker compose version
+  changed_when: false
+  when:
+    - platform_router_state == 'present'
+    - not ansible_check_mode
+
+- name: Build platform_router SoftEther runtime image on orchestration controller
+  ansible.builtin.shell: |
+    set -euo pipefail
+    archive="$(mktemp /tmp/ai-sp-softether-runtime.XXXXXX.tar)"
+    docker build -t "$IMAGE_REF" -f "$CONTEXT/Dockerfile" "$CONTEXT"
+    image_id="$(docker image inspect --format '{{ "{{" }}.Id{{ "}}" }}' "$IMAGE_REF")"
+    docker save -o "$archive" "$IMAGE_REF"
+    chmod 0644 "$archive"
+    python3 - "$IMAGE_REF" "$image_id" "$archive" <<'PY'
+    import json
+    import sys
+    print(json.dumps({"image_ref": sys.argv[1], "image_id": sys.argv[2], "archive": sys.argv[3]}, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    CONTEXT: "{{ hostvars[ansible_play_hosts_all[0]].platform_router_softether_client_build_plan.context }}"
+    IMAGE_REF: "{{ hostvars[ansible_play_hosts_all[0]].platform_router_softether_client_build_plan.image_ref }}"
+  register: platform_router_softether_client_image_build
+  changed_when: true
+  delegate_to: localhost
+  become: true
+  run_once: true
+  when:
+    - platform_router_state == 'present'
+    - platform_router_softether_runtime_build_image | bool
+    - not ansible_check_mode
+
+- name: Store platform_router SoftEther runtime image build artifact
+  ansible.builtin.set_fact:
+    platform_router_softether_client_image_artifact: "{{ platform_router_softether_client_image_build.stdout | from_json }}"
+  run_once: true
+  when:
+    - platform_router_softether_client_image_build is defined
+    - platform_router_softether_client_image_build.stdout is defined
+    - platform_router_softether_client_image_build.stdout | length > 0
+    - not ansible_check_mode
+
+- name: Copy platform_router SoftEther runtime image archive to host
+  ansible.builtin.copy:
+    src: "{{ hostvars[ansible_play_hosts_all[0]].platform_router_softether_client_image_artifact.archive }}"
+    dest: "{{ platform_router_softether_client_remote_archive }}"
+    mode: "0600"
+  when:
+    - platform_router_state == 'present'
+    - ((platform_router_model.softether_clients | default([])) | length > 0) or ((platform_router_model.softether_servers | default([])) | length > 0)
+    - platform_router_softether_runtime_build_image | bool
+    - hostvars[ansible_play_hosts_all[0]].platform_router_softether_client_image_artifact is defined
+    - not ansible_check_mode
+
+- name: Load platform_router SoftEther runtime image on host
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker load -i "$ARCHIVE" >/dev/null
+    actual="$(docker image inspect --format '{{ "{{" }}.Id{{ "}}" }}' "$IMAGE_REF")"
+    if [ "$actual" != "$EXPECTED_IMAGE_ID" ]; then
+      echo "platform_router SoftEther runtime image ID mismatch for $IMAGE_REF: expected $EXPECTED_IMAGE_ID, got $actual" >&2
+      exit 1
+    fi
+  args:
+    executable: /bin/bash
+  environment:
+    ARCHIVE: "{{ platform_router_softether_client_remote_archive }}"
+    IMAGE_REF: "{{ hostvars[ansible_play_hosts_all[0]].platform_router_softether_client_image_artifact.image_ref }}"
+    EXPECTED_IMAGE_ID: "{{ hostvars[ansible_play_hosts_all[0]].platform_router_softether_client_image_artifact.image_id }}"
+  changed_when: true
+  when:
+    - platform_router_state == 'present'
+    - ((platform_router_model.softether_clients | default([])) | length > 0) or ((platform_router_model.softether_servers | default([])) | length > 0)
+    - platform_router_softether_runtime_build_image | bool
+    - hostvars[ansible_play_hosts_all[0]].platform_router_softether_client_image_artifact is defined
+    - not ansible_check_mode
+
+- name: Remove staged platform_router SoftEther runtime image archive from host
+  ansible.builtin.file:
+    path: "{{ platform_router_softether_client_remote_archive }}"
+    state: absent
+  when:
+    - platform_router_state == 'present'
+    - ((platform_router_model.softether_clients | default([])) | length > 0) or ((platform_router_model.softether_servers | default([])) | length > 0)
+    - platform_router_softether_runtime_build_image | bool
+    - platform_router_softether_client_remote_archive is defined
+    - not ansible_check_mode
+
+- name: Remove platform_router SoftEther runtime image archive from orchestration controller
+  ansible.builtin.file:
+    path: "{{ hostvars[ansible_play_hosts_all[0]].platform_router_softether_client_image_artifact.archive }}"
+    state: absent
+  delegate_to: localhost
+  become: true
+  run_once: true
+  when:
+    - hostvars[ansible_play_hosts_all[0]].platform_router_softether_client_image_artifact is defined
+    - not ansible_check_mode
+
+- name: Remove legacy standalone softether_l3_vps server before platform_router sidecar starts
+  ansible.builtin.command:
+    cmd: docker rm -f "{{ platform_router_model.softether_server_runtime.legacy_container_name }}"
+  register: platform_router_legacy_softether_server_stop
+  failed_when: false
+  changed_when: platform_router_legacy_softether_server_stop.rc == 0
+  when:
+    - platform_router_state == 'present'
+    - (platform_router_model.softether_servers | default([])) | length > 0
+    - not ansible_check_mode
+
+- name: Build platform_router image on orchestration controller
+  ansible.builtin.shell: |
+    set -euo pipefail
+    archive="$(mktemp /tmp/ai-sp-platform-router.XXXXXX.tar)"
+    docker build -t "$IMAGE_REF" -f "$CONTEXT/Dockerfile" "$CONTEXT"
+    image_id="$(docker image inspect --format '{{ "{{" }}.Id{{ "}}" }}' "$IMAGE_REF")"
+    docker save -o "$archive" "$IMAGE_REF"
+    chmod 0644 "$archive"
+    python3 - "$IMAGE_REF" "$image_id" "$archive" <<'PY'
+    import json
+    import sys
+    print(json.dumps({"image_ref": sys.argv[1], "image_id": sys.argv[2], "archive": sys.argv[3]}, sort_keys=True))
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    CONTEXT: "{{ hostvars[ansible_play_hosts_all[0]].platform_router_build_plan.context }}"
+    IMAGE_REF: "{{ hostvars[ansible_play_hosts_all[0]].platform_router_build_plan.image_ref }}"
+  delegate_to: localhost
+  become: true
+  run_once: true
+  register: platform_router_build_command
+  changed_when: true
+  when:
+    - platform_router_state == 'present'
+    - platform_router_build_image | bool
+    - not ansible_check_mode
+
+- name: Store platform_router image build artifact
+  ansible.builtin.set_fact:
+    platform_router_build_artifact: "{{ platform_router_build_command.stdout | from_json }}"
+  run_once: true
+  when:
+    - platform_router_state == 'present'
+    - platform_router_build_image | bool
+    - not ansible_check_mode
+
+- name: Copy platform_router image archive to host
+  ansible.builtin.copy:
+    src: "{{ hostvars[ansible_play_hosts_all[0]].platform_router_build_artifact.archive }}"
+    dest: "{{ platform_router_remote_archive }}"
+    mode: "0600"
+  when:
+    - platform_router_state == 'present'
+    - platform_router_build_image | bool
+    - not ansible_check_mode
+
+- name: Load platform_router image archive on host
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker load -i "$ARCHIVE" >/dev/null
+    actual="$(docker image inspect --format '{{ "{{" }}.Id{{ "}}" }}' "$IMAGE_REF")"
+    if [ "$actual" != "$EXPECTED_IMAGE_ID" ]; then
+      echo "platform_router image ID mismatch for $IMAGE_REF: expected $EXPECTED_IMAGE_ID, got $actual" >&2
+      exit 1
+    fi
+    docker run --rm --network none "$IMAGE_REF" sh -c 'ip -V >/dev/null && iptables --version >/dev/null'
+  args:
+    executable: /bin/bash
+  environment:
+    ARCHIVE: "{{ platform_router_remote_archive }}"
+    IMAGE_REF: "{{ hostvars[ansible_play_hosts_all[0]].platform_router_build_artifact.image_ref }}"
+    EXPECTED_IMAGE_ID: "{{ hostvars[ansible_play_hosts_all[0]].platform_router_build_artifact.image_id }}"
+  changed_when: true
+  when:
+    - platform_router_state == 'present'
+    - platform_router_build_image | bool
+    - not ansible_check_mode
+
+- name: Remove staged platform_router image archive from host
+  ansible.builtin.file:
+    path: "{{ platform_router_remote_archive }}"
+    state: absent
+  when:
+    - platform_router_build_image | bool
+    - platform_router_remote_archive is defined
+    - not ansible_check_mode
+
+- name: Remove platform_router image archive from orchestration controller
+  ansible.builtin.file:
+    path: "{{ hostvars[ansible_play_hosts_all[0]].platform_router_build_artifact.archive }}"
+    state: absent
+  delegate_to: localhost
+  become: true
+  run_once: true
+  when:
+    - platform_router_state == 'present'
+    - platform_router_build_image | bool
+    - not ansible_check_mode
+
+- name: Start platform_router container
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ platform_router_compose_file }}" up -d
+    chdir: "{{ platform_router_root_dir }}"
+  register: platform_router_compose_up
+  changed_when: >
+    (platform_router_compose_up.stdout ~ platform_router_compose_up.stderr)
+    is search('(?i)(creating|created|recreating|recreated|starting|started|pulling|pulled|building|built)')
+  when:
+    - platform_router_state == 'present'
+    - not ansible_check_mode
+
+- name: Recreate platform_router stack when route reconciler changed
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ platform_router_compose_file }}" up -d --force-recreate
+    chdir: "{{ platform_router_root_dir }}"
+  changed_when: true
+  when:
+    - platform_router_state == 'present'
+    - platform_router_reconcile_template.changed | default(false)
+    - not platform_router_compose_up.changed
+    - not ansible_check_mode
+
+- name: Verify running platform_router container network attachment
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "$CONTAINER" | python3 -c '
+    import json, os, sys
+    data = json.load(sys.stdin)[0]
+    networks = data.get("NetworkSettings", {}).get("Networks", {})
+    expected = {
+        os.environ["DATA_NETWORK"]: os.environ["DATA_IP"],
+        os.environ["APP_NETWORK"]: os.environ["APP_IP"],
+    }
+    if os.environ["TRANSPORT_NETWORK_ENABLED"] == "true":
+        for item in json.loads(os.environ["TRANSPORT_NETWORKS_JSON"]):
+            expected[item["name"]] = item["container_ipv4"]
+    if os.environ["MGMT_NETWORK_ENABLED"] == "true":
+        for item in json.loads(os.environ["MGMT_NETWORKS_JSON"]):
+            expected[item["name"]] = item["container_ipv4"]
+    running = data.get("State", {}).get("Running")
+    ok = bool(running)
+    for network, ip in expected.items():
+        ok = ok and networks.get(network, {}).get("IPAddress") == ip
+    sys.exit(0 if ok else 1)
+    '
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ platform_router_model.container_name }}"
+    TRANSPORT_NETWORK_ENABLED: "{{ platform_router_model.transport_network_enabled | ternary('true', 'false') }}"
+    TRANSPORT_NETWORKS_JSON: "{{ platform_router_model.transport_networks | default([]) | to_json }}"
+    MGMT_NETWORK_ENABLED: "{{ (((platform_router_model.management_networks | default([])) | length) > 0) | ternary('true', 'false') }}"
+    MGMT_NETWORKS_JSON: "{{ platform_router_model.management_networks | default([]) | to_json }}"
+    DATA_NETWORK: "{{ platform_router_model.data_network_name }}"
+    DATA_IP: "{{ platform_router_model.data_ipv4 }}"
+    APP_NETWORK: "{{ platform_router_model.app_network_name }}"
+    APP_IP: "{{ platform_router_model.app_ipv4 }}"
+  changed_when: false
+  register: platform_router_container_ready
+  until: platform_router_container_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - platform_router_state == 'present'
+    - not ansible_check_mode
+
+- name: Remove legacy standalone softether_l3_vps client for platform_router sidecar
+  ansible.builtin.command:
+    cmd: docker rm -f "{{ item.legacy_container_name }}"
+  register: platform_router_legacy_softether_client_stop
+  failed_when: false
+  changed_when: platform_router_legacy_softether_client_stop.rc == 0
+  loop: "{{ platform_router_model.softether_clients | default([]) }}"
+  when:
+    - platform_router_state == 'present'
+    - (platform_router_model.softether_clients | default([])) | length > 0
+    - not ansible_check_mode
+
+- name: Verify platform_router SoftEther client sidecar is running
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "$CONTAINER" | python3 -c '
+    import json, sys
+    data = json.load(sys.stdin)[0]
+    sys.exit(0 if data.get("State", {}).get("Running") else 1)
+    '
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ item.container_name }}"
+  changed_when: false
+  register: platform_router_softether_client_ready
+  until: platform_router_softether_client_ready.rc == 0
+  retries: 15
+  delay: 2
+  loop: "{{ platform_router_model.softether_clients | default([]) }}"
+  when:
+    - platform_router_state == 'present'
+    - (platform_router_model.softether_clients | default([])) | length > 0
+    - not ansible_check_mode
+
+- name: Configure platform_router SoftEther client sidecar
+  ansible.builtin.shell: |
+    set -euo pipefail
+    router_container="{{ platform_router_model.container_name }}"
+    client_container="{{ item.container_name }}"
+    timeout_s="{{ item.vpncmd_timeout_seconds }}"
+    account="{{ item.account_name }}"
+    nic="{{ item.nic_name }}"
+    iface="{{ item.iface }}"
+    server="{{ item.server }}"
+    hub="{{ item.hub }}"
+    client_ip="{{ item.client_ip }}"
+    prefix="{{ item.prefixlen }}"
+    user="${CLIENT_USER}"
+    password="${CLIENT_PASSWORD}"
+
+    cleanup_vpncmd() {
+      docker exec "$client_container" sh -c 'pkill -KILL vpncmd 2>/dev/null || true' >/dev/null 2>&1 || true
+    }
+    run_vpncmd() {
+      timeout "${timeout_s}s" docker exec "$client_container" vpncmd "$@"
+      rc="$?"
+      if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+        cleanup_vpncmd
+      fi
+      return "$rc"
+    }
+    trap cleanup_vpncmd EXIT
+    cleanup_vpncmd
+
+    run_vpncmd localhost /CLIENT /CMD Check >/dev/null
+    nics="$(run_vpncmd localhost /CLIENT /CMD NicList 2>/dev/null || true)"
+    echo "$nics" | grep -Fq "$nic" || run_vpncmd localhost /CLIENT /CMD NicCreate "$nic" >/dev/null
+
+    accounts="$(run_vpncmd localhost /CLIENT /CMD AccountList 2>/dev/null || true)"
+    if echo "$accounts" | grep -Fq "$account"; then
+      run_vpncmd localhost /CLIENT /CMD AccountDisconnect "$account" >/dev/null 2>&1 || true
+      run_vpncmd localhost /CLIENT /CMD AccountDelete "$account" >/dev/null
+    fi
+    run_vpncmd localhost /CLIENT /CMD AccountCreate "$account" /SERVER:"$server" /HUB:"$hub" /USERNAME:"$user" /NICNAME:"$nic" >/dev/null
+    run_vpncmd localhost /CLIENT /CMD AccountPasswordSet "$account" /PASSWORD:"$password" /TYPE:standard >/dev/null
+    run_vpncmd localhost /CLIENT /CMD AccountStartupSet "$account" >/dev/null
+    run_vpncmd localhost /CLIENT /CMD AccountConnect "$account" >/dev/null
+
+    for attempt in $(seq 1 30); do
+      if docker exec -u 0 "$router_container" ip link show "$iface" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 2
+      if [ "$attempt" -eq 30 ]; then
+        echo "SoftEther client interface did not appear: $iface" >&2
+        exit 1
+      fi
+    done
+    docker exec -u 0 "$router_container" ip link set "$iface" up
+    docker exec -u 0 "$router_container" ip addr replace "$client_ip/$prefix" dev "$iface"
+  args:
+    executable: /bin/bash
+  environment:
+    CLIENT_USER: "{{ ((platform_router_softether_secrets[item.secret_file]).client_users[item.client_alias].client_user | default('')) or item.client_user or (platform_router_softether_secrets[item.secret_file]).client_user | default('') }}"
+    CLIENT_PASSWORD: "{{ ((platform_router_softether_secrets[item.secret_file]).client_users[item.client_alias].client_password | default('')) or (platform_router_softether_secrets[item.secret_file]).client_password | default('') }}"
+  no_log: true
+  changed_when: false
+  loop: "{{ platform_router_model.softether_clients | default([]) }}"
+  when:
+    - platform_router_state == 'present'
+    - (platform_router_model.softether_clients | default([])) | length > 0
+    - not ansible_check_mode
+
+- name: Verify platform_router SoftEther server sidecar is running
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker inspect "$CONTAINER" | python3 -c '
+    import json, sys
+    data = json.load(sys.stdin)[0]
+    sys.exit(0 if data.get("State", {}).get("Running") else 1)
+    '
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ item.container_name }}"
+  changed_when: false
+  register: platform_router_softether_server_ready
+  until: platform_router_softether_server_ready.rc == 0
+  retries: 15
+  delay: 2
+  loop: "{{ platform_router_model.softether_servers | default([]) }}"
+  when:
+    - platform_router_state == 'present'
+    - (platform_router_model.softether_servers | default([])) | length > 0
+    - not ansible_check_mode
+
+- name: Configure platform_router SoftEther server sidecar
+  ansible.builtin.shell: |
+    set -euo pipefail
+    server_container="{{ item.container_name }}"
+    server_vpncmd_endpoint="127.0.0.1:5555"
+    timeout_s="{{ item.vpncmd_timeout_seconds }}"
+    password="${SERVER_PASSWORD}"
+    hub="{{ item.hub }}"
+    hub_password="${HUB_PASSWORD}"
+    client_users_json="${CLIENT_USERS_JSON}"
+    legacy_client_user="${CLIENT_USER}"
+    legacy_client_password="${CLIENT_PASSWORD}"
+    server_ip="{{ item.server_ip }}"
+    client_ip="{{ item.client_ip }}"
+    netmask="{{ item.netmask }}"
+    public_port="{{ item.public_port }}"
+
+    cleanup_vpncmd() {
+      docker exec "$server_container" sh -c 'pkill -KILL vpncmd 2>/dev/null || true' >/dev/null 2>&1 || true
+    }
+    run_vpncmd() {
+      timeout "${timeout_s}s" docker exec "$server_container" vpncmd "$@"
+      rc="$?"
+      if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+        cleanup_vpncmd
+      fi
+      return "$rc"
+    }
+    run_vpncmd_batch() {
+      output_file="$1"
+      timeout "${timeout_s}s" docker exec -i -e VPNCMD_PASSWORD="$password" -e VPNCMD_ENDPOINT="$server_vpncmd_endpoint" "$server_container" sh -c 'tmp="$(mktemp)"; trap "rm -f \"$tmp\"" EXIT; cat > "$tmp"; timeout "$1" vpncmd "$VPNCMD_ENDPOINT" /SERVER /PASSWORD:"$VPNCMD_PASSWORD" /IN:"$tmp"; rc="$?"; if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then pkill -KILL vpncmd 2>/dev/null || true; fi; exit "$rc"' sh "$timeout_s" >"$output_file" 2>&1
+    }
+    trap cleanup_vpncmd EXIT
+    cleanup_vpncmd
+
+    if ! run_vpncmd "$server_vpncmd_endpoint" /SERVER /PASSWORD:"$password" /CMD ServerInfoGet >/dev/null 2>&1; then
+      if run_vpncmd "$server_vpncmd_endpoint" /SERVER /PASSWORD: /CMD ServerInfoGet >/dev/null 2>&1; then
+        run_vpncmd "$server_vpncmd_endpoint" /SERVER /PASSWORD: /CMD ServerPasswordSet "$password" >/dev/null
+      else
+        echo "platform_router SoftEther server configure failed during ServerInfoGet/password/adminip validation" >&2
+        echo "platform_router SoftEther server data uses a different password; remove/reseed sidecar data explicitly" >&2
+        exit 1
+      fi
+    fi
+
+    listeners="$(run_vpncmd "$server_vpncmd_endpoint" /SERVER /PASSWORD:"$password" /CMD ListenerList 2>/dev/null || true)"
+    for port in "$public_port" 992 5555; do
+      echo "$listeners" | grep -Eq "(^|[^0-9])${port}([^0-9]|$)" || run_vpncmd "$server_vpncmd_endpoint" /SERVER /PASSWORD:"$password" /CMD ListenerCreate "$port" >/dev/null
+    done
+    if echo "$listeners" | grep -Eq '(^|[^0-9])1194([^0-9]|$)'; then
+      run_vpncmd "$server_vpncmd_endpoint" /SERVER /PASSWORD:"$password" /CMD ListenerDelete 1194 >/dev/null
+    fi
+
+    hubs="$(run_vpncmd "$server_vpncmd_endpoint" /SERVER /PASSWORD:"$password" /CMD HubList 2>/dev/null || true)"
+    echo "$hubs" | grep -Fq "$hub" || run_vpncmd "$server_vpncmd_endpoint" /SERVER /PASSWORD:"$password" /CMD HubCreate "$hub" /PASSWORD:"$hub_password" >/dev/null
+    if [ "$hub" != "DEFAULT" ] && echo "$hubs" | grep -Eq '(^|[[:space:]|])DEFAULT([[:space:]|]|$)'; then
+      run_vpncmd "$server_vpncmd_endpoint" /SERVER /PASSWORD:"$password" /CMD HubDelete DEFAULT >/dev/null
+    fi
+
+    users_input="$(mktemp)"
+    input="$(mktemp)"
+    user_check_output="$(mktemp)"
+    user_create_output="$(mktemp)"
+    trap 'rm -f "$users_input" "$input" "$user_check_output" "$user_create_output"; cleanup_vpncmd' EXIT
+    python3 - "$client_users_json" "$legacy_client_user" "$legacy_client_password" <<'PY' > "$users_input"
+    import json
+    import sys
+    client_users = json.loads(sys.argv[1] or "{}")
+    if client_users:
+        for _alias, item in sorted(client_users.items()):
+            user = str(item.get("client_user") or "").strip()
+            password = str(item.get("client_password") or "").strip()
+            if user and password:
+                print(f"{user}|{password}")
+    elif sys.argv[2] and sys.argv[3]:
+        print(f"{sys.argv[2]}|{sys.argv[3]}")
+    PY
+
+    while IFS='|' read -r client_user client_password; do
+      [ -n "$client_user" ] || continue
+      if ! {
+        printf 'Hub %s\n' "$hub"
+        printf 'UserGet %s\n' "$client_user"
+      } | run_vpncmd_batch "$user_check_output"; then
+        if ! {
+          printf 'Hub %s\n' "$hub"
+          printf 'UserCreate %s /GROUP:none /REALNAME:none /NOTE:none\n' "$client_user"
+        } | run_vpncmd_batch "$user_create_output"; then
+          if ! grep -Fqi 'already exists' "$user_create_output"; then
+            echo "platform_router SoftEther server configure failed during UserCreate for client user" >&2
+            sed -E 's#/PASSWORD:[^[:space:]]+#/PASSWORD:<redacted>#g' "$user_create_output" >&2
+            exit 1
+          fi
+        fi
+      fi
+    done < "$users_input"
+
+    {
+      printf 'Hub %s\n' "$hub"
+      printf 'SetEnumDeny\n'
+      while IFS='|' read -r client_user client_password; do
+        [ -n "$client_user" ] || continue
+        printf 'UserPasswordSet %s /PASSWORD:%s\n' "$client_user" "$client_password"
+      done < "$users_input"
+      printf 'SecureNatEnable\n'
+      printf 'SecureNatHostSet /MAC:none /IP:%s /MASK:%s\n' "$server_ip" "$netmask"
+      printf 'DhcpSet /START:%s /END:%s /MASK:%s /EXPIRE:7200 /GW:%s /DNS:1.1.1.1 /DNS2:8.8.8.8 /DOMAIN:none /LOG:yes\n' "$client_ip" "$client_ip" "$netmask" "$server_ip"
+      printf 'Flush\n'
+    } > "$input"
+    run_vpncmd_batch /tmp/platform-router-softether-server-config.out < "$input" || {
+      cleanup_vpncmd
+      echo "platform_router SoftEther server configure failed during vpncmd /IN batch" >&2
+      sed -E 's#/PASSWORD:[^[:space:]]+#/PASSWORD:<redacted>#g' /tmp/platform-router-softether-server-config.out >&2
+      exit 1
+    }
+  args:
+    executable: /bin/bash
+  environment:
+    SERVER_PASSWORD: "{{ (platform_router_softether_secrets[item.secret_file]).server_password | default('') }}"
+    HUB_PASSWORD: "{{ (platform_router_softether_secrets[item.secret_file]).hub_password | default('') }}"
+    CLIENT_USER: "{{ (platform_router_softether_secrets[item.secret_file]).client_user | default('') }}"
+    CLIENT_PASSWORD: "{{ (platform_router_softether_secrets[item.secret_file]).client_password | default('') }}"
+    CLIENT_USERS_JSON: "{{ (platform_router_softether_secrets[item.secret_file]).client_users | default({}) | to_json }}"
+  no_log: "{{ platform_router_softether_debug_no_log | bool }}"
+  changed_when: false
+  loop: "{{ platform_router_model.softether_servers | default([]) }}"
+  when:
+    - platform_router_state == 'present'
+    - (platform_router_model.softether_servers | default([])) | length > 0
+    - not ansible_check_mode
+
+- name: Configure platform_router explicit route and service policy
+  ansible.builtin.shell: |
+    set -euo pipefail
+    container="{{ platform_router_model.container_name }}"
+    next_hop="{{ platform_router_model.next_hop_ipv4 }}"
+    policies_json='{{ platform_router_model.policies | to_json }}'
+    docker exec -u 0 "$container" sh -ceu 'sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true'
+    docker exec -u 0 "$container" iptables -P FORWARD DROP
+    docker exec -u 0 "$container" iptables -F FORWARD
+    docker exec -u 0 "$container" iptables -t nat -N PLATFORM_ROUTER_POSTROUTING 2>/dev/null || true
+    docker exec -u 0 "$container" iptables -t nat -C POSTROUTING -j PLATFORM_ROUTER_POSTROUTING 2>/dev/null ||
+      docker exec -u 0 "$container" iptables -t nat -A POSTROUTING -j PLATFORM_ROUTER_POSTROUTING
+    docker exec -u 0 "$container" iptables -t nat -F PLATFORM_ROUTER_POSTROUTING
+    python3 - "$policies_json" <<'PY' | while IFS='|' read -r proto source_cidr destination_ipv4 destination_port route_destination vpn_iface vpn_next_hop; do
+    import json
+    import sys
+    for item in json.loads(sys.argv[1]):
+        print("|".join([
+            item["protocol"],
+            item["source_cidr"],
+            item["destination_ipv4"],
+            str(item["destination_port"]),
+            "true" if item["route_destination"] else "false",
+            item.get("softether_client_iface") or "",
+            item.get("softether_client_server_ip") or "",
+        ]))
+    PY
+      if [ "$route_destination" = "true" ]; then
+        if [ -n "$vpn_iface" ]; then
+          docker exec -u 0 "$container" ip route replace "$destination_ipv4/32" via "$vpn_next_hop" dev "$vpn_iface"
+        else
+          docker exec -u 0 "$container" ip route replace "$destination_ipv4/32" via "$next_hop"
+        fi
+      fi
+      docker exec -u 0 "$container" iptables -A FORWARD -p "$proto" -s "$source_cidr" -d "$destination_ipv4/32" --dport "$destination_port" -j ACCEPT
+      docker exec -u 0 "$container" iptables -A FORWARD -p "$proto" -s "$destination_ipv4/32" --sport "$destination_port" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    done
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - platform_router_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify platform_router dataplane tools
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker exec -u 0 "$CONTAINER" sh -c 'ip route >/dev/null && iptables -S FORWARD >/dev/null'
+  args:
+    executable: /bin/bash
+  environment:
+    CONTAINER: "{{ platform_router_model.container_name }}"
+  changed_when: false
+  when:
+    - platform_router_state == 'present'
+    - not ansible_check_mode
+
+- name: Stop platform_router container
+  ansible.builtin.command:
+    cmd: docker compose -f "{{ platform_router_compose_file }}" down
+    chdir: "{{ platform_router_root_dir }}"
+  changed_when: true
+  when:
+    - platform_router_state == 'absent'
+    - platform_router_compose_stat.stat.exists | default(false)
+    - not ansible_check_mode
+
+- name: Purge platform_router runtime data when explicitly requested
+  ansible.builtin.file:
+    path: "{{ platform_router_root_dir }}"
+    state: absent
+  when:
+    - platform_router_state == 'absent'
+    - platform_router_purge_data in [true, 'true', 'True']
+    - not ansible_check_mode

@@ -1,0 +1,20 @@
+---
+- name: Platform router service rollout
+  hosts: platform_routers
+  become: true
+  gather_facts: false
+  vars:
+    platform_router_state: present
+    platform_router_purge_data: false
+  roles:
+    - platform_router
+
+- name: Platform router candidate rollout
+  hosts: candidate_platform_routers
+  become: true
+  gather_facts: false
+  vars:
+    platform_router_state: present
+    platform_router_purge_data: false
+  roles:
+    - platform_router

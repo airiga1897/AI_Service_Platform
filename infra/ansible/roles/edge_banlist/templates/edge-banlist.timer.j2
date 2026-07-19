@@ -1,0 +1,11 @@
+[Unit]
+Description=Run AI Service Platform edge banlist collector
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec={{ edge_banlist_interval }}
+AccuracySec=15s
+Unit=edge-banlist.service
+
+[Install]
+WantedBy=timers.target

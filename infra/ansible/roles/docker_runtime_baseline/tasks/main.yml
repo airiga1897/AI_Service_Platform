@@ -1,0 +1,112 @@
+---
+- name: Проверить базовую конфигурацию Docker
+  ansible.builtin.shell: |
+    set -euo pipefail
+    command -v docker >/dev/null 2>&1
+    docker compose version >/dev/null 2>&1
+  args:
+    executable: /bin/bash
+  register: docker_runtime_baseline_check
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: not ansible_check_mode
+
+- name: Установить отсутствующую базовую конфигурацию Docker
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    export LC_ALL=C
+    export LANG=C
+    export LANGUAGE=C
+
+    docker_ready() {
+        command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1
+    }
+
+    if docker_ready; then
+        systemctl enable --now docker >/dev/null 2>&1 || true
+        echo "changed=false"
+        exit 0
+    fi
+
+    if [ ! -r /etc/os-release ]; then
+        echo "Docker baseline auto-install requires /etc/os-release" >&2
+        exit 1
+    fi
+    . /etc/os-release
+    if [ "${ID:-}" != "ubuntu" ]; then
+        echo "Docker baseline auto-install currently supports Ubuntu only; found ID=${ID:-unknown}" >&2
+        exit 1
+    fi
+
+    codename="${VERSION_CODENAME:-}"
+    if [ -z "$codename" ]; then
+        echo "Unable to detect Ubuntu VERSION_CODENAME" >&2
+        exit 1
+    fi
+
+    apt-get update -y
+    apt-get install -y ca-certificates curl gnupg lsb-release
+    install -m 0755 -d /etc/apt/keyrings
+
+    official_installed=0
+    if curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg; then
+        chmod a+r /etc/apt/keyrings/docker.gpg
+        arch="$(dpkg --print-architecture)"
+        echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${codename} stable" > /etc/apt/sources.list.d/docker.list
+        if apt-get update -y && apt-cache policy docker-ce | grep -q "Candidate: [^(]"; then
+            if apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+                official_installed=1
+            fi
+        fi
+    fi
+
+    if ! docker_ready; then
+        rm -f /etc/apt/sources.list.d/docker.list
+        apt-get update -y
+        if command -v add-apt-repository >/dev/null 2>&1; then
+            add-apt-repository -y universe || true
+        else
+            apt-get install -y software-properties-common || true
+            command -v add-apt-repository >/dev/null 2>&1 && add-apt-repository -y universe || true
+        fi
+        apt-get update -y
+        apt-get install -y docker.io
+        if apt-cache policy docker-compose-v2 | grep -q "Candidate: [^(]"; then
+            apt-get install -y docker-compose-v2
+        elif apt-cache policy docker-compose-plugin | grep -q "Candidate: [^(]"; then
+            apt-get install -y docker-compose-plugin
+        fi
+    fi
+
+    systemctl enable --now docker
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        docker info >/dev/null 2>&1 && break
+        sleep 1
+    done
+
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "Docker CLI is unavailable after installation" >&2
+        exit 1
+    fi
+    if ! docker compose version >/dev/null 2>&1; then
+        echo "Docker Compose plugin is unavailable after installation" >&2
+        echo "Package candidates:" >&2
+        apt-cache policy docker-ce docker.io docker-compose-v2 docker-compose-plugin >&2 || true
+        exit 1
+    fi
+
+    if [ "$official_installed" = "1" ]; then
+        echo "Docker runtime installed from official Docker repo for Ubuntu ${codename}"
+    else
+        echo "Docker runtime installed from Ubuntu distro packages for Ubuntu ${codename}"
+    fi
+    echo "changed=true"
+  args:
+    executable: /bin/bash
+  register: docker_runtime_baseline_install
+  changed_when: "'changed=true' in docker_runtime_baseline_install.stdout"
+  when:
+    - not ansible_check_mode
+    - docker_runtime_baseline_check.rc != 0

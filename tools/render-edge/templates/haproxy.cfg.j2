@@ -1,0 +1,107 @@
+# СГЕНЕРИРОВАННЫЙ ФАЙЛ — не редактируйте вручную.
+# Источник: services.yml + tools/render-edge/templates/haproxy.cfg.j2
+# Регенерация: python3 tools/render-edge/render_edge.py
+#
+# Конфиг описывает edge-маршрутизацию платформы:
+#   * HTTP (80) — ACME-passthrough и редирект на HTTPS.
+#   * HTTPS (443) — TCP-режим с SNI-ACL: запросы на vpn.<домен>
+#     уходят на SoftEther; всё остальное — на per-site Nginx-бэкенды.
+#   * TCP-порты SoftEther (992) — прямой проброс на softether.
+#   * Management-порт SoftEther (5555) — с allowlist по vpn_mgmt_ips.lst.
+#
+# IP-листы (vpn_mgmt_ips.lst, blocked_ips.lst, ru_networks.lst)
+# управляются отдельно и не коммитятся вместе с конфигом.
+
+global
+    log stdout format raw local0
+    maxconn 4096
+    tune.ssl.default-dh-param 2048
+
+defaults
+    log global
+    option dontlognull
+    timeout connect 5s
+    timeout client  50s
+    timeout server  50s
+
+#
+# === HTTP frontend (порт 80) ====================================
+#
+frontend http_in
+    bind *:80
+    mode http
+    # ACME http-01 challenge должен ходить напрямую на certbot.
+    acl is_acme path_beg /.well-known/acme-challenge/
+    use_backend be_acme if is_acme
+    # Всё остальное — редирект на HTTPS.
+    http-request redirect scheme https code 301 unless is_acme
+
+backend be_acme
+    mode http
+    server certbot certbot:80 check
+
+#
+# === HTTPS frontend (порт 443) — TCP-режим с SNI ================
+#
+frontend https_in
+    bind *:443
+    mode tcp
+    option tcplog
+    tcp-request inspect-delay 5s
+    tcp-request content accept if { req_ssl_hello_type 1 }
+
+<% if softether_https_port %>
+    # SoftEther на 443 определяется по vpn-поддомену (SNI).
+    acl is_softether req_ssl_sni -m beg vpn.
+    use_backend be_softether_https if is_softether
+<% endif %>
+
+<% for route in sni_routes %>
+    # Сайт << route.instance_name >>: домены << route.prod_domains | join(', ') >>
+<% for domain in route.prod_domains %>
+    acl host_<< route.backend_name >>_<< loop.index >> req_ssl_sni -i << domain >>
+<% endfor %>
+    use_backend << route.backend_name >> if<% for domain in route.prod_domains %> host_<< route.backend_name >>_<< loop.index >><% if not loop.last %> ||<% endif %><% endfor %>
+
+<% endfor %>
+
+<% for route in sni_routes %>
+backend << route.backend_name >>
+    mode tcp
+    server << route.nginx_container >> << route.nginx_container >>:443 check
+
+<% endfor %>
+
+<% if softether_https_port %>
+backend be_softether_https
+    mode tcp
+    server softether softether:443 check
+<% endif %>
+
+#
+# === Прочие TCP-порты SoftEther =================================
+#
+<% for port in softether_tcp_ports %>
+frontend softether_tcp_<< port >>
+    bind *:<< port >>
+    mode tcp
+    default_backend be_softether_<< port >>
+
+backend be_softether_<< port >>
+    mode tcp
+    server softether softether:<< port >> check
+
+<% endfor %>
+
+#
+# === Management-порт SoftEther (allowlist) ======================
+#
+frontend softether_mgmt
+    bind *:<< softether_mgmt_port >>
+    mode tcp
+    tcp-request connection reject if !{ src -f /etc/haproxy/lists/vpn_mgmt_ips.lst }
+    default_backend be_softether_mgmt
+
+backend be_softether_mgmt
+    mode tcp
+    server softether softether:<< softether_mgmt_port >> check

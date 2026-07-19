@@ -1,0 +1,7 @@
+---
+- name: restart ssh
+  ansible.builtin.shell: |
+    set -e
+    systemctl restart ssh 2>/dev/null || systemctl restart sshd
+  args:
+    executable: /bin/bash

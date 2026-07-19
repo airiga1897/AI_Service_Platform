@@ -1,0 +1,40 @@
+---
+# Переменные группы backup (VPS2 — горячий резерв + бэкапы).
+#
+# Базовая параметризация приложения (`app_name`, `app_dir`, …)
+# объявлена в `all.yml` и переопределяется через `host_vars/<host>.yml`.
+
+# --- Тип резерва ---
+standby_mode: hot           # hot = PostgreSQL streaming replication работает постоянно
+
+# --- Локальные директории бэкапов ---
+backup_dir: /opt/backups
+
+# --- Хранение бэкапов ---
+backup_retention_days: 7    # хранить 7 дней локально
+
+# --- Uptime Kuma ---
+uptime_kuma_port: 3001
+uptime_kuma_data: /opt/uptime-kuma
+
+# --- PostgreSQL Streaming Replication ---
+pg_replication_user: replicator
+pg_primary_host: "{{ groups['prod'][0] }}"
+pg_primary_port: 5432
+pg_replication_slot: vps2_replica
+
+# --- Rsync медиафайлов (каждые 10 минут) ---
+media_rsync_interval_minutes: 10
+# `app_dir` на стороне VPS1 берётся из его host_vars (унаследованный
+# через `all.yml`). Если не задан — fallback на `app_dir` текущей ноды.
+media_src: "{{ hostvars[groups['prod'][0]]['app_dir'] | default(app_dir) }}/media/"
+media_dst: "{{ app_dir }}/media/"
+
+# --- rsync: разрешённые источники ---
+rsync_allowed_hosts:
+  - "{{ hostvars[groups['prod'][0]]['ansible_host'] | default(groups['prod'][0]) }}"
+  - "{{ hostvars[groups['management'][0]]['ansible_host'] | default(groups['management'][0]) }}"
+
+# --- Prometheus exporter ---
+node_exporter_port: 9100
+postgres_exporter_port: 9187

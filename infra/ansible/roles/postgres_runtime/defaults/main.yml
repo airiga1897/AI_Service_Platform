@@ -1,0 +1,33 @@
+---
+postgres_runtime_state: present
+postgres_runtime_purge_data: false
+postgres_runtime_reinit_standby: false
+
+postgres_runtime_operator_config_file: "{{ playbook_dir }}/../../operator/postgres/config.yml"
+postgres_runtime_operator_state_file: "{{ playbook_dir }}/../../operator/state.csv"
+postgres_runtime_operator_nodes_file: "{{ playbook_dir }}/../../operator/nodes.csv"
+
+postgres_runtime_root_dir: /opt/ai-service-platform/postgres
+postgres_runtime_config_dir: "{{ postgres_runtime_root_dir }}/config"
+postgres_runtime_env_file: "{{ postgres_runtime_root_dir }}/postgres.env"
+postgres_runtime_compose_file: "{{ postgres_runtime_root_dir }}/docker-compose.yml"
+postgres_runtime_default_data_volume: ai_service_postgres_data
+postgres_runtime_default_container_name: ai-service-postgres
+postgres_runtime_default_image: postgres:16-alpine
+postgres_runtime_default_port: 5432
+postgres_runtime_default_listen_addresses: "*"
+postgres_runtime_default_wal_keep_size: 512MB
+postgres_runtime_default_max_wal_senders: 5
+postgres_runtime_default_max_replication_slots: 5
+postgres_runtime_default_connect_timeout_seconds: 5
+postgres_runtime_default_keepalives_idle_seconds: 10
+postgres_runtime_default_keepalives_interval_seconds: 5
+postgres_runtime_default_keepalives_count: 3
+postgres_runtime_default_tcp_user_timeout_ms: 30000
+postgres_runtime_default_wal_receiver_timeout: 30s
+postgres_runtime_startup_retries: 90
+postgres_runtime_startup_delay: 2
+postgres_runtime_route_reconcile_script: /usr/local/sbin/ai-service-postgres-route-reconcile
+postgres_runtime_route_reconcile_service: ai-service-postgres-route-reconcile.service
+postgres_runtime_route_reconcile_timer: ai-service-postgres-route-reconcile.timer
+postgres_runtime_route_reconcile_interval: 10s

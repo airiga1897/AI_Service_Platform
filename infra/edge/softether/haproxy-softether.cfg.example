@@ -1,0 +1,44 @@
+# SoftEther HAProxy routing fragment.
+# Render concrete hostnames and allowlist paths from services.yml or secrets.
+
+frontend ft_ssl
+    bind *:443
+    mode tcp
+    option tcplog
+
+    tcp-request inspect-delay 5s
+    tcp-request content accept if { req_ssl_hello_type 1 }
+
+    acl is_vpn req_ssl_sni -i {{ vpn_sni_hostname }}
+    use_backend bk_vpn if is_vpn
+
+frontend ft_vpn_alt
+    bind *:992
+    mode tcp
+    option tcplog
+    default_backend bk_vpn_alt
+
+frontend ft_vpn_mgmt
+    bind *:5555
+    mode tcp
+    option tcplog
+
+    acl is_mgmt_allowed src -f /usr/local/etc/haproxy/allowlist/vpn_mgmt_ips.lst
+    tcp-request connection reject if !is_mgmt_allowed
+
+    default_backend bk_vpn_mgmt
+
+backend bk_vpn
+    mode tcp
+    option tcp-check
+    server softether 172.20.0.2:443 check inter 5s fall 3 rise 2
+
+backend bk_vpn_alt
+    mode tcp
+    option tcp-check
+    server softether_alt 172.20.0.2:992 check inter 5s fall 3 rise 2
+
+backend bk_vpn_mgmt
+    mode tcp
+    option tcp-check
+    server softether_mgmt 172.20.0.2:5555 check inter 5s fall 3 rise 2

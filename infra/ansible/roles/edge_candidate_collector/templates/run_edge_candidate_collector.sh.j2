@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ALIAS="{{ inventory_hostname }}"
+ROOT_DIR="{{ edge_candidate_collector_root_dir }}"
+STATE_DIR="{{ edge_candidate_collector_state_dir }}"
+LOG_DIR="{{ edge_candidate_collector_log_dir }}"
+CANDIDATE_DIR="{{ edge_candidate_collector_candidate_dir }}"
+PROCESSED_DIR="{{ edge_candidate_collector_processed_dir }}"
+OBSERVATION_DIR="{{ edge_candidate_collector_observation_dir }}"
+OBSERVATION_STATE="{{ edge_candidate_collector_observation_state_file }}"
+SINCE="{{ edge_candidate_collector_docker_since }}"
+MAX_LINES="{{ edge_candidate_collector_max_lines }}"
+CANDIDATE_RETENTION_DAYS="{{ edge_candidate_collector_candidate_retention_days }}"
+PROCESSED_RETENTION_DAYS="{{ edge_candidate_collector_processed_retention_days }}"
+TCPDUMP_ENABLED="{{ edge_candidate_collector_tcpdump_enabled | bool | ternary('true', 'false') }}"
+TCPDUMP_DURATION_SECONDS="{{ edge_candidate_collector_tcpdump_duration_seconds }}"
+SECURE_NAT_SOURCE_IP="{{ edge_candidate_collector_secure_nat_source_ip }}"
+OBSERVATION_WINDOW_HOURS="{{ edge_candidate_collector_observation_window_hours }}"
+MIN_OBSERVATIONS="{{ edge_candidate_collector_min_observations }}"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+
+mkdir -p "$LOG_DIR" "$CANDIDATE_DIR" "$PROCESSED_DIR" "$OBSERVATION_DIR"
+
+collect_docker_logs() {
+    local container="$1"
+    local output="$2"
+    if command -v docker >/dev/null 2>&1 && docker inspect "$container" >/dev/null 2>&1; then
+        docker logs --since "$SINCE" "$container" >"$output" 2>&1 || true
+    else
+        : >"$output"
+    fi
+}
+
+HAPROXY_LOG="$LOG_DIR/haproxy-${STAMP}.log"
+POLICY_LOG="$LOG_DIR/policy-gateway-${STAMP}.log"
+CASCADE_LOG="$LOG_DIR/vpn-cascade-${STAMP}.log"
+TCPDUMP_LOG="$LOG_DIR/tcpdump-secure-nat-${STAMP}.log"
+OUTPUT="$CANDIDATE_DIR/${ALIAS}-${STAMP}.jsonl"
+
+collect_docker_logs "{{ edge_candidate_collector_haproxy_container }}" "$HAPROXY_LOG"
+collect_docker_logs "{{ edge_candidate_collector_policy_gateway_container }}" "$POLICY_LOG"
+collect_docker_logs "{{ edge_candidate_collector_vpn_cascade_container }}" "$CASCADE_LOG"
+
+if [ "$TCPDUMP_ENABLED" = "true" ] && command -v timeout >/dev/null 2>&1 && command -v tcpdump >/dev/null 2>&1; then
+    timeout "$TCPDUMP_DURATION_SECONDS" tcpdump -nn -i any -tt -q "(tcp or udp) and not port 22 and src host $SECURE_NAT_SOURCE_IP" >"$TCPDUMP_LOG" 2>/dev/null || true
+else
+    : >"$TCPDUMP_LOG"
+fi
+
+python3 "$ROOT_DIR/edge_candidate_collector.py" \
+    --source-alias "$ALIAS" \
+    --haproxy-log "$HAPROXY_LOG" \
+    --policy-log "$POLICY_LOG" \
+    --cascade-log "$CASCADE_LOG" \
+    --tcpdump-log "$TCPDUMP_LOG" \
+    --tcpdump-state "$OBSERVATION_STATE" \
+    --secure-nat-source-ip "$SECURE_NAT_SOURCE_IP" \
+    --observation-window-hours "$OBSERVATION_WINDOW_HOURS" \
+    --min-observations "$MIN_OBSERVATIONS" \
+    --max-lines "$MAX_LINES" \
+    --output "$OUTPUT"
+
+chmod 0644 "$OUTPUT"
+
+find "$LOG_DIR" -type f -name '*.log' -mtime +7 -delete
+find "$CANDIDATE_DIR" -type f -name '*.jsonl' -mtime +"$CANDIDATE_RETENTION_DAYS" -delete
+find "$PROCESSED_DIR" -type f -name '*.jsonl' -mtime +"$PROCESSED_RETENTION_DAYS" -delete

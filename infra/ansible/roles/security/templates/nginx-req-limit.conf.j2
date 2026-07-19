@@ -1,0 +1,7 @@
+[Definition]
+# Читаем реальный IP из X-Forwarded-For (трафик идёт через HAProxy)
+# HAProxy передаёт реальный IP клиента в заголовке X-Forwarded-For
+failregex = ^.*\[error\].*limiting requests, excess:.* by zone.*client: <HOST>
+            ^.*\[error\].*no live upstreams while connecting to upstream.*client: <HOST>
+
+ignoreregex =

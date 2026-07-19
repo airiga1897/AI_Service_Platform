@@ -1,0 +1,166 @@
+---
+- name: Validate site_runtime network probe scope
+  ansible.builtin.assert:
+    that:
+      - site_runtime_network_probe_state == 'present'
+      - inventory_hostname == site_runtime_network_probe_allowed_alias
+      - site_runtime_network_probe_anchor_ipv4 == '172.31.3.10'
+      - site_runtime_network_probe_router_ipv4 == '172.31.3.2'
+      - site_runtime_network_probe_destination_ipv4 == '172.30.8.10'
+      - site_runtime_network_probe_destination_port | int == 5432
+    fail_msg: >-
+      The phase-1 site_runtime probe is intentionally restricted to vps3,
+      172.31.3.10 via 172.31.3.2, and TCP 172.30.8.10:5432.
+
+- name: Check required application network
+  ansible.builtin.command:
+    cmd: "docker network inspect {{ site_runtime_network_probe_app_network }}"
+  check_mode: false
+  changed_when: false
+
+- name: Inspect running platform_router container
+  ansible.builtin.command:
+    cmd: "docker inspect {{ site_runtime_network_probe_source_container }}"
+  check_mode: false
+  register: site_runtime_network_probe_source_container_inspect
+  changed_when: false
+
+- name: Resolve exact preloaded anchor image from platform_router
+  ansible.builtin.set_fact:
+    site_runtime_network_probe_image: >-
+      {{
+        (
+          site_runtime_network_probe_source_container_inspect.stdout
+          | from_json
+          | first
+        ).Config.Image
+      }}
+
+- name: Validate resolved anchor image policy
+  ansible.builtin.assert:
+    that:
+      - site_runtime_network_probe_image.startswith(site_runtime_network_probe_expected_image_repository + ':')
+      - not site_runtime_network_probe_image.endswith(':local')
+      - not site_runtime_network_probe_image.endswith(':latest')
+    fail_msg: >-
+      The running platform-router must use a timestamped
+      {{ site_runtime_network_probe_expected_image_repository }} image.
+
+- name: Check resolved preloaded anchor image
+  ansible.builtin.command:
+    cmd: "docker image inspect {{ site_runtime_network_probe_image }}"
+  check_mode: false
+  changed_when: false
+
+- name: Create site_runtime network probe directory
+  ansible.builtin.file:
+    path: "{{ site_runtime_network_probe_root_dir }}"
+    state: directory
+    mode: "0750"
+
+- name: Render site_runtime network probe compose
+  ansible.builtin.template:
+    src: docker-compose.site-runtime-network-probe.yml.j2
+    dest: "{{ site_runtime_network_probe_compose_file }}"
+    mode: "0640"
+
+- name: Validate site_runtime network probe compose
+  ansible.builtin.command:
+    cmd: "docker compose -f {{ site_runtime_network_probe_compose_file }} config --quiet"
+  changed_when: false
+
+- name: Start site_runtime network anchor
+  ansible.builtin.command:
+    cmd: "docker compose -f {{ site_runtime_network_probe_compose_file }} up -d --no-build --pull never anchor"
+    chdir: "{{ site_runtime_network_probe_root_dir }}"
+  register: site_runtime_network_probe_anchor_up
+  changed_when: >-
+    'Created' in site_runtime_network_probe_anchor_up.stdout or
+    'Started' in site_runtime_network_probe_anchor_up.stdout or
+    'Recreated' in site_runtime_network_probe_anchor_up.stdout
+  when: not ansible_check_mode
+
+- name: Wait for anchor route reconciliation
+  ansible.builtin.command:
+    cmd: >-
+      docker exec {{ site_runtime_network_probe_anchor_name }}
+      sh -ec 'ip route get {{ site_runtime_network_probe_destination_ipv4 }} |
+      grep -F "via {{ site_runtime_network_probe_router_ipv4 }}"'
+  register: site_runtime_network_probe_route_before_restart
+  retries: 12
+  delay: 2
+  until: site_runtime_network_probe_route_before_restart.rc == 0
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Verify anchor application IP
+  ansible.builtin.command:
+    cmd: >-
+      docker inspect --format
+      '{{ '{{' }} (index .NetworkSettings.Networks "{{ site_runtime_network_probe_app_network }}").IPAddress {{ '}}' }}'
+      {{ site_runtime_network_probe_anchor_name }}
+  register: site_runtime_network_probe_anchor_ip
+  changed_when: false
+  failed_when: site_runtime_network_probe_anchor_ip.stdout | trim != site_runtime_network_probe_anchor_ipv4
+  when: not ansible_check_mode
+
+- name: Verify anchor publishes no host ports
+  ansible.builtin.command:
+    cmd: >-
+      docker inspect --format
+      '{{ '{{' }} json .HostConfig.PortBindings {{ '}}' }}'
+      {{ site_runtime_network_probe_anchor_name }}
+  register: site_runtime_network_probe_port_bindings
+  changed_when: false
+  failed_when: site_runtime_network_probe_port_bindings.stdout | trim not in ['null', '{}']
+  when: not ansible_check_mode
+
+- name: Prove PostgreSQL TCP path through shared network namespace
+  ansible.builtin.command:
+    cmd: >-
+      docker compose -f {{ site_runtime_network_probe_compose_file }}
+      --profile probe run --rm --no-deps tcp-probe
+    chdir: "{{ site_runtime_network_probe_root_dir }}"
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Restart site_runtime network anchor
+  ansible.builtin.command:
+    cmd: "docker compose -f {{ site_runtime_network_probe_compose_file }} restart anchor"
+    chdir: "{{ site_runtime_network_probe_root_dir }}"
+  changed_when: true
+  when: not ansible_check_mode
+
+- name: Verify route is restored after anchor restart
+  ansible.builtin.command:
+    cmd: >-
+      docker exec {{ site_runtime_network_probe_anchor_name }}
+      sh -ec 'ip route get {{ site_runtime_network_probe_destination_ipv4 }} |
+      grep -F "via {{ site_runtime_network_probe_router_ipv4 }}"'
+  register: site_runtime_network_probe_route_after_restart
+  retries: 12
+  delay: 2
+  until: site_runtime_network_probe_route_after_restart.rc == 0
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Re-prove PostgreSQL TCP path after anchor restart
+  ansible.builtin.command:
+    cmd: >-
+      docker compose -f {{ site_runtime_network_probe_compose_file }}
+      --profile probe run --rm --no-deps tcp-probe
+    chdir: "{{ site_runtime_network_probe_root_dir }}"
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Report site_runtime network probe acceptance
+  ansible.builtin.debug:
+    msg:
+      alias: "{{ inventory_hostname }}"
+      anchor_ipv4: "{{ site_runtime_network_probe_anchor_ipv4 }}"
+      route: "{{ site_runtime_network_probe_destination_ipv4 }}/32 via {{ site_runtime_network_probe_router_ipv4 }}"
+      tcp_target: "{{ site_runtime_network_probe_destination_ipv4 }}:{{ site_runtime_network_probe_destination_port }}"
+      shared_network_namespace: verified
+      route_after_anchor_restart: verified
+      host_ports: none
+  when: not ansible_check_mode
