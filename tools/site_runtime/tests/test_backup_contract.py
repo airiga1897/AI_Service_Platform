@@ -150,6 +150,7 @@ class BackupRenderContractTests(unittest.TestCase):
 class BackupRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.backup_model = {
+            "instance": "ai-retail-mvp",
             "backup_target": {
                 "alias": "vps5",
                 "repository": "/opt/backups/ai-service-platform/site-runtime/ai-retail-mvp/restic",
@@ -157,6 +158,40 @@ class BackupRuntimeTests(unittest.TestCase):
             "postgres": {"container_name": "ai-service-postgres"},
             "nodes": {"vps5": "vps5.mine-craft.su"},
         }
+
+    def test_runtime_container_names_match_compose_contract(self) -> None:
+        self.assertEqual(
+            RUNTIME._runtime_container(self.backup_model, "anchor"),
+            "site-runtime-ai-retail-mvp-anchor",
+        )
+        self.assertEqual(
+            RUNTIME._runtime_container(self.backup_model, "web"),
+            "ai-retail-mvp-web-1",
+        )
+        with self.assertRaisesRegex(RUNTIME.BackupError, "Неизвестный сервис"):
+            RUNTIME._runtime_container(self.backup_model, "migration")
+
+    def test_private_health_retries_until_runtime_is_ready(self) -> None:
+        self.backup_model.update({
+            "runtime_alias": "vps3",
+            "runtime_root": "/opt/ai-service-platform/site-runtime/ai-retail-mvp",
+        })
+        responses = [
+            SimpleNamespace(returncode=1),
+            SimpleNamespace(returncode=1),
+            SimpleNamespace(returncode=0),
+        ]
+        with (
+            mock.patch.object(RUNTIME, "_ssh_result", side_effect=responses) as ssh_result,
+            mock.patch.object(RUNTIME.time, "sleep") as sleep,
+        ):
+            healthy = RUNTIME._private_health(
+                self.backup_model, attempts=20, delay_seconds=3,
+            )
+        self.assertTrue(healthy)
+        self.assertEqual(ssh_result.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        sleep.assert_called_with(3)
 
     def test_postgres_scratch_command_uses_positional_arguments(self) -> None:
         command = RUNTIME._postgres_shell(

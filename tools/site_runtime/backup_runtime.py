@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -178,6 +179,19 @@ def _preflight(model: dict[str, Any], password: str, *, require_repository: bool
             raise BackupError(f"current.json содержит неожиданный storage identity: {key}")
         _ssh(model, runtime, f"sudo -n docker volume inspect {shlex_quote(expected)} >/dev/null")
 
+    runtime_services = ("anchor", "redis", "web", "worker", "beat", "nginx")
+    for service in runtime_services:
+        container = _runtime_container(model, service)
+        running = _ssh(
+            model,
+            runtime,
+            "sudo -n docker inspect --format '{{.State.Running}}' " + shlex_quote(container),
+        ).stdout.strip()
+        if running != "true":
+            raise BackupError(f"Обязательный runtime-контейнер {service} не запущен")
+    if not _private_health(model, attempts=1, delay_seconds=0):
+        raise BackupError("Private runtime не прошёл health preflight")
+
     primary = model["postgres"]["primary"]
     primary_state = _ssh(
         model, primary,
@@ -212,7 +226,13 @@ def _preflight(model: dict[str, Any], password: str, *, require_repository: bool
         raise BackupError("На backup target осталось менее 2 GiB")
     if require_repository:
         _restic(model, password, "snapshots", "--json")
-    return {"current": current, "target_free_bytes": int(capacity), "postgres_streaming_standbys": 2}
+    return {
+        "current": current,
+        "target_free_bytes": int(capacity),
+        "postgres_streaming_standbys": 2,
+        "runtime_containers_running": len(runtime_services),
+        "private_health": "succeeded",
+    }
 
 
 def backup_init(model: dict[str, Any], password: str, *, check: bool) -> dict[str, Any]:
@@ -256,7 +276,33 @@ def _media_archive(model: dict[str, Any], volume: str, image_id: str, destinatio
 
 
 def _runtime_container(model: dict[str, Any], service: str) -> str:
-    return f"site-runtime-{model['instance']}-{service}-1"
+    instance = str(model["instance"])
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", instance):
+        raise BackupError("Некорректный instance в backup-модели")
+    if service == "anchor":
+        return f"site-runtime-{instance}-anchor"
+    if service not in {"redis", "web", "worker", "beat", "nginx"}:
+        raise BackupError("Неизвестный сервис site_runtime в backup-модели")
+    return f"{instance}-{service}-1"
+
+
+def _private_health(model: dict[str, Any], *, attempts: int, delay_seconds: int) -> bool:
+    runtime = model["runtime_alias"]
+    compose = f"{model['runtime_root']}/docker-compose.yml"
+    health_cmd = (
+        f"sudo -n docker compose -f {shlex_quote(compose)} exec -T web python -c "
+        + shlex_quote(
+            "import urllib.request; "
+            "[urllib.request.urlopen('http://127.0.0.1:8080'+p,timeout=5).read() "
+            "for p in ('/healthz/','/readyz/','/worker-healthz/')]"
+        )
+    )
+    for attempt in range(attempts):
+        if _ssh_result(model, runtime, health_cmd).returncode == 0:
+            return True
+        if attempt + 1 < attempts:
+            time.sleep(delay_seconds)
+    return False
 
 
 def _postgres_shell(model: dict[str, Any], command: str, *arguments: str,
@@ -275,7 +321,9 @@ def backup(model: dict[str, Any], password: str, *, check: bool) -> dict[str, An
     if check:
         return {"action": "backup", "check_mode_mutations": False, "snapshot_created": False,
                 "deployment_id": preflight["current"]["deployment_id"],
-                "datasets": model["datasets"], "target_free_bytes": preflight["target_free_bytes"]}
+                "datasets": model["datasets"], "target_free_bytes": preflight["target_free_bytes"],
+                "runtime_containers_running": preflight["runtime_containers_running"],
+                "private_health": preflight["private_health"]}
 
     backup_id = _utc_id()
     control_root = Path(f"/var/lib/ai-service-platform/site-runtime-backup/{model['instance']}")
@@ -346,11 +394,11 @@ def backup(model: dict[str, Any], password: str, *, check: bool) -> dict[str, An
         if writers_restart_required:
             restart = _ssh_result(model, runtime, f"sudo -n docker compose -f {shlex_quote(compose)} up -d --no-build --pull never web worker beat")
             if restart.returncode == 0:
-                health_cmd = (
-                    f"sudo -n docker compose -f {shlex_quote(compose)} exec -T web python -c "
-                    + shlex_quote("import urllib.request; [urllib.request.urlopen('http://127.0.0.1:8080'+p,timeout=5).read() for p in ('/healthz/','/readyz/','/worker-healthz/')]")
+                health = (
+                    "succeeded"
+                    if _private_health(model, attempts=20, delay_seconds=3)
+                    else "failed"
                 )
-                health = "succeeded" if _ssh_result(model, runtime, health_cmd).returncode == 0 else "failed"
             else:
                 health = "failed"
         if output is not None:
