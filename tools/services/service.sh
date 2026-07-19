@@ -784,6 +784,7 @@ if [ "$CHECK" = "true" ]; then
 fi
 mapfile -t extra_vars < <(service_extra_vars "$SERVICE" "$service_state" "$service_purge_data" "$service_reseed_config" "$POLICY_ROUTER_IMAGE_REF" "$BUILD_POLICY_ROUTER_IMAGE")
 
+set +e
 list_hosts_output="$(
     run_ansible_playbook \
         -i "$INVENTORY" \
@@ -793,6 +794,7 @@ list_hosts_output="$(
         --list-hosts 2>&1
 )"
 list_hosts_rc=$?
+set -e
 printf '%s\n' "$list_hosts_output"
 if [ "$list_hosts_rc" -ne 0 ]; then
     fail "ansible --list-hosts failed before $SERVICE $ACTION with exit code $list_hosts_rc"

@@ -15,6 +15,7 @@ import yaml
 
 INSTANCE_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 VOLUME_RE = re.compile(r"[a-z0-9][a-z0-9_-]+")
+CONTAINER_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]+")
 SNAPSHOT_RE = re.compile(r"(?:latest|[0-9a-f]{8,64})")
 REPOSITORY_RE = re.compile(r"/opt/backups/ai-service-platform/site-runtime/[a-z0-9-]+/restic")
 
@@ -51,7 +52,8 @@ def _single_role(rows: list[dict[str, str]], name: str) -> str:
 
 def resolve_backup(
     *, registry_path: Path, instances_path: Path, state_path: Path,
-    nodes_path: Path, instance_name: str, limit: str, snapshot_id: str = "",
+    nodes_path: Path, postgres_config_path: Path, instance_name: str, limit: str,
+    snapshot_id: str = "",
 ) -> dict[str, Any]:
     if not INSTANCE_RE.fullmatch(instance_name):
         raise ContractError("instance должен быть lowercase kebab-case")
@@ -62,6 +64,12 @@ def resolve_backup(
 
     registry = _yaml(registry_path)
     instances = _yaml(instances_path)
+    postgres_config = _yaml(postgres_config_path).get("postgres_runtime") or {}
+    if not isinstance(postgres_config, dict):
+        raise ContractError("postgres_runtime config должен содержать YAML mapping")
+    postgres_container = str(postgres_config.get("container_name") or "")
+    if not CONTAINER_RE.fullmatch(postgres_container):
+        raise ContractError("postgres_runtime container_name отсутствует или некорректен")
     placements = instances.get("instances") or {}
     profiles = registry.get("runtime_instances") or {}
     if instances.get("version") != 1 or instance_name not in placements or instance_name not in profiles:
@@ -136,7 +144,11 @@ def resolve_backup(
         "schedule": "manual",
         "restore_policy": "scratch-only",
         "database": instance_name.replace("-", "_"),
-        "postgres": {"primary": primary_aliases[0], "standbys": standby_aliases},
+        "postgres": {
+            "primary": primary_aliases[0],
+            "standbys": standby_aliases,
+            "container_name": postgres_container,
+        },
         "volumes": {"public_media": public_volume, "private_media": private_volume},
         "current_receipt": f"/var/lib/ai-service-platform/site-runtime/deployments/{instance_name}/current.json",
         "runtime_root": f"/opt/ai-service-platform/site-runtime/{instance_name}",
@@ -150,6 +162,7 @@ def main() -> int:
     parser.add_argument("--instances", type=Path, required=True)
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--nodes", type=Path, required=True)
+    parser.add_argument("--postgres-config", type=Path, required=True)
     parser.add_argument("--instance", required=True)
     parser.add_argument("--limit", required=True)
     parser.add_argument("--snapshot-id", default="")
@@ -158,6 +171,7 @@ def main() -> int:
         model = resolve_backup(
             registry_path=args.registry, instances_path=args.instances,
             state_path=args.state, nodes_path=args.nodes,
+            postgres_config_path=args.postgres_config,
             instance_name=args.instance, limit=args.limit, snapshot_id=args.snapshot_id,
         )
     except (ContractError, OSError, yaml.YAMLError) as exc:

@@ -21,6 +21,8 @@ from typing import Any
 
 PASSWORD_RE = re.compile(r"RESTIC_PASSWORD=(\S{24,})")
 HEX_RE = re.compile(r"[0-9a-f]{8,64}")
+ANSIBLE_SSH_KEY = "/home/ansible/.ssh/ansible_control"
+ANSIBLE_KNOWN_HOSTS = "/home/ansible/.ssh/known_hosts"
 
 
 class BackupError(RuntimeError):
@@ -47,16 +49,20 @@ def _ssh(model: dict[str, Any], alias: str, command: str, *, stdin: bytes | None
          text: bool = True) -> subprocess.CompletedProcess[Any]:
     endpoint = model["nodes"][alias]
     return _checked([
-        "ssh", "-i", "/home/ansible/.ssh/ansible_control", "-o", "BatchMode=yes",
-        "-o", "StrictHostKeyChecking=yes", f"ansible@{endpoint}", command,
+        "ssh", "-i", ANSIBLE_SSH_KEY, "-o", "BatchMode=yes",
+        "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes",
+        "-o", f"UserKnownHostsFile={ANSIBLE_KNOWN_HOSTS}",
+        f"ansible@{endpoint}", command,
     ], stdin=stdin, text=text)
 
 
 def _ssh_result(model: dict[str, Any], alias: str, command: str) -> subprocess.CompletedProcess[str]:
     endpoint = model["nodes"][alias]
     return _run([
-        "ssh", "-i", "/home/ansible/.ssh/ansible_control", "-o", "BatchMode=yes",
-        "-o", "StrictHostKeyChecking=yes", f"ansible@{endpoint}", command,
+        "ssh", "-i", ANSIBLE_SSH_KEY, "-o", "BatchMode=yes",
+        "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=yes",
+        "-o", f"UserKnownHostsFile={ANSIBLE_KNOWN_HOSTS}",
+        f"ansible@{endpoint}", command,
     ])
 
 
@@ -96,14 +102,50 @@ def _restic_env(model: dict[str, Any], password: str) -> dict[str, str]:
 
 def _restic(model: dict[str, Any], password: str, *args: str,
             cwd: Path | None = None, checked: bool = True) -> subprocess.CompletedProcess[str]:
+    target = model["backup_target"]
+    endpoint = model["nodes"][target["alias"]]
+    if re.fullmatch(r"[A-Za-z0-9.-]+", endpoint) is None:
+        raise BackupError("Недопустимый endpoint backup target для Restic SFTP")
+    sftp_command = (
+        f"ssh -i {ANSIBLE_SSH_KEY} "
+        "-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "
+        f"-o UserKnownHostsFile={ANSIBLE_KNOWN_HOSTS} "
+        f"ansible@{endpoint} -s sftp"
+    )
     command = [
         "restic", "-o",
-        "sftp.command=ssh -i /home/ansible/.ssh/ansible_control -o BatchMode=yes -o StrictHostKeyChecking=yes",
+        f"sftp.command={sftp_command}",
         *args,
     ]
     return _checked(command, env=_restic_env(model, password), cwd=cwd) if checked else _run(
         command, env=_restic_env(model, password), cwd=cwd,
     )
+
+
+def _repository_state(model: dict[str, Any]) -> str:
+    target = model["backup_target"]
+    repository = shlex_quote(target["repository"])
+    command = (
+        f"repository={repository}; "
+        "if [ ! -d \"$repository\" ]; then printf missing; "
+        "elif [ \"$(stat -c %U \"$repository\")\" != ansible ]; then printf invalid_owner; "
+        "elif [ \"$(stat -c %a \"$repository\")\" != 700 ]; then printf invalid_mode; "
+        "elif [ -f \"$repository/config\" ]; then printf initialized; "
+        "elif find \"$repository\" -mindepth 1 -maxdepth 1 -print -quit | grep -q .; "
+        "then printf nonempty_without_config; else printf empty; fi"
+    )
+    state = _ssh(model, target["alias"], command).stdout.strip()
+    allowed = {"missing", "invalid_owner", "invalid_mode", "initialized", "nonempty_without_config", "empty"}
+    if state not in allowed:
+        raise BackupError("Backup target вернул неизвестное состояние Restic repository")
+    return state
+
+
+def _postgres_container(model: dict[str, Any]) -> str:
+    container = str(model["postgres"]["container_name"])
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]+", container) is None:
+        raise BackupError("Некорректное имя контейнера PostgreSQL в backup-модели")
+    return container
 
 
 def _sha256(path: Path) -> str:
@@ -125,6 +167,7 @@ def _utc_id() -> str:
 
 def _preflight(model: dict[str, Any], password: str, *, require_repository: bool) -> dict[str, Any]:
     runtime = model["runtime_alias"]
+    postgres_container = shlex_quote(_postgres_container(model))
     current = _read_json_remote(model, runtime, model["current_receipt"])
     required = {"deployment_id", "digest", "compose_checksum", "storage"}
     if not required.issubset(current) or not str(current["digest"]).startswith("sha256:"):
@@ -138,13 +181,13 @@ def _preflight(model: dict[str, Any], password: str, *, require_repository: bool
     primary = model["postgres"]["primary"]
     primary_state = _ssh(
         model, primary,
-        "sudo -n docker exec postgres_runtime sh -ec 'psql -U \"$POSTGRES_USER\" -d postgres -Atqc \"select not pg_is_in_recovery()\"'",
+        f"sudo -n docker exec {postgres_container} sh -ec 'psql -U \"$POSTGRES_USER\" -d postgres -Atqc \"select not pg_is_in_recovery()\"'",
     ).stdout.strip()
     if primary_state != "t":
         raise BackupError("PostgreSQL primary находится в recovery")
     replication = _ssh(
         model, primary,
-        "sudo -n docker exec -i postgres_runtime sh -ec 'psql -U \"$POSTGRES_USER\" -d postgres -At'",
+        f"sudo -n docker exec -i {postgres_container} sh -ec 'psql -U \"$POSTGRES_USER\" -d postgres -At'",
         stdin=b"select count(*) from pg_stat_replication where state='streaming' and sync_state='async';\n",
         text=False,
     ).stdout.decode().strip()
@@ -153,7 +196,7 @@ def _preflight(model: dict[str, Any], password: str, *, require_repository: bool
     for standby in model["postgres"]["standbys"]:
         state = _ssh(
             model, standby,
-            "sudo -n docker exec -i postgres_runtime sh -ec 'psql -U \"$POSTGRES_USER\" -d postgres -At'",
+            f"sudo -n docker exec -i {postgres_container} sh -ec 'psql -U \"$POSTGRES_USER\" -d postgres -At'",
             stdin=b"select pg_is_in_recovery() and exists(select 1 from pg_stat_wal_receiver where status='streaming');\n",
             text=False,
         ).stdout.decode().strip()
@@ -177,13 +220,22 @@ def backup_init(model: dict[str, Any], password: str, *, check: bool) -> dict[st
     if check:
         return {"action": "backup-init", "check_mode_mutations": False, "repository_initialized": None,
                 "target_alias": target["alias"], "repository": target["repository"]}
-    env = _restic_env(model, password)
-    snapshots = _restic(model, password, "snapshots", "--json", checked=False)
-    initialized = snapshots.returncode == 0
-    if not initialized:
-        message = snapshots.stderr.lower()
-        if "repository does not exist" not in message and "config file does not exist" not in message:
-            raise BackupError(f"Не удалось проверить Restic repository: {snapshots.stderr.strip()}")
+    state = _repository_state(model)
+    if state == "missing":
+        raise BackupError("Каталог Restic repository отсутствует на backup target")
+    if state == "invalid_owner":
+        raise BackupError("Каталог Restic repository должен принадлежать пользователю ansible")
+    if state == "invalid_mode":
+        raise BackupError("Каталог Restic repository должен иметь режим доступа 0700")
+    if state == "nonempty_without_config":
+        raise BackupError("Непустой каталог Restic repository не содержит config; инициализация запрещена")
+
+    initialized = state == "initialized"
+    if initialized:
+        snapshots = _restic(model, password, "snapshots", "--json", checked=False)
+        if snapshots.returncode != 0:
+            raise BackupError(f"Не удалось проверить существующий Restic repository: {snapshots.stderr.strip()}")
+    else:
         _restic(model, password, "init")
     _restic(model, password, "check")
     return {"action": "backup-init", "check_mode_mutations": False,
@@ -203,6 +255,21 @@ def _media_archive(model: dict[str, Any], volume: str, image_id: str, destinatio
     return _tar_count(destination)
 
 
+def _runtime_container(model: dict[str, Any], service: str) -> str:
+    return f"site-runtime-{model['instance']}-{service}-1"
+
+
+def _postgres_shell(model: dict[str, Any], command: str, *arguments: str,
+                    stdin: bytes | None = None) -> str:
+    interactive = " -i" if stdin is not None else ""
+    quoted_arguments = "".join(f" {shlex_quote(argument)}" for argument in arguments)
+    return (
+        f"sudo -n docker exec{interactive} {shlex_quote(_postgres_container(model))} "
+        f"sh -ec {shlex_quote(command)} sh"
+        f"{quoted_arguments}"
+    )
+
+
 def backup(model: dict[str, Any], password: str, *, check: bool) -> dict[str, Any]:
     preflight = _preflight(model, password, require_repository=True)
     if check:
@@ -219,19 +286,26 @@ def backup(model: dict[str, Any], password: str, *, check: bool) -> dict[str, An
     compose = f"{model['runtime_root']}/docker-compose.yml"
     final_status = "failed"
     snapshot_id: str | None = None
-    writers_stopped = False
+    writers_restart_required = False
     output: dict[str, Any] | None = None
+    health = "not_checked"
+    health_error: BackupError | None = None
     try:
+        writers_restart_required = True
         _ssh(model, runtime, f"sudo -n docker compose -f {shlex_quote(compose)} stop web worker beat")
-        writers_stopped = True
         database_path = staging / "database.dump"
         dump = _ssh(
             model, model["postgres"]["primary"],
-            "sudo -n docker exec postgres_runtime sh -ec 'pg_dump -U \"$POSTGRES_USER\" -d "
-            + model["database"] + " -Fc'", text=False,
+            f"sudo -n docker exec {shlex_quote(_postgres_container(model))} "
+            "sh -ec 'pg_dump -U \"$POSTGRES_USER\" -d " + model["database"] + " -Fc'",
+            text=False,
         )
         database_path.write_bytes(dump.stdout)
-        image_id = _ssh(model, runtime, "sudo -n docker inspect --format '{{.Image}}' ai-retail-mvp-web-1").stdout.strip()
+        image_id = _ssh(
+            model, runtime,
+            f"sudo -n docker inspect --format '{{{{.Image}}}}' "
+            f"{shlex_quote(_runtime_container(model, 'web'))}",
+        ).stdout.strip()
         counts = {
             "database_objects": None,
             "public_media": _media_archive(model, model["volumes"]["public_media"], image_id, staging / "public_media.tar"),
@@ -267,11 +341,9 @@ def backup(model: dict[str, Any], password: str, *, check: bool) -> dict[str, An
         final_status = "succeeded"
         output = {"action": "backup", "snapshot_id": snapshot_id, "backup_id": backup_id,
                   "deployment_id": current["deployment_id"], "final_status": final_status,
-                  "writers_restarted": True, "private_health": "pending"}
-        return output
+                  "writers_restarted": False, "private_health": "pending"}
     finally:
-        health = "not_checked"
-        if writers_stopped:
+        if writers_restart_required:
             restart = _ssh_result(model, runtime, f"sudo -n docker compose -f {shlex_quote(compose)} up -d --no-build --pull never web worker beat")
             if restart.returncode == 0:
                 health_cmd = (
@@ -279,14 +351,29 @@ def backup(model: dict[str, Any], password: str, *, check: bool) -> dict[str, An
                     + shlex_quote("import urllib.request; [urllib.request.urlopen('http://127.0.0.1:8080'+p,timeout=5).read() for p in ('/healthz/','/readyz/','/worker-healthz/')]")
                 )
                 health = "succeeded" if _ssh_result(model, runtime, health_cmd).returncode == 0 else "failed"
+            else:
+                health = "failed"
         if output is not None:
             output["private_health"] = health
+            output["writers_restarted"] = health == "succeeded"
             if health != "succeeded":
                 output["final_status"] = "failed"
+                final_status = "failed"
+                health_error = BackupError("После backup не пройдена проверка private runtime")
         journal = {"backup_id": backup_id, "snapshot_id": snapshot_id, "final_status": final_status,
+                   "snapshot_accepted": final_status == "succeeded",
                    "health_after_restart": health, "plaintext_staging_removed": True}
-        (journal_root / f"{backup_id}.json").write_text(json.dumps(journal, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            (journal_root / f"{backup_id}.json").write_text(
+                json.dumps(journal, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+    if health_error is not None:
+        raise health_error
+    if output is None:
+        raise BackupError("Backup завершился без результата")
+    return output
 
 
 def _verify_restored(root: Path) -> tuple[dict[str, Any], Path]:
@@ -325,25 +412,48 @@ def restore_rehearsal(model: dict[str, Any], password: str, *, check: bool) -> d
     journal_root.mkdir(parents=True, exist_ok=True, mode=0o750)
     restored = Path(tempfile.mkdtemp(prefix=f"restore-{safe_id}-", dir=root))
     status = "failed"
-    cleanup = False
+    cleanup_requested = False
+    cleanup_succeeded = False
+    cleanup_error: BackupError | None = None
+    output: dict[str, Any] | None = None
     try:
         _restic(model, password, "restore", snapshot, "--target", str(restored))
         manifest, data = _verify_restored(restored)
         if manifest["instance"] != model["instance"]:
             raise BackupError("Snapshot принадлежит другому instance")
         primary = model["postgres"]["primary"]
-        _ssh(model, primary, "sudo -n docker exec postgres_runtime sh -ec 'dropdb -U \"$POSTGRES_USER\" --if-exists " + shlex_quote(scratch_db) + "; createdb -U \"$POSTGRES_USER\" -O " + shlex_quote(model["database"]) + " " + shlex_quote(scratch_db) + "'")
+        _ssh(
+            model, primary,
+            _postgres_shell(
+                model,
+                'dropdb -U "$POSTGRES_USER" --if-exists "$1"; '
+                'createdb -U "$POSTGRES_USER" -O "$2" "$1"',
+                scratch_db, model["database"],
+            ),
+        )
         dump = (data / "database.dump").read_bytes()
-        _ssh(model, primary, "sudo -n docker exec -i postgres_runtime sh -ec 'pg_restore -U \"$POSTGRES_USER\" --no-owner --no-privileges -d " + shlex_quote(scratch_db) + "'", stdin=dump, text=False)
+        _ssh(
+            model, primary,
+            _postgres_shell(
+                model,
+                'pg_restore -U "$POSTGRES_USER" --no-owner --no-privileges -d "$1"', scratch_db,
+                stdin=dump,
+            ),
+            stdin=dump, text=False,
+        )
         vector = _ssh(
             model, primary,
-            "sudo -n docker exec -i postgres_runtime sh -ec 'psql -U \"$POSTGRES_USER\" -d " + scratch_db + " -At'",
+            _postgres_shell(model, 'psql -U "$POSTGRES_USER" -d "$1" -At', scratch_db, stdin=b""),
             stdin=b"select count(*) from pg_extension where extname='vector';\n", text=False,
         ).stdout.decode().strip()
         if vector != "1":
             raise BackupError("В scratch DB отсутствует extension vector")
         runtime = model["runtime_alias"]
-        image_id = _ssh(model, runtime, "sudo -n docker inspect --format '{{.Image}}' ai-retail-mvp-web-1").stdout.strip()
+        image_id = _ssh(
+            model, runtime,
+            f"sudo -n docker inspect --format '{{{{.Image}}}}' "
+            f"{shlex_quote(_runtime_container(model, 'web'))}",
+        ).stdout.strip()
         for key, volume in scratch_volumes.items():
             _ssh(model, runtime, f"sudo -n docker volume create {shlex_quote(volume)} >/dev/null")
             script = "import sys,tarfile; tarfile.open(fileobj=sys.stdin.buffer,mode='r|').extractall('/data',filter='data')"
@@ -354,25 +464,41 @@ def restore_rehearsal(model: dict[str, Any], password: str, *, check: bool) -> d
                 raise BackupError(f"Количество объектов scratch {key} не совпадает с manifest")
         env_file = f"{model['runtime_root']}/runtime.env"
         migrate = (
-            "sudo -n docker run --rm --pull never --network container:site-runtime-ai-retail-mvp-anchor "
+            f"sudo -n docker run --rm --pull never --network container:{shlex_quote(_runtime_container(model, 'anchor'))} "
             f"--env-file {shlex_quote(env_file)} -e DB_NAME={shlex_quote(scratch_db)} --entrypoint python {shlex_quote(image_id)} "
             "manage.py migrate --check"
         )
         _ssh(model, runtime, migrate)
         status = "succeeded"
-        cleanup = True
-        return {"action": "restore-rehearsal", "snapshot_id": snapshot, "rehearsal_id": rehearsal_id,
-                "final_status": status, "vector": True, "migrations": "current",
-                "storage_counts_valid": True, "production_unchanged": True, "scratch_removed": True}
+        cleanup_requested = True
+        output = {"action": "restore-rehearsal", "snapshot_id": snapshot, "rehearsal_id": rehearsal_id,
+                  "final_status": status, "vector": True, "migrations": "current",
+                  "storage_counts_valid": True, "production_unchanged": True, "scratch_removed": True}
     finally:
-        if cleanup:
-            _ssh(model, model["postgres"]["primary"], "sudo -n docker exec postgres_runtime sh -ec 'dropdb -U \"$POSTGRES_USER\" --if-exists " + shlex_quote(scratch_db) + "'")
-            for volume in scratch_volumes.values():
-                _ssh(model, model["runtime_alias"], f"sudo -n docker volume rm {shlex_quote(volume)} >/dev/null")
-            shutil.rmtree(restored, ignore_errors=True)
+        if cleanup_requested:
+            try:
+                _ssh(
+                    model, model["postgres"]["primary"],
+                    _postgres_shell(
+                        model, 'dropdb -U "$POSTGRES_USER" --if-exists "$1"', scratch_db,
+                    ),
+                )
+                for volume in scratch_volumes.values():
+                    _ssh(model, model["runtime_alias"], f"sudo -n docker volume rm {shlex_quote(volume)} >/dev/null")
+                shutil.rmtree(restored, ignore_errors=True)
+                cleanup_succeeded = True
+            except BackupError as exc:
+                status = "failed"
+                cleanup_error = BackupError(f"Не удалось удалить scratch-объекты: {exc}")
         journal = {"rehearsal_id": rehearsal_id, "snapshot_id": snapshot, "final_status": status,
-                   "production_unchanged": True, "scratch_preserved_for_diagnostics": not cleanup}
+                   "production_unchanged": True,
+                   "scratch_preserved_for_diagnostics": not cleanup_succeeded}
         (journal_root / f"{rehearsal_id}.json").write_text(json.dumps(journal, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if cleanup_error is not None:
+        raise cleanup_error
+    if output is None:
+        raise BackupError("Restore rehearsal завершился без результата")
+    return output
 
 
 def main() -> int:
