@@ -2,9 +2,10 @@
 - name: Проверить параметры backup/restore site_runtime
   ansible.builtin.assert:
     that:
-      - site_runtime_backup_action in ['backup-init', 'backup', 'restore-rehearsal']
+      - site_runtime_backup_action in ['backup-init', 'backup', 'restore-rehearsal', 'restore-cleanup']
       - site_runtime_instance | length > 0
       - site_runtime_backup_action != 'restore-rehearsal' or site_runtime_snapshot_id | length > 0
+      - site_runtime_backup_action != 'restore-cleanup' or site_runtime_rehearsal_id | length > 0
     fail_msg: "Некорректные параметры ручного backup/restore site_runtime."
 
 - name: Вычислить каноническую backup-модель
@@ -28,6 +29,8 @@
       - "{{ inventory_hostname }}"
       - --snapshot-id
       - "{{ site_runtime_snapshot_id }}"
+      - --rehearsal-id
+      - "{{ site_runtime_rehearsal_id }}"
   delegate_to: localhost
   become: false
   check_mode: false
@@ -127,7 +130,7 @@
       check_mode: false
       changed_when:
         - not site_runtime_backup_check | bool
-        - site_runtime_backup_action in ['backup-init', 'backup', 'restore-rehearsal']
+        - site_runtime_backup_action in ['backup-init', 'backup', 'restore-rehearsal', 'restore-cleanup']
       register: site_runtime_backup_result_command
 
     - name: Вывести результат backup/restore без секретов

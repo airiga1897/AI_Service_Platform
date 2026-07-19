@@ -58,10 +58,25 @@ Nginx остаются запущенными. В секции `finally` writers
 ```
 
 Репетиция использует только scratch DB и digest-scoped scratch volumes. Она
-сверяет manifest и SHA-256, extension `vector`, актуальность Django migrations
+сверяет manifest и SHA-256, extension `vector`, migration ledger scratch и текущей production DB
 и количество media-объектов. Production DB, volumes и `current.json` не
 изменяются. После успеха scratch удаляется; после ошибки сохраняется для
 диагностики и фиксируется в restore journal.
+
+## Очистка неудачной репетиции
+
+Scratch-объекты после ошибки сохраняются до завершения диагностики. Удалять их вручную запрещено.
+Сначала выполняется read-only inventory по точному `rehearsal_id` из failed restore journal:
+
+```powershell
+.\tools\services\service_remote.ps1 site_runtime restore-cleanup `
+  -Instance ai-retail-mvp -RehearsalId <rehearsal-id> -Limit vps3 -Check
+```
+
+После проверки количества scratch DB, volumes и staging запускается та же команда без `-Check`.
+Она принимает только journal со статусом `failed`, признаком неизменности production и сохранённой
+диагностикой. Результат записывается в отдельный append-only cleanup journal. Завершающий повтор с
+`-Check` должен показать нулевой остаток.
 
 ## Аварийная остановка
 

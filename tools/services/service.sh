@@ -12,6 +12,7 @@ LIMIT=""
 INSTANCE=""
 IMAGE_REF=""
 SNAPSHOT_ID=""
+REHEARSAL_ID=""
 SERVICES_REGISTRY="./services.yml"
 SITE_RUNTIME_INSTANCES="./operator/site_runtime/instances.yml"
 SITE_RUNTIME_RESOLVER="./tools/site_runtime/resolve.py"
@@ -56,6 +57,7 @@ Usage:
   bash tools/services/service.sh site_runtime backup-init --instance NAME --limit ALIAS [--check]
   bash tools/services/service.sh site_runtime backup --instance NAME --limit ALIAS [--check]
   bash tools/services/service.sh site_runtime restore-rehearsal --instance NAME --snapshot-id ID --limit ALIAS [--check]
+  bash tools/services/service.sh site_runtime restore-cleanup --instance NAME --rehearsal-id ID --limit ALIAS [--check]
   bash tools/services/service.sh vpn_cascade plan [options]
   bash tools/services/service.sh vpn_cascade apply [options]
   bash tools/services/service.sh vpn_cascade absent [options]
@@ -97,6 +99,7 @@ Options:
   --instance NAME        site_runtime instance name.
   --image-ref REF        site_runtime immutable repository@sha256 reference.
   --snapshot-id ID       Restic snapshot для site_runtime restore-rehearsal.
+  --rehearsal-id ID      Точный failed rehearsal для site_runtime restore-cleanup.
   --policy-router-image-ref REF
                         vpn_cascade only: pin policy-router image and skip cache/build.
   --build-policy-router-image
@@ -247,7 +250,7 @@ service_playbook() {
                 echo "infra/ansible/site_runtime_image_stage.yml"
             elif [ "$ACTION" = "stage-support-images" ]; then
                 echo "infra/ansible/site_runtime_support_images_stage.yml"
-            elif [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ]; then
+            elif [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; then
                 echo "infra/ansible/site_runtime_backup.yml"
             else
                 echo "infra/ansible/site_runtime_apply.yml"
@@ -326,11 +329,12 @@ service_extra_vars() {
                     "-e" "site_runtime_state_file=$STATE_FILE" \
                     "-e" "site_runtime_resolver=$SITE_RUNTIME_RESOLVER" \
                     "-e" "site_runtime_env_resolver=$(dirname "$SITE_RUNTIME_RESOLVER")/resolve_env.py"
-            elif [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ]; then
+            elif [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; then
                 printf '%s\n' \
                     "-e" "site_runtime_backup_action=$ACTION" \
                     "-e" "site_runtime_instance=$INSTANCE" \
                     "-e" "site_runtime_snapshot_id=$SNAPSHOT_ID" \
+                    "-e" "site_runtime_rehearsal_id=$REHEARSAL_ID" \
                     "-e" "site_runtime_backup_check=$CHECK" \
                     "-e" "site_runtime_services_registry=$SERVICES_REGISTRY" \
                     "-e" "site_runtime_instances_file=$SITE_RUNTIME_INSTANCES" \
@@ -379,12 +383,12 @@ case "$SERVICE" in
     *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks, host_resources, platform_router, site_runtime." ;;
 esac
 case "$ACTION" in
-    plan|apply|absent|purge|reseed|probe|stage-image|stage-support-images|backup-init|backup|restore-rehearsal) ;;
-    *) usage; fail "Action must be one of: plan, apply, absent, purge, reseed, probe, stage-image, stage-support-images, backup-init, backup, restore-rehearsal" ;;
+    plan|apply|absent|purge|reseed|probe|stage-image|stage-support-images|backup-init|backup|restore-rehearsal|restore-cleanup) ;;
+    *) usage; fail "Action must be one of: plan, apply, absent, purge, reseed, probe, stage-image, stage-support-images, backup-init, backup, restore-rehearsal, restore-cleanup" ;;
 esac
 shift 2
 
-if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" != "plan" ] && [ "$ACTION" != "probe" ] && [ "$ACTION" != "stage-image" ] && [ "$ACTION" != "stage-support-images" ] && [ "$ACTION" != "apply" ] && [ "$ACTION" != "backup-init" ] && [ "$ACTION" != "backup" ] && [ "$ACTION" != "restore-rehearsal" ]; then
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" != "plan" ] && [ "$ACTION" != "probe" ] && [ "$ACTION" != "stage-image" ] && [ "$ACTION" != "stage-support-images" ] && [ "$ACTION" != "apply" ] && [ "$ACTION" != "backup-init" ] && [ "$ACTION" != "backup" ] && [ "$ACTION" != "restore-rehearsal" ] && [ "$ACTION" != "restore-cleanup" ]; then
     fail "site_runtime action is not supported"
 fi
 if [ "$SERVICE" != "site_runtime" ] && [ "$ACTION" = "probe" ]; then
@@ -428,6 +432,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --snapshot-id)
             SNAPSHOT_ID="${2:-}"
+            shift 2
+            ;;
+        --rehearsal-id)
+            REHEARSAL_ID="${2:-}"
             shift 2
             ;;
         --services-registry)
@@ -501,7 +509,7 @@ fi
 if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "plan" ] || [ "$ACTION" = "stage-image" ] || [ "$ACTION" = "apply" ]; } && { [ -z "$INSTANCE" ] || [ -z "$IMAGE_REF" ]; }; then
     fail "site_runtime $ACTION requires --instance and --image-ref"
 fi
-if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ]; } && [ -z "$INSTANCE" ]; then
+if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; } && [ -z "$INSTANCE" ]; then
     fail "site_runtime $ACTION requires --instance"
 fi
 if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "restore-rehearsal" ] && [ -z "$SNAPSHOT_ID" ]; then
@@ -509,6 +517,12 @@ if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "restore-rehearsal" ] && [ -
 fi
 if [ -n "$SNAPSHOT_ID" ] && { [ "$SERVICE" != "site_runtime" ] || [ "$ACTION" != "restore-rehearsal" ]; }; then
     fail "--snapshot-id is supported only for site_runtime restore-rehearsal"
+fi
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "restore-cleanup" ] && [ -z "$REHEARSAL_ID" ]; then
+    fail "site_runtime restore-cleanup requires --rehearsal-id"
+fi
+if [ -n "$REHEARSAL_ID" ] && { [ "$SERVICE" != "site_runtime" ] || [ "$ACTION" != "restore-cleanup" ]; }; then
+    fail "--rehearsal-id is supported only for site_runtime restore-cleanup"
 fi
 if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "stage-support-images" ] && { [ -z "$SUPPORT_ARCHIVE" ] || [ -z "$SUPPORT_MANIFEST" ]; }; then
     fail "site_runtime stage-support-images requires internal --support-archive and --support-manifest inputs"
@@ -739,14 +753,14 @@ fi
 if [ "$ACTION" = "reseed" ] && [ "$service_row_state" != "present" ]; then
     fail "$SERVICE reseed requires state=present in $STATE_FILE"
 fi
-if { [ "$ACTION" = "apply" ] || [ "$ACTION" = "probe" ] || [ "$ACTION" = "stage-image" ] || [ "$ACTION" = "stage-support-images" ] || [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ]; } && [ "$service_row_state" != "present" ]; then
+if { [ "$ACTION" = "apply" ] || [ "$ACTION" = "probe" ] || [ "$ACTION" = "stage-image" ] || [ "$ACTION" = "stage-support-images" ] || [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; } && [ "$service_row_state" != "present" ]; then
     fail "$SERVICE $ACTION requires state=present in $STATE_FILE"
 fi
 service_target_aliases="$service_active_aliases"
 if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ] || [ "$SERVICE" = "site_runtime" ]; } && [ -n "$service_candidate_aliases" ]; then
     service_target_aliases="$(append_aliases_unique "$service_target_aliases" "$service_candidate_aliases")"
 fi
-if { [ "$ACTION" = "apply" ] || [ "$ACTION" = "probe" ] || [ "$ACTION" = "stage-image" ] || [ "$ACTION" = "stage-support-images" ] || [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ]; } && [ -z "$service_target_aliases" ]; then
+if { [ "$ACTION" = "apply" ] || [ "$ACTION" = "probe" ] || [ "$ACTION" = "stage-image" ] || [ "$ACTION" = "stage-support-images" ] || [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; } && [ -z "$service_target_aliases" ]; then
     fail "No active/candidate aliases for $SERVICE found in $STATE_FILE"
 fi
 if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "stage-image" ]; then

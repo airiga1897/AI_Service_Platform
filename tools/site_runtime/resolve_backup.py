@@ -17,6 +17,7 @@ INSTANCE_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 VOLUME_RE = re.compile(r"[a-z0-9][a-z0-9_-]+")
 CONTAINER_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]+")
 SNAPSHOT_RE = re.compile(r"(?:latest|[0-9a-f]{8,64})")
+REHEARSAL_RE = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}")
 REPOSITORY_RE = re.compile(r"/opt/backups/ai-service-platform/site-runtime/[a-z0-9-]+/restic")
 
 
@@ -53,7 +54,7 @@ def _single_role(rows: list[dict[str, str]], name: str) -> str:
 def resolve_backup(
     *, registry_path: Path, instances_path: Path, state_path: Path,
     nodes_path: Path, postgres_config_path: Path, instance_name: str, limit: str,
-    snapshot_id: str = "",
+    snapshot_id: str = "", rehearsal_id: str = "",
 ) -> dict[str, Any]:
     if not INSTANCE_RE.fullmatch(instance_name):
         raise ContractError("instance должен быть lowercase kebab-case")
@@ -61,6 +62,8 @@ def resolve_backup(
         raise ContractError("site_runtime backup требует ровно один limit alias")
     if snapshot_id and not SNAPSHOT_RE.fullmatch(snapshot_id):
         raise ContractError("snapshot_id должен быть Restic short/full ID или latest")
+    if rehearsal_id and not REHEARSAL_RE.fullmatch(rehearsal_id):
+        raise ContractError("rehearsal_id должен точно соответствовать failed restore journal")
 
     registry = _yaml(registry_path)
     instances = _yaml(instances_path)
@@ -153,6 +156,7 @@ def resolve_backup(
         "current_receipt": f"/var/lib/ai-service-platform/site-runtime/deployments/{instance_name}/current.json",
         "runtime_root": f"/opt/ai-service-platform/site-runtime/{instance_name}",
         "snapshot_id": snapshot_id or None,
+        "rehearsal_id": rehearsal_id or None,
     }
 
 
@@ -166,6 +170,7 @@ def main() -> int:
     parser.add_argument("--instance", required=True)
     parser.add_argument("--limit", required=True)
     parser.add_argument("--snapshot-id", default="")
+    parser.add_argument("--rehearsal-id", default="")
     args = parser.parse_args()
     try:
         model = resolve_backup(
@@ -173,6 +178,7 @@ def main() -> int:
             state_path=args.state, nodes_path=args.nodes,
             postgres_config_path=args.postgres_config,
             instance_name=args.instance, limit=args.limit, snapshot_id=args.snapshot_id,
+            rehearsal_id=args.rehearsal_id,
         )
     except (ContractError, OSError, yaml.YAMLError) as exc:
         print(f"site_runtime backup contract error: {exc}", file=sys.stderr)

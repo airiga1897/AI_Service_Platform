@@ -3,7 +3,7 @@ param(
     [string]$Service,
 
     [Parameter(Position=1)]
-    [ValidateSet("plan", "apply", "absent", "purge", "reseed", "probe", "stage-image", "stage-support-images", "backup-init", "backup", "restore-rehearsal")]
+    [ValidateSet("plan", "apply", "absent", "purge", "reseed", "probe", "stage-image", "stage-support-images", "backup-init", "backup", "restore-rehearsal", "restore-cleanup")]
     [string]$Action,
 
     [string]$NodesFile = ".\operator\nodes.csv",
@@ -55,6 +55,8 @@ param(
     [string]$ImageRef = "",
 
     [string]$SnapshotId = "",
+
+    [string]$RehearsalId = "",
 
     [string]$SiteRuntimePrepareScript = "tools/site_runtime/prepare_image.ps1",
 
@@ -454,6 +456,7 @@ function New-ServiceCommand($Step, $RemoteRepoDir, $RemoteNodesFile, $RemoteStat
     if ($Step.Instance) { $args += @("--instance", (Quote-BashArg $Step.Instance)) }
     if ($Step.ImageRef) { $args += @("--image-ref", (Quote-BashArg $Step.ImageRef)) }
     if ($Step.SnapshotId) { $args += @("--snapshot-id", (Quote-BashArg $Step.SnapshotId)) }
+    if ($Step.RehearsalId) { $args += @("--rehearsal-id", (Quote-BashArg $Step.RehearsalId)) }
     if ($Step.ImageArchive) { $args += @("--image-archive", (Quote-BashArg $Step.ImageArchive)) }
     if ($Step.ImageManifest) { $args += @("--image-manifest", (Quote-BashArg $Step.ImageManifest)) }
     if ($Step.SupportArchive) { $args += @("--support-archive", (Quote-BashArg $Step.SupportArchive)) }
@@ -721,7 +724,7 @@ if ($BatchPlanFile) {
 if (-not $BatchPlanFile -and $Service -eq "host_resources" -and $Action -notin @("plan", "apply")) {
     Fail "host_resources v1 supports only plan and apply; absent/purge/reseed are intentionally disabled"
 }
-if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -notin @("plan", "probe", "stage-image", "stage-support-images", "apply", "backup-init", "backup", "restore-rehearsal")) {
+if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -notin @("plan", "probe", "stage-image", "stage-support-images", "apply", "backup-init", "backup", "restore-rehearsal", "restore-cleanup")) {
     Fail "site_runtime action is not supported"
 }
 if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "probe" -and $Limit -ne "vps3") {
@@ -733,7 +736,7 @@ if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and -not $Limit) {
 if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -in @("plan", "stage-image", "apply") -and (-not $Instance -or -not $ImageRef -or -not $Limit)) {
     Fail "site_runtime $Action requires -Instance, -ImageRef, and exactly one -Limit alias"
 }
-if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -in @("backup-init", "backup", "restore-rehearsal") -and (-not $Instance -or -not $Limit)) {
+if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -in @("backup-init", "backup", "restore-rehearsal", "restore-cleanup") -and (-not $Instance -or -not $Limit)) {
     Fail "site_runtime $Action requires -Instance and exactly one -Limit alias"
 }
 if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "restore-rehearsal" -and -not $SnapshotId) {
@@ -741,6 +744,12 @@ if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "resto
 }
 if (-not $BatchPlanFile -and $SnapshotId -and ($Service -ne "site_runtime" -or $Action -ne "restore-rehearsal")) {
     Fail "-SnapshotId is supported only for site_runtime restore-rehearsal"
+}
+if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "restore-cleanup" -and -not $RehearsalId) {
+    Fail "site_runtime restore-cleanup requires -RehearsalId"
+}
+if (-not $BatchPlanFile -and $RehearsalId -and ($Service -ne "site_runtime" -or $Action -ne "restore-cleanup")) {
+    Fail "-RehearsalId is supported only for site_runtime restore-cleanup"
 }
 if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "stage-image") {
     Require-File $SiteRuntimePrepareScript "SiteRuntimePrepareScript"
@@ -858,6 +867,7 @@ if ($isBatch) {
         Instance = $Instance
         ImageRef = $ImageRef
         SnapshotId = $SnapshotId
+        RehearsalId = $RehearsalId
         ImageArchive = if ($Service -eq "site_runtime" -and $Action -eq "stage-image") { $remoteSiteRuntimeImageArchive } else { "" }
         ImageManifest = if ($Service -eq "site_runtime" -and $Action -eq "stage-image") { $remoteSiteRuntimeImageManifest } else { "" }
         SupportArchive = if ($Service -eq "site_runtime" -and $Action -eq "stage-support-images") { $remoteSiteRuntimeSupportArchive } else { "" }
@@ -930,6 +940,9 @@ if ($isBatch) {
     }
     if ($SnapshotId) {
         Write-Host "Snapshot:     $SnapshotId"
+    }
+    if ($RehearsalId) {
+        Write-Host "Rehearsal:    $RehearsalId"
     }
     if ($ImageRef) {
         Write-Host "Image:        $ImageRef"

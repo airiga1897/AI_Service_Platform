@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import csv
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -47,6 +48,7 @@ class BackupResolverTests(unittest.TestCase):
             "instance_name": "ai-retail-mvp",
             "limit": "vps3",
             "snapshot_id": "",
+            "rehearsal_id": "",
         }
         values.update(overrides)
         return MODULE.resolve_backup(**values)
@@ -67,6 +69,12 @@ class BackupResolverTests(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.ContractError, "snapshot_id"):
             self.resolve(snapshot_id="../../production")
         self.assertEqual(self.resolve(snapshot_id="a" * 64)["snapshot_id"], "a" * 64)
+
+    def test_rehearsal_id_is_strict(self) -> None:
+        with self.assertRaisesRegex(MODULE.ContractError, "rehearsal_id"):
+            self.resolve(rehearsal_id="../../production")
+        value = "20260719T113907Z-9c54c8a30d25"
+        self.assertEqual(self.resolve(rehearsal_id=value)["rehearsal_id"], value)
 
     def test_backup_role_is_required(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT) as temp:
@@ -117,9 +125,12 @@ class BackupRenderContractTests(unittest.TestCase):
     def test_restore_is_scratch_only_and_preserves_failures(self) -> None:
         self.assertIn("restore_ai_retail_", self.runner)
         self.assertIn('"scratch_preserved_for_diagnostics": not cleanup_succeeded', self.runner)
-        self.assertIn("manage.py migrate --check", self.runner)
-        self.assertIn("-e DB_NAME=", self.runner)
+        self.assertNotIn("manage.py migrate --check", self.runner)
+        self.assertIn("_migration_ledger", self.runner)
+        self.assertIn('"migration_ledger_match": True', self.runner)
         self.assertIn("_postgres_shell(", self.runner)
+        self.assertIn('"database_nonempty": True', self.runner)
+        self.assertIn("В scratch DB отсутствуют пользовательские таблицы", self.runner)
 
     def test_cli_transfers_backup_secret_with_restricted_mode(self) -> None:
         self.assertIn("'*/secrets/*'", self.remote)
@@ -272,6 +283,49 @@ class BackupRuntimeTests(unittest.TestCase):
         restic.assert_called_once_with(
             self.backup_model, "suppressed", "snapshots", "--json", checked=False,
         )
+
+    def test_restore_cleanup_check_only_inventories_failed_rehearsal(self) -> None:
+        rehearsal_id = "20260719T113907Z-9c54c8a30d25"
+        self.backup_model.update({
+            "rehearsal_id": rehearsal_id,
+            "runtime_alias": "vps3",
+            "postgres": {
+                "primary": "vps8",
+                "container_name": "ai-service-postgres",
+            },
+        })
+        with tempfile.TemporaryDirectory(dir=ROOT) as temp:
+            root = Path(temp)
+            journal_root = root / "restore-journal"
+            journal_root.mkdir()
+            (journal_root / f"{rehearsal_id}.json").write_text(
+                json.dumps({
+                    "rehearsal_id": rehearsal_id,
+                    "final_status": "failed",
+                    "production_unchanged": True,
+                    "scratch_preserved_for_diagnostics": True,
+                }),
+                encoding="utf-8",
+            )
+            staging = root / "restore-20260719t113907z9c54c8a30d25-test"
+            staging.mkdir()
+            with (
+                mock.patch.object(RUNTIME, "_control_root", return_value=root),
+                mock.patch.object(RUNTIME, "_preflight"),
+                mock.patch.object(
+                    RUNTIME, "_ssh", return_value=SimpleNamespace(stdout=b"1"),
+                ),
+                mock.patch.object(
+                    RUNTIME, "_ssh_result", return_value=SimpleNamespace(returncode=0),
+                ),
+            ):
+                result = RUNTIME.restore_cleanup(
+                    self.backup_model, "suppressed", check=True,
+                )
+        self.assertFalse(result["cleanup_performed"])
+        self.assertTrue(result["scratch_database_present"])
+        self.assertEqual(result["scratch_volumes_present"], 2)
+        self.assertEqual(result["staging_directories_present"], 1)
 
 
 

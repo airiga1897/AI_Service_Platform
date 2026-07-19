@@ -166,6 +166,10 @@ def _utc_id() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
+def _control_root(model: dict[str, Any]) -> Path:
+    return Path(f"/var/lib/ai-service-platform/site-runtime-backup/{model['instance']}")
+
+
 def _preflight(model: dict[str, Any], password: str, *, require_repository: bool) -> dict[str, Any]:
     runtime = model["runtime_alias"]
     postgres_container = shlex_quote(_postgres_container(model))
@@ -316,6 +320,22 @@ def _postgres_shell(model: dict[str, Any], command: str, *arguments: str,
     )
 
 
+def _migration_ledger(model: dict[str, Any], database: str) -> str:
+    query = (
+        b"select app || E'\\t' || name from django_migrations "
+        b"order by app, name;\n"
+    )
+    return _ssh(
+        model,
+        model["postgres"]["primary"],
+        _postgres_shell(
+            model, 'psql -U "$POSTGRES_USER" -d "$1" -At', database, stdin=b"",
+        ),
+        stdin=query,
+        text=False,
+    ).stdout.decode().strip()
+
+
 def backup(model: dict[str, Any], password: str, *, check: bool) -> dict[str, Any]:
     preflight = _preflight(model, password, require_repository=True)
     if check:
@@ -326,7 +346,7 @@ def backup(model: dict[str, Any], password: str, *, check: bool) -> dict[str, An
                 "private_health": preflight["private_health"]}
 
     backup_id = _utc_id()
-    control_root = Path(f"/var/lib/ai-service-platform/site-runtime-backup/{model['instance']}")
+    control_root = _control_root(model)
     journal_root = control_root / "journal"
     journal_root.mkdir(parents=True, exist_ok=True, mode=0o750)
     staging = Path(tempfile.mkdtemp(prefix=f"backup-{backup_id}-", dir=control_root))
@@ -455,7 +475,7 @@ def restore_rehearsal(model: dict[str, Any], password: str, *, check: bool) -> d
         "public_media": f"ai_retail_mvp_restore_{safe_id}_public",
         "private_media": f"ai_retail_mvp_restore_{safe_id}_private",
     }
-    root = Path(f"/var/lib/ai-service-platform/site-runtime-backup/{model['instance']}")
+    root = _control_root(model)
     journal_root = root / "restore-journal"
     journal_root.mkdir(parents=True, exist_ok=True, mode=0o750)
     restored = Path(tempfile.mkdtemp(prefix=f"restore-{safe_id}-", dir=root))
@@ -469,6 +489,12 @@ def restore_rehearsal(model: dict[str, Any], password: str, *, check: bool) -> d
         manifest, data = _verify_restored(restored)
         if manifest["instance"] != model["instance"]:
             raise BackupError("Snapshot принадлежит другому instance")
+        current = preflight["current"]
+        for field in ("deployment_id", "digest", "compose_checksum", "storage"):
+            if manifest.get(field) != current.get(field):
+                raise BackupError(
+                    f"Snapshot {field} не совпадает с текущим принятым deployment"
+                )
         primary = model["postgres"]["primary"]
         _ssh(
             model, primary,
@@ -496,6 +522,25 @@ def restore_rehearsal(model: dict[str, Any], password: str, *, check: bool) -> d
         ).stdout.decode().strip()
         if vector != "1":
             raise BackupError("В scratch DB отсутствует extension vector")
+        relation_count = _ssh(
+            model,
+            primary,
+            _postgres_shell(
+                model, 'psql -U "$POSTGRES_USER" -d "$1" -At', scratch_db, stdin=b"",
+            ),
+            stdin=(
+                b"select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace "
+                b"where c.relkind in ('r','p') and n.nspname not in "
+                b"('pg_catalog','information_schema') and n.nspname not like 'pg_toast%';\n"
+            ),
+            text=False,
+        ).stdout.decode().strip()
+        if not relation_count.isdigit() or int(relation_count) < 1:
+            raise BackupError("В scratch DB отсутствуют пользовательские таблицы")
+        scratch_migrations = _migration_ledger(model, scratch_db)
+        production_migrations = _migration_ledger(model, model["database"])
+        if not scratch_migrations or scratch_migrations != production_migrations:
+            raise BackupError("Migration ledger scratch DB не совпадает с production DB")
         runtime = model["runtime_alias"]
         image_id = _ssh(
             model, runtime,
@@ -510,17 +555,12 @@ def restore_rehearsal(model: dict[str, Any], password: str, *, check: bool) -> d
             count = int(_ssh(model, runtime, "sudo -n docker run --rm --pull never " + f"-v {shlex_quote(volume + ':/data:ro')} --entrypoint python {shlex_quote(image_id)} -c {shlex_quote(count_script)}").stdout.strip())
             if count != int(manifest["counts"][key]):
                 raise BackupError(f"Количество объектов scratch {key} не совпадает с manifest")
-        env_file = f"{model['runtime_root']}/runtime.env"
-        migrate = (
-            f"sudo -n docker run --rm --pull never --network container:{shlex_quote(_runtime_container(model, 'anchor'))} "
-            f"--env-file {shlex_quote(env_file)} -e DB_NAME={shlex_quote(scratch_db)} --entrypoint python {shlex_quote(image_id)} "
-            "manage.py migrate --check"
-        )
-        _ssh(model, runtime, migrate)
         status = "succeeded"
         cleanup_requested = True
         output = {"action": "restore-rehearsal", "snapshot_id": snapshot, "rehearsal_id": rehearsal_id,
                   "final_status": status, "vector": True, "migrations": "current",
+                  "database_nonempty": True, "database_relations": int(relation_count),
+                  "migration_ledger_match": True,
                   "storage_counts_valid": True, "production_unchanged": True, "scratch_removed": True}
     finally:
         if cleanup_requested:
@@ -549,9 +589,130 @@ def restore_rehearsal(model: dict[str, Any], password: str, *, check: bool) -> d
     return output
 
 
+def restore_cleanup(model: dict[str, Any], password: str, *, check: bool) -> dict[str, Any]:
+    _preflight(model, password, require_repository=False)
+    rehearsal_id = str(model.get("rehearsal_id") or "")
+    if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", rehearsal_id) is None:
+        raise BackupError("restore-cleanup требует точный rehearsal ID")
+
+    root = _control_root(model)
+    journal_path = root / "restore-journal" / f"{rehearsal_id}.json"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    if (
+        journal.get("rehearsal_id") != rehearsal_id
+        or journal.get("final_status") != "failed"
+        or journal.get("production_unchanged") is not True
+        or journal.get("scratch_preserved_for_diagnostics") is not True
+    ):
+        raise BackupError("restore-cleanup разрешён только для подтверждённого failed journal")
+
+    safe_id = re.sub(r"[^a-z0-9]", "", rehearsal_id.lower())[-32:]
+    scratch_db = f"restore_ai_retail_{safe_id}"
+    scratch_volumes = (
+        f"ai_retail_mvp_restore_{safe_id}_public",
+        f"ai_retail_mvp_restore_{safe_id}_private",
+    )
+    database_present = _ssh(
+        model,
+        model["postgres"]["primary"],
+        _postgres_shell(
+            model, 'psql -U "$POSTGRES_USER" -d postgres -At', stdin=b"",
+        ),
+        stdin=(
+            "select count(*) from pg_database where datname="
+            f"'{scratch_db}';\n"
+        ).encode(),
+        text=False,
+    ).stdout.decode().strip() == "1"
+    volumes_present = [
+        volume
+        for volume in scratch_volumes
+        if _ssh_result(
+            model,
+            model["runtime_alias"],
+            f"sudo -n docker volume inspect {shlex_quote(volume)} >/dev/null",
+        ).returncode == 0
+    ]
+    root_resolved = root.resolve()
+    staging = [
+        path
+        for path in root.glob(f"restore-{safe_id}-*")
+        if path.is_dir() and path.resolve().parent == root_resolved
+    ]
+    inventory = {
+        "scratch_database_present": database_present,
+        "scratch_volumes_present": len(volumes_present),
+        "staging_directories_present": len(staging),
+    }
+    if check:
+        return {
+            "action": "restore-cleanup",
+            "rehearsal_id": rehearsal_id,
+            "check_mode_mutations": False,
+            "cleanup_performed": False,
+            **inventory,
+        }
+
+    cleanup_id = _utc_id()
+    cleanup_root = root / "restore-cleanup-journal"
+    cleanup_root.mkdir(parents=True, exist_ok=True, mode=0o750)
+    removed_database = False
+    removed_volumes = 0
+    removed_staging = 0
+    final_status = "failed"
+    try:
+        if database_present:
+            _ssh(
+                model,
+                model["postgres"]["primary"],
+                _postgres_shell(
+                    model, 'dropdb -U "$POSTGRES_USER" --if-exists "$1"', scratch_db,
+                ),
+            )
+            removed_database = True
+        for volume in volumes_present:
+            _ssh(
+                model,
+                model["runtime_alias"],
+                f"sudo -n docker volume rm {shlex_quote(volume)} >/dev/null",
+            )
+            removed_volumes += 1
+        for path in staging:
+            shutil.rmtree(path)
+            removed_staging += 1
+        final_status = "succeeded"
+    finally:
+        cleanup_journal = {
+            "cleanup_id": cleanup_id,
+            "rehearsal_id": rehearsal_id,
+            "final_status": final_status,
+            "production_unchanged": True,
+            "scratch_database_removed": removed_database,
+            "scratch_volumes_removed": removed_volumes,
+            "staging_directories_removed": removed_staging,
+        }
+        (cleanup_root / f"{cleanup_id}-{rehearsal_id}.json").write_text(
+            json.dumps(cleanup_journal, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    return {
+        "action": "restore-cleanup",
+        "rehearsal_id": rehearsal_id,
+        "final_status": final_status,
+        "production_unchanged": True,
+        "scratch_database_removed": removed_database,
+        "scratch_volumes_removed": removed_volumes,
+        "staging_directories_removed": removed_staging,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--action", choices=("backup-init", "backup", "restore-rehearsal"), required=True)
+    parser.add_argument(
+        "--action",
+        choices=("backup-init", "backup", "restore-rehearsal", "restore-cleanup"),
+        required=True,
+    )
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--secret", type=Path, required=True)
     parser.add_argument("--nodes", type=Path, required=True)
@@ -571,8 +732,10 @@ def main() -> int:
                 result = backup_init(model, password, check=args.check)
             elif args.action == "backup":
                 result = backup(model, password, check=args.check)
-            else:
+            elif args.action == "restore-rehearsal":
                 result = restore_rehearsal(model, password, check=args.check)
+            else:
+                result = restore_cleanup(model, password, check=args.check)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
     except (BackupError, OSError, ValueError, json.JSONDecodeError) as exc:
