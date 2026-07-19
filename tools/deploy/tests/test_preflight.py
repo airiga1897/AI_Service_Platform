@@ -30,7 +30,7 @@ VALID_DEV_REF = (
     "ghcr.io/airiga1897/ai_e_retail:"
     "abc123def4567890abc123def4567890abcdef12"
 )
-VALID_MVP_REF = "ghcr.io/airiga1897/ai_e_retail:ai-retail-mvp-v1"
+VALID_MVP_REF = "ghcr.io/airiga1897/ai_e_retail@sha256:" + "a" * 64
 INVALID_DEV_REF = "ghcr.io/airiga1897/ai_e_retail:wrong-tag"
 
 
@@ -68,7 +68,7 @@ class PreflightResolveTests(unittest.TestCase):
             )
         self.assertIn("does not match", str(ctx.exception))
 
-    def test_frozen_mvp_requires_mvp_tag(self) -> None:
+    def test_mvp_requires_immutable_digest(self) -> None:
         registry = load_real()
         with self.assertRaises(PreflightError):
             resolve_preflight(registry, "ai-retail-mvp", "preprod", VALID_DEV_REF)

@@ -43,7 +43,7 @@ class BuildTargetsTests(unittest.TestCase):
         urls = {t.instance: t.url for t in targets}
         self.assertEqual(urls["aromaflow-work"], "http://localhost:8020/health/")
         self.assertEqual(urls["aromaflow-demo"], "http://localhost:5010/health/")
-        self.assertEqual(urls["ai-retail-mvp"], "http://localhost:5173/health/")
+        self.assertEqual(urls["ai-retail-mvp"], "http://localhost:5173/healthz/")
         self.assertEqual(urls["ai-retail-dev"], "http://localhost:5174/health/")
 
     def test_preprod_placeholder_domains_are_skipped(self) -> None:
