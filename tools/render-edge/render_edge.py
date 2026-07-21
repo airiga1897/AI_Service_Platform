@@ -130,6 +130,13 @@ def _collect_sites(registry: dict[str, Any]) -> list[dict[str, Any]]:
             d for d in (domains_block.get("prod") or [])
             if isinstance(d, str) and not _is_placeholder_domain(d)
         ]
+        publication = ((instance.get("site_runtime") or {}).get("publication") or {})
+        publication_state = publication.get("state")
+        if publication_state == "planned":
+            # Домен уже зарезервирован в canonical model, но ещё не разрешён
+            # для активного edge-рендера. Реальный маршрут включается отдельным
+            # операторским рубежом после подготовки ACME и TLS.
+            prod_domains = []
         preprod_domains = [
             d for d in (domains_block.get("preprod") or [])
             if isinstance(d, str) and not _is_placeholder_domain(d)
@@ -144,6 +151,7 @@ def _collect_sites(registry: dict[str, Any]) -> list[dict[str, Any]]:
                 "backend_internal_port": 8000,  # все django-* шаблоны слушают 8000
                 "nginx_container": nginx_container,
                 "prod_domains": prod_domains,
+                "publication_state": publication_state,
                 "preprod_domains": preprod_domains,
                 "all_server_names": all_server_names,
                 "haproxy_backend_name": f"be_{instance_name.replace('-', '_')}",

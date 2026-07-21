@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import copy
 import io
 import shutil
 import sys
@@ -63,6 +64,24 @@ class RenderEdgeSmokeTests(unittest.TestCase):
         self.assertIn("vpn_mgmt_ips.lst", cfg)
         # Плейсхолдер-домены не должны попасть в маршрутизацию.
         self.assertNotIn("example.invalid", cfg)
+
+    def test_planned_publication_is_absent_from_active_edge_render(self) -> None:
+        site = next(s for s in self.sites if s["instance_name"] == "ai-retail-mvp")
+        self.assertEqual("planned", site["publication_state"])
+        self.assertEqual([], site["prod_domains"])
+        self.assertNotIn("retail.travelltickets.ru", render_haproxy(self.registry, self.sites))
+        self.assertNotIn("retail.travelltickets.ru", render_nginx_site(site))
+
+    def test_active_publication_enters_edge_render(self) -> None:
+        registry = copy.deepcopy(self.registry)
+        registry["runtime_instances"]["ai-retail-mvp"]["site_runtime"]["publication"][
+            "state"
+        ] = "active"
+        sites = _collect_sites(registry)
+        site = next(s for s in sites if s["instance_name"] == "ai-retail-mvp")
+        self.assertEqual(["retail.travelltickets.ru"], site["prod_domains"])
+        self.assertIn("retail.travelltickets.ru", render_haproxy(registry, sites))
+        self.assertIn("retail.travelltickets.ru", render_nginx_site(site))
 
     def test_nginx_site_proxies_to_backend_container(self) -> None:
         site = next(s for s in self.sites if s["instance_name"] == "aromaflow-work")
