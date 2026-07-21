@@ -1,0 +1,11 @@
+[Unit]
+Description=Расписание автоматического backup site_runtime {{ site_runtime_instance }}
+
+[Timer]
+OnCalendar={{ site_runtime_backup_model.schedule.on_calendar }}
+RandomizedDelaySec={{ site_runtime_backup_model.schedule.randomized_delay_sec }}
+Persistent={{ site_runtime_backup_model.schedule.persistent | lower }}
+Unit={{ site_runtime_backup_systemd_service }}
+
+[Install]
+WantedBy=timers.target

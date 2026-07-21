@@ -1,15 +1,56 @@
-# Ручной backup и репетиция восстановления `site_runtime`
+# Backup, retention и репетиция восстановления `site_runtime`
 
 ## Граница этапа
 
 Для `ai-retail-mvp` создаётся зашифрованный Restic snapshot базы PostgreSQL,
 `public_media` и `private_media`. Release static и Redis в backup не входят.
 Repository расположен на `vps5`; управление выполняется с orchestration-узла
-`vps6`. Расписание, автоматический prune, S3 и public route не включены.
+`vps6`. Автоматический backup запускается ежедневно в 03:30 МСК со случайной
+задержкой до 15 минут. S3 и public route не включены.
 
 Источник истины — принятый `current.json`. Backup-команды не принимают новый
 образ и не меняют deployment. Все операции одного instance используют единый
 lock на orchestration-узле.
+
+## Автоматическое расписание и retention
+
+Расписание устанавливается отдельно и не является побочным эффектом
+`backup-init`:
+
+```powershell
+.\tools\services\service_remote.ps1 site_runtime backup-schedule `
+  -Instance ai-retail-mvp -Limit vps3 -Check
+
+.\tools\services\service_remote.ps1 site_runtime backup-schedule `
+  -Instance ai-retail-mvp -Limit vps3
+```
+
+Повторный вызов должен быть идемпотентным. Timer на `vps6` использует
+`OnCalendar=*-*-* 03:30:00 Europe/Moscow`, `RandomizedDelaySec=900` и
+`Persistent=true`. Он вызывает тот же canonical `site_runtime backup`, что и
+операторская команда. Занятый lock останавливает запуск до любых изменений.
+Перед первым включением или изменением timer платформа обновляет его systemd
+stamp текущим временем: пропущенное окно 03:30 не запускает backup немедленно.
+
+Retention выполняется только после создания snapshot, штатного запуска writers
+и успешной private health-проверки. Для instance-тега сохраняются 7 daily,
+4 weekly и 6 monthly точек; затем выполняются `prune` и `restic check`. Ошибка
+retention не удаляет новый принятый snapshot, но завершает операцию со статусом
+`failed`.
+
+Проверка и ручной запуск установленного systemd-маршрута:
+
+```bash
+sudo systemctl status ai-service-platform-site-runtime-backup-ai-retail-mvp.timer
+sudo systemctl list-timers ai-service-platform-site-runtime-backup-ai-retail-mvp.timer
+sudo systemctl start ai-service-platform-site-runtime-backup-ai-retail-mvp.service
+sudo journalctl -u ai-service-platform-site-runtime-backup-ai-retail-mvp.service --since today
+```
+
+Для аварийного отключения следующих запусков используется
+`sudo systemctl disable --now ai-service-platform-site-runtime-backup-ai-retail-mvp.timer`.
+Это не удаляет snapshots, repository, секрет или journal. Повторное включение
+выполняется штатным `backup-schedule` после диагностики.
 
 ## Подготовка секрета
 

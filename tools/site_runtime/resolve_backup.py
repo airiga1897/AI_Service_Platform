@@ -115,10 +115,16 @@ def resolve_backup(
         "engine": "restic", "transport": "sftp",
         "datasets": ["database", "public_media", "private_media"],
         "retention": {"daily": 7, "weekly": 4, "monthly": 6},
-        "schedule": "manual", "restore_policy": "scratch-only",
+        "schedule": {
+            "enabled": True,
+            "on_calendar": "*-*-* 03:30:00 Europe/Moscow",
+            "randomized_delay_sec": 900,
+            "persistent": True,
+        },
+        "restore_policy": "scratch-only",
     }
     if runtime_backup != expected_backup:
-        raise ContractError("site_runtime backup contract должен точно соответствовать manual Restic policy")
+        raise ContractError("site_runtime backup contract должен точно соответствовать scheduled Restic policy")
     storage = (profile.get("site_runtime") or {}).get("storage") or {}
     public_volume = str((storage.get("public_media") or {}).get("volume") or "")
     private_volume = str((storage.get("private_media") or {}).get("volume") or "")
@@ -144,7 +150,7 @@ def resolve_backup(
         "secret_file": secret_file,
         "datasets": expected_backup["datasets"],
         "retention": expected_backup["retention"],
-        "schedule": "manual",
+        "schedule": expected_backup["schedule"],
         "restore_policy": "scratch-only",
         "database": instance_name.replace("-", "_"),
         "postgres": {

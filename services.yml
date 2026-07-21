@@ -568,7 +568,11 @@ runtime_instances:
           daily: 7
           weekly: 4
           monthly: 6
-        schedule: manual
+        schedule:
+          enabled: true
+          on_calendar: "*-*-* 03:30:00 Europe/Moscow"
+          randomized_delay_sec: 900
+          persistent: true
         restore_policy: scratch-only
 
   ai-retail-dev:

@@ -58,6 +58,9 @@ class BackupResolverTests(unittest.TestCase):
         self.assertEqual(model["backup_target"]["alias"], "vps5")
         self.assertEqual(model["datasets"], ["database", "public_media", "private_media"])
         self.assertEqual(model["retention"], {"daily": 7, "weekly": 4, "monthly": 6})
+        self.assertEqual(model["schedule"]["on_calendar"], "*-*-* 03:30:00 Europe/Moscow")
+        self.assertEqual(model["schedule"]["randomized_delay_sec"], 900)
+        self.assertTrue(model["schedule"]["persistent"])
         self.assertEqual(model["restore_policy"], "scratch-only")
         self.assertEqual(model["postgres"]["container_name"], "ai-service-postgres")
 
@@ -95,9 +98,9 @@ class BackupResolverTests(unittest.TestCase):
             target = Path(temp) / "services.yml"
             data = yaml.safe_load(self.registry.read_text(encoding="utf-8"))
             changed = copy.deepcopy(data)
-            changed["runtime_instances"]["ai-retail-mvp"]["site_runtime"]["backup"]["schedule"] = "nightly"
+            changed["runtime_instances"]["ai-retail-mvp"]["site_runtime"]["backup"]["schedule"]["persistent"] = False
             target.write_text(yaml.safe_dump(changed, sort_keys=False), encoding="utf-8")
-            with self.assertRaisesRegex(MODULE.ContractError, "manual Restic"):
+            with self.assertRaisesRegex(MODULE.ContractError, "scheduled Restic"):
                 self.resolve(registry_path=target)
 
 
@@ -110,12 +113,21 @@ class BackupRenderContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         cls.remote = (ROOT / "tools/services/service_remote.ps1").read_text(encoding="utf-8")
         cls.service = (ROOT / "tools/services/service.sh").read_text(encoding="utf-8")
+        cls.timer = (
+            ROOT / "infra/ansible/roles/site_runtime_backup/templates/site-runtime-backup.timer.j2"
+        ).read_text(encoding="utf-8")
+        cls.systemd_service = (
+            ROOT / "infra/ansible/roles/site_runtime_backup/templates/site-runtime-backup.service.j2"
+        ).read_text(encoding="utf-8")
 
     def test_shared_lock_and_plaintext_cleanup_are_mandatory(self) -> None:
         self.assertIn("fcntl.flock(lock, fcntl.LOCK_EX)", self.runner)
         self.assertIn("shutil.rmtree(staging, ignore_errors=True)", self.runner)
-        self.assertIn('"snapshot_accepted": final_status == "succeeded"', self.runner)
+        self.assertIn('snapshot_accepted = snapshot_id is not None and health == "succeeded"', self.runner)
         self.assertIn("raise health_error", self.runner)
+        self.assertIn("flock -n 9", self.service)
+        self.assertIn('"--lock-held"', self.runner)
+        self.assertIn("site_runtime_lock_held", self.tasks)
 
     def test_backup_excludes_release_static_and_redis(self) -> None:
         self.assertIn('(\"database.dump\", \"public_media.tar\", \"private_media.tar\")', self.runner)
@@ -137,6 +149,23 @@ class BackupRenderContractTests(unittest.TestCase):
         self.assertIn("'*/backup-secrets/*'", self.remote)
         self.assertIn("-SnapshotId", self.remote)
         self.assertIn("restore-rehearsal", self.remote)
+        self.assertIn("backup-schedule", self.remote)
+
+    def test_systemd_schedule_uses_canonical_service_path(self) -> None:
+        self.assertIn("OnCalendar={{ site_runtime_backup_model.schedule.on_calendar }}", self.timer)
+        self.assertIn("RandomizedDelaySec={{ site_runtime_backup_model.schedule.randomized_delay_sec }}", self.timer)
+        self.assertIn("Persistent={{ site_runtime_backup_model.schedule.persistent | lower }}", self.timer)
+        self.assertIn("site_runtime backup --instance", self.systemd_service)
+        self.assertIn("--services-registry {{ site_runtime_services_registry }}", self.systemd_service)
+        self.assertIn("--site-runtime-instances {{ site_runtime_instances_file }}", self.systemd_service)
+        self.assertIn(
+            "--site-runtime-resolver /opt/ai-service-platform/tools/site_runtime/resolve.py",
+            self.systemd_service,
+        )
+        self.assertIn("TimeoutStartSec=1h", self.systemd_service)
+        stamp = self.tasks.index("site_runtime_backup_systemd_stamp")
+        enable = self.tasks.index("Включить автоматический backup без немедленного запуска")
+        self.assertLess(stamp, enable)
 
     def test_check_mode_is_passed_to_non_mutating_runner(self) -> None:
         self.assertIn("site_runtime_backup_check", self.tasks)
@@ -283,6 +312,50 @@ class BackupRuntimeTests(unittest.TestCase):
         restic.assert_called_once_with(
             self.backup_model, "suppressed", "snapshots", "--json", checked=False,
         )
+
+    def test_retention_is_scoped_to_instance_and_exact_policy(self) -> None:
+        self.backup_model.update({
+            "instance": "ai-retail-mvp",
+            "retention": {"daily": 7, "weekly": 4, "monthly": 6},
+        })
+        responses = [
+            SimpleNamespace(stdout='[{"id":"one"},{"id":"two"}]'),
+            SimpleNamespace(stdout="[]"),
+            SimpleNamespace(stdout='[{"id":"two"}]'),
+        ]
+        with mock.patch.object(RUNTIME, "_restic", side_effect=responses) as restic:
+            result = RUNTIME._apply_retention(self.backup_model, "suppressed")
+        self.assertEqual(result["retention_status"], "succeeded")
+        self.assertEqual(result["retained_snapshots"], 1)
+        self.assertEqual(result["removed_snapshots"], 1)
+        forget = restic.call_args_list[1].args[2:]
+        self.assertEqual(forget[0], "forget")
+        self.assertIn("site-runtime:ai-retail-mvp", forget)
+        self.assertIn("--group-by", forget)
+        self.assertIn("host", forget)
+        self.assertIn("--keep-daily", forget)
+        self.assertIn("--keep-weekly", forget)
+        self.assertIn("--keep-monthly", forget)
+        self.assertIn("--prune", forget)
+
+    def test_backup_schedule_is_read_only_preflight(self) -> None:
+        self.backup_model.update({
+            "schedule": {
+                "enabled": True,
+                "on_calendar": "*-*-* 03:30:00 Europe/Moscow",
+                "randomized_delay_sec": 900,
+                "persistent": True,
+            },
+            "retention": {"daily": 7, "weekly": 4, "monthly": 6},
+        })
+        with mock.patch.object(
+            RUNTIME,
+            "_preflight",
+            return_value={"current": {"deployment_id": "accepted-deployment"}},
+        ):
+            result = RUNTIME.backup_schedule(self.backup_model, "suppressed")
+        self.assertFalse(result["check_mode_mutations"])
+        self.assertTrue(result["repository_ready"])
 
     def test_restore_cleanup_check_only_inventories_failed_rehearsal(self) -> None:
         rehearsal_id = "20260719T113907Z-9c54c8a30d25"
