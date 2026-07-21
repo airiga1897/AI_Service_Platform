@@ -44,6 +44,7 @@ from _lib.registry import load_registry, runtime_instances  # noqa: E402
 
 SUPPORTED_ENVS = ("local", "preprod", "prod")
 PLACEHOLDER_REASON = "placeholder-domain"
+PUBLICATION_PLANNED_REASON = "publication-planned"
 
 
 class HealthcheckConfigError(Exception):
@@ -161,6 +162,22 @@ def build_targets(
                 f"runtime_instances.{name}.healthcheck is incomplete"
                 " (path/expected_status/timeout_seconds required)"
             )
+
+        publication = ((instance.get("site_runtime") or {}).get("publication") or {})
+        if env == "prod" and publication.get("state") == "planned":
+            # Production-домен уже может быть зарезервирован в DNS и registry,
+            # но не становится сетевой целью до отдельного рубежа публикации.
+            skipped.append(
+                Result(
+                    instance=name,
+                    env=env,
+                    url="",
+                    status="skipped",
+                    expected_status=expected_status,
+                    reason=PUBLICATION_PLANNED_REASON,
+                )
+            )
+            continue
 
         domains = ((instance.get("domains") or {}).get(env)) or []
         if not isinstance(domains, list) or not domains:
