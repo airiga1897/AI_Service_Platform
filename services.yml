@@ -472,7 +472,8 @@ runtime_instances:
         - http://localhost:5173
       preprod:
         - mvp-ai-retail.example.invalid
-      prod: []
+      prod:
+        - retail.travelltickets.ru
     containers:
       future:
         - ai-retail-mvp-web
@@ -557,6 +558,23 @@ runtime_instances:
         live: /healthz/
         ready: /readyz/
         worker: /worker-healthz/
+      publication:
+        state: planned
+        domain: retail.travelltickets.ru
+        allowed_hosts:
+          - retail.travelltickets.ru
+        csrf_trusted_origins:
+          - https://retail.travelltickets.ru
+        tls:
+          termination: site-nginx
+          edge_mode: sni-passthrough
+          provider: letsencrypt
+          challenge: http-01
+        external_health:
+          - /healthz/
+          - /readyz/
+        private_endpoints:
+          - /worker-healthz/
       backup:
         engine: restic
         transport: sftp

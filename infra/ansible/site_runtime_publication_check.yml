@@ -1,0 +1,6 @@
+---
+- name: Проверка будущей публикации site_runtime без изменений
+  hosts: site_runtimes
+  become: true
+  roles:
+    - site_runtime_publication_check

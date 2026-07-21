@@ -176,6 +176,27 @@ class ValidatorBrokenFixtureTests(unittest.TestCase):
         errors, _ = validate_data(self.data)
         self.assertTrue(any("private_media.container_path" in error for error in errors), errors)
 
+    def test_site_runtime_publication_requires_domain_match(self) -> None:
+        self.data["runtime_instances"]["ai-retail-mvp"]["site_runtime"]["publication"][
+            "domain"
+        ] = "wrong.example"
+        errors, _ = validate_data(self.data)
+        self.assertTrue(any("domains.prod" in error for error in errors), errors)
+
+    def test_site_runtime_publication_rejects_public_worker_health(self) -> None:
+        self.data["runtime_instances"]["ai-retail-mvp"]["site_runtime"]["publication"][
+            "external_health"
+        ].append("/worker-healthz/")
+        errors, _ = validate_data(self.data)
+        self.assertTrue(any("только live и ready" in error for error in errors), errors)
+
+    def test_site_runtime_publication_requires_site_nginx_tls(self) -> None:
+        self.data["runtime_instances"]["ai-retail-mvp"]["site_runtime"]["publication"]["tls"][
+            "termination"
+        ] = "haproxy"
+        errors, _ = validate_data(self.data)
+        self.assertTrue(any("canonical TLS contract" in error for error in errors), errors)
+
     def test_compose_file_must_be_under_instance_stack(self) -> None:
         self.data["runtime_instances"]["ai-retail-dev"]["deploy"]["environments"][
             "preprod"
