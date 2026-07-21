@@ -2,11 +2,11 @@
 - name: Проверить параметры backup/restore site_runtime
   ansible.builtin.assert:
     that:
-      - site_runtime_backup_action in ['backup-init', 'backup', 'restore-rehearsal', 'restore-cleanup']
+      - site_runtime_backup_action in ['backup-init', 'backup-schedule', 'backup', 'restore-rehearsal', 'restore-cleanup']
       - site_runtime_instance | length > 0
       - site_runtime_backup_action != 'restore-rehearsal' or site_runtime_snapshot_id | length > 0
       - site_runtime_backup_action != 'restore-cleanup' or site_runtime_rehearsal_id | length > 0
-    fail_msg: "Некорректные параметры ручного backup/restore site_runtime."
+    fail_msg: "Некорректные параметры backup/restore site_runtime."
 
 - name: Вычислить каноническую backup-модель
   ansible.builtin.command:
@@ -124,6 +124,7 @@
               '--nodes', site_runtime_nodes_file
             ]
             + (['--check'] if site_runtime_backup_check | bool else [])
+            + (['--lock-held'] if site_runtime_lock_held | bool else [])
           }}
       delegate_to: localhost
       become: true
@@ -136,6 +137,60 @@
     - name: Вывести результат backup/restore без секретов
       ansible.builtin.debug:
         msg: "{{ site_runtime_backup_result_command.stdout | from_json }}"
+
+    - name: Сформировать systemd service автоматического backup
+      ansible.builtin.template:
+        src: site-runtime-backup.service.j2
+        dest: "/etc/systemd/system/{{ site_runtime_backup_systemd_service }}"
+        owner: root
+        group: root
+        mode: "0644"
+      delegate_to: localhost
+      when: site_runtime_backup_action == 'backup-schedule'
+      register: site_runtime_backup_service_unit
+
+    - name: Сформировать systemd timer автоматического backup
+      ansible.builtin.template:
+        src: site-runtime-backup.timer.j2
+        dest: "/etc/systemd/system/{{ site_runtime_backup_systemd_timer }}"
+        owner: root
+        group: root
+        mode: "0644"
+      delegate_to: localhost
+      when: site_runtime_backup_action == 'backup-schedule'
+      register: site_runtime_backup_timer_unit
+
+    - name: Перезагрузить systemd после изменения расписания backup
+      ansible.builtin.systemd:
+        daemon_reload: true
+      delegate_to: localhost
+      when:
+        - site_runtime_backup_action == 'backup-schedule'
+        - not site_runtime_backup_check | bool
+        - site_runtime_backup_service_unit.changed or site_runtime_backup_timer_unit.changed
+
+    - name: Исключить немедленный persistent-запуск при первом включении timer
+      ansible.builtin.file:
+        path: "{{ site_runtime_backup_systemd_stamp }}"
+        state: touch
+        owner: root
+        group: root
+        mode: "0644"
+      delegate_to: localhost
+      when:
+        - site_runtime_backup_action == 'backup-schedule'
+        - not site_runtime_backup_check | bool
+        - site_runtime_backup_timer_unit.changed
+
+    - name: Включить автоматический backup без немедленного запуска
+      ansible.builtin.systemd:
+        name: "{{ site_runtime_backup_systemd_timer }}"
+        enabled: true
+        state: "{{ 'restarted' if site_runtime_backup_timer_unit.changed else 'started' }}"
+      delegate_to: localhost
+      when:
+        - site_runtime_backup_action == 'backup-schedule'
+        - not site_runtime_backup_check | bool
   always:
     - name: Удалить временную backup-модель
       ansible.builtin.file:

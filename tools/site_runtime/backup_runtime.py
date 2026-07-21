@@ -267,6 +267,65 @@ def backup_init(model: dict[str, Any], password: str, *, check: bool) -> dict[st
             "target_alias": target["alias"], "repository": target["repository"]}
 
 
+def backup_schedule(model: dict[str, Any], password: str) -> dict[str, Any]:
+    """Проверяет готовность repository перед установкой расписания."""
+    preflight = _preflight(model, password, require_repository=True)
+    return {
+        "action": "backup-schedule",
+        "check_mode_mutations": False,
+        "deployment_id": preflight["current"]["deployment_id"],
+        "repository_ready": True,
+        "schedule": model["schedule"],
+        "retention": model["retention"],
+    }
+
+
+def _snapshot_count(model: dict[str, Any], password: str) -> int:
+    result = _restic(
+        model,
+        password,
+        "snapshots",
+        "--tag",
+        f"site-runtime:{model['instance']}",
+        "--json",
+    )
+    try:
+        snapshots = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise BackupError("Restic snapshots вернул некорректный JSON") from exc
+    if not isinstance(snapshots, list):
+        raise BackupError("Restic snapshots вернул неожиданный JSON")
+    return len(snapshots)
+
+
+def _apply_retention(model: dict[str, Any], password: str) -> dict[str, int | str]:
+    retention = model["retention"]
+    before = _snapshot_count(model, password)
+    _restic(
+        model,
+        password,
+        "forget",
+        "--tag",
+        f"site-runtime:{model['instance']}",
+        "--group-by",
+        "host",
+        "--keep-daily",
+        str(retention["daily"]),
+        "--keep-weekly",
+        str(retention["weekly"]),
+        "--keep-monthly",
+        str(retention["monthly"]),
+        "--prune",
+    )
+    after = _snapshot_count(model, password)
+    return {
+        "retention_status": "succeeded",
+        "repository_check": "not_run",
+        "retained_snapshots": after,
+        "removed_snapshots": max(before - after, 0),
+    }
+
+
 def _media_archive(model: dict[str, Any], volume: str, image_id: str, destination: Path) -> int:
     script = "import sys,tarfile; t=tarfile.open(fileobj=sys.stdout.buffer,mode='w|'); t.add('/data',arcname='.'); t.close()"
     result = _ssh(
@@ -358,6 +417,14 @@ def backup(model: dict[str, Any], password: str, *, check: bool) -> dict[str, An
     output: dict[str, Any] | None = None
     health = "not_checked"
     health_error: BackupError | None = None
+    retention_error: BackupError | None = None
+    snapshot_accepted = False
+    retention_result: dict[str, int | str] = {
+        "retention_status": "not_run",
+        "repository_check": "not_run",
+        "retained_snapshots": 0,
+        "removed_snapshots": 0,
+    }
     try:
         writers_restart_required = True
         _ssh(model, runtime, f"sudo -n docker compose -f {shlex_quote(compose)} stop web worker beat")
@@ -428,17 +495,45 @@ def backup(model: dict[str, Any], password: str, *, check: bool) -> dict[str, An
                 output["final_status"] = "failed"
                 final_status = "failed"
                 health_error = BackupError("После backup не пройдена проверка private runtime")
-        journal = {"backup_id": backup_id, "snapshot_id": snapshot_id, "final_status": final_status,
-                   "snapshot_accepted": final_status == "succeeded",
-                   "health_after_restart": health, "plaintext_staging_removed": True}
-        try:
-            (journal_root / f"{backup_id}.json").write_text(
-                json.dumps(journal, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-            )
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
+        snapshot_accepted = snapshot_id is not None and health == "succeeded"
+        shutil.rmtree(staging, ignore_errors=True)
+        if snapshot_accepted:
+            try:
+                retention_result = _apply_retention(model, password)
+            except BackupError as exc:
+                retention_result["retention_status"] = "failed"
+                final_status = "failed"
+                if output is not None:
+                    output["final_status"] = "failed"
+                retention_error = BackupError(f"Не удалось применить Restic retention: {exc}")
+            else:
+                try:
+                    _restic(model, password, "check")
+                    retention_result["repository_check"] = "succeeded"
+                except BackupError as exc:
+                    retention_result["repository_check"] = "failed"
+                    final_status = "failed"
+                    if output is not None:
+                        output["final_status"] = "failed"
+                    retention_error = BackupError(f"Не пройдена проверка Restic repository: {exc}")
+        journal = {
+            "backup_id": backup_id,
+            "snapshot_id": snapshot_id,
+            "final_status": final_status,
+            "snapshot_accepted": snapshot_accepted,
+            "health_after_restart": health,
+            "plaintext_staging_removed": True,
+            **retention_result,
+        }
+        (journal_root / f"{backup_id}.json").write_text(
+            json.dumps(journal, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        if output is not None:
+            output.update({"snapshot_accepted": snapshot_accepted, **retention_result})
     if health_error is not None:
         raise health_error
+    if retention_error is not None:
+        raise retention_error
     if output is None:
         raise BackupError("Backup завершился без результата")
     return output
@@ -710,13 +805,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--action",
-        choices=("backup-init", "backup", "restore-rehearsal", "restore-cleanup"),
+        choices=("backup-init", "backup-schedule", "backup", "restore-rehearsal", "restore-cleanup"),
         required=True,
     )
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--secret", type=Path, required=True)
     parser.add_argument("--nodes", type=Path, required=True)
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--lock-held", action="store_true")
     args = parser.parse_args()
     try:
         model = json.loads(args.model.read_text(encoding="utf-8"))
@@ -726,16 +822,24 @@ def main() -> int:
         password = _secret(args.secret)
         lock_path = Path(f"/var/lock/ai-service-platform-site-runtime-{model['instance']}.lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with lock_path.open("w", encoding="utf-8") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+
+        def execute() -> dict[str, Any]:
             if args.action == "backup-init":
-                result = backup_init(model, password, check=args.check)
-            elif args.action == "backup":
-                result = backup(model, password, check=args.check)
-            elif args.action == "restore-rehearsal":
-                result = restore_rehearsal(model, password, check=args.check)
-            else:
-                result = restore_cleanup(model, password, check=args.check)
+                return backup_init(model, password, check=args.check)
+            if args.action == "backup-schedule":
+                return backup_schedule(model, password)
+            if args.action == "backup":
+                return backup(model, password, check=args.check)
+            if args.action == "restore-rehearsal":
+                return restore_rehearsal(model, password, check=args.check)
+            return restore_cleanup(model, password, check=args.check)
+
+        if args.lock_held:
+            result = execute()
+        else:
+            with lock_path.open("w", encoding="utf-8") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                result = execute()
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
     except (BackupError, OSError, ValueError, json.JSONDecodeError) as exc:

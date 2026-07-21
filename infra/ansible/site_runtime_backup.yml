@@ -1,5 +1,5 @@
 ---
-- name: Выполнить ручной backup или репетицию восстановления site_runtime
+- name: Управлять backup, расписанием и восстановлением site_runtime
   hosts: site_runtimes
   become: true
   gather_facts: false

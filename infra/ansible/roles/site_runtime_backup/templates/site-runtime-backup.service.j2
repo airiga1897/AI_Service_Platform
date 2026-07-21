@@ -1,0 +1,13 @@
+[Unit]
+Description=Автоматический backup site_runtime {{ site_runtime_instance }}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/ai-service-platform
+ExecStart=/bin/bash {{ site_runtime_backup_service_runner }} site_runtime backup --instance {{ site_runtime_instance }} --limit {{ site_runtime_backup_model.runtime_alias }} --nodes-file {{ site_runtime_nodes_file }} --state-file {{ site_runtime_state_file }} --inventory {{ site_runtime_backup_inventory }} --services-registry {{ site_runtime_services_registry }} --site-runtime-instances {{ site_runtime_instances_file }} --site-runtime-resolver /opt/ai-service-platform/tools/site_runtime/resolve.py
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=1h
