@@ -1,0 +1,28 @@
+---
+version: 1
+instances:
+  ai-retail-mvp:
+    profile: ai-retail-mvp
+    placement_alias: vps3
+    network:
+      app_network: ai_service_app_vps3
+      anchor_ipv4: 172.31.3.10
+      router_ipv4: 172.31.3.2
+      postgres_route:
+        destination: 172.30.8.10/32
+        via: 172.31.3.2
+    runtime:
+      internal_host: ai-retail-mvp.internal
+      postgres_managed_database: ai-retail-mvp
+      application_secret_file: /opt/ai-service-platform/operator/site_runtime/secrets/ai-retail-mvp.env
+    publication:
+      ingress_alias: vps3
+      dns_cname: vps3.mine-craft.su
+      backend_ipv4: 172.31.3.10
+      http_port: 8080
+      https_port: 8443
+      public_route_enabled: false
+    backup:
+      target_role: backup
+      repository: /opt/backups/ai-service-platform/site-runtime/ai-retail-mvp/restic
+      secret_file: /opt/ai-service-platform/operator/site_runtime/backup-secrets/ai-retail-mvp.env

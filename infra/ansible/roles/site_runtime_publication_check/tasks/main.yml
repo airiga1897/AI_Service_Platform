@@ -1,0 +1,130 @@
+---
+- name: Проверить границы check-only рубежа публикации
+  ansible.builtin.assert:
+    that:
+      - ansible_check_mode
+      - site_runtime_instance | length > 0
+      - inventory_hostname == 'vps3'
+    fail_msg: >-
+      Проверка публикации допускается только с -Check для site_runtime instance на vps3.
+
+- name: Разрешить canonical publication model
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ site_runtime_publication_resolver }}"
+      - --registry
+      - "{{ site_runtime_services_registry }}"
+      - --instances
+      - "{{ site_runtime_instances_file }}"
+      - --state
+      - "{{ site_runtime_state_file }}"
+      - --instance
+      - "{{ site_runtime_instance }}"
+      - --limit
+      - "{{ inventory_hostname }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  register: site_runtime_publication_resolved
+
+- name: Прочитать canonical publication model
+  ansible.builtin.set_fact:
+    site_runtime_publication_model: "{{ site_runtime_publication_resolved.stdout | from_json }}"
+
+- name: Проверить текущее DNS-разрешение домена и CNAME target
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - >-
+        import json, socket, sys;
+        domain=sys.argv[1]; target=sys.argv[2];
+        resolve=lambda name: sorted({item[4][0] for item in socket.getaddrinfo(name, 443, family=socket.AF_INET)});
+        domain_ips=resolve(domain); target_ips=resolve(target);
+        print(json.dumps({'domain_ips':domain_ips,'target_ips':target_ips,'matches':bool(domain_ips) and domain_ips==target_ips}, sort_keys=True))
+      - "{{ site_runtime_publication_model.domain }}"
+      - "{{ site_runtime_publication_model.dns.expected_target }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  register: site_runtime_publication_dns
+
+- name: Проверить private application network
+  ansible.builtin.command:
+    argv:
+      - docker
+      - network
+      - inspect
+      - "{{ site_runtime_publication_model.edge.application_network }}"
+      - --format
+      - "{{ '{{json .Containers}}' }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_publication_app_network
+
+- name: Проверить сети действующего edge HAProxy
+  ansible.builtin.command:
+    argv:
+      - docker
+      - inspect
+      - "{{ site_runtime_publication_edge_container }}"
+      - --format
+      - "{{ '{{json .NetworkSettings.Networks}}' }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_publication_edge_networks
+
+- name: Проверить отсутствие host ports у private runtime
+  ansible.builtin.shell: >-
+    set -euo pipefail;
+    for name in
+    site-runtime-{{ site_runtime_instance }}-anchor
+    {{ site_runtime_instance }}-redis-1
+    {{ site_runtime_instance }}-web-1
+    {{ site_runtime_instance }}-worker-1
+    {{ site_runtime_instance }}-beat-1
+    {{ site_runtime_instance }}-nginx-1;
+    do
+      bindings="$(docker inspect "$name" --format '{{ '{{json .HostConfig.PortBindings}}' }}')";
+      test "$bindings" = 'null' || test "$bindings" = '{}';
+    done
+  args:
+    executable: /bin/bash
+  check_mode: false
+  changed_when: false
+
+- name: Сформировать безопасный результат проверки публикации
+  ansible.builtin.set_fact:
+    site_runtime_publication_result:
+      action: publication-check
+      instance: "{{ site_runtime_instance }}"
+      domain: "{{ site_runtime_publication_model.domain }}"
+      dns_matches_expected_target: "{{ (site_runtime_publication_dns.stdout | from_json).matches }}"
+      ingress_alias: "{{ site_runtime_publication_model.edge.ingress_alias }}"
+      public_route_enabled: false
+      check_mode_mutations: false
+      edge_app_network_attached: >-
+        {{ site_runtime_publication_model.edge.application_network in (site_runtime_publication_edge_networks.stdout | from_json) }}
+      edge_app_network_attachment_planned: true
+      http_acme_backend: "{{ site_runtime_publication_model.edge.http_acme_backend }}"
+      https_backend: "{{ site_runtime_publication_model.edge.https_backend }}"
+      tls_termination: "{{ site_runtime_publication_model.tls.termination }}"
+      external_health: "{{ site_runtime_publication_model.health.external }}"
+      private_endpoints: "{{ site_runtime_publication_model.health.private }}"
+      security: "{{ site_runtime_publication_model.security }}"
+      render_checksums: "{{ site_runtime_publication_model.render.checksums }}"
+
+- name: Принять read-only проверку публикации
+  ansible.builtin.assert:
+    that:
+      - site_runtime_publication_result.dns_matches_expected_target | bool
+      - not site_runtime_publication_result.public_route_enabled | bool
+      - not site_runtime_publication_result.check_mode_mutations | bool
+    fail_msg: DNS или check-only contract будущей публикации не принят.
+
+- name: Вывести результат проверки публикации без секретов
+  ansible.builtin.debug:
+    var: site_runtime_publication_result

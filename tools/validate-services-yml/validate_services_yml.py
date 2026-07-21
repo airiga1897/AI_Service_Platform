@@ -665,6 +665,39 @@ def validate_runtime_instances(
                 if not isinstance(health_path, str) or not health_path.startswith("/"):
                     fail(errors, f"{runtime_path}.health.{health_name} must start with '/'")
 
+            publication_value = runtime.get("publication")
+            if publication_value is not None:
+                publication_path = f"{runtime_path}.publication"
+                publication = require_mapping(errors, publication_value, publication_path)
+                domain = publication.get("domain")
+                if publication.get("state") != "planned":
+                    fail(errors, f"{publication_path}.state должен оставаться planned до отдельного apply")
+                if not isinstance(domain, str) or not re.fullmatch(
+                    r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}",
+                    domain,
+                ):
+                    fail(errors, f"{publication_path}.domain должен быть нормализованным DNS-именем")
+                if (instance_data.get("domains") or {}).get("prod") != [domain]:
+                    fail(errors, f"{node_path}.domains.prod должен содержать только publication.domain")
+                if publication.get("allowed_hosts") != [domain]:
+                    fail(errors, f"{publication_path}.allowed_hosts должен содержать только публичный домен")
+                if publication.get("csrf_trusted_origins") != [f"https://{domain}"]:
+                    fail(errors, f"{publication_path}.csrf_trusted_origins должен содержать только HTTPS origin")
+                if publication.get("tls") != {
+                    "termination": "site-nginx",
+                    "edge_mode": "sni-passthrough",
+                    "provider": "letsencrypt",
+                    "challenge": "http-01",
+                }:
+                    fail(errors, f"{publication_path}.tls не соответствует canonical TLS contract")
+                if publication.get("external_health") != [
+                    health_contract.get("live"),
+                    health_contract.get("ready"),
+                ]:
+                    fail(errors, f"{publication_path}.external_health разрешает только live и ready")
+                if publication.get("private_endpoints") != [health_contract.get("worker")]:
+                    fail(errors, f"{publication_path}.private_endpoints должен содержать worker health")
+
         # ---- local ports -------------------------------------------------
         local = instance_data.get("local") or {}
         if isinstance(local, dict):

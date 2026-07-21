@@ -27,6 +27,8 @@ operator/softether/l3-vps/secrets/*
 !operator/softether/l3-vps/secrets/template.json
 !operator/site_runtime/
 operator/site_runtime/*
+!operator/site_runtime/README.md
+!operator/site_runtime/instances.yml.example
 !operator/site_runtime/secrets/
 operator/site_runtime/secrets/*
 !operator/site_runtime/secrets/template.env

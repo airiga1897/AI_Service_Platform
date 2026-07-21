@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import io
 import json
 import socket
@@ -60,10 +61,27 @@ class BuildTargetsTests(unittest.TestCase):
     def test_prod_instances_without_domains_are_skipped(self) -> None:
         _, skipped = hc.build_targets(REGISTRY, "prod", None, None)
         skipped_by_instance = {r.instance: r for r in skipped}
-        # У трёх инстансов prod-доменов нет → no-domains skipped.
-        for name in ("aromaflow-demo", "ai-retail-mvp", "ai-retail-dev"):
+        # У двух инстансов prod-доменов нет → no-domains skipped.
+        for name in ("aromaflow-demo", "ai-retail-dev"):
             self.assertIn(name, skipped_by_instance)
             self.assertEqual(skipped_by_instance[name].reason, "no-domains")
+        self.assertEqual(
+            skipped_by_instance["ai-retail-mvp"].reason,
+            hc.PUBLICATION_PLANNED_REASON,
+        )
+
+    def test_active_publication_becomes_prod_health_target(self) -> None:
+        registry = copy.deepcopy(REGISTRY)
+        registry["runtime_instances"]["ai-retail-mvp"]["site_runtime"]["publication"][
+            "state"
+        ] = "active"
+        targets, skipped = hc.build_targets(registry, "prod", ["ai-retail-mvp"], None)
+        self.assertEqual([], skipped)
+        self.assertEqual(1, len(targets))
+        self.assertEqual(
+            "https://retail.travelltickets.ru/healthz/",
+            targets[0].url,
+        )
 
     def test_unknown_instance_raises(self) -> None:
         with self.assertRaises(hc.HealthcheckConfigError):

@@ -59,6 +59,10 @@ python3 tools/healthcheck/healthcheck.py --env <local|preprod|prod> \
 Инстансы, у которых в выбранном окружении просто нет доменов
 (`domains.<env>: []`), также попадают в `skipped` с причиной `no-domains`.
 
+Production-домен с `site_runtime.publication.state: planned` ещё не считается
+опубликованным и попадает в `skipped` с причиной `publication-planned`. Сетевой
+опрос начинается только после отдельного перевода публикации в `active`.
+
 ## Plaintext vs HTTPS
 
 - `local` — берётся то, что лежит в реестре (как правило,
@@ -103,7 +107,7 @@ python3 tools/healthcheck/healthcheck.py --env <local|preprod|prod> \
 `status` всегда один из `ok`, `fail`, `skipped`. Поле `error` заполняется
 для `fail` (например `unexpected-status: got 500, expected 200`,
 `timeout after 5.0s`, `url-error: ...`). Поле `reason` заполняется для
-`skipped` (`placeholder-domain`, `no-domains`).
+`skipped` (`placeholder-domain`, `no-domains`, `publication-planned`).
 
 ## Примеры
 
