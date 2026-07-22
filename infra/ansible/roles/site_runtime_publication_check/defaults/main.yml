@@ -1,7 +1,10 @@
 ---
 site_runtime_instance: ""
+site_runtime_publication_action: publication-check
 site_runtime_services_registry: "{{ playbook_dir }}/../../services.yml"
 site_runtime_instances_file: "{{ playbook_dir }}/../../operator/site_runtime/instances.yml"
 site_runtime_state_file: "{{ playbook_dir }}/../../operator/state.csv"
 site_runtime_publication_resolver: "{{ playbook_dir }}/../../tools/site_runtime/resolve_publication.py"
 site_runtime_publication_edge_container: edge-haproxy
+site_runtime_publication_stage_root: /var/lib/ai-service-platform/site-runtime
+site_runtime_publication_runtime_root: /opt/ai-service-platform/site-runtime

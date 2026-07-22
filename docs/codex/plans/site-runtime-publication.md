@@ -46,9 +46,39 @@ network, действующий edge HAProxy и отсутствие host ports 
 
 Вызов без `-Check` штатно запрещён.
 
+## Подготовка ACME/TLS contract без изменений
+
+Canonical model резервирует два persistent Docker volume:
+
+- `ai_retail_mvp_acme_webroot` → `/var/www/acme`, read-only для Nginx;
+- `ai_retail_mvp_tls` → `/etc/letsencrypt`, read-only для Nginx.
+
+Certbot в будущем получает к ним read-write доступ только как управляемый
+one-shot процесс. На текущем рубеже volumes не создаются и сертификат не
+запрашивается.
+
+```powershell
+.\tools\services\service_remote.ps1 site_runtime publication-prepare `
+  -Instance ai-retail-mvp `
+  -Limit vps3 `
+  -Check
+```
+
+Команда проверяет существующий `current.json` и Compose, наличие будущих volume
+без их создания и выводит:
+
+- текущие deployment/Compose identities;
+- future Compose contract checksum;
+- checksums ACME-only Nginx, Compose override и HAProxy ACME fragment;
+- `volumes_created=false`, `certificate_requested=false`;
+- `runtime_changed=false`, `edge_changed=false`.
+
+Публичный HTTP server в future-render обслуживает только
+`/.well-known/acme-challenge/`, а на остальные пути отвечает `404`.
+
 ## Следующие отдельные рубежи
 
-1. Подготовить ACME webroot и закрытый TLS storage без публичного сайта.
+1. Реально создать ACME webroot и закрытый TLS storage без публичного сайта.
 2. Подключить HAProxy на `vps3` к application network и открыть только HTTP-01.
 3. Получить сертификат Let's Encrypt и проверить цепочку/renewal.
 4. Включить SNI-маршрут HTTPS и production env.
