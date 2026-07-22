@@ -44,7 +44,24 @@ def _active_aliases(state_path: Path, kind: str, name: str) -> set[str]:
     return {item for item in (matches[0].get("active_aliases") or "").split("+") if item}
 
 
-def _render_contract(instance: str, domain: str, backend: str, http_port: int, https_port: int) -> dict[str, Any]:
+def _checksum_documents(documents: dict[str, str], bundle_name: str) -> dict[str, str]:
+    checksums = {
+        name: hashlib.sha256(content.encode("utf-8")).hexdigest()
+        for name, content in documents.items()
+    }
+    combined = "\n".join(documents[name] for name in sorted(documents))
+    checksums[bundle_name] = hashlib.sha256(combined.encode("utf-8")).hexdigest()
+    return checksums
+
+
+def _render_contract(
+    instance: str,
+    domain: str,
+    backend: str,
+    http_port: int,
+    https_port: int,
+    storage: dict[str, Any],
+) -> dict[str, Any]:
     backend_name = f"be_site_{instance.replace('-', '_')}"
     acl_name = f"site_{instance.replace('-', '_')}"
     haproxy_http = f"""acl host_{acl_name} hdr(host) -i {domain}
@@ -88,13 +105,37 @@ server {{
         "haproxy_https_fragment": haproxy_https,
         "nginx_public_fragment": nginx,
     }
-    checksums = {
-        name: hashlib.sha256(content.encode("utf-8")).hexdigest()
-        for name, content in documents.items()
+    preparation_documents = {
+        "compose_override_fragment": f"""services:
+  nginx:
+    volumes:
+      - acme_webroot_data:{storage['acme_webroot']['container_path']}:ro
+      - tls_data:{storage['tls']['container_path']}:ro
+volumes:
+  acme_webroot_data:
+    name: {storage['acme_webroot']['volume']}
+  tls_data:
+    name: {storage['tls']['volume']}
+""",
+        "nginx_acme_fragment": f"""server {{
+    listen {http_port};
+    server_name {domain};
+    location ^~ /.well-known/acme-challenge/ {{ root {storage['acme_webroot']['container_path']}; }}
+    location / {{ return 404; }}
+}}
+""",
+        "haproxy_acme_fragment": haproxy_http,
     }
-    combined = "\n".join(documents[name] for name in sorted(documents))
-    checksums["publication_bundle"] = hashlib.sha256(combined.encode("utf-8")).hexdigest()
-    return {"documents": documents, "checksums": checksums}
+    return {
+        "documents": documents,
+        "checksums": _checksum_documents(documents, "publication_bundle"),
+        "preparation": {
+            "documents": preparation_documents,
+            "checksums": _checksum_documents(
+                preparation_documents, "preparation_bundle"
+            ),
+        },
+    }
 
 
 def resolve(
@@ -129,6 +170,55 @@ def resolve(
         raise PublicationContractError("domains.prod должен содержать только publication.domain")
     if publication.get("allowed_hosts") != [domain]:
         raise PublicationContractError("publication.allowed_hosts должен содержать только публичный домен")
+    publication_storage = publication.get("storage") or {}
+    expected_publication_storage = {
+        "acme_webroot": {
+            "lifecycle": "persistent",
+            "container_path": "/var/www/acme",
+            "nginx_access": "read-only",
+            "certbot_access": "read-write",
+        },
+        "tls": {
+            "lifecycle": "persistent",
+            "container_path": "/etc/letsencrypt",
+            "nginx_access": "read-only",
+            "certbot_access": "read-write",
+        },
+    }
+    if not isinstance(publication_storage, dict) or set(publication_storage) != set(
+        expected_publication_storage
+    ):
+        raise PublicationContractError("publication.storage должен содержать acme_webroot и tls")
+    publication_volume_names: list[str] = []
+    for storage_name, expected_storage in expected_publication_storage.items():
+        storage_class = publication_storage.get(storage_name) or {}
+        if not isinstance(storage_class, dict) or set(storage_class) != {
+            *expected_storage,
+            "volume",
+        }:
+            raise PublicationContractError(
+                f"publication.storage.{storage_name} содержит некорректные поля"
+            )
+        for field, expected_value in expected_storage.items():
+            if storage_class.get(field) != expected_value:
+                raise PublicationContractError(
+                    f"publication.storage.{storage_name}.{field} должен быть {expected_value!r}"
+                )
+        volume = storage_class.get("volume")
+        if not isinstance(volume, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]+", volume):
+            raise PublicationContractError(
+                f"publication.storage.{storage_name}.volume должен быть нормализованным"
+            )
+        publication_volume_names.append(volume)
+    runtime_volume_names = {
+        (runtime.get("volumes") or {}).get("redis"),
+        *((item or {}).get("volume") for item in (runtime.get("storage") or {}).values()),
+        *((item or {}).get("volume_prefix") for item in (runtime.get("storage") or {}).values()),
+    }
+    if len(publication_volume_names) != len(set(publication_volume_names)) or (
+        set(publication_volume_names) & runtime_volume_names
+    ):
+        raise PublicationContractError("publication storage volumes не должны совпадать")
     if publication.get("csrf_trusted_origins") != [f"https://{domain}"]:
         raise PublicationContractError("publication.csrf_trusted_origins должен содержать только HTTPS origin")
     if publication.get("tls") != {
@@ -167,7 +257,14 @@ def resolve(
     if ingress_alias not in _active_aliases(state_path, "service", "edge_haproxy"):
         raise PublicationContractError("edge_haproxy отсутствует на ingress alias")
 
-    rendered = _render_contract(instance_name, domain, backend, http_port, https_port)
+    rendered = _render_contract(
+        instance_name,
+        domain,
+        backend,
+        http_port,
+        https_port,
+        publication_storage,
+    )
     return {
         "instance": instance_name,
         "placement_alias": limit,
@@ -199,6 +296,7 @@ def resolve(
             "private_media_public": False,
         },
         "tls": publication["tls"],
+        "storage": publication_storage,
         "render": rendered,
     }
 

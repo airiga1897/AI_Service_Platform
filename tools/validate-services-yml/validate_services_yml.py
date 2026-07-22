@@ -681,6 +681,50 @@ def validate_runtime_instances(
                     fail(errors, f"{node_path}.domains.prod должен содержать только publication.domain")
                 if publication.get("allowed_hosts") != [domain]:
                     fail(errors, f"{publication_path}.allowed_hosts должен содержать только публичный домен")
+                publication_storage = require_mapping(
+                    errors, publication.get("storage"), f"{publication_path}.storage"
+                )
+                expected_publication_storage = {
+                    "acme_webroot": {
+                        "lifecycle": "persistent",
+                        "container_path": "/var/www/acme",
+                        "nginx_access": "read-only",
+                        "certbot_access": "read-write",
+                    },
+                    "tls": {
+                        "lifecycle": "persistent",
+                        "container_path": "/etc/letsencrypt",
+                        "nginx_access": "read-only",
+                        "certbot_access": "read-write",
+                    },
+                }
+                if set(publication_storage) != set(expected_publication_storage):
+                    fail(errors, f"{publication_path}.storage должен содержать acme_webroot и tls")
+                publication_volume_names: list[str] = []
+                for storage_name, expected in expected_publication_storage.items():
+                    storage_path = f"{publication_path}.storage.{storage_name}"
+                    storage_class = require_mapping(
+                        errors, publication_storage.get(storage_name), storage_path
+                    )
+                    if set(storage_class) != {*expected, "volume"}:
+                        fail(errors, f"{storage_path} содержит некорректный набор полей")
+                    for field, expected_value in expected.items():
+                        if storage_class.get(field) != expected_value:
+                            fail(errors, f"{storage_path}.{field} должен быть {expected_value!r}")
+                    publication_volume = storage_class.get("volume")
+                    if not isinstance(publication_volume, str) or not re.fullmatch(
+                        r"[a-z0-9][a-z0-9_-]+", publication_volume
+                    ):
+                        fail(errors, f"{storage_path}.volume должен быть нормализованным Docker volume")
+                    else:
+                        publication_volume_names.append(publication_volume)
+                existing_volume_names = {
+                    name for name in normalized_storage_names if isinstance(name, str)
+                }
+                if len(publication_volume_names) != len(set(publication_volume_names)) or (
+                    existing_volume_names & set(publication_volume_names)
+                ):
+                    fail(errors, f"Имена {publication_path}.storage volumes не должны совпадать")
                 if publication.get("csrf_trusted_origins") != [f"https://{domain}"]:
                     fail(errors, f"{publication_path}.csrf_trusted_origins должен содержать только HTTPS origin")
                 if publication.get("tls") != {

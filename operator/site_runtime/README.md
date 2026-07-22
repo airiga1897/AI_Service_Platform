@@ -6,6 +6,10 @@
 edge/runtime не изменяются. Подробности находятся в
 `docs/codex/plans/site-runtime-publication.md`.
 
+Future ACME/TLS storage проверяется через
+`site_runtime publication-prepare ... -Check`. Эта команда не создаёт volumes,
+не запрашивает сертификат и не подключает HAProxy к application network.
+
 `instances.yml` — источник истины для размещения generic site runtime и его
 приватной сети. Файл хранится локально у оператора и синхронизируется на
 активный orchestration-узел через remote wrapper.

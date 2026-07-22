@@ -561,6 +561,19 @@ runtime_instances:
       publication:
         state: planned
         domain: retail.travelltickets.ru
+        storage:
+          acme_webroot:
+            lifecycle: persistent
+            volume: ai_retail_mvp_acme_webroot
+            container_path: /var/www/acme
+            nginx_access: read-only
+            certbot_access: read-write
+          tls:
+            lifecycle: persistent
+            volume: ai_retail_mvp_tls
+            container_path: /etc/letsencrypt
+            nginx_access: read-only
+            certbot_access: read-write
         allowed_hosts:
           - retail.travelltickets.ru
         csrf_trusted_origins:

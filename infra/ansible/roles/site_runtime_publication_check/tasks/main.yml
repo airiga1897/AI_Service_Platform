@@ -4,6 +4,7 @@
     that:
       - ansible_check_mode
       - site_runtime_instance | length > 0
+      - site_runtime_publication_action in ['publication-check', 'publication-prepare']
       - inventory_hostname == 'vps3'
     fail_msg: >-
       Проверка публикации допускается только с -Check для site_runtime instance на vps3.
@@ -96,10 +97,75 @@
   check_mode: false
   changed_when: false
 
+- name: Проверить current.json принятого runtime перед ACME preparation
+  ansible.builtin.stat:
+    path: "{{ site_runtime_publication_stage_root }}/deployments/{{ site_runtime_instance }}/current.json"
+    checksum_algorithm: sha256
+  check_mode: false
+  register: site_runtime_publication_current_stat
+  when: site_runtime_publication_action == 'publication-prepare'
+
+- name: Прочитать current.json принятого runtime перед ACME preparation
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_publication_stage_root }}/deployments/{{ site_runtime_instance }}/current.json"
+  check_mode: false
+  register: site_runtime_publication_current_slurp
+  when:
+    - site_runtime_publication_action == 'publication-prepare'
+    - site_runtime_publication_current_stat.stat.exists | default(false)
+
+- name: Проверить действующий Compose перед ACME preparation
+  ansible.builtin.stat:
+    path: "{{ site_runtime_publication_runtime_root }}/{{ site_runtime_instance }}/docker-compose.yml"
+    checksum_algorithm: sha256
+  check_mode: false
+  register: site_runtime_publication_compose_stat
+  when: site_runtime_publication_action == 'publication-prepare'
+
+- name: Проверить будущий ACME webroot volume без создания
+  ansible.builtin.command:
+    argv:
+      - docker
+      - volume
+      - inspect
+      - "{{ site_runtime_publication_model.storage.acme_webroot.volume }}"
+  check_mode: false
+  changed_when: false
+  failed_when: false
+  register: site_runtime_publication_acme_volume
+  when: site_runtime_publication_action == 'publication-prepare'
+
+- name: Проверить будущий TLS volume без создания
+  ansible.builtin.command:
+    argv:
+      - docker
+      - volume
+      - inspect
+      - "{{ site_runtime_publication_model.storage.tls.volume }}"
+  check_mode: false
+  changed_when: false
+  failed_when: false
+  register: site_runtime_publication_tls_volume
+  when: site_runtime_publication_action == 'publication-prepare'
+
+- name: Принять наличие действующего deployment snapshot
+  ansible.builtin.assert:
+    that:
+      - site_runtime_publication_current_stat.stat.exists | default(false)
+      - site_runtime_publication_compose_stat.stat.exists | default(false)
+    fail_msg: Для publication-prepare требуется принятый current.json и действующий Compose.
+  when: site_runtime_publication_action == 'publication-prepare'
+
+- name: Прочитать deployment identity для ACME preparation
+  ansible.builtin.set_fact:
+    site_runtime_publication_current: >-
+      {{ site_runtime_publication_current_slurp.content | b64decode | from_json }}
+  when: site_runtime_publication_action == 'publication-prepare'
+
 - name: Сформировать безопасный результат проверки публикации
   ansible.builtin.set_fact:
     site_runtime_publication_result:
-      action: publication-check
+      action: "{{ site_runtime_publication_action }}"
       instance: "{{ site_runtime_instance }}"
       domain: "{{ site_runtime_publication_model.domain }}"
       dns_matches_expected_target: "{{ (site_runtime_publication_dns.stdout | from_json).matches }}"
@@ -117,6 +183,30 @@
       security: "{{ site_runtime_publication_model.security }}"
       render_checksums: "{{ site_runtime_publication_model.render.checksums }}"
 
+- name: Дополнить результат future ACME/TLS storage contract
+  ansible.builtin.set_fact:
+    site_runtime_publication_result: >-
+      {{ site_runtime_publication_result | combine({
+        'current_json_checksum': site_runtime_publication_current_stat.stat.checksum,
+        'current_compose_file_checksum': site_runtime_publication_compose_stat.stat.checksum,
+        'current_compose_checksum': site_runtime_publication_current.compose_checksum,
+        'current_deployment_id': site_runtime_publication_current.deployment_id,
+        'acme_webroot_volume': site_runtime_publication_model.storage.acme_webroot.volume,
+        'tls_volume': site_runtime_publication_model.storage.tls.volume,
+        'acme_webroot_volume_present': site_runtime_publication_acme_volume.rc == 0,
+        'tls_volume_present': site_runtime_publication_tls_volume.rc == 0,
+        'preparation_render_checksums': site_runtime_publication_model.render.preparation.checksums,
+        'future_compose_contract_checksum': (
+          site_runtime_publication_current.compose_checksum ~ ':' ~
+          site_runtime_publication_model.render.preparation.checksums.compose_override_fragment
+        ) | hash('sha256'),
+        'volumes_created': false,
+        'certificate_requested': false,
+        'runtime_changed': false,
+        'edge_changed': false
+      }, recursive=True) }}
+  when: site_runtime_publication_action == 'publication-prepare'
+
 - name: Принять read-only проверку публикации
   ansible.builtin.assert:
     that:
@@ -124,6 +214,16 @@
       - not site_runtime_publication_result.public_route_enabled | bool
       - not site_runtime_publication_result.check_mode_mutations | bool
     fail_msg: DNS или check-only contract будущей публикации не принят.
+
+- name: Принять отсутствие изменений на ACME preparation рубеже
+  ansible.builtin.assert:
+    that:
+      - not site_runtime_publication_result.volumes_created | bool
+      - not site_runtime_publication_result.certificate_requested | bool
+      - not site_runtime_publication_result.runtime_changed | bool
+      - not site_runtime_publication_result.edge_changed | bool
+    fail_msg: publication-prepare не должен изменять volumes, TLS, runtime или edge.
+  when: site_runtime_publication_action == 'publication-prepare'
 
 - name: Вывести результат проверки публикации без секретов
   ansible.builtin.debug:

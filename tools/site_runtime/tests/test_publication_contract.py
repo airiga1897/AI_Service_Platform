@@ -60,6 +60,28 @@ class PublicationContractTests(unittest.TestCase):
         self.assertIn("/.well-known/acme-challenge/", nginx)
         self.assertIn("location / { return 404; }", nginx)
 
+    def test_preparation_contract_declares_persistent_acme_and_tls_storage(self) -> None:
+        model = self.call()
+        self.assertEqual("ai_retail_mvp_acme_webroot", model["storage"]["acme_webroot"]["volume"])
+        self.assertEqual("ai_retail_mvp_tls", model["storage"]["tls"]["volume"])
+        override = model["render"]["preparation"]["documents"]["compose_override_fragment"]
+        compose = yaml.safe_load(override)
+        self.assertEqual(
+            ["acme_webroot_data:/var/www/acme:ro", "tls_data:/etc/letsencrypt:ro"],
+            compose["services"]["nginx"]["volumes"],
+        )
+        self.assertEqual(
+            "ai_retail_mvp_acme_webroot", compose["volumes"]["acme_webroot_data"]["name"]
+        )
+        self.assertEqual("ai_retail_mvp_tls", compose["volumes"]["tls_data"]["name"])
+
+    def test_preparation_http_server_does_not_publish_application(self) -> None:
+        model = self.call()
+        nginx = model["render"]["preparation"]["documents"]["nginx_acme_fragment"]
+        self.assertIn("/.well-known/acme-challenge/", nginx)
+        self.assertIn("location / { return 404; }", nginx)
+        self.assertNotIn("proxy_pass", nginx)
+
     def test_security_contract_keeps_internal_services_private(self) -> None:
         security = self.call()["security"]
         for field in ("gunicorn_public", "redis_public", "postgres_public", "private_media_public"):
@@ -93,6 +115,15 @@ class PublicationContractTests(unittest.TestCase):
             registry = yaml.safe_load(self.registry.read_text(encoding="utf-8"))
             self.call_data(registry, data)
 
+    def test_rejects_duplicate_publication_storage_volume(self) -> None:
+        data = yaml.safe_load(self.registry.read_text(encoding="utf-8"))
+        runtime = data["runtime_instances"]["ai-retail-mvp"]["site_runtime"]
+        runtime["publication"]["storage"]["tls"]["volume"] = runtime["storage"][
+            "public_media"
+        ]["volume"]
+        with self.assertRaisesRegex(PublicationContractError, "не должны совпадать"):
+            self.call_data(data)
+
     def test_rejects_limit_mismatch(self) -> None:
         with self.assertRaisesRegex(PublicationContractError, "placement_alias"):
             self.call(limit="vps4")
@@ -111,8 +142,9 @@ class PublicationContractTests(unittest.TestCase):
         service = (ROOT / "tools/services/service.sh").read_text(encoding="utf-8")
         remote = (ROOT / "tools/services/service_remote.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("site_runtime_publication_check.yml", service)
-        self.assertIn('publication-check requires --check', service)
-        self.assertIn('publication-check requires -Check', remote)
+        self.assertIn('site_runtime $ACTION requires --check', service)
+        self.assertIn('publication-prepare', service)
+        self.assertIn('site_runtime $Action requires -Check', remote)
 
     def test_ansible_check_role_contains_no_mutating_runtime_commands(self) -> None:
         tasks = (
@@ -120,7 +152,13 @@ class PublicationContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("ansible_check_mode", tasks)
         self.assertIn("check_mode_mutations: false", tasks)
-        for forbidden in ("docker compose up", "docker network connect", "certbot certonly"):
+        self.assertIn("- docker\n      - volume\n      - inspect", tasks)
+        for forbidden in (
+            "docker compose up",
+            "docker network connect",
+            "docker volume create",
+            "certbot certonly",
+        ):
             self.assertNotIn(forbidden, tasks)
 
 

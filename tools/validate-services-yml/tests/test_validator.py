@@ -197,6 +197,21 @@ class ValidatorBrokenFixtureTests(unittest.TestCase):
         errors, _ = validate_data(self.data)
         self.assertTrue(any("canonical TLS contract" in error for error in errors), errors)
 
+    def test_site_runtime_publication_requires_acme_and_tls_storage(self) -> None:
+        del self.data["runtime_instances"]["ai-retail-mvp"]["site_runtime"]["publication"][
+            "storage"
+        ]["tls"]
+        errors, _ = validate_data(self.data)
+        self.assertTrue(any("acme_webroot и tls" in error for error in errors), errors)
+
+    def test_site_runtime_publication_storage_must_not_overlap_media(self) -> None:
+        runtime = self.data["runtime_instances"]["ai-retail-mvp"]["site_runtime"]
+        runtime["publication"]["storage"]["tls"]["volume"] = runtime["storage"][
+            "public_media"
+        ]["volume"]
+        errors, _ = validate_data(self.data)
+        self.assertTrue(any("storage volumes не должны совпадать" in error for error in errors), errors)
+
     def test_compose_file_must_be_under_instance_stack(self) -> None:
         self.data["runtime_instances"]["ai-retail-dev"]["deploy"]["environments"][
             "preprod"
