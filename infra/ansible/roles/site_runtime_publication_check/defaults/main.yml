@@ -8,3 +8,4 @@ site_runtime_publication_resolver: "{{ playbook_dir }}/../../tools/site_runtime/
 site_runtime_publication_edge_container: edge-haproxy
 site_runtime_publication_stage_root: /var/lib/ai-service-platform/site-runtime
 site_runtime_publication_runtime_root: /opt/ai-service-platform/site-runtime
+site_runtime_publication_journal_root: /var/lib/ai-service-platform/site-runtime-publication

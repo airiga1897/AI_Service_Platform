@@ -67,7 +67,11 @@ class PublicationContractTests(unittest.TestCase):
         override = model["render"]["preparation"]["documents"]["compose_override_fragment"]
         compose = yaml.safe_load(override)
         self.assertEqual(
-            ["acme_webroot_data:/var/www/acme:ro", "tls_data:/etc/letsencrypt:ro"],
+            [
+                "./nginx-publication-acme.conf:/etc/nginx/conf.d/publication-acme.conf:ro",
+                "acme_webroot_data:/var/www/acme:ro",
+                "tls_data:/etc/letsencrypt:ro",
+            ],
             compose["services"]["nginx"]["volumes"],
         )
         self.assertEqual(
@@ -138,25 +142,43 @@ class PublicationContractTests(unittest.TestCase):
         ):
             resolve(Path("registry.yml"), Path("instances.yml"), Path("state.csv"), "ai-retail-mvp", "vps3")
 
-    def test_service_interface_requires_check_mode(self) -> None:
+    def test_service_interface_keeps_check_strict_and_allows_real_prepare(self) -> None:
         service = (ROOT / "tools/services/service.sh").read_text(encoding="utf-8")
         remote = (ROOT / "tools/services/service_remote.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("site_runtime_publication_check.yml", service)
-        self.assertIn('site_runtime $ACTION requires --check', service)
-        self.assertIn('publication-prepare', service)
-        self.assertIn('site_runtime $Action requires -Check', remote)
+        self.assertIn("site_runtime publication-check requires --check", service)
+        self.assertNotIn("site_runtime publication-prepare requires --check", service)
+        self.assertIn('"apply" ] || [ "$ACTION" = "publication-prepare"', service)
+        self.assertIn("site_runtime publication-check requires -Check", remote)
+        self.assertNotIn("site_runtime publication-prepare requires -Check", remote)
 
-    def test_ansible_check_role_contains_no_mutating_runtime_commands(self) -> None:
+    def test_ansible_role_guards_real_mutations_from_check_mode(self) -> None:
         tasks = (
             ROOT / "infra/ansible/roles/site_runtime_publication_check/tasks/main.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("ansible_check_mode", tasks)
         self.assertIn("check_mode_mutations: false", tasks)
         self.assertIn("- docker\n      - volume\n      - inspect", tasks)
+        self.assertIn("not ansible_check_mode", tasks)
+        self.assertIn("Создать persistent ACME webroot volume", tasks)
+        self.assertIn("ai-service-platform.storage=acme_webroot", tasks)
+        self.assertIn("ai-service-platform.storage=tls", tasks)
+        self.assertIn("автоматическое подключение или перезапись запрещены", tasks)
+        self.assertIn("Пересоздать только Nginx с ACME/TLS mounts", tasks)
+        self.assertIn("--no-deps", tasks)
+        self.assertIn("application_current_unchanged", tasks)
+        self.assertIn("base_compose_unchanged", tasks)
+        self.assertIn("site_runtime_publication_edge_networks_after.stdout", tasks)
+        self.assertIn("selectattr('Type', 'equalto', 'volume')", tasks)
+        self.assertIn("application current.json изменился во время preparation", tasks)
+        self.assertIn("базовый Compose изменился во время preparation", tasks)
+        self.assertIn("site_runtime_publication_already_prepared", tasks)
+        self.assertIn("Записать failed publication preparation journal", tasks)
+        self.assertIn("Восстановить предыдущую конфигурацию Nginx", tasks)
+        self.assertIn("volumes_preserved_for_diagnostics", tasks)
         for forbidden in (
             "docker compose up",
             "docker network connect",
-            "docker volume create",
             "certbot certonly",
         ):
             self.assertNotIn(forbidden, tasks)

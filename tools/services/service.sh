@@ -529,7 +529,9 @@ if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "backup-init" ] || [ "$ACT
 fi
 if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "publication-check" ] || [ "$ACTION" = "publication-prepare" ]; }; then
     [ -n "$INSTANCE" ] || fail "site_runtime $ACTION requires --instance"
-    [ "$CHECK" = "true" ] || fail "site_runtime $ACTION requires --check"
+fi
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "publication-check" ]; then
+    [ "$CHECK" = "true" ] || fail "site_runtime publication-check requires --check"
 fi
 if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "restore-rehearsal" ] && [ -z "$SNAPSHOT_ID" ]; then
     fail "site_runtime restore-rehearsal requires --snapshot-id"
@@ -815,7 +817,7 @@ check_args=()
 if [ "$CHECK" = "true" ]; then
     check_args=(--check)
 fi
-if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "apply" ] || [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; }; then
+if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "apply" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; }; then
     [[ "$INSTANCE" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || fail "site_runtime instance is not normalized"
     command -v flock >/dev/null 2>&1 || fail "flock not found in PATH"
     site_runtime_lock="/var/lock/ai-service-platform-site-runtime-$INSTANCE.lock"
