@@ -157,7 +157,7 @@ class PublicationContractTests(unittest.TestCase):
         ):
             resolve(Path("registry.yml"), Path("instances.yml"), Path("state.csv"), "ai-retail-mvp", "vps3")
 
-    def test_service_interface_keeps_check_strict_and_allows_real_prepare(self) -> None:
+    def test_service_interface_keeps_check_strict_and_allows_real_publication_steps(self) -> None:
         service = (ROOT / "tools/services/service.sh").read_text(encoding="utf-8")
         remote = (ROOT / "tools/services/service_remote.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("site_runtime_publication_check.yml", service)
@@ -166,8 +166,9 @@ class PublicationContractTests(unittest.TestCase):
         self.assertIn('"apply" ] || [ "$ACTION" = "publication-prepare"', service)
         self.assertIn("site_runtime publication-check requires -Check", remote)
         self.assertNotIn("site_runtime publication-prepare requires -Check", remote)
-        self.assertIn("site_runtime publication-http01 requires --check", service)
-        self.assertIn("site_runtime publication-http01 requires -Check", remote)
+        self.assertNotIn("site_runtime publication-http01 requires --check", service)
+        self.assertNotIn("site_runtime publication-http01 requires -Check", remote)
+        self.assertIn('"publication-prepare" ] || [ "$ACTION" = "publication-http01"', service)
 
     def test_ansible_role_guards_real_mutations_from_check_mode(self) -> None:
         tasks = (
@@ -197,9 +198,17 @@ class PublicationContractTests(unittest.TestCase):
         self.assertIn("haproxy -c -f /dev/stdin", tasks)
         self.assertIn("current_external_status", tasks)
         self.assertIn("application_published", tasks)
+        self.assertIn("Подключить edge HAProxy к private application network", tasks)
+        self.assertIn("docker\n          - network\n          - connect", tasks)
+        self.assertIn("Атомарно записать принятый HTTP-01 HAProxy config", tasks)
+        self.assertIn("Сохранить snapshot HAProxy перед HTTP-01 route", tasks)
+        self.assertIn("Восстановить предыдущий HAProxy config после ошибки", tasks)
+        self.assertIn("Вернуть исходное network attachment после ошибки", tasks)
+        self.assertIn("Проверить применённый HTTP-01 route извне", tasks)
+        self.assertIn("site_runtime_publication_http01_route_already_applied", tasks)
+        self.assertIn("mutation_performed", tasks)
         for forbidden in (
             "docker compose up",
-            "docker network connect",
             "certbot certonly",
         ):
             self.assertNotIn(forbidden, tasks)

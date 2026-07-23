@@ -115,10 +115,35 @@ prospective HAProxy config в памяти, проверяет его через
 точным `Host: retail.travelltickets.ru` и префиксом
 `/.well-known/acme-challenge/`; остальные ACME hosts сохраняют placeholder.
 
-1. Подключить HAProxy на `vps3` к application network и открыть только HTTP-01.
-2. Получить сертификат Let's Encrypt и проверить цепочку/renewal.
-3. Включить SNI-маршрут HTTPS и production env.
-4. Принять внешние health endpoints и доказать отсутствие публичного доступа к
+После принятого `-Check` отдельным операторским разрешением выполняется тот же
+интерфейс без `-Check`:
+
+```powershell
+.\tools\services\service_remote.ps1 site_runtime publication-http01 `
+  -Instance ai-retail-mvp `
+  -Limit vps3
+```
+
+Реальный вызов сериализован общим instance lock и выполняет только HTTP-01
+рубеж:
+
+1. сохраняет snapshot действующего HAProxy config;
+2. подключает только `edge-haproxy` к `ai_service_app_vps3`;
+3. атомарно записывает уже проверенный host-scoped route и перезапускает HAProxy;
+4. создаёт временный marker в ACME webroot и принимает его извне со статусом
+   `200`;
+5. удаляет marker и записывает append-only journal/current receipt.
+
+При ошибке предыдущий HAProxy config и исходное network attachment
+восстанавливаются. Повторный вызов идемпотентен: route и сеть не применяются
+повторно, выполняется только внешняя приёмка. Сертификат не запрашивается,
+HTTPS-route не создаётся, публичный root приложения остаётся закрытым.
+
+Следующие отдельные рубежи:
+
+1. Получить сертификат Let's Encrypt и проверить цепочку/renewal.
+2. Включить SNI-маршрут HTTPS и production env.
+3. Принять внешние health endpoints и доказать отсутствие публичного доступа к
    внутренним сервисам и `private_media`.
 
 Каждый реальный шаг требует отдельного подтверждения. Seed, superuser и S3-копия

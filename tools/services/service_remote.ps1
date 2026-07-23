@@ -747,9 +747,6 @@ if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -in @("pub
 if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "publication-check" -and -not $Check) {
     Fail "site_runtime publication-check requires -Check"
 }
-if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "publication-http01" -and -not $Check) {
-    Fail "site_runtime publication-http01 requires -Check"
-}
 if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "restore-rehearsal" -and -not $SnapshotId) {
     Fail "site_runtime restore-rehearsal requires -SnapshotId"
 }
