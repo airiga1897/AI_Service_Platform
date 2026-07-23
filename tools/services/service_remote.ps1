@@ -3,7 +3,7 @@ param(
     [string]$Service,
 
     [Parameter(Position=1)]
-    [ValidateSet("plan", "apply", "absent", "purge", "reseed", "probe", "stage-image", "stage-support-images", "publication-check", "publication-prepare", "backup-init", "backup-schedule", "backup", "restore-rehearsal", "restore-cleanup")]
+    [ValidateSet("plan", "apply", "absent", "purge", "reseed", "probe", "stage-image", "stage-support-images", "publication-check", "publication-prepare", "publication-http01", "backup-init", "backup-schedule", "backup", "restore-rehearsal", "restore-cleanup")]
     [string]$Action,
 
     [string]$NodesFile = ".\operator\nodes.csv",
@@ -724,7 +724,7 @@ if ($BatchPlanFile) {
 if (-not $BatchPlanFile -and $Service -eq "host_resources" -and $Action -notin @("plan", "apply")) {
     Fail "host_resources v1 supports only plan and apply; absent/purge/reseed are intentionally disabled"
 }
-if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -notin @("plan", "probe", "stage-image", "stage-support-images", "publication-check", "publication-prepare", "apply", "backup-init", "backup-schedule", "backup", "restore-rehearsal", "restore-cleanup")) {
+if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -notin @("plan", "probe", "stage-image", "stage-support-images", "publication-check", "publication-prepare", "publication-http01", "apply", "backup-init", "backup-schedule", "backup", "restore-rehearsal", "restore-cleanup")) {
     Fail "site_runtime action is not supported"
 }
 if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "probe" -and $Limit -ne "vps3") {
@@ -739,13 +739,16 @@ if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -in @("pla
 if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -in @("backup-init", "backup-schedule", "backup", "restore-rehearsal", "restore-cleanup") -and (-not $Instance -or -not $Limit)) {
     Fail "site_runtime $Action requires -Instance and exactly one -Limit alias"
 }
-if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -in @("publication-check", "publication-prepare")) {
+if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -in @("publication-check", "publication-prepare", "publication-http01")) {
     if (-not $Instance -or -not $Limit) {
         Fail "site_runtime $Action requires -Instance and exactly one -Limit alias"
     }
 }
 if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "publication-check" -and -not $Check) {
     Fail "site_runtime publication-check requires -Check"
+}
+if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "publication-http01" -and -not $Check) {
+    Fail "site_runtime publication-http01 requires -Check"
 }
 if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "restore-rehearsal" -and -not $SnapshotId) {
     Fail "site_runtime restore-rehearsal requires -SnapshotId"

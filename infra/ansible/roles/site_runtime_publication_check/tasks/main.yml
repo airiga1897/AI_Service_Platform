@@ -5,7 +5,7 @@
       - ansible_check_mode
         or site_runtime_publication_action == 'publication-prepare'
       - site_runtime_instance | length > 0
-      - site_runtime_publication_action in ['publication-check', 'publication-prepare']
+      - site_runtime_publication_action in ['publication-check', 'publication-prepare', 'publication-http01']
       - inventory_hostname == 'vps3'
     fail_msg: >-
       publication-check допускается только с -Check; publication-prepare — только для site_runtime instance на vps3.
@@ -716,6 +716,131 @@
     - site_runtime_publication_action == 'publication-prepare'
     - not ansible_check_mode
 
+- name: Проверить receipt подготовленного Nginx перед HTTP-01 ingress
+  ansible.builtin.stat:
+    path: "{{ site_runtime_publication_journal_root }}/{{ site_runtime_instance }}/current.json"
+    checksum_algorithm: sha256
+  check_mode: false
+  register: site_runtime_publication_http01_receipt_stat
+  when: site_runtime_publication_action == 'publication-http01'
+
+- name: Прочитать receipt подготовленного Nginx перед HTTP-01 ingress
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_publication_journal_root }}/{{ site_runtime_instance }}/current.json"
+  check_mode: false
+  register: site_runtime_publication_http01_receipt_slurp
+  when:
+    - site_runtime_publication_action == 'publication-http01'
+    - site_runtime_publication_http01_receipt_stat.stat.exists | default(false)
+
+- name: Разобрать receipt подготовленного Nginx
+  ansible.builtin.set_fact:
+    site_runtime_publication_http01_receipt: >-
+      {{ site_runtime_publication_http01_receipt_slurp.content | b64decode | from_json }}
+  when:
+    - site_runtime_publication_action == 'publication-http01'
+    - site_runtime_publication_http01_receipt_stat.stat.exists | default(false)
+
+- name: Принять prerequisites HTTP-01 ingress
+  ansible.builtin.assert:
+    that:
+      - site_runtime_publication_http01_receipt_stat.stat.exists | default(false)
+      - site_runtime_publication_http01_receipt.final_status == 'succeeded'
+      - site_runtime_publication_http01_receipt.domain == site_runtime_publication_model.domain
+      - site_runtime_publication_http01_receipt.storage.acme_webroot == site_runtime_publication_model.storage.acme_webroot.volume
+      - site_runtime_publication_http01_receipt.storage.tls == site_runtime_publication_model.storage.tls.volume
+      - site_runtime_publication_http01_receipt.preparation_render_checksums == site_runtime_publication_model.render.preparation.checksums
+    fail_msg: Nginx ACME/TLS preparation не принят; HTTP-01 ingress запрещён.
+  when: site_runtime_publication_action == 'publication-http01'
+
+- name: Проверить Nginx ACME backend перед HTTP-01 ingress
+  ansible.builtin.shell: |
+    python3 - \
+      "{{ site_runtime_instance }}-nginx-1" \
+      "{{ site_runtime_publication_model.storage.acme_webroot.volume }}" \
+      "{{ site_runtime_publication_model.storage.acme_webroot.container_path }}" <<'PY'
+    import json
+    import subprocess
+    import sys
+
+    container, volume, destination = sys.argv[1:]
+    info = json.loads(subprocess.run(
+        ["docker", "inspect", container], check=True, capture_output=True, text=True
+    ).stdout)[0]
+    if not info.get("State", {}).get("Running"):
+        raise SystemExit("Nginx ACME backend не запущен")
+    matches = [mount for mount in info.get("Mounts", []) if
+        mount.get("Type") == "volume" and mount.get("Name") == volume and
+        mount.get("Destination") == destination and mount.get("RW") is False]
+    if len(matches) != 1:
+        raise SystemExit("ACME webroot не подключён к Nginx read-only")
+    subprocess.run(["docker", "exec", container, "nginx", "-t"], check=True)
+    PY
+  args:
+    executable: /bin/bash
+  check_mode: false
+  changed_when: false
+  when: site_runtime_publication_action == 'publication-http01'
+
+- name: Прочитать действующий HAProxy config перед HTTP-01 ingress
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_publication_edge_config }}"
+  check_mode: false
+  register: site_runtime_publication_http01_haproxy_slurp
+  when: site_runtime_publication_action == 'publication-http01'
+
+- name: Сформировать prospective HAProxy config в памяти
+  ansible.builtin.set_fact:
+    site_runtime_publication_http01_haproxy_current: >-
+      {{ site_runtime_publication_http01_haproxy_slurp.content | b64decode }}
+    site_runtime_publication_http01_haproxy_future: >-
+      {{
+        (site_runtime_publication_http01_haproxy_slurp.content | b64decode).replace(
+          site_runtime_publication_model.render.http01.insertion_anchor,
+          site_runtime_publication_model.render.http01.documents.haproxy_frontend_rules
+          ~ site_runtime_publication_model.render.http01.insertion_anchor
+        )
+        ~ site_runtime_publication_model.render.http01.documents.haproxy_backend
+      }}
+  when: site_runtime_publication_action == 'publication-http01'
+
+- name: Принять безопасную точку вставки HTTP-01 route
+  ansible.builtin.assert:
+    that:
+      - (site_runtime_publication_http01_haproxy_current.split(site_runtime_publication_model.render.http01.insertion_anchor) | length) == 2
+      - "'backend be_site_ai_retail_mvp_http' not in site_runtime_publication_http01_haproxy_current"
+      - not site_runtime_publication_model.edge.public_route_enabled | bool
+    fail_msg: HAProxy config не содержит единственную безопасную ACME placeholder boundary.
+  when: site_runtime_publication_action == 'publication-http01'
+
+- name: Проверить prospective HAProxy config без записи файла
+  ansible.builtin.shell: |
+    docker exec -i {{ site_runtime_publication_edge_container }} haproxy -c -f /dev/stdin <<'HAPROXY'
+    {{ site_runtime_publication_http01_haproxy_future }}
+    HAPROXY
+  args:
+    executable: /bin/bash
+  check_mode: false
+  changed_when: false
+  when: site_runtime_publication_action == 'publication-http01'
+
+- name: Проверить текущий внешний ACME placeholder
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - >-
+        import sys, urllib.error, urllib.request;
+        request=urllib.request.Request('http://' + sys.argv[1] + '/.well-known/acme-challenge/platform-http01-check');
+        exec("try:\n urllib.request.urlopen(request, timeout=10)\nexcept urllib.error.HTTPError as exc:\n assert exc.code == 404; print(exc.code)\nelse:\n raise SystemExit('ACME placeholder должен возвращать 404')")
+      - "{{ site_runtime_publication_model.domain }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  register: site_runtime_publication_http01_external
+  when: site_runtime_publication_action == 'publication-http01'
+
 - name: Сформировать безопасный результат проверки публикации
   ansible.builtin.set_fact:
     site_runtime_publication_result:
@@ -736,6 +861,42 @@
       private_endpoints: "{{ site_runtime_publication_model.health.private }}"
       security: "{{ site_runtime_publication_model.security }}"
       render_checksums: "{{ site_runtime_publication_model.render.checksums }}"
+
+- name: Дополнить результат check-only HTTP-01 ingress contract
+  ansible.builtin.set_fact:
+    site_runtime_publication_result: >-
+      {{ site_runtime_publication_result | combine({
+        'http01': {
+          'prerequisites_accepted': true,
+          'current_external_status': site_runtime_publication_http01_external.stdout | int,
+          'current_haproxy_checksum': site_runtime_publication_http01_haproxy_current | hash('sha256'),
+          'prospective_haproxy_checksum': site_runtime_publication_http01_haproxy_future | hash('sha256'),
+          'render_checksums': site_runtime_publication_model.render.http01.checksums,
+          'route_host': site_runtime_publication_model.domain,
+          'route_path_prefix': '/.well-known/acme-challenge/',
+          'future_backend': site_runtime_publication_model.edge.http_acme_backend,
+          'haproxy_config_valid': true,
+          'edge_network_attachment_planned': true,
+          'edge_network_attached': site_runtime_publication_model.edge.application_network in (site_runtime_publication_edge_networks.stdout | from_json),
+          'route_applied': false,
+          'certificate_requested': false,
+          'application_published': false,
+          'check_mode_mutations': false
+        }
+      }, recursive=True) }}
+  when: site_runtime_publication_action == 'publication-http01'
+
+- name: Принять отсутствие изменений HTTP-01 check-only рубежа
+  ansible.builtin.assert:
+    that:
+      - not site_runtime_publication_result.http01.edge_network_attached | bool
+      - not site_runtime_publication_result.http01.route_applied | bool
+      - not site_runtime_publication_result.http01.certificate_requested | bool
+      - not site_runtime_publication_result.http01.application_published | bool
+      - not site_runtime_publication_result.http01.check_mode_mutations | bool
+      - site_runtime_publication_result.http01.current_external_status | int == 404
+    fail_msg: HTTP-01 check-only contract обнаружил преждевременную публикацию или mutation.
+  when: site_runtime_publication_action == 'publication-http01'
 
 - name: Дополнить результат future ACME/TLS storage contract
   ansible.builtin.set_fact:

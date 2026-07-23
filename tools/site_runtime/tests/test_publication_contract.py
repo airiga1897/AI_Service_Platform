@@ -86,6 +86,21 @@ class PublicationContractTests(unittest.TestCase):
         self.assertIn("location / { return 404; }", nginx)
         self.assertNotIn("proxy_pass", nginx)
 
+    def test_http01_contract_is_host_scoped_and_preserves_placeholder(self) -> None:
+        http01 = self.call()["render"]["http01"]
+        rules = http01["documents"]["haproxy_frontend_rules"]
+        backend = http01["documents"]["haproxy_backend"]
+        self.assertIn("hdr(host) -i retail.travelltickets.ru", rules)
+        self.assertIn("path_beg /.well-known/acme-challenge/", rules)
+        self.assertIn("use_backend be_site_ai_retail_mvp_http", rules)
+        self.assertIn("172.31.3.10:8080", backend)
+        self.assertTrue(backend.startswith("\nbackend be_site_ai_retail_mvp_http"))
+        self.assertNotIn("\\nbackend", backend)
+        self.assertEqual(
+            "    use_backend be_acme_placeholder if is_acme",
+            http01["insertion_anchor"],
+        )
+
     def test_security_contract_keeps_internal_services_private(self) -> None:
         security = self.call()["security"]
         for field in ("gunicorn_public", "redis_public", "postgres_public", "private_media_public"):
@@ -151,6 +166,8 @@ class PublicationContractTests(unittest.TestCase):
         self.assertIn('"apply" ] || [ "$ACTION" = "publication-prepare"', service)
         self.assertIn("site_runtime publication-check requires -Check", remote)
         self.assertNotIn("site_runtime publication-prepare requires -Check", remote)
+        self.assertIn("site_runtime publication-http01 requires --check", service)
+        self.assertIn("site_runtime publication-http01 requires -Check", remote)
 
     def test_ansible_role_guards_real_mutations_from_check_mode(self) -> None:
         tasks = (
@@ -176,6 +193,10 @@ class PublicationContractTests(unittest.TestCase):
         self.assertIn("Записать failed publication preparation journal", tasks)
         self.assertIn("Восстановить предыдущую конфигурацию Nginx", tasks)
         self.assertIn("volumes_preserved_for_diagnostics", tasks)
+        self.assertIn("Сформировать prospective HAProxy config в памяти", tasks)
+        self.assertIn("haproxy -c -f /dev/stdin", tasks)
+        self.assertIn("current_external_status", tasks)
+        self.assertIn("application_published", tasks)
         for forbidden in (
             "docker compose up",
             "docker network connect",
