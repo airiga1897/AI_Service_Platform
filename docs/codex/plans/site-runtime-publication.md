@@ -99,6 +99,22 @@ Application `current.json` и базовый `docker-compose.yml` не изме�
 
 ## Следующие отдельные рубежи
 
+Перед реальным подключением edge выполняется check-only HTTP-01 contract:
+
+```powershell
+.\tools\services\service_remote.ps1 site_runtime publication-http01 `
+  -Instance ai-retail-mvp `
+  -Limit vps3 `
+  -Check
+```
+
+Команда принимает publication preparation receipt и Nginx mounts, строит
+prospective HAProxy config в памяти, проверяет его через работающий HAProxy и
+подтверждает текущий внешний `404` placeholder. Файлы HAProxy, Docker networks,
+сертификаты и runtime не изменяются. Будущий route ограничен одновременно
+точным `Host: retail.travelltickets.ru` и префиксом
+`/.well-known/acme-challenge/`; остальные ACME hosts сохраняют placeholder.
+
 1. Подключить HAProxy на `vps3` к application network и открыть только HTTP-01.
 2. Получить сертификат Let's Encrypt и проверить цепочку/renewal.
 3. Включить SNI-маршрут HTTPS и production env.

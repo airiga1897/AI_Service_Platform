@@ -127,6 +127,17 @@ volumes:
 """,
         "haproxy_acme_fragment": haproxy_http,
     }
+    http01_documents = {
+        "haproxy_frontend_rules": f"""    acl host_{acl_name} hdr(host) -i {domain}
+    acl acme_{acl_name} path_beg /.well-known/acme-challenge/
+    use_backend {backend_name}_http if host_{acl_name} acme_{acl_name}
+""",
+        "haproxy_backend": f"""
+backend {backend_name}_http
+    mode http
+    server {instance}-nginx {backend}:{http_port} check inter 5s fall 3 rise 2
+""",
+    }
     return {
         "documents": documents,
         "checksums": _checksum_documents(documents, "publication_bundle"),
@@ -135,6 +146,11 @@ volumes:
             "checksums": _checksum_documents(
                 preparation_documents, "preparation_bundle"
             ),
+        },
+        "http01": {
+            "documents": http01_documents,
+            "checksums": _checksum_documents(http01_documents, "http01_bundle"),
+            "insertion_anchor": "    use_backend be_acme_placeholder if is_acme",
         },
     }
 
