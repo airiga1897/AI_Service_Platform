@@ -3,11 +3,12 @@
   ansible.builtin.assert:
     that:
       - ansible_check_mode
+        or site_runtime_publication_action == 'publication-prepare'
       - site_runtime_instance | length > 0
       - site_runtime_publication_action in ['publication-check', 'publication-prepare']
       - inventory_hostname == 'vps3'
     fail_msg: >-
-      Проверка публикации допускается только с -Check для site_runtime instance на vps3.
+      publication-check допускается только с -Check; publication-prepare — только для site_runtime instance на vps3.
 
 - name: Разрешить canonical publication model
   ansible.builtin.command:
@@ -148,6 +149,40 @@
   register: site_runtime_publication_tls_volume
   when: site_runtime_publication_action == 'publication-prepare'
 
+- name: Проверить ownership существующих ACME/TLS volumes
+  ansible.builtin.set_fact:
+    site_runtime_publication_acme_volume_labels: >-
+      {{
+        ((site_runtime_publication_acme_volume.stdout | from_json | first).Labels | default({}, true))
+        if site_runtime_publication_acme_volume.rc == 0 else {}
+      }}
+    site_runtime_publication_tls_volume_labels: >-
+      {{
+        ((site_runtime_publication_tls_volume.stdout | from_json | first).Labels | default({}, true))
+        if site_runtime_publication_tls_volume.rc == 0 else {}
+      }}
+  when: site_runtime_publication_action == 'publication-prepare'
+
+- name: Принять ownership существующих ACME/TLS volumes
+  ansible.builtin.assert:
+    that:
+      - >-
+        site_runtime_publication_acme_volume.rc != 0 or (
+          site_runtime_publication_acme_volume_labels.get('ai-service-platform.managed') == 'site_runtime'
+          and site_runtime_publication_acme_volume_labels.get('ai-service-platform.instance') == site_runtime_instance
+          and site_runtime_publication_acme_volume_labels.get('ai-service-platform.storage') == 'acme_webroot'
+        )
+      - >-
+        site_runtime_publication_tls_volume.rc != 0 or (
+          site_runtime_publication_tls_volume_labels.get('ai-service-platform.managed') == 'site_runtime'
+          and site_runtime_publication_tls_volume_labels.get('ai-service-platform.instance') == site_runtime_instance
+          and site_runtime_publication_tls_volume_labels.get('ai-service-platform.storage') == 'tls'
+        )
+    fail_msg: >-
+      Существующий ACME/TLS volume не принадлежит canonical site_runtime instance;
+      автоматическое подключение или перезапись запрещены.
+  when: site_runtime_publication_action == 'publication-prepare'
+
 - name: Принять наличие действующего deployment snapshot
   ansible.builtin.assert:
     that:
@@ -161,6 +196,525 @@
     site_runtime_publication_current: >-
       {{ site_runtime_publication_current_slurp.content | b64decode | from_json }}
   when: site_runtime_publication_action == 'publication-prepare'
+
+- name: Зафиксировать пути ACME preparation
+  ansible.builtin.set_fact:
+    site_runtime_publication_instance_root: "{{ site_runtime_publication_runtime_root }}/{{ site_runtime_instance }}"
+    site_runtime_publication_override_path: "{{ site_runtime_publication_runtime_root }}/{{ site_runtime_instance }}/docker-compose.publication.yml"
+    site_runtime_publication_nginx_path: "{{ site_runtime_publication_runtime_root }}/{{ site_runtime_instance }}/nginx-publication-acme.conf"
+    site_runtime_publication_instance_journal_root: "{{ site_runtime_publication_journal_root }}/{{ site_runtime_instance }}"
+    site_runtime_publication_preparation_id: "{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}-prepare"
+  when: site_runtime_publication_action == 'publication-prepare'
+
+- name: Проверить существующий Compose overlay публикации
+  ansible.builtin.stat:
+    path: "{{ site_runtime_publication_override_path }}"
+    checksum_algorithm: sha256
+  check_mode: false
+  register: site_runtime_publication_override_stat
+  when: site_runtime_publication_action == 'publication-prepare'
+
+- name: Проверить существующую ACME-конфигурацию Nginx
+  ansible.builtin.stat:
+    path: "{{ site_runtime_publication_nginx_path }}"
+    checksum_algorithm: sha256
+  check_mode: false
+  register: site_runtime_publication_nginx_stat
+  when: site_runtime_publication_action == 'publication-prepare'
+
+- name: Сохранить предыдущий Compose overlay для аварийного восстановления
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_publication_override_path }}"
+  check_mode: false
+  register: site_runtime_publication_override_previous
+  when:
+    - site_runtime_publication_action == 'publication-prepare'
+    - site_runtime_publication_override_stat.stat.exists | default(false)
+
+- name: Сохранить предыдущую ACME-конфигурацию для аварийного восстановления
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_publication_nginx_path }}"
+  check_mode: false
+  register: site_runtime_publication_nginx_previous
+  when:
+    - site_runtime_publication_action == 'publication-prepare'
+    - site_runtime_publication_nginx_stat.stat.exists | default(false)
+
+- name: Проверить текущие mounts Nginx перед ACME preparation
+  ansible.builtin.command:
+    argv:
+      - docker
+      - inspect
+      - "{{ site_runtime_instance }}-nginx-1"
+      - --format
+      - "{{ '{{json .Mounts}}' }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_publication_nginx_mounts_before
+  when: site_runtime_publication_action == 'publication-prepare'
+
+- name: Определить необходимость ACME preparation
+  ansible.builtin.set_fact:
+    site_runtime_publication_already_prepared: >-
+      {{
+        site_runtime_publication_acme_volume.rc == 0
+        and site_runtime_publication_tls_volume.rc == 0
+        and site_runtime_publication_override_stat.stat.exists | default(false)
+        and site_runtime_publication_override_stat.stat.checksum | default('') == site_runtime_publication_model.render.preparation.checksums.compose_override_fragment
+        and site_runtime_publication_nginx_stat.stat.exists | default(false)
+        and site_runtime_publication_nginx_stat.stat.checksum | default('') == site_runtime_publication_model.render.preparation.checksums.nginx_acme_fragment
+        and ((site_runtime_publication_nginx_mounts_before.stdout | from_json)
+          | selectattr('Type', 'equalto', 'volume')
+          | selectattr('Name', 'equalto', site_runtime_publication_model.storage.acme_webroot.volume)
+          | selectattr('Destination', 'equalto', site_runtime_publication_model.storage.acme_webroot.container_path)
+          | selectattr('RW', 'equalto', false) | list | length) == 1
+        and ((site_runtime_publication_nginx_mounts_before.stdout | from_json)
+          | selectattr('Type', 'equalto', 'volume')
+          | selectattr('Name', 'equalto', site_runtime_publication_model.storage.tls.volume)
+          | selectattr('Destination', 'equalto', site_runtime_publication_model.storage.tls.container_path)
+          | selectattr('RW', 'equalto', false) | list | length) == 1
+      }}
+  when: site_runtime_publication_action == 'publication-prepare'
+
+- name: Выполнить реальную подготовку ACME/TLS storage и Nginx
+  when:
+    - site_runtime_publication_action == 'publication-prepare'
+    - not ansible_check_mode
+    - not site_runtime_publication_already_prepared | bool
+  block:
+    - name: Подготовить каталог publication journal
+      ansible.builtin.file:
+        path: "{{ site_runtime_publication_instance_journal_root }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Создать persistent ACME webroot volume
+      ansible.builtin.command:
+        argv:
+          - docker
+          - volume
+          - create
+          - --label
+          - ai-service-platform.managed=site_runtime
+          - --label
+          - "ai-service-platform.instance={{ site_runtime_instance }}"
+          - --label
+          - ai-service-platform.storage=acme_webroot
+          - "{{ site_runtime_publication_model.storage.acme_webroot.volume }}"
+      when: site_runtime_publication_acme_volume.rc != 0
+
+    - name: Создать persistent TLS volume
+      ansible.builtin.command:
+        argv:
+          - docker
+          - volume
+          - create
+          - --label
+          - ai-service-platform.managed=site_runtime
+          - --label
+          - "ai-service-platform.instance={{ site_runtime_instance }}"
+          - --label
+          - ai-service-platform.storage=tls
+          - "{{ site_runtime_publication_model.storage.tls.volume }}"
+      when: site_runtime_publication_tls_volume.rc != 0
+
+    - name: Записать canonical Compose overlay публикации
+      ansible.builtin.copy:
+        content: "{{ site_runtime_publication_model.render.preparation.documents.compose_override_fragment }}"
+        dest: "{{ site_runtime_publication_override_path }}"
+        owner: root
+        group: root
+        mode: "0640"
+
+    - name: Записать ACME-only конфигурацию Nginx
+      ansible.builtin.copy:
+        content: "{{ site_runtime_publication_model.render.preparation.documents.nginx_acme_fragment }}"
+        dest: "{{ site_runtime_publication_nginx_path }}"
+        owner: root
+        group: root
+        mode: "0640"
+
+    - name: Проверить объединённый Compose до изменения Nginx
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - -f
+          - "{{ site_runtime_publication_instance_root }}/docker-compose.yml"
+          - -f
+          - "{{ site_runtime_publication_override_path }}"
+          - config
+          - --quiet
+      changed_when: false
+
+    - name: Пересоздать только Nginx с ACME/TLS mounts
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - -f
+          - "{{ site_runtime_publication_instance_root }}/docker-compose.yml"
+          - -f
+          - "{{ site_runtime_publication_override_path }}"
+          - up
+          - -d
+          - --no-build
+          - --pull
+          - never
+          - --no-deps
+          - nginx
+
+    - name: Дождаться private health после обновления Nginx
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ site_runtime_instance }}-web-1"
+          - python
+          - -c
+          - >-
+            import urllib.request;
+            [urllib.request.urlopen('http://127.0.0.1:8080' + path, timeout=5).read()
+            for path in ('/healthz/','/readyz/','/worker-healthz/')]
+      register: site_runtime_publication_private_health
+      retries: 20
+      delay: 3
+      until: site_runtime_publication_private_health.rc == 0
+      changed_when: false
+
+    - name: Проверить ACME webroot и закрытый публичный root
+      ansible.builtin.shell: |
+        set -euo pipefail
+        nginx_image="$(docker inspect "{{ site_runtime_instance }}-nginx-1" --format '{{ '{{.Image}}' }}')"
+        cleanup() {
+          docker run --rm \
+            -v "{{ site_runtime_publication_model.storage.acme_webroot.volume }}:/var/www/acme" \
+            "$nginx_image" sh -ec 'rm -f /var/www/acme/.well-known/acme-challenge/platform-preparation-probe' >/dev/null
+        }
+        trap cleanup EXIT
+        docker run --rm \
+          -v "{{ site_runtime_publication_model.storage.acme_webroot.volume }}:/var/www/acme" \
+          "$nginx_image" sh -ec \
+          'mkdir -p /var/www/acme/.well-known/acme-challenge; printf prepared > /var/www/acme/.well-known/acme-challenge/platform-preparation-probe'
+        docker exec "{{ site_runtime_instance }}-web-1" python - "{{ site_runtime_publication_model.domain }}" <<'PY'
+        import sys
+        import urllib.error
+        import urllib.request
+
+        domain = sys.argv[1]
+        request = urllib.request.Request(
+            "http://127.0.0.1:8080/.well-known/acme-challenge/platform-preparation-probe",
+            headers={"Host": domain},
+        )
+        if urllib.request.urlopen(request, timeout=5).read() != b"prepared":
+            raise SystemExit("ACME webroot не отдал контрольный marker")
+        root = urllib.request.Request("http://127.0.0.1:8080/", headers={"Host": domain})
+        try:
+            urllib.request.urlopen(root, timeout=5)
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:
+                raise
+        else:
+            raise SystemExit("Публичный root должен возвращать 404 до отдельного route apply")
+        PY
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Принять mounts Nginx и неизменность application artifacts до записи journal
+      ansible.builtin.shell: |
+        python3 - \
+          "{{ site_runtime_instance }}-nginx-1" \
+          "{{ site_runtime_publication_model.storage.acme_webroot.volume }}" \
+          "{{ site_runtime_publication_model.storage.acme_webroot.container_path }}" \
+          "{{ site_runtime_publication_model.storage.tls.volume }}" \
+          "{{ site_runtime_publication_model.storage.tls.container_path }}" \
+          "{{ site_runtime_publication_stage_root }}/deployments/{{ site_runtime_instance }}/current.json" \
+          "{{ site_runtime_publication_current_stat.stat.checksum }}" \
+          "{{ site_runtime_publication_instance_root }}/docker-compose.yml" \
+          "{{ site_runtime_publication_compose_stat.stat.checksum }}" <<'PY'
+        import hashlib
+        import json
+        from pathlib import Path
+        import subprocess
+        import sys
+
+        (
+            nginx_container,
+            acme_volume,
+            acme_path,
+            tls_volume,
+            tls_path,
+            current_path,
+            current_checksum,
+            compose_path,
+            compose_checksum,
+        ) = sys.argv[1:]
+
+        def sha256(path):
+            return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+        if sha256(current_path) != current_checksum:
+            raise SystemExit("application current.json изменился во время preparation")
+        if sha256(compose_path) != compose_checksum:
+            raise SystemExit("базовый Compose изменился во время preparation")
+        inspected = subprocess.run(
+            ["docker", "inspect", nginx_container],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        info = json.loads(inspected.stdout)[0]
+        if not info.get("State", {}).get("Running"):
+            raise SystemExit("Nginx не запущен после preparation")
+        if info.get("HostConfig", {}).get("PortBindings"):
+            raise SystemExit("У Nginx обнаружены host port bindings")
+
+        def require_read_only_volume(name, destination):
+            matches = [
+                mount
+                for mount in info.get("Mounts", [])
+                if mount.get("Type") == "volume"
+                and mount.get("Name") == name
+                and mount.get("Destination") == destination
+                and mount.get("RW") is False
+            ]
+            if len(matches) != 1:
+                raise SystemExit(f"Не принят read-only volume mount {destination}")
+
+        require_read_only_volume(acme_volume, acme_path)
+        require_read_only_volume(tls_volume, tls_path)
+        PY
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Записать успешный publication preparation journal
+      ansible.builtin.copy:
+        content: >-
+          {{ {'preparation_id': site_runtime_publication_preparation_id,
+          'time_utc': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ'),
+          'instance': site_runtime_instance, 'domain': site_runtime_publication_model.domain,
+          'deployment_id': site_runtime_publication_current.deployment_id,
+          'deployment_digest': site_runtime_publication_current.digest,
+          'base_compose_checksum': site_runtime_publication_current.compose_checksum,
+          'storage': {'acme_webroot': site_runtime_publication_model.storage.acme_webroot.volume,
+          'tls': site_runtime_publication_model.storage.tls.volume},
+          'preparation_render_checksums': site_runtime_publication_model.render.preparation.checksums,
+          'private_health': 'succeeded', 'acme_probe': 'succeeded',
+          'certificate_requested': False, 'edge_changed': False,
+          'public_route_enabled': False, 'final_status': 'succeeded'} | to_nice_json }}
+        dest: "{{ site_runtime_publication_instance_journal_root }}/{{ site_runtime_publication_preparation_id }}.json"
+        owner: root
+        group: root
+        mode: "0640"
+
+    - name: Обновить current receipt publication preparation
+      ansible.builtin.copy:
+        content: >-
+          {{ {'preparation_id': site_runtime_publication_preparation_id,
+          'instance': site_runtime_instance, 'domain': site_runtime_publication_model.domain,
+          'deployment_id': site_runtime_publication_current.deployment_id,
+          'deployment_digest': site_runtime_publication_current.digest,
+          'base_compose_checksum': site_runtime_publication_current.compose_checksum,
+          'storage': {'acme_webroot': site_runtime_publication_model.storage.acme_webroot.volume,
+          'tls': site_runtime_publication_model.storage.tls.volume},
+          'preparation_render_checksums': site_runtime_publication_model.render.preparation.checksums,
+          'final_status': 'succeeded'} | to_nice_json }}
+        dest: "{{ site_runtime_publication_instance_journal_root }}/current.json"
+        owner: root
+        group: root
+        mode: "0640"
+
+  rescue:
+    - name: Восстановить предыдущий Compose overlay после ошибки
+      ansible.builtin.copy:
+        content: "{{ site_runtime_publication_override_previous.content | b64decode }}"
+        dest: "{{ site_runtime_publication_override_path }}"
+        owner: root
+        group: root
+        mode: "0640"
+      when: site_runtime_publication_override_stat.stat.exists | default(false)
+
+    - name: Удалить новый Compose overlay после ошибки первого preparation
+      ansible.builtin.file:
+        path: "{{ site_runtime_publication_override_path }}"
+        state: absent
+      when: not site_runtime_publication_override_stat.stat.exists | default(false)
+
+    - name: Восстановить предыдущую ACME-конфигурацию после ошибки
+      ansible.builtin.copy:
+        content: "{{ site_runtime_publication_nginx_previous.content | b64decode }}"
+        dest: "{{ site_runtime_publication_nginx_path }}"
+        owner: root
+        group: root
+        mode: "0640"
+      when: site_runtime_publication_nginx_stat.stat.exists | default(false)
+
+    - name: Удалить новую ACME-конфигурацию после ошибки первого preparation
+      ansible.builtin.file:
+        path: "{{ site_runtime_publication_nginx_path }}"
+        state: absent
+      when: not site_runtime_publication_nginx_stat.stat.exists | default(false)
+
+    - name: Восстановить предыдущую конфигурацию Nginx
+      ansible.builtin.command:
+        argv: >-
+          {{
+            ['docker', 'compose', '-f', site_runtime_publication_instance_root + '/docker-compose.yml']
+            + (['-f', site_runtime_publication_override_path]
+              if site_runtime_publication_override_stat.stat.exists | default(false) else [])
+            + ['up', '-d', '--no-build', '--pull', 'never', '--no-deps', 'nginx']
+          }}
+
+    - name: Записать failed publication preparation journal
+      ansible.builtin.copy:
+        content: >-
+          {{ {'preparation_id': site_runtime_publication_preparation_id,
+          'time_utc': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ'),
+          'instance': site_runtime_instance, 'domain': site_runtime_publication_model.domain,
+          'deployment_id': site_runtime_publication_current.deployment_id,
+          'deployment_digest': site_runtime_publication_current.digest,
+          'base_compose_checksum': site_runtime_publication_current.compose_checksum,
+          'certificate_requested': False, 'edge_changed': False,
+          'public_route_enabled': False, 'final_status': 'failed',
+          'volumes_preserved_for_diagnostics': True} | to_nice_json }}
+        dest: "{{ site_runtime_publication_instance_journal_root }}/{{ site_runtime_publication_preparation_id }}.json"
+        owner: root
+        group: root
+        mode: "0640"
+
+    - name: Остановить publication preparation после сохранения диагностики
+      ansible.builtin.fail:
+        msg: >-
+          ACME/TLS preparation не принята; предыдущая конфигурация Nginx восстановлена,
+          volumes сохранены для диагностики, public route не изменён.
+
+- name: Проверить ACME webroot volume после реального preparation
+  ansible.builtin.command:
+    argv:
+      - docker
+      - volume
+      - inspect
+      - "{{ site_runtime_publication_model.storage.acme_webroot.volume }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_publication_acme_volume_after
+  when:
+    - site_runtime_publication_action == 'publication-prepare'
+    - not ansible_check_mode
+
+- name: Проверить TLS volume после реального preparation
+  ansible.builtin.command:
+    argv:
+      - docker
+      - volume
+      - inspect
+      - "{{ site_runtime_publication_model.storage.tls.volume }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_publication_tls_volume_after
+  when:
+    - site_runtime_publication_action == 'publication-prepare'
+    - not ansible_check_mode
+
+- name: Проверить Nginx после реального preparation
+  ansible.builtin.command:
+    argv:
+      - docker
+      - inspect
+      - "{{ site_runtime_instance }}-nginx-1"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_publication_nginx_after
+  when:
+    - site_runtime_publication_action == 'publication-prepare'
+    - not ansible_check_mode
+
+- name: Проверить private health и закрытый публичный root после preparation
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - "{{ site_runtime_instance }}-web-1"
+      - python
+      - -c
+      - >-
+        import sys, urllib.error, urllib.request;
+        [urllib.request.urlopen('http://127.0.0.1:8080' + path, timeout=5).read()
+        for path in ('/healthz/','/readyz/','/worker-healthz/')];
+        request=urllib.request.Request('http://127.0.0.1:8080/', headers={'Host':sys.argv[1]});
+        exec("try:\n urllib.request.urlopen(request, timeout=5)\nexcept urllib.error.HTTPError as exc:\n assert exc.code == 404\nelse:\n raise SystemExit('Публичный root должен возвращать 404')")
+      - "{{ site_runtime_publication_model.domain }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_publication_health_after
+  when:
+    - site_runtime_publication_action == 'publication-prepare'
+    - not ansible_check_mode
+
+- name: Проверить application current.json после preparation
+  ansible.builtin.stat:
+    path: "{{ site_runtime_publication_stage_root }}/deployments/{{ site_runtime_instance }}/current.json"
+    checksum_algorithm: sha256
+  check_mode: false
+  register: site_runtime_publication_current_after
+  when:
+    - site_runtime_publication_action == 'publication-prepare'
+    - not ansible_check_mode
+
+- name: Проверить базовый Compose после preparation
+  ansible.builtin.stat:
+    path: "{{ site_runtime_publication_instance_root }}/docker-compose.yml"
+    checksum_algorithm: sha256
+  check_mode: false
+  register: site_runtime_publication_compose_after
+  when:
+    - site_runtime_publication_action == 'publication-prepare'
+    - not ansible_check_mode
+
+- name: Проверить edge network после preparation
+  ansible.builtin.command:
+    argv:
+      - docker
+      - inspect
+      - "{{ site_runtime_publication_edge_container }}"
+      - --format
+      - "{{ '{{json .NetworkSettings.Networks}}' }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_publication_edge_networks_after
+  when:
+    - site_runtime_publication_action == 'publication-prepare'
+    - not ansible_check_mode
+
+- name: Принять реальную подготовку ACME/TLS storage
+  ansible.builtin.assert:
+    that:
+      - site_runtime_publication_current_after.stat.checksum == site_runtime_publication_current_stat.stat.checksum
+      - site_runtime_publication_compose_after.stat.checksum == site_runtime_publication_compose_stat.stat.checksum
+      - site_runtime_publication_edge_networks_after.stdout == site_runtime_publication_edge_networks.stdout
+      - (site_runtime_publication_acme_volume_after.stdout | from_json | first).Labels['ai-service-platform.storage'] == 'acme_webroot'
+      - (site_runtime_publication_tls_volume_after.stdout | from_json | first).Labels['ai-service-platform.storage'] == 'tls'
+      - (site_runtime_publication_nginx_after.stdout | from_json | first).State.Running | bool
+      - not ((site_runtime_publication_nginx_after.stdout | from_json | first).HostConfig.PortBindings | default({}))
+      - ((site_runtime_publication_nginx_after.stdout | from_json | first).Mounts
+        | selectattr('Type', 'equalto', 'volume')
+        | selectattr('Name', 'equalto', site_runtime_publication_model.storage.acme_webroot.volume)
+        | selectattr('Destination', 'equalto', site_runtime_publication_model.storage.acme_webroot.container_path)
+        | selectattr('RW', 'equalto', false) | list | length) == 1
+      - ((site_runtime_publication_nginx_after.stdout | from_json | first).Mounts
+        | selectattr('Type', 'equalto', 'volume')
+        | selectattr('Name', 'equalto', site_runtime_publication_model.storage.tls.volume)
+        | selectattr('Destination', 'equalto', site_runtime_publication_model.storage.tls.container_path)
+        | selectattr('RW', 'equalto', false) | list | length) == 1
+    fail_msg: >-
+      ACME/TLS storage, Nginx mounts или неизменность application current/base Compose/edge не прошли приёмку.
+  when:
+    - site_runtime_publication_action == 'publication-prepare'
+    - not ansible_check_mode
 
 - name: Сформировать безопасный результат проверки публикации
   ansible.builtin.set_fact:
@@ -195,6 +749,7 @@
         'tls_volume': site_runtime_publication_model.storage.tls.volume,
         'acme_webroot_volume_present': site_runtime_publication_acme_volume.rc == 0,
         'tls_volume_present': site_runtime_publication_tls_volume.rc == 0,
+        'already_prepared': site_runtime_publication_already_prepared | bool,
         'preparation_render_checksums': site_runtime_publication_model.render.preparation.checksums,
         'future_compose_contract_checksum': (
           site_runtime_publication_current.compose_checksum ~ ':' ~
@@ -206,6 +761,31 @@
         'edge_changed': false
       }, recursive=True) }}
   when: site_runtime_publication_action == 'publication-prepare'
+
+- name: Дополнить результат реального ACME/TLS preparation
+  ansible.builtin.set_fact:
+    site_runtime_publication_result: >-
+      {{ site_runtime_publication_result | combine({
+        'already_prepared': site_runtime_publication_already_prepared | bool,
+        'acme_webroot_volume_present': true,
+        'tls_volume_present': true,
+        'volumes_created': (
+          not site_runtime_publication_already_prepared | bool
+          and (site_runtime_publication_acme_volume.rc != 0 or site_runtime_publication_tls_volume.rc != 0)
+        ),
+        'nginx_updated': not site_runtime_publication_already_prepared | bool,
+        'application_current_unchanged': true,
+        'base_compose_unchanged': true,
+        'private_health': 'succeeded',
+        'acme_only_root_status': 404,
+        'certificate_requested': false,
+        'runtime_changed': not site_runtime_publication_already_prepared | bool,
+        'edge_changed': false,
+        'public_route_enabled': false
+      }, recursive=True) }}
+  when:
+    - site_runtime_publication_action == 'publication-prepare'
+    - not ansible_check_mode
 
 - name: Принять read-only проверку публикации
   ansible.builtin.assert:
@@ -223,7 +803,9 @@
       - not site_runtime_publication_result.runtime_changed | bool
       - not site_runtime_publication_result.edge_changed | bool
     fail_msg: publication-prepare не должен изменять volumes, TLS, runtime или edge.
-  when: site_runtime_publication_action == 'publication-prepare'
+  when:
+    - site_runtime_publication_action == 'publication-prepare'
+    - ansible_check_mode
 
 - name: Вывести результат проверки публикации без секретов
   ansible.builtin.debug:

@@ -1,5 +1,5 @@
 ---
-- name: Проверка будущей публикации site_runtime без изменений
+- name: Проверка и подготовка будущей публикации site_runtime
   hosts: site_runtimes
   become: true
   roles:

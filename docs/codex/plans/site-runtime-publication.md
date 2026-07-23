@@ -46,7 +46,7 @@ network, действующий edge HAProxy и отсутствие host ports 
 
 Вызов без `-Check` штатно запрещён.
 
-## Подготовка ACME/TLS contract без изменений
+## Подготовка ACME/TLS storage
 
 Canonical model резервирует два persistent Docker volume:
 
@@ -54,8 +54,7 @@ Canonical model резервирует два persistent Docker volume:
 - `ai_retail_mvp_tls` → `/etc/letsencrypt`, read-only для Nginx.
 
 Certbot в будущем получает к ним read-write доступ только как управляемый
-one-shot процесс. На текущем рубеже volumes не создаются и сертификат не
-запрашивается.
+one-shot процесс. Сертификат на этом рубеже не запрашивается.
 
 ```powershell
 .\tools\services\service_remote.ps1 site_runtime publication-prepare `
@@ -76,13 +75,34 @@ one-shot процесс. На текущем рубеже volumes не созд�
 Публичный HTTP server в future-render обслуживает только
 `/.well-known/acme-challenge/`, а на остальные пути отвечает `404`.
 
+После успешного `-Check` реальный preparation выполняется отдельной командой:
+
+```powershell
+.\tools\services\service_remote.ps1 site_runtime publication-prepare `
+  -Instance ai-retail-mvp `
+  -Limit vps3
+```
+
+Реальный вызов под общим instance lock:
+
+1. создаёт persistent ACME/TLS volumes, если они отсутствуют;
+2. записывает отдельный `docker-compose.publication.yml` и ACME-only Nginx config;
+3. проверяет объединённый Compose;
+4. пересоздаёт только Nginx, не запуская `collectstatic` и migrations;
+5. принимает private health, read-only mounts и `404` публичного root;
+6. записывает отдельный append-only publication journal.
+
+Application `current.json` и базовый `docker-compose.yml` не изменяются. HAProxy
+не подключается к application network, сертификат не запрашивается и внешний
+маршрут не появляется. Повторный вызов должен вернуть `already_prepared=true`
+без пересоздания Nginx.
+
 ## Следующие отдельные рубежи
 
-1. Реально создать ACME webroot и закрытый TLS storage без публичного сайта.
-2. Подключить HAProxy на `vps3` к application network и открыть только HTTP-01.
-3. Получить сертификат Let's Encrypt и проверить цепочку/renewal.
-4. Включить SNI-маршрут HTTPS и production env.
-5. Принять внешние health endpoints и доказать отсутствие публичного доступа к
+1. Подключить HAProxy на `vps3` к application network и открыть только HTTP-01.
+2. Получить сертификат Let's Encrypt и проверить цепочку/renewal.
+3. Включить SNI-маршрут HTTPS и production env.
+4. Принять внешние health endpoints и доказать отсутствие публичного доступа к
    внутренним сервисам и `private_media`.
 
 Каждый реальный шаг требует отдельного подтверждения. Seed, superuser и S3-копия

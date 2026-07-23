@@ -109,6 +109,7 @@ server {{
         "compose_override_fragment": f"""services:
   nginx:
     volumes:
+      - ./nginx-publication-acme.conf:/etc/nginx/conf.d/publication-acme.conf:ro
       - acme_webroot_data:{storage['acme_webroot']['container_path']}:ro
       - tls_data:{storage['tls']['container_path']}:ro
 volumes:
