@@ -57,7 +57,7 @@ Usage:
   bash tools/services/service.sh site_runtime apply --instance NAME --image-ref REF --limit ALIAS [--check]
   bash tools/services/service.sh site_runtime publication-check --instance NAME --limit ALIAS --check
   bash tools/services/service.sh site_runtime publication-prepare --instance NAME --limit ALIAS --check
-  bash tools/services/service.sh site_runtime publication-http01 --instance NAME --limit ALIAS --check
+  bash tools/services/service.sh site_runtime publication-http01 --instance NAME --limit ALIAS [--check]
   bash tools/services/service.sh site_runtime backup-init --instance NAME --limit ALIAS [--check]
   bash tools/services/service.sh site_runtime backup-schedule --instance NAME --limit ALIAS [--check]
   bash tools/services/service.sh site_runtime backup --instance NAME --limit ALIAS [--check]
@@ -534,9 +534,6 @@ fi
 if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "publication-check" ]; then
     [ "$CHECK" = "true" ] || fail "site_runtime publication-check requires --check"
 fi
-if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "publication-http01" ]; then
-    [ "$CHECK" = "true" ] || fail "site_runtime publication-http01 requires --check"
-fi
 if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "restore-rehearsal" ] && [ -z "$SNAPSHOT_ID" ]; then
     fail "site_runtime restore-rehearsal requires --snapshot-id"
 fi
@@ -821,7 +818,7 @@ check_args=()
 if [ "$CHECK" = "true" ]; then
     check_args=(--check)
 fi
-if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "apply" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; }; then
+if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "apply" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; }; then
     [[ "$INSTANCE" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || fail "site_runtime instance is not normalized"
     command -v flock >/dev/null 2>&1 || fail "flock not found in PATH"
     site_runtime_lock="/var/lock/ai-service-platform-site-runtime-$INSTANCE.lock"

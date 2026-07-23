@@ -12,10 +12,14 @@ Future ACME/TLS storage проверяется через
 Оба режима не запрашивают сертификат и не подключают HAProxy к application
 network.
 
-Будущий HTTP-01 ingress проверяется командой
+HTTP-01 ingress сначала проверяется командой
 `site_runtime publication-http01 ... -Check`. Она не записывает HAProxy config,
 не подключает edge container к application network и сохраняет внешний ACME
-placeholder со статусом `404`.
+placeholder со статусом `404`. Отдельно разрешённый вызов без `-Check`
+подключает только `edge-haproxy` к private application network, применяет
+host-scoped ACME route и принимает временный marker извне. Сертификат,
+HTTPS-route и публичный root приложения этим действием не создаются. При ошибке
+восстанавливаются предыдущий HAProxy config и исходное network attachment.
 
 `instances.yml` — источник истины для размещения generic site runtime и его
 приватной сети. Файл хранится локально у оператора и синхронизируется на

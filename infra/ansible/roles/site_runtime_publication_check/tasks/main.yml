@@ -4,11 +4,12 @@
     that:
       - ansible_check_mode
         or site_runtime_publication_action == 'publication-prepare'
+        or site_runtime_publication_action == 'publication-http01'
       - site_runtime_instance | length > 0
       - site_runtime_publication_action in ['publication-check', 'publication-prepare', 'publication-http01']
       - inventory_hostname == 'vps3'
     fail_msg: >-
-      publication-check допускается только с -Check; publication-prepare — только для site_runtime instance на vps3.
+      publication-check допускается только с -Check; mutation-действия публикации — только для site_runtime instance на vps3.
 
 - name: Разрешить canonical publication model
   ansible.builtin.command:
@@ -789,18 +790,25 @@
   register: site_runtime_publication_http01_haproxy_slurp
   when: site_runtime_publication_action == 'publication-http01'
 
-- name: Сформировать prospective HAProxy config в памяти
+- name: Прочитать действующий HAProxy config в память
   ansible.builtin.set_fact:
     site_runtime_publication_http01_haproxy_current: >-
       {{ site_runtime_publication_http01_haproxy_slurp.content | b64decode }}
-    site_runtime_publication_http01_haproxy_future: >-
+  when: site_runtime_publication_action == 'publication-http01'
+
+- name: Определить состояние HTTP-01 route
+  ansible.builtin.set_fact:
+    site_runtime_publication_http01_frontend_count: >-
       {{
-        (site_runtime_publication_http01_haproxy_slurp.content | b64decode).replace(
-          site_runtime_publication_model.render.http01.insertion_anchor,
+        site_runtime_publication_http01_haproxy_current.count(
           site_runtime_publication_model.render.http01.documents.haproxy_frontend_rules
-          ~ site_runtime_publication_model.render.http01.insertion_anchor
         )
-        ~ site_runtime_publication_model.render.http01.documents.haproxy_backend
+      }}
+    site_runtime_publication_http01_backend_count: >-
+      {{
+        site_runtime_publication_http01_haproxy_current.count(
+          site_runtime_publication_model.render.http01.documents.haproxy_backend
+        )
       }}
   when: site_runtime_publication_action == 'publication-http01'
 
@@ -808,9 +816,40 @@
   ansible.builtin.assert:
     that:
       - (site_runtime_publication_http01_haproxy_current.split(site_runtime_publication_model.render.http01.insertion_anchor) | length) == 2
-      - "'backend be_site_ai_retail_mvp_http' not in site_runtime_publication_http01_haproxy_current"
+      - >-
+        (site_runtime_publication_http01_frontend_count | int == 0
+        and site_runtime_publication_http01_backend_count | int == 0)
+        or
+        (site_runtime_publication_http01_frontend_count | int == 1
+        and site_runtime_publication_http01_backend_count | int == 1)
       - not site_runtime_publication_model.edge.public_route_enabled | bool
-    fail_msg: HAProxy config не содержит единственную безопасную ACME placeholder boundary.
+    fail_msg: HAProxy config содержит частичный, дублированный или небезопасный HTTP-01 route.
+  when: site_runtime_publication_action == 'publication-http01'
+
+- name: Сформировать prospective HAProxy config в памяти
+  ansible.builtin.set_fact:
+    site_runtime_publication_http01_route_already_applied: >-
+      {{
+        site_runtime_publication_http01_frontend_count | int == 1
+        and site_runtime_publication_http01_backend_count | int == 1
+      }}
+    site_runtime_publication_http01_haproxy_future: >-
+      {{
+        site_runtime_publication_http01_haproxy_current
+        if (
+          site_runtime_publication_http01_frontend_count | int == 1
+          and site_runtime_publication_http01_backend_count | int == 1
+        )
+        else
+        (
+          site_runtime_publication_http01_haproxy_current.replace(
+            site_runtime_publication_model.render.http01.insertion_anchor,
+            site_runtime_publication_model.render.http01.documents.haproxy_frontend_rules
+            ~ site_runtime_publication_model.render.http01.insertion_anchor
+          )
+          ~ site_runtime_publication_model.render.http01.documents.haproxy_backend
+        )
+      }}
   when: site_runtime_publication_action == 'publication-http01'
 
 - name: Проверить prospective HAProxy config без записи файла
@@ -841,6 +880,292 @@
   register: site_runtime_publication_http01_external
   when: site_runtime_publication_action == 'publication-http01'
 
+- name: Зафиксировать состояние перед реальным HTTP-01 route
+  ansible.builtin.set_fact:
+    site_runtime_publication_http01_edge_network_was_attached: >-
+      {{
+        site_runtime_publication_model.edge.application_network
+        in (site_runtime_publication_edge_networks.stdout | from_json)
+      }}
+    site_runtime_publication_http01_mutation_required: >-
+      {{
+        not site_runtime_publication_http01_route_already_applied | bool
+        or
+        site_runtime_publication_model.edge.application_network
+        not in (site_runtime_publication_edge_networks.stdout | from_json)
+      }}
+    site_runtime_publication_http01_id: "{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}-http01"
+    site_runtime_publication_http01_journal_root: >-
+      {{ site_runtime_publication_journal_root }}/{{ site_runtime_instance }}
+  when: site_runtime_publication_action == 'publication-http01'
+
+- name: Применить только HTTP-01 ingress с аварийным восстановлением
+  when:
+    - site_runtime_publication_action == 'publication-http01'
+    - not ansible_check_mode
+  block:
+    - name: Подготовить каталог HTTP-01 journal
+      ansible.builtin.file:
+        path: "{{ site_runtime_publication_http01_journal_root }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+      when: site_runtime_publication_http01_mutation_required | bool
+
+    - name: Сохранить snapshot HAProxy перед HTTP-01 route
+      ansible.builtin.copy:
+        content: "{{ site_runtime_publication_http01_haproxy_current }}"
+        dest: >-
+          {{ site_runtime_publication_http01_journal_root }}/{{ site_runtime_publication_http01_id }}.haproxy.cfg
+        owner: root
+        group: root
+        mode: "0640"
+      when: site_runtime_publication_http01_mutation_required | bool
+
+    - name: Подключить edge HAProxy к private application network
+      ansible.builtin.command:
+        argv:
+          - docker
+          - network
+          - connect
+          - "{{ site_runtime_publication_model.edge.application_network }}"
+          - "{{ site_runtime_publication_edge_container }}"
+      when: not site_runtime_publication_http01_edge_network_was_attached | bool
+
+    - name: Атомарно записать принятый HTTP-01 HAProxy config
+      ansible.builtin.copy:
+        content: "{{ site_runtime_publication_http01_haproxy_future }}"
+        dest: "{{ site_runtime_publication_edge_config }}"
+        owner: root
+        group: root
+        mode: "0644"
+      register: site_runtime_publication_http01_config_apply
+      when: not site_runtime_publication_http01_route_already_applied | bool
+
+    - name: Перезапустить HAProxy после изменения HTTP-01 config
+      ansible.builtin.command:
+        argv:
+          - docker
+          - restart
+          - "{{ site_runtime_publication_edge_container }}"
+      when: site_runtime_publication_http01_config_apply.changed | default(false)
+
+    - name: Принять HAProxy и private application network после применения
+      ansible.builtin.shell: |
+        set -euo pipefail
+        python3 - \
+          "{{ site_runtime_publication_edge_container }}" \
+          "{{ site_runtime_publication_model.edge.application_network }}" \
+          "{{ site_runtime_publication_edge_config }}" \
+          "{{ site_runtime_publication_http01_haproxy_future | hash('sha256') }}" <<'PY'
+        import hashlib
+        import json
+        from pathlib import Path
+        import subprocess
+        import sys
+
+        container, network, config_path, expected_checksum = sys.argv[1:]
+        inspected = subprocess.run(
+            ["docker", "inspect", container],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        info = json.loads(inspected.stdout)[0]
+        if not info.get("State", {}).get("Running"):
+            raise SystemExit("edge HAProxy не запущен")
+        if network not in info.get("NetworkSettings", {}).get("Networks", {}):
+            raise SystemExit("edge HAProxy не подключён к private application network")
+        checksum = hashlib.sha256(Path(config_path).read_bytes()).hexdigest()
+        if checksum != expected_checksum:
+            raise SystemExit("HAProxy config checksum не совпадает с принятым prospective config")
+        PY
+        docker exec "{{ site_runtime_publication_edge_container }}" \
+          haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
+      args:
+        executable: /bin/bash
+      register: site_runtime_publication_http01_edge_acceptance
+      retries: 15
+      delay: 2
+      until: site_runtime_publication_http01_edge_acceptance.rc == 0
+      changed_when: false
+
+    - name: Создать временный marker для внешней проверки HTTP-01 route
+      ansible.builtin.shell: |
+        set -euo pipefail
+        nginx_image="$(docker inspect "{{ site_runtime_instance }}-nginx-1" --format '{{ '{{.Image}}' }}')"
+        docker run --rm \
+          -v "{{ site_runtime_publication_model.storage.acme_webroot.volume }}:/var/www/acme" \
+          "$nginx_image" sh -ec \
+          'mkdir -p /var/www/acme/.well-known/acme-challenge; printf %s "$1" > "/var/www/acme/.well-known/acme-challenge/$1"' \
+          sh "{{ site_runtime_publication_http01_id }}"
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Проверить применённый HTTP-01 route извне
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - >-
+            import sys, urllib.request;
+            token=sys.argv[2];
+            body=urllib.request.urlopen(
+              'http://' + sys.argv[1] + '/.well-known/acme-challenge/' + token,
+              timeout=15).read().decode();
+            assert body == token;
+            print(200)
+          - "{{ site_runtime_publication_model.domain }}"
+          - "{{ site_runtime_publication_http01_id }}"
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      changed_when: false
+      register: site_runtime_publication_http01_applied_external
+
+    - name: Удалить временный HTTP-01 marker
+      ansible.builtin.shell: |
+        set -euo pipefail
+        nginx_image="$(docker inspect "{{ site_runtime_instance }}-nginx-1" --format '{{ '{{.Image}}' }}')"
+        docker run --rm \
+          -v "{{ site_runtime_publication_model.storage.acme_webroot.volume }}:/var/www/acme" \
+          "$nginx_image" sh -ec 'rm -f "/var/www/acme/.well-known/acme-challenge/$1"' \
+          sh "{{ site_runtime_publication_http01_id }}"
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Записать успешный HTTP-01 journal
+      ansible.builtin.copy:
+        content: >-
+          {{ {'http01_id': site_runtime_publication_http01_id,
+          'time_utc': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ'),
+          'instance': site_runtime_instance, 'domain': site_runtime_publication_model.domain,
+          'route_host': site_runtime_publication_model.domain,
+          'route_path_prefix': '/.well-known/acme-challenge/',
+          'backend': site_runtime_publication_model.edge.http_acme_backend,
+          'application_network': site_runtime_publication_model.edge.application_network,
+          'previous_haproxy_checksum': site_runtime_publication_http01_haproxy_current | hash('sha256'),
+          'current_haproxy_checksum': site_runtime_publication_http01_haproxy_future | hash('sha256'),
+          'render_checksums': site_runtime_publication_model.render.http01.checksums,
+          'external_probe': 'succeeded', 'certificate_requested': False,
+          'application_published': False, 'final_status': 'succeeded'} | to_nice_json }}
+        dest: >-
+          {{ site_runtime_publication_http01_journal_root }}/{{ site_runtime_publication_http01_id }}.json
+        owner: root
+        group: root
+        mode: "0640"
+      when: site_runtime_publication_http01_mutation_required | bool
+
+    - name: Дополнить current receipt принятым HTTP-01 route
+      ansible.builtin.copy:
+        content: >-
+          {{ site_runtime_publication_http01_receipt | combine({
+          'http01': {'http01_id': site_runtime_publication_http01_id,
+          'route_host': site_runtime_publication_model.domain,
+          'route_path_prefix': '/.well-known/acme-challenge/',
+          'backend': site_runtime_publication_model.edge.http_acme_backend,
+          'application_network': site_runtime_publication_model.edge.application_network,
+          'haproxy_checksum': site_runtime_publication_http01_haproxy_future | hash('sha256'),
+          'render_checksums': site_runtime_publication_model.render.http01.checksums,
+          'final_status': 'succeeded'}}, recursive=True) | to_nice_json }}
+        dest: "{{ site_runtime_publication_http01_journal_root }}/current.json"
+        owner: root
+        group: root
+        mode: "0640"
+      when: site_runtime_publication_http01_mutation_required | bool
+
+  rescue:
+    - name: Удалить диагностический HTTP-01 marker после ошибки
+      ansible.builtin.shell: |
+        nginx_image="$(docker inspect "{{ site_runtime_instance }}-nginx-1" --format '{{ '{{.Image}}' }}' 2>/dev/null || true)"
+        if [ -n "$nginx_image" ]; then
+          docker run --rm \
+            -v "{{ site_runtime_publication_model.storage.acme_webroot.volume }}:/var/www/acme" \
+            "$nginx_image" sh -ec 'rm -f "/var/www/acme/.well-known/acme-challenge/$1"' \
+            sh "{{ site_runtime_publication_http01_id }}" >/dev/null 2>&1 || true
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Восстановить предыдущий HAProxy config после ошибки
+      ansible.builtin.copy:
+        content: "{{ site_runtime_publication_http01_haproxy_current }}"
+        dest: "{{ site_runtime_publication_edge_config }}"
+        owner: root
+        group: root
+        mode: "0644"
+      when: not site_runtime_publication_http01_route_already_applied | bool
+
+    - name: Перезапустить HAProxy после аварийного восстановления
+      ansible.builtin.command:
+        argv:
+          - docker
+          - restart
+          - "{{ site_runtime_publication_edge_container }}"
+      when: not site_runtime_publication_http01_route_already_applied | bool
+
+    - name: Вернуть исходное network attachment после ошибки
+      ansible.builtin.command:
+        argv:
+          - docker
+          - network
+          - disconnect
+          - "{{ site_runtime_publication_model.edge.application_network }}"
+          - "{{ site_runtime_publication_edge_container }}"
+      failed_when: false
+      when: not site_runtime_publication_http01_edge_network_was_attached | bool
+
+    - name: Записать failed HTTP-01 journal
+      ansible.builtin.copy:
+        content: >-
+          {{ {'http01_id': site_runtime_publication_http01_id,
+          'time_utc': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ'),
+          'instance': site_runtime_instance, 'domain': site_runtime_publication_model.domain,
+          'route_host': site_runtime_publication_model.domain,
+          'route_path_prefix': '/.well-known/acme-challenge/',
+          'certificate_requested': False, 'application_published': False,
+          'rollback_attempted': True, 'final_status': 'failed'} | to_nice_json }}
+        dest: >-
+          {{ site_runtime_publication_http01_journal_root }}/{{ site_runtime_publication_http01_id }}.json
+        owner: root
+        group: root
+        mode: "0640"
+
+    - name: Остановить HTTP-01 apply после аварийного восстановления
+      ansible.builtin.fail:
+        msg: >-
+          HTTP-01 route не принят; предыдущий HAProxy config и исходное network attachment восстановлены.
+
+- name: Проверить итоговые сети edge HAProxy после HTTP-01 рубежа
+  ansible.builtin.command:
+    argv:
+      - docker
+      - inspect
+      - "{{ site_runtime_publication_edge_container }}"
+      - --format
+      - "{{ '{{json .NetworkSettings.Networks}}' }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_publication_http01_edge_networks_final
+  when: site_runtime_publication_action == 'publication-http01'
+
+- name: Прочитать итоговый HAProxy config после HTTP-01 рубежа
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_publication_edge_config }}"
+  check_mode: false
+  register: site_runtime_publication_http01_haproxy_final_slurp
+  when: site_runtime_publication_action == 'publication-http01'
+
+- name: Зафиксировать итоговый HAProxy config в памяти
+  ansible.builtin.set_fact:
+    site_runtime_publication_http01_haproxy_final: >-
+      {{ site_runtime_publication_http01_haproxy_final_slurp.content | b64decode }}
+  when: site_runtime_publication_action == 'publication-http01'
+
 - name: Сформировать безопасный результат проверки публикации
   ansible.builtin.set_fact:
     site_runtime_publication_result:
@@ -852,8 +1177,15 @@
       public_route_enabled: false
       check_mode_mutations: false
       edge_app_network_attached: >-
-        {{ site_runtime_publication_model.edge.application_network in (site_runtime_publication_edge_networks.stdout | from_json) }}
-      edge_app_network_attachment_planned: true
+        {{
+          site_runtime_publication_model.edge.application_network
+          in (
+            (site_runtime_publication_http01_edge_networks_final.stdout | from_json)
+            if site_runtime_publication_action == 'publication-http01'
+            else (site_runtime_publication_edge_networks.stdout | from_json)
+          )
+        }}
+      edge_app_network_attachment_planned: "{{ ansible_check_mode }}"
       http_acme_backend: "{{ site_runtime_publication_model.edge.http_acme_backend }}"
       https_backend: "{{ site_runtime_publication_model.edge.https_backend }}"
       tls_termination: "{{ site_runtime_publication_model.tls.termination }}"
@@ -869,16 +1201,44 @@
         'http01': {
           'prerequisites_accepted': true,
           'current_external_status': site_runtime_publication_http01_external.stdout | int,
-          'current_haproxy_checksum': site_runtime_publication_http01_haproxy_current | hash('sha256'),
+          'applied_external_status': (
+            site_runtime_publication_http01_applied_external.stdout | int
+            if not ansible_check_mode else none
+          ),
+          'previous_haproxy_checksum': site_runtime_publication_http01_haproxy_current | hash('sha256'),
+          'current_haproxy_checksum': site_runtime_publication_http01_haproxy_final | hash('sha256'),
           'prospective_haproxy_checksum': site_runtime_publication_http01_haproxy_future | hash('sha256'),
           'render_checksums': site_runtime_publication_model.render.http01.checksums,
           'route_host': site_runtime_publication_model.domain,
           'route_path_prefix': '/.well-known/acme-challenge/',
           'future_backend': site_runtime_publication_model.edge.http_acme_backend,
           'haproxy_config_valid': true,
-          'edge_network_attachment_planned': true,
-          'edge_network_attached': site_runtime_publication_model.edge.application_network in (site_runtime_publication_edge_networks.stdout | from_json),
-          'route_applied': false,
+          'already_applied': (
+            site_runtime_publication_http01_route_already_applied | bool
+            and site_runtime_publication_http01_edge_network_was_attached | bool
+          ),
+          'mutation_performed': (
+            not ansible_check_mode
+            and site_runtime_publication_http01_mutation_required | bool
+          ),
+          'edge_network_attachment_planned': (
+            site_runtime_publication_model.edge.application_network
+            not in (site_runtime_publication_http01_edge_networks_final.stdout | from_json)
+          ),
+          'edge_network_attached': (
+            site_runtime_publication_model.edge.application_network
+            in (site_runtime_publication_http01_edge_networks_final.stdout | from_json)
+          ),
+          'route_applied': (
+            site_runtime_publication_http01_haproxy_final | hash('sha256')
+            == site_runtime_publication_http01_haproxy_future | hash('sha256')
+            and site_runtime_publication_http01_haproxy_final.count(
+              site_runtime_publication_model.render.http01.documents.haproxy_frontend_rules
+            ) == 1
+            and site_runtime_publication_http01_haproxy_final.count(
+              site_runtime_publication_model.render.http01.documents.haproxy_backend
+            ) == 1
+          ),
           'certificate_requested': false,
           'application_published': false,
           'check_mode_mutations': false
@@ -889,14 +1249,29 @@
 - name: Принять отсутствие изменений HTTP-01 check-only рубежа
   ansible.builtin.assert:
     that:
-      - not site_runtime_publication_result.http01.edge_network_attached | bool
-      - not site_runtime_publication_result.http01.route_applied | bool
       - not site_runtime_publication_result.http01.certificate_requested | bool
       - not site_runtime_publication_result.http01.application_published | bool
       - not site_runtime_publication_result.http01.check_mode_mutations | bool
+      - not site_runtime_publication_result.http01.mutation_performed | bool
       - site_runtime_publication_result.http01.current_external_status | int == 404
     fail_msg: HTTP-01 check-only contract обнаружил преждевременную публикацию или mutation.
-  when: site_runtime_publication_action == 'publication-http01'
+  when:
+    - site_runtime_publication_action == 'publication-http01'
+    - ansible_check_mode
+
+- name: Принять реальный HTTP-01 ingress без публикации приложения
+  ansible.builtin.assert:
+    that:
+      - site_runtime_publication_result.http01.edge_network_attached | bool
+      - site_runtime_publication_result.http01.route_applied | bool
+      - site_runtime_publication_result.http01.applied_external_status | int == 200
+      - not site_runtime_publication_result.http01.certificate_requested | bool
+      - not site_runtime_publication_result.http01.application_published | bool
+      - not site_runtime_publication_result.public_route_enabled | bool
+    fail_msg: Реальный HTTP-01 route не прошёл итоговую безопасную приёмку.
+  when:
+    - site_runtime_publication_action == 'publication-http01'
+    - not ansible_check_mode
 
 - name: Дополнить результат future ACME/TLS storage contract
   ansible.builtin.set_fact:
