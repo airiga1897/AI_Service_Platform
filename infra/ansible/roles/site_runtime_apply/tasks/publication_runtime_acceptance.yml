@@ -1,0 +1,89 @@
+---
+- name: Проверить локальный TLS endpoint опубликованного runtime
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - "{{ site_runtime_instance }}-web-1"
+      - python
+      - -c
+      - |
+        import socket
+        import ssl
+        import sys
+
+        domain = sys.argv[1]
+        context = ssl.create_default_context()
+        with socket.create_connection(("127.0.0.1", 8443), timeout=5) as raw:
+            with context.wrap_socket(raw, server_hostname=domain) as secure:
+                secure.sendall(
+                    (
+                        "GET /healthz/ HTTP/1.1\r\n"
+                        f"Host: {domain}\r\n"
+                        "Connection: close\r\n\r\n"
+                    ).encode()
+                )
+                status = secure.recv(128).split(b"\r\n", 1)[0]
+        if b" 200 " not in status:
+            raise SystemExit("local TLS health did not return 200")
+      - "{{ site_runtime_model.runtime_contract.publication.domain }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_apply_publication_local_tls
+  retries: 20
+  delay: 3
+  until: site_runtime_apply_publication_local_tls.rc == 0
+
+- name: Проверить внешний HTTPS и закрытые endpoints опубликованного runtime
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import json
+        import socket
+        import sys
+        import urllib.error
+        import urllib.request
+
+        domain = sys.argv[1]
+
+        def status(path):
+            try:
+                with urllib.request.urlopen("https://" + domain + path, timeout=15) as response:
+                    response.read(4096)
+                    return response.status
+            except urllib.error.HTTPError as exc:
+                return exc.code
+
+        result = {
+            "root": status("/"),
+            "live": status("/healthz/"),
+            "ready": status("/readyz/"),
+            "static": status("/static/admin/css/base.css"),
+            "worker": status("/worker-healthz/"),
+            "private_media": status("/private_media/platform-apply-probe"),
+            "closed_ports": {},
+        }
+        for port in (5432, 6379, 8000):
+            sock = socket.socket()
+            sock.settimeout(3)
+            result["closed_ports"][str(port)] = sock.connect_ex((domain, port)) != 0
+            sock.close()
+        print(json.dumps(result, sort_keys=True))
+        assert result["root"] == 200
+        assert result["live"] == 200
+        assert result["ready"] == 200
+        assert result["static"] == 200
+        assert result["worker"] == 404
+        assert result["private_media"] == 404
+        assert all(result["closed_ports"].values())
+      - "{{ site_runtime_model.runtime_contract.publication.domain }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  register: site_runtime_apply_publication_external
+  retries: 15
+  delay: 3
+  until: site_runtime_apply_publication_external.rc == 0

@@ -145,6 +145,23 @@ Bootstrap не является частью обычного старта ко�
    operator-профиль, после чего использует общие stage/apply/bootstrap/backup/
    publication действия без отдельной Ansible-роли.
 
+### Обновление уже опубликованного runtime
+
+Наличие принятого HTTPS publication receipt меняет контракт `apply`: публикация
+должна сохраняться, а не возвращаться к private-конфигурации. До любых runtime
+mutations платформа fail-closed проверяет связь publication receipt с текущим
+deployment, checksums `runtime.env`, public Nginx и HAProxy, TLS/ACME volumes,
+работающий SNI route, локальный TLS endpoint и внешнюю security-приёмку.
+
+Prospective Compose включает те же persistent TLS/ACME volumes, Nginx получает
+принятый public config, а platform-owned `ALLOWED_HOSTS` и
+`CSRF_TRUSTED_ORIGINS` повторно выводятся из canonical publication model. После
+обновления принимаются private и external health и отсутствие публичных
+Gunicorn/Redis/PostgreSQL/private media. Затем новый deployment receipt проходит
+финальную приёмку, и только после неё обновляется publication receipt.
+Расхождение любого durable или фактического identity останавливает `apply` до
+изменения runtime.
+
 ## Приёмка презентационного профиля AI_E_Retail
 
 - SPA показывает Shop, B2B, Ops, Platform Admin, SaaS и demo-сценарии,

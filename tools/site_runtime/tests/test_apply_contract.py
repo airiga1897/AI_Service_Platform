@@ -79,14 +79,17 @@ class ComposeContractTests(unittest.TestCase):
         cls.template = (ROOT / "infra/ansible/roles/site_runtime_apply/templates/docker-compose.yml.j2").read_text(encoding="utf-8")
         environment = Environment(undefined=StrictUndefined, autoescape=False)
         environment.filters["to_json"] = json.dumps
-        cls.rendered = environment.from_string(cls.template).render(
-            site_runtime_anchor_image="anchor@sha256:" + "a" * 64,
-            site_runtime_route_reconcile_seconds=30,
-            site_runtime_support_images={
+        environment.filters["bool"] = bool
+        cls.render_environment = environment
+        cls.render_context = {
+            "site_runtime_publication_preserved": False,
+            "site_runtime_anchor_image": "anchor@sha256:" + "a" * 64,
+            "site_runtime_route_reconcile_seconds": 30,
+            "site_runtime_support_images": {
                 "redis": {"transport_tag": "support/redis:exact"},
                 "nginx": {"transport_tag": "support/nginx:exact"},
             },
-            site_runtime_model={
+            "site_runtime_model": {
                 "instance": "ai-retail-mvp",
                 "transport_tag": "product/ai-retail-mvp:exact",
                 "network": {
@@ -122,7 +125,8 @@ class ComposeContractTests(unittest.TestCase):
                     },
                 },
             },
-        )
+        }
+        cls.rendered = environment.from_string(cls.template).render(**cls.render_context)
         cls.rendered_compose = yaml.safe_load(cls.rendered)
 
     def test_shared_namespace_and_single_net_admin(self) -> None:
@@ -230,6 +234,124 @@ class ComposeContractTests(unittest.TestCase):
     def test_runtime_env_declares_postgresql_engine(self) -> None:
         env_template = (ROOT / "infra/ansible/roles/site_runtime_apply/templates/runtime.env.j2").read_text(encoding="utf-8")
         self.assertIn("DB_ENGINE=django.db.backends.postgresql", env_template)
+
+    def test_publication_aware_artifacts_preserve_tls_and_public_hosts(self) -> None:
+        self.assertIn("site_runtime_publication_preserved", self.template)
+        self.assertIn("acme_webroot_data:", self.template)
+        self.assertIn("tls_data:", self.template)
+        self.assertNotIn("acme_webroot_data", self.rendered_compose["volumes"])
+        self.assertNotIn("tls_data", self.rendered_compose["volumes"])
+
+        env_template = (
+            ROOT / "infra/ansible/roles/site_runtime_apply/templates/runtime.env.j2"
+        ).read_text(encoding="utf-8")
+        self.assertIn("runtime_contract.publication.allowed_hosts", env_template)
+        self.assertIn("runtime_contract.publication.csrf_trusted_origins", env_template)
+
+        public_context = json.loads(json.dumps(self.render_context))
+        public_context["site_runtime_publication_preserved"] = True
+        public_context["site_runtime_model"]["runtime_contract"]["publication"] = {
+            "storage": {
+                "acme_webroot": {
+                    "volume": "ai_retail_mvp_acme_webroot",
+                    "container_path": "/var/www/acme",
+                },
+                "tls": {
+                    "volume": "ai_retail_mvp_tls",
+                    "container_path": "/etc/letsencrypt",
+                },
+            }
+        }
+        public_compose = yaml.safe_load(
+            self.render_environment.from_string(self.template).render(**public_context)
+        )
+        self.assertEqual(
+            public_compose["volumes"]["acme_webroot_data"]["name"],
+            "ai_retail_mvp_acme_webroot",
+        )
+        self.assertEqual(
+            public_compose["volumes"]["tls_data"]["name"],
+            "ai_retail_mvp_tls",
+        )
+        self.assertIn(
+            "acme_webroot_data:/var/www/acme:ro",
+            public_compose["services"]["nginx"]["volumes"],
+        )
+        self.assertIn(
+            "tls_data:/etc/letsencrypt:ro",
+            public_compose["services"]["nginx"]["volumes"],
+        )
+
+    def test_active_publication_is_fail_closed_before_runtime_render(self) -> None:
+        tasks = (
+            ROOT / "infra/ansible/roles/site_runtime_apply/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        preservation = tasks.index("include_tasks: publication_preservation.yml")
+        render = tasks.index("site_runtime_compose_content:")
+        mutation = tasks.index("Применить runtime после отдельного операторского разрешения")
+        self.assertLess(preservation, render)
+        self.assertLess(render, mutation)
+        self.assertIn("site_runtime_publication_receipt.deployment_id", tasks)
+        self.assertIn("site_runtime_publication_receipt.deployment_digest", tasks)
+        self.assertIn("site_runtime_publication_receipt.compose_checksum", tasks)
+        self.assertIn("Проверить prospective public Nginx config", tasks)
+        self.assertIn("site_runtime_apply_check_dir.path }}/nginx.conf", tasks)
+        nginx_preflight = tasks.split(
+            "Проверить prospective public Nginx config", 1
+        )[1].split("Проверить PostgreSQL authentication", 1)[0]
+        self.assertNotIn("runtime_contract.storage.release_static.volume", nginx_preflight)
+        self.assertNotIn("runtime_contract.storage.public_media.volume", nginx_preflight)
+        self.assertIn("runtime_contract.publication.storage.tls.volume", nginx_preflight)
+
+        contract = (
+            ROOT
+            / "infra/ansible/roles/site_runtime_apply/tasks/publication_preservation.yml"
+        ).read_text(encoding="utf-8")
+        for required in (
+            "environment_checksum",
+            "nginx_checksum",
+            "haproxy_checksum",
+            "docker-compose.publication.yml",
+            "docker volume, inspect",
+            "publication_runtime_acceptance.yml",
+        ):
+            self.assertIn(required, contract.replace("[docker, volume, inspect", "docker volume, inspect"))
+        self.assertIn("Apply остановлен до runtime mutations", contract)
+
+    def test_publication_acceptance_wraps_real_runtime_update(self) -> None:
+        tasks = (
+            ROOT / "infra/ansible/roles/site_runtime_apply/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        start = tasks.index("Запустить private runtime")
+        external = tasks.index("include_tasks: publication_runtime_acceptance.yml", start)
+        journal = tasks.index("Записать успешный deployment journal", external)
+        final_acceptance = tasks.index("include_tasks: accept_runtime.yml", journal)
+        receipt = tasks.index("Обновить publication receipt", final_acceptance)
+        self.assertLess(start, external)
+        self.assertLess(external, journal)
+        self.assertLess(journal, final_acceptance)
+        self.assertLess(final_acceptance, receipt)
+        self.assertIn("site_runtime_environment_checksum", tasks)
+        self.assertIn("site_runtime_nginx_checksum", tasks)
+
+        acceptance = (
+            ROOT
+            / "infra/ansible/roles/site_runtime_apply/tasks/publication_runtime_acceptance.yml"
+        ).read_text(encoding="utf-8")
+        for expected in (
+            "/healthz/",
+            "/readyz/",
+            "/worker-healthz/",
+            "/private_media/platform-apply-probe",
+            "(5432, 6379, 8000)",
+        ):
+            self.assertIn(expected, acceptance)
+
+    def test_apply_task_files_are_valid_yaml(self) -> None:
+        task_root = ROOT / "infra/ansible/roles/site_runtime_apply/tasks"
+        for path in task_root.glob("*.yml"):
+            with self.subTest(path=path.name):
+                self.assertIsInstance(yaml.safe_load(path.read_text(encoding="utf-8")), list)
 
     def test_apply_preflights_database_before_migration(self) -> None:
         tasks = (ROOT / "infra/ansible/roles/site_runtime_apply/tasks/main.yml").read_text(encoding="utf-8")

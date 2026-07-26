@@ -12,5 +12,8 @@ site_runtime_postgres_config: /opt/ai-service-platform/operator/postgres/config.
 site_runtime_postgres_secrets: /opt/ai-service-platform/operator/postgres/secrets.env
 site_runtime_stage_root: /var/lib/ai-service-platform/site-runtime
 site_runtime_runtime_root: /opt/ai-service-platform/site-runtime
+site_runtime_publication_journal_root: /var/lib/ai-service-platform/site-runtime-publication
+site_runtime_edge_container: edge-haproxy
+site_runtime_edge_config: /opt/ai-service-platform/edge_haproxy/haproxy/haproxy.cfg
 site_runtime_probe_root: /opt/ai-service-platform/site_runtime-network-probe
 site_runtime_route_reconcile_seconds: 15

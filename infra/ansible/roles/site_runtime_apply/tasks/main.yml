@@ -50,6 +50,9 @@
     site_runtime_instance_root: "{{ site_runtime_runtime_root }}/{{ site_runtime_instance }}"
     site_runtime_deployment_id: "{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}-{{ site_runtime_model.distribution_digest | regex_replace('^sha256:', '') | truncate(12, true, '') }}"
 
+- name: Проверить контракт сохранения уже принятой HTTPS publication
+  ansible.builtin.include_tasks: publication_preservation.yml
+
 - name: Прочитать product receipt
   ansible.builtin.slurp:
     src: "{{ site_runtime_product_receipt_path }}"
@@ -265,13 +268,20 @@
 - name: Сформировать runtime artifacts в памяти
   ansible.builtin.set_fact:
     site_runtime_compose_content: "{{ lookup('template', 'docker-compose.yml.j2') }}"
-    site_runtime_nginx_content: "{{ lookup('template', 'nginx.conf.j2') }}"
+    site_runtime_nginx_content: >-
+      {{
+        site_runtime_public_nginx_content
+        if site_runtime_publication_preserved | bool
+        else lookup('template', 'nginx.conf.j2')
+      }}
     site_runtime_env_content: "{{ lookup('template', 'runtime.env.j2') }}"
   no_log: true
 
 - name: Вычислить checksum Compose
   ansible.builtin.set_fact:
     site_runtime_compose_checksum: "{{ site_runtime_compose_content | hash('sha256') }}"
+    site_runtime_nginx_checksum: "{{ site_runtime_nginx_content | hash('sha256') }}"
+    site_runtime_environment_checksum: "{{ site_runtime_env_content | hash('sha256') }}"
     site_runtime_runtime_acceptance:
       performed: false
       reason: check_mode
@@ -303,6 +313,21 @@
         if site_runtime_apply_current_stat.stat.exists
         else none
       }}
+
+- name: Принять связь publication receipt с текущим deployment
+  ansible.builtin.assert:
+    that:
+      - >-
+        not site_runtime_publication_preserved | bool or
+        site_runtime_publication_receipt.deployment_id == site_runtime_current_deployment.deployment_id
+      - >-
+        not site_runtime_publication_preserved | bool or
+        site_runtime_publication_receipt.deployment_digest == site_runtime_current_deployment.digest
+      - >-
+        not site_runtime_publication_preserved | bool or
+        site_runtime_publication_receipt.compose_checksum == site_runtime_current_deployment.compose_checksum
+    fail_msg: >-
+      Publication receipt не связан с текущим принятым deployment. Apply остановлен до runtime mutations.
 
 - name: Определить идемпотентный apply
   ansible.builtin.set_fact:
@@ -347,6 +372,28 @@
     - name: Выполнить docker compose config
       ansible.builtin.command:
         argv: [docker, compose, -f, "{{ site_runtime_apply_check_dir.path }}/docker-compose.yml", config, --quiet]
+      check_mode: false
+      changed_when: false
+
+    - name: Проверить prospective public Nginx config с принятыми TLS volumes
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --pull
+          - never
+          - --entrypoint
+          - nginx
+          - --volume
+          - "{{ site_runtime_apply_check_dir.path }}/nginx.conf:/etc/nginx/conf.d/default.conf:ro"
+          - --volume
+          - "{{ site_runtime_model.runtime_contract.publication.storage.acme_webroot.volume }}:{{ site_runtime_model.runtime_contract.publication.storage.acme_webroot.container_path }}:ro"
+          - --volume
+          - "{{ site_runtime_model.runtime_contract.publication.storage.tls.volume }}:{{ site_runtime_model.runtime_contract.publication.storage.tls.container_path }}:ro"
+          - "{{ site_runtime_support_images.nginx.transport_tag }}"
+          - -t
+      when: site_runtime_publication_preserved | bool
       check_mode: false
       changed_when: false
 
@@ -418,7 +465,10 @@
         site_runtime_static_status: not_started
         site_runtime_migration_status: not_started
         site_runtime_health_status: not_started
+        site_runtime_publication_status: >-
+          {{ 'not_started' if site_runtime_publication_preserved | bool else 'not_applicable' }}
         site_runtime_current_receipt_written: false
+        site_runtime_publication_receipt_written: false
 
     - name: Создать runtime и journal каталоги
       ansible.builtin.file:
@@ -523,6 +573,15 @@
       ansible.builtin.set_fact:
         site_runtime_health_status: succeeded
 
+    - name: Принять сохранённую HTTPS publication после обновления runtime
+      ansible.builtin.include_tasks: publication_runtime_acceptance.yml
+      when: site_runtime_publication_preserved | bool
+
+    - name: Зафиксировать успешное сохранение HTTPS publication
+      ansible.builtin.set_fact:
+        site_runtime_publication_status: succeeded
+      when: site_runtime_publication_preserved | bool
+
     - name: Записать успешный deployment journal
       ansible.builtin.copy:
         content: >-
@@ -531,7 +590,10 @@
           'compose_checksum': site_runtime_compose_checksum, 'support_image_digests': site_runtime_support_receipt.images | map(attribute='distribution_digest') | list,
           'storage': site_runtime_storage_identity,
           'static_status': site_runtime_static_status, 'migration_status': site_runtime_migration_status,
-          'health_result': site_runtime_health_status, 'final_status': 'succeeded'} | to_nice_json }}
+          'health_result': site_runtime_health_status,
+          'publication_preserved': site_runtime_publication_preserved | bool,
+          'publication_status': site_runtime_publication_status,
+          'final_status': 'succeeded'} | to_nice_json }}
         dest: "{{ site_runtime_stage_root }}/deployments/{{ site_runtime_instance }}/{{ site_runtime_deployment_id }}.json"
         mode: "0640"
 
@@ -549,6 +611,34 @@
 
     - name: Выполнить финальную приёмку нового private runtime
       ansible.builtin.include_tasks: accept_runtime.yml
+
+    - name: Обновить publication receipt после полной приёмки нового runtime
+      ansible.builtin.copy:
+        content: >-
+          {{
+            site_runtime_publication_receipt | combine({
+              'deployment_id': site_runtime_deployment_id,
+              'deployment_digest': site_runtime_model.distribution_digest,
+              'compose_checksum': site_runtime_compose_checksum,
+              'environment_checksum': site_runtime_environment_checksum,
+              'nginx_checksum': site_runtime_nginx_checksum,
+              'https_route_enabled': true,
+              'application_published': true,
+              'external_health': 'succeeded',
+              'security_acceptance': 'succeeded',
+              'final_status': 'succeeded'
+            }, recursive=True) | to_nice_json
+          }}
+        dest: "{{ site_runtime_publication_journal_root }}/{{ site_runtime_instance }}/current.json"
+        owner: root
+        group: root
+        mode: "0640"
+      when: site_runtime_publication_preserved | bool
+
+    - name: Зафиксировать обновление publication receipt
+      ansible.builtin.set_fact:
+        site_runtime_publication_receipt_written: true
+      when: site_runtime_publication_preserved | bool
   rescue:
     - name: Записать failed deployment journal без автоматического rollback
       ansible.builtin.copy:
@@ -558,7 +648,10 @@
           'compose_checksum': site_runtime_compose_checksum, 'storage': site_runtime_storage_identity,
           'static_status': site_runtime_static_status | default('not_started'),
           'migration_status': site_runtime_migration_status | default('not_started'),
-          'health_result': site_runtime_health_status | default('not_started'), 'final_status': 'failed', 'automatic_schema_rollback': False} | to_nice_json }}
+          'health_result': site_runtime_health_status | default('not_started'),
+          'publication_preserved': site_runtime_publication_preserved | bool,
+          'publication_status': site_runtime_publication_status | default('not_started'),
+          'final_status': 'failed', 'automatic_schema_rollback': False} | to_nice_json }}
         dest: "{{ site_runtime_stage_root }}/deployments/{{ site_runtime_instance }}/{{ site_runtime_deployment_id }}.json"
         mode: "0640"
 
@@ -578,6 +671,17 @@
       when:
         - site_runtime_current_receipt_written | default(false)
         - not site_runtime_apply_current_stat.stat.exists
+
+    - name: Восстановить предыдущий publication receipt после ошибки
+      ansible.builtin.copy:
+        content: "{{ site_runtime_apply_publication_receipt_slurp.content | b64decode }}"
+        dest: "{{ site_runtime_publication_journal_root }}/{{ site_runtime_instance }}/current.json"
+        owner: root
+        group: root
+        mode: "0640"
+      when:
+        - site_runtime_publication_receipt_written | default(false)
+        - site_runtime_apply_publication_receipt_stat.stat.exists
 
     - name: Остановить apply после сохранения диагностики
       ansible.builtin.fail:
@@ -647,3 +751,10 @@
       check_mode_mutations: false
       already_current: "{{ site_runtime_apply_already_current }}"
       runtime_acceptance: "{{ site_runtime_runtime_acceptance }}"
+      publication_preserved: "{{ site_runtime_publication_preserved }}"
+      publication_domain: >-
+        {{
+          site_runtime_model.runtime_contract.publication.domain
+          if site_runtime_publication_preserved | bool
+          else none
+        }}
