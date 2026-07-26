@@ -329,15 +329,23 @@ class ComposeContractTests(unittest.TestCase):
         tasks = (
             ROOT / "infra/ansible/roles/site_runtime_apply/tasks/main.yml"
         ).read_text(encoding="utf-8")
-        start = tasks.index("Запустить private runtime")
+        start = tasks.index("Запустить product private runtime")
+        nginx_recreate = tasks.index(
+            "Пересоздать Nginx с актуальным file bind mount", start
+        )
         external = tasks.index("include_tasks: publication_runtime_acceptance.yml", start)
         journal = tasks.index("Записать успешный deployment journal", external)
         final_acceptance = tasks.index("include_tasks: accept_runtime.yml", journal)
         receipt = tasks.index("Обновить publication receipt", final_acceptance)
-        self.assertLess(start, external)
+        self.assertLess(start, nginx_recreate)
+        self.assertLess(nginx_recreate, external)
         self.assertLess(external, journal)
         self.assertLess(journal, final_acceptance)
         self.assertLess(final_acceptance, receipt)
+        nginx_command = tasks[nginx_recreate:external]
+        self.assertIn("--no-deps", nginx_command)
+        self.assertIn("--force-recreate", nginx_command)
+        self.assertIn("- nginx", nginx_command)
         self.assertIn("site_runtime_environment_checksum", tasks)
         self.assertIn("site_runtime_nginx_checksum", tasks)
         self.assertIn("'runtime_nginx_checksum': site_runtime_nginx_checksum", tasks)

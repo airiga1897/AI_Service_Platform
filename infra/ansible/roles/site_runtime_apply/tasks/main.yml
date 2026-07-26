@@ -548,9 +548,26 @@
       ansible.builtin.set_fact:
         site_runtime_migration_status: succeeded
 
-    - name: Запустить private runtime
+    - name: Запустить product private runtime
       ansible.builtin.command:
-        argv: [docker, compose, -f, "{{ site_runtime_instance_root }}/docker-compose.yml", up, -d, --no-build, --pull, never, web, worker, beat, nginx]
+        argv: [docker, compose, -f, "{{ site_runtime_instance_root }}/docker-compose.yml", up, -d, --no-build, --pull, never, web, worker, beat]
+      changed_when: true
+
+    - name: Пересоздать Nginx с актуальным file bind mount
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - -f
+          - "{{ site_runtime_instance_root }}/docker-compose.yml"
+          - up
+          - -d
+          - --no-build
+          - --pull
+          - never
+          - --no-deps
+          - --force-recreate
+          - nginx
       changed_when: true
 
     - name: Зафиксировать начало health acceptance
