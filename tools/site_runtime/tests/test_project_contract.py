@@ -177,6 +177,28 @@ class ProjectContractTests(unittest.TestCase):
         self.assertNotIn("bootstrap-secret", rendered)
         write_atomic.assert_not_called()
 
+    def test_image_preparation_binds_validated_embedded_contract_to_manifest(self) -> None:
+        prepare_script = (ROOT / "tools/site_runtime/prepare_image.ps1").read_text(encoding="utf-8")
+        stage_tasks = (
+            ROOT / "infra/ansible/roles/site_runtime_image_stage/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn('docker cp "${contractContainer}:${contractPathInImage}"', prepare_script)
+        self.assertIn(
+            '& python $contractValidator --contract $contractPath',
+            prepare_script,
+        )
+        self.assertIn("schema_version = 2", prepare_script)
+        self.assertIn("project_contract = [ordered]@{", prepare_script)
+        self.assertIn(
+            "site_runtime_manifest.project_contract.sha256 is match('^[0-9a-f]{64}$')",
+            stage_tasks,
+        )
+        self.assertIn(
+            "site_runtime_loaded_project_contract.stdout | trim == "
+            "site_runtime_manifest.project_contract.sha256",
+            stage_tasks,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

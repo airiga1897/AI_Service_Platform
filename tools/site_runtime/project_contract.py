@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import argparse
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -182,3 +184,32 @@ def resolve_application_environment(
         elif source.get(key, "") != "":
             result[key] = source[key]
     return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--contract", type=Path, required=True)
+    args = parser.parse_args()
+    contract = load_contract(args.contract)
+    print(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "frontend_endpoint": contract.frontend_endpoint,
+                "bootstrap_operations": sorted(contract.bootstrap),
+                "environment_key_counts": {
+                    "runtime": len(contract.runtime),
+                    "secrets": len(contract.secrets),
+                    "platform_owned": len(contract.platform_owned),
+                    "local_only": len(contract.local_only),
+                },
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

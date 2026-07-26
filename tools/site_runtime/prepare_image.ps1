@@ -15,6 +15,7 @@ $transportTag = $null
 foreach ($command in @("gh", "docker")) {
     if (-not (Get-Command $command -ErrorAction SilentlyContinue)) { throw "$command not found in PATH" }
 }
+if (-not (Get-Command python -ErrorAction SilentlyContinue)) { throw "python not found in PATH" }
 
 $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-service-platform.site-runtime-image." + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $tempDir | Out-Null
@@ -46,6 +47,25 @@ try {
     if ($inspect.RepoDigests -notcontains $ImageRef) { throw "pulled image RepoDigests does not contain requested identity" }
     if ($inspect.Os -ne "linux" -or $inspect.Architecture -ne "amd64") { throw "image platform must be linux/amd64" }
 
+    $contractPathInImage = "/app/deploy/site-runtime.contract.yml"
+    $contractPath = Join-Path $tempDir "site-runtime.contract.yml"
+    $contractContainer = $null
+    try {
+        $contractContainer = (& docker create --platform linux/amd64 $ImageRef).Trim()
+        if ($LASTEXITCODE -ne 0 -or -not $contractContainer) { throw "failed to create contract inspection container" }
+        & docker cp "${contractContainer}:${contractPathInImage}" $contractPath
+        if ($LASTEXITCODE -ne 0) { throw "image does not contain $contractPathInImage" }
+    } finally {
+        if ($contractContainer) {
+            & docker rm --force $contractContainer 1>$null 2>$null
+        }
+    }
+    $contractValidator = Join-Path $PSScriptRoot "project_contract.py"
+    $contractResultRaw = & python $contractValidator --contract $contractPath
+    if ($LASTEXITCODE -ne 0) { throw "embedded site-runtime contract is invalid" }
+    $contractResult = $contractResultRaw | ConvertFrom-Json
+    $contractSha = (Get-FileHash -LiteralPath $contractPath -Algorithm SHA256).Hash.ToLowerInvariant()
+
     # Одноразовые данные авторизации больше не нужны после проверенного pull.
     if ($null -eq $originalDockerConfig) {
         Remove-Item Env:DOCKER_CONFIG -ErrorAction SilentlyContinue
@@ -64,7 +84,7 @@ try {
     $manifestPath = Join-Path $tempDir "manifest.json"
     $labels = if ($inspect.Config.Labels) { $inspect.Config.Labels } else { @{} }
     $manifest = [ordered]@{
-        schema_version = 1
+        schema_version = 2
         instance = $Instance
         target_alias = $TargetAlias
         image_ref = $ImageRef
@@ -76,6 +96,13 @@ try {
         source_label = $labels.'org.opencontainers.image.source'
         revision_label = $labels.'org.opencontainers.image.revision'
         version_label = $labels.'org.opencontainers.image.version'
+        project_contract = [ordered]@{
+            path = $contractPathInImage
+            sha256 = $contractSha
+            schema_version = $contractResult.schema_version
+            frontend_endpoint = $contractResult.frontend_endpoint
+            bootstrap_operations = @($contractResult.bootstrap_operations)
+        }
     }
     [System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 5), [System.Text.UTF8Encoding]::new($false))
     [pscustomobject]@{ temp_dir=$tempDir; archive_path=$archivePath; manifest_path=$manifestPath; transport_tag=$transportTag; config_image_id=$inspect.Id } | ConvertTo-Json -Compress
