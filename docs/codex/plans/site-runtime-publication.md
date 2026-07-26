@@ -274,13 +274,22 @@ fail-closed SNI route. Публичной точкой остаётся Nginx: `
 Django. Gunicorn, Redis и PostgreSQL не получают host ports; `private_media` и
 `worker-healthz` извне возвращают `404`.
 
+HAProxy config проходит отдельный byte-exact контракт: Python-writer
+нормализует переносы, оставляет ровно один завершающий LF, записывает candidate
+с `fsync`, а работающий HAProxy проверяет именно candidate из bind-mounted
+каталога. Только после совпадения SHA-256 candidate атомарно заменяет production
+config. В `-Check` тот же candidate создаётся временно, валидируется и
+гарантированно удаляется без изменения production-файла.
+
 После открытия route проверяются HTTPS root, `/healthz/`, `/readyz/`,
 статический файл, HTTP→HTTPS redirect и закрытость публичных портов внутренних
 сервисов. Успех записывается в append-only HTTPS journal и publication
 `current.json`. При ошибке восстанавливаются предыдущие environment, Nginx и
 HAProxy, runtime возвращается к закрытой конфигурации и записывается failed
-journal без секретов. Повтор принятого rollout идемпотентен и выполняет только
-health/security acceptance.
+journal без секретов. Journal содержит фазу ошибки и фактический
+`rollback_status`; успешное восстановление фиксируется только после private
+health и повторной проверки HAProxy. Повтор принятого rollout идемпотентен и
+выполняет только health/security acceptance.
 
 Каждый реальный шаг требует отдельного подтверждения. Seed, superuser и S3-копия
 в этот контракт не входят.

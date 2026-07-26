@@ -152,14 +152,88 @@
   changed_when: false
   register: site_runtime_publication_https_haproxy_future
 
-- name: Нормализовать prospective HAProxy config с завершающим LF
+- name: Зафиксировать идентификатор byte-exact HAProxy preflight
   ansible.builtin.set_fact:
-    site_runtime_publication_https_haproxy_document: >-
-      {{
-        site_runtime_publication_https_haproxy_future.stdout
-        | regex_replace('\n*$', '')
-        ~ '\n'
-      }}
+    site_runtime_publication_https_preflight_id: >-
+      {{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}-https-preflight
+
+- name: Зафиксировать пути byte-exact HAProxy preflight candidate
+  ansible.builtin.set_fact:
+    site_runtime_publication_https_preflight_candidate: >-
+      {{ site_runtime_publication_edge_config | dirname }}/.{{
+        site_runtime_publication_https_preflight_id
+      }}.haproxy.cfg.candidate
+    site_runtime_publication_https_preflight_writer: >-
+      /tmp/{{ site_runtime_publication_https_preflight_id }}-atomic-config.py
+
+- name: Проверить byte-exact prospective HAProxy candidate без production mutation
+  block:
+    - name: Доставить byte-exact writer для HAProxy preflight
+      ansible.builtin.copy:
+        src: "{{ site_runtime_publication_atomic_writer }}"
+        dest: "{{ site_runtime_publication_https_preflight_writer }}"
+        owner: root
+        group: root
+        mode: "0700"
+      check_mode: false
+      changed_when: false
+
+    - name: Подготовить byte-exact HAProxy preflight candidate
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ site_runtime_publication_https_preflight_writer }}"
+          - prepare
+          - --candidate
+          - "{{ site_runtime_publication_https_preflight_candidate }}"
+        stdin: "{{ site_runtime_publication_https_haproxy_future.stdout }}"
+        stdin_add_newline: false
+      check_mode: false
+      changed_when: false
+      register: site_runtime_publication_https_preflight_candidate_result
+
+    - name: Прочитать безопасные метаданные HAProxy preflight candidate
+      ansible.builtin.set_fact:
+        site_runtime_publication_https_haproxy_metadata: >-
+          {{ site_runtime_publication_https_preflight_candidate_result.stdout | from_json }}
+
+    - name: Принять byte-level контракт HAProxy preflight candidate
+      ansible.builtin.assert:
+        that:
+          - site_runtime_publication_https_haproxy_metadata.size | int > 0
+          - site_runtime_publication_https_haproxy_metadata.sha256 | length == 64
+        fail_msg: Prospective HAProxy candidate не прошёл byte-level контракт.
+
+    - name: Проверить exact HAProxy candidate через bind-mounted каталог
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ site_runtime_publication_edge_container }}"
+          - haproxy
+          - -c
+          - -f
+          - >-
+            /usr/local/etc/haproxy/{{
+              site_runtime_publication_https_preflight_candidate | basename
+            }}
+      check_mode: false
+      changed_when: false
+
+  always:
+    - name: Удалить временный HAProxy preflight candidate
+      ansible.builtin.file:
+        path: "{{ site_runtime_publication_https_preflight_candidate }}"
+        state: absent
+      check_mode: false
+      changed_when: false
+
+    - name: Удалить временный byte-exact writer после HAProxy preflight
+      ansible.builtin.file:
+        path: "{{ site_runtime_publication_https_preflight_writer }}"
+        state: absent
+      check_mode: false
+      changed_when: false
 
 - name: Определить состояние HTTPS/SNI route
   ansible.builtin.set_fact:
@@ -198,7 +272,8 @@
       - -c
       - -f
       - /dev/stdin
-    stdin: "{{ site_runtime_publication_https_haproxy_document }}"
+    stdin: "{{ site_runtime_publication_https_haproxy_future.stdout }}"
+    stdin_add_newline: true
   check_mode: false
   changed_when: false
 
@@ -396,7 +471,7 @@
       current_haproxy_checksum: >-
         {{ (site_runtime_publication_https_haproxy_slurp.content | b64decode) | hash('sha256') }}
       prospective_haproxy_checksum: >-
-        {{ site_runtime_publication_https_haproxy_document | hash('sha256') }}
+        {{ site_runtime_publication_https_haproxy_metadata.sha256 }}
       current_environment_checksum: >-
         {{ (site_runtime_publication_https_environment.stdout | from_json).current_checksum }}
       prospective_environment_checksum: >-
