@@ -7,7 +7,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from jinja2 import Environment, StrictUndefined
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
 import yaml
 
 from tools.site_runtime.resolve_env import resolve_env
@@ -294,6 +294,9 @@ class ComposeContractTests(unittest.TestCase):
         self.assertIn("site_runtime_publication_receipt.deployment_id", tasks)
         self.assertIn("site_runtime_publication_receipt.deployment_digest", tasks)
         self.assertIn("site_runtime_publication_receipt.compose_checksum", tasks)
+        self.assertIn("site_runtime_apply_resume_failed", tasks)
+        self.assertIn('resume_failed_deployment: "{{ site_runtime_apply_resume_failed }}"', tasks)
+        self.assertIn("site_runtime_apply_failed_candidate.compose_checksum", tasks)
         self.assertIn("Проверить prospective public Nginx config", tasks)
         self.assertIn("site_runtime_apply_check_dir.path }}/nginx.conf", tasks)
         nginx_preflight = tasks.split(
@@ -317,6 +320,10 @@ class ComposeContractTests(unittest.TestCase):
         ):
             self.assertIn(required, contract.replace("[docker, volume, inspect", "docker volume, inspect"))
         self.assertIn("Apply остановлен до runtime mutations", contract)
+        self.assertIn("Найти journal предыдущей попытки exact deployment", contract)
+        self.assertIn("static_status", contract)
+        self.assertIn("migration_status", contract)
+        self.assertIn("site_runtime_product_receipt.config_image_id", contract)
 
     def test_publication_acceptance_wraps_real_runtime_update(self) -> None:
         tasks = (
@@ -333,6 +340,52 @@ class ComposeContractTests(unittest.TestCase):
         self.assertLess(final_acceptance, receipt)
         self.assertIn("site_runtime_environment_checksum", tasks)
         self.assertIn("site_runtime_nginx_checksum", tasks)
+        self.assertIn("'runtime_nginx_checksum': site_runtime_nginx_checksum", tasks)
+        self.assertIn("'nginx_checksum': site_runtime_public_nginx_checksum", tasks)
+
+    def test_published_nginx_combines_private_and_public_configs(self) -> None:
+        template_root = ROOT / "infra/ansible/roles/site_runtime_apply/templates"
+        environment = Environment(
+            loader=FileSystemLoader(template_root),
+            undefined=StrictUndefined,
+            autoescape=False,
+            keep_trailing_newline=True,
+        )
+        public_fragment = (
+            "server {\n"
+            "    listen 8080;\n"
+            "    server_name retail.travelltickets.ru;\n"
+            "    location / { return 404; }\n"
+            "}\n\n"
+            "server {\n"
+            "    listen 8443 ssl;\n"
+            "    server_name retail.travelltickets.ru;\n"
+            "    location / { proxy_pass http://127.0.0.1:8000; }\n"
+            "}\n"
+        )
+        rendered = environment.get_template("nginx-published.conf.j2").render(
+            site_runtime_public_nginx_content=public_fragment,
+            site_runtime_model={
+                "runtime_intent": {"internal_host": "ai-retail-mvp.internal"}
+            },
+        )
+        payload = rendered.encode("utf-8")
+
+        self.assertIn(b"server_name ai-retail-mvp.internal;", payload)
+        self.assertIn(b"server_name retail.travelltickets.ru;", payload)
+        self.assertRegex(payload, rb"}\n{1,2}server \{")
+        self.assertNotIn(b"\\nserver", payload)
+        self.assertTrue(payload.endswith(b"\n"))
+        self.assertEqual(payload.count(b"server {"), 3)
+
+        tasks = (
+            ROOT / "infra/ansible/roles/site_runtime_apply/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        render = tasks.split("site_runtime_nginx_content:", 1)[1].split(
+            "site_runtime_env_content:", 1
+        )[0]
+        self.assertIn("lookup('template', 'nginx-published.conf.j2')", render)
+        self.assertNotIn("~ '\\n'", render)
 
         acceptance = (
             ROOT

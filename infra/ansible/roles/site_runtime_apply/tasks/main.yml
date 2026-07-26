@@ -50,9 +50,6 @@
     site_runtime_instance_root: "{{ site_runtime_runtime_root }}/{{ site_runtime_instance }}"
     site_runtime_deployment_id: "{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}-{{ site_runtime_model.distribution_digest | regex_replace('^sha256:', '') | truncate(12, true, '') }}"
 
-- name: Проверить контракт сохранения уже принятой HTTPS publication
-  ansible.builtin.include_tasks: publication_preservation.yml
-
 - name: Прочитать product receipt
   ansible.builtin.slurp:
     src: "{{ site_runtime_product_receipt_path }}"
@@ -85,6 +82,9 @@
       - site_runtime_support_images.nginx.source_ref == 'nginx@sha256:54f2a904c251d5a34adf545a72d32515a15e08418dae0266e23be2e18c66fefa'
       - site_runtime_support_images.certbot.source_ref == 'certbot/certbot@sha256:34ee91d2f43008eb78a007d22f23ed4b2eaa9a454cb27ca2c042b49527a695b4'
     fail_msg: "Product/support receipts не соответствуют canonical site_runtime model."
+
+- name: Проверить контракт сохранения уже принятой HTTPS publication
+  ansible.builtin.include_tasks: publication_preservation.yml
 
 - name: Проверить exact product image
   ansible.builtin.command:
@@ -270,7 +270,7 @@
     site_runtime_compose_content: "{{ lookup('template', 'docker-compose.yml.j2') }}"
     site_runtime_nginx_content: >-
       {{
-        site_runtime_public_nginx_content
+        lookup('template', 'nginx-published.conf.j2')
         if site_runtime_publication_preserved | bool
         else lookup('template', 'nginx.conf.j2')
       }}
@@ -281,6 +281,7 @@
   ansible.builtin.set_fact:
     site_runtime_compose_checksum: "{{ site_runtime_compose_content | hash('sha256') }}"
     site_runtime_nginx_checksum: "{{ site_runtime_nginx_content | hash('sha256') }}"
+    site_runtime_public_nginx_checksum: "{{ site_runtime_public_nginx_content | hash('sha256') }}"
     site_runtime_environment_checksum: "{{ site_runtime_env_content | hash('sha256') }}"
     site_runtime_runtime_acceptance:
       performed: false
@@ -326,6 +327,15 @@
       - >-
         not site_runtime_publication_preserved | bool or
         site_runtime_publication_receipt.compose_checksum == site_runtime_current_deployment.compose_checksum
+      - >-
+        not site_runtime_apply_resume_failed | bool or
+        site_runtime_apply_failed_candidate.compose_checksum == site_runtime_compose_checksum
+      - >-
+        not site_runtime_apply_resume_failed | bool or
+        site_runtime_apply_publication_artifacts.results[4].stat.checksum == site_runtime_compose_checksum
+      - >-
+        not site_runtime_apply_resume_failed | bool or
+        site_runtime_apply_publication_artifacts.results[0].stat.checksum == site_runtime_environment_checksum
     fail_msg: >-
       Publication receipt не связан с текущим принятым deployment. Apply остановлен до runtime mutations.
 
@@ -621,7 +631,8 @@
               'deployment_digest': site_runtime_model.distribution_digest,
               'compose_checksum': site_runtime_compose_checksum,
               'environment_checksum': site_runtime_environment_checksum,
-              'nginx_checksum': site_runtime_nginx_checksum,
+              'nginx_checksum': site_runtime_public_nginx_checksum,
+              'runtime_nginx_checksum': site_runtime_nginx_checksum,
               'https_route_enabled': true,
               'application_published': true,
               'external_health': 'succeeded',
@@ -750,6 +761,7 @@
       recovery_anchor_present: "{{ site_runtime_apply_existing_anchor.rc == 0 }}"
       check_mode_mutations: false
       already_current: "{{ site_runtime_apply_already_current }}"
+      resume_failed_deployment: "{{ site_runtime_apply_resume_failed }}"
       runtime_acceptance: "{{ site_runtime_runtime_acceptance }}"
       publication_preserved: "{{ site_runtime_publication_preserved }}"
       publication_domain: >-

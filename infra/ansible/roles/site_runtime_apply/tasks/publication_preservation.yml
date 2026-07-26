@@ -31,6 +31,45 @@
         )
       }}
 
+- name: Найти journal предыдущей попытки exact deployment
+  ansible.builtin.find:
+    paths: "{{ site_runtime_stage_root }}/deployments/{{ site_runtime_instance }}"
+    patterns: "*-{{ site_runtime_model.distribution_digest | regex_replace('^sha256:', '') | truncate(12, true, '') }}.json"
+    file_type: file
+    recurse: false
+  check_mode: false
+  changed_when: false
+  register: site_runtime_apply_failed_candidates
+
+- name: Прочитать последний journal exact deployment
+  ansible.builtin.slurp:
+    src: "{{ (site_runtime_apply_failed_candidates.files | sort(attribute='mtime') | last).path }}"
+  when: site_runtime_apply_failed_candidates.matched | int > 0
+  check_mode: false
+  register: site_runtime_apply_failed_candidate_slurp
+
+- name: Разобрать последний journal exact deployment
+  ansible.builtin.set_fact:
+    site_runtime_apply_failed_candidate: >-
+      {{
+        (site_runtime_apply_failed_candidate_slurp.content | b64decode | from_json)
+        if site_runtime_apply_failed_candidates.matched | int > 0
+        else {}
+      }}
+
+- name: Определить безопасное продолжение failed deployment
+  ansible.builtin.set_fact:
+    site_runtime_apply_resume_failed: >-
+      {{
+        site_runtime_publication_preserved | bool
+        and site_runtime_apply_failed_candidate.get('final_status') == 'failed'
+        and site_runtime_apply_failed_candidate.get('current_digest') == site_runtime_model.distribution_digest
+        and site_runtime_apply_failed_candidate.get('previous_digest') == site_runtime_publication_receipt.get('deployment_digest')
+        and site_runtime_apply_failed_candidate.get('static_status') == 'succeeded'
+        and site_runtime_apply_failed_candidate.get('migration_status') == 'succeeded'
+        and site_runtime_apply_failed_candidate.get('publication_preserved', false) | bool
+      }}
+
 - name: Запретить неоднозначный publication receipt
   ansible.builtin.assert:
     that:
@@ -65,6 +104,8 @@
     - "{{ site_runtime_instance_root }}/nginx-publication-acme.conf"
     - "{{ site_runtime_instance_root }}/docker-compose.publication.yml"
     - "{{ site_runtime_edge_config }}"
+    - "{{ site_runtime_instance_root }}/docker-compose.yml"
+    - "{{ site_runtime_instance_root }}/nginx.conf"
   when: site_runtime_publication_preserved | bool
   check_mode: false
   changed_when: false
@@ -82,9 +123,12 @@
 - name: Принять фактические publication identities
   ansible.builtin.assert:
     that:
-      - site_runtime_apply_publication_artifacts.results | length == 4
+      - site_runtime_apply_publication_artifacts.results | length == 6
       - site_runtime_apply_publication_artifacts.results | map(attribute='stat.exists') | list | min
-      - site_runtime_apply_publication_artifacts.results[0].stat.checksum == site_runtime_publication_receipt.environment_checksum
+      - >-
+        site_runtime_apply_publication_artifacts.results[0].stat.checksum
+        == site_runtime_publication_receipt.environment_checksum
+        or site_runtime_apply_resume_failed | bool
       - site_runtime_apply_publication_artifacts.results[1].stat.checksum == site_runtime_publication_receipt.nginx_checksum
       - site_runtime_apply_publication_artifacts.results[3].stat.checksum == site_runtime_publication_receipt.haproxy_checksum
       - site_runtime_apply_publication_volumes.results | length == 2
@@ -93,6 +137,35 @@
       Publication artifacts, volumes или HAProxy config расходятся с durable receipt.
       Apply остановлен до runtime mutations.
   when: site_runtime_publication_preserved | bool
+
+- name: Проверить exact product containers при продолжении failed deployment
+  ansible.builtin.command:
+    argv:
+      - docker
+      - inspect
+      - "{{ site_runtime_instance }}-web-1"
+      - "{{ site_runtime_instance }}-worker-1"
+      - "{{ site_runtime_instance }}-beat-1"
+  when: site_runtime_apply_resume_failed | bool
+  check_mode: false
+  changed_when: false
+  no_log: true
+  register: site_runtime_apply_resume_containers
+
+- name: Принять exact product containers failed deployment
+  ansible.builtin.assert:
+    that:
+      - site_runtime_apply_resume_containers.stdout | from_json | length == 3
+      - >-
+        site_runtime_apply_resume_containers.stdout | from_json
+        | map(attribute='Image') | unique | list
+        == [site_runtime_product_receipt.config_image_id]
+      - >-
+        site_runtime_apply_resume_containers.stdout | from_json
+        | map(attribute='State.Running') | list | min
+    fail_msg: >-
+      Failed deployment нельзя продолжить: product containers не соответствуют exact staged image.
+  when: site_runtime_apply_resume_failed | bool
 
 - name: Прочитать принятый public Nginx config
   ansible.builtin.slurp:
