@@ -1,0 +1,463 @@
+---
+- name: Проверить параметры site_runtime bootstrap
+  ansible.builtin.assert:
+    that:
+      - site_runtime_bootstrap_instance is match('^[a-z0-9]+(-[a-z0-9]+)*$')
+      - site_runtime_bootstrap_operation is match('^[a-z0-9]+([_-][a-z0-9]+)*$')
+      - site_runtime_bootstrap_runner_source | length > 0
+      - site_runtime_bootstrap_project_contract_source | length > 0
+    fail_msg: "site_runtime bootstrap требует нормализованные instance и operation."
+
+- name: Проверить bootstrap runner на orchestration node
+  ansible.builtin.stat:
+    path: "{{ site_runtime_bootstrap_runner_source }}"
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  register: site_runtime_bootstrap_runner_source_stat
+
+- name: Проверить project contract helper на orchestration node
+  ansible.builtin.stat:
+    path: "{{ site_runtime_bootstrap_project_contract_source }}"
+    checksum_algorithm: sha256
+  delegate_to: localhost
+  become: false
+  register: site_runtime_bootstrap_project_contract_source_stat
+
+- name: Принять controller-side bootstrap tooling
+  ansible.builtin.assert:
+    that:
+      - site_runtime_bootstrap_runner_source_stat.stat.exists
+      - site_runtime_bootstrap_runner_source_stat.stat.isreg
+      - site_runtime_bootstrap_project_contract_source_stat.stat.exists
+      - site_runtime_bootstrap_project_contract_source_stat.stat.isreg
+    fail_msg: "Bootstrap runner или project contract helper отсутствует на orchestration node."
+
+- name: Вычислить пути site_runtime bootstrap
+  ansible.builtin.set_fact:
+    site_runtime_bootstrap_current_path: "{{ site_runtime_bootstrap_stage_root }}/deployments/{{ site_runtime_bootstrap_instance }}/current.json"
+    site_runtime_bootstrap_compose_path: "{{ site_runtime_bootstrap_runtime_root }}/{{ site_runtime_bootstrap_instance }}/docker-compose.yml"
+    site_runtime_bootstrap_secret_path: "{{ site_runtime_bootstrap_secret_root }}/{{ site_runtime_bootstrap_instance }}.{{ site_runtime_bootstrap_operation }}.env"
+    site_runtime_bootstrap_journal_dir: "{{ site_runtime_bootstrap_stage_root }}/bootstrap/{{ site_runtime_bootstrap_instance }}/{{ site_runtime_bootstrap_operation }}"
+
+- name: Прочитать принятый deployment receipt для bootstrap
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_bootstrap_current_path }}"
+  register: site_runtime_bootstrap_current_slurp
+
+- name: Разобрать принятый deployment receipt для bootstrap
+  ansible.builtin.set_fact:
+    site_runtime_bootstrap_current: "{{ site_runtime_bootstrap_current_slurp.content | b64decode | from_json }}"
+
+- name: Вычислить путь immutable image receipt
+  ansible.builtin.set_fact:
+    site_runtime_bootstrap_image_receipt_path: >-
+      {{
+        site_runtime_bootstrap_stage_root ~ '/images/' ~ site_runtime_bootstrap_instance ~ '/' ~
+        (site_runtime_bootstrap_current.digest | regex_replace('^sha256:', '')) ~ '.json'
+      }}
+
+- name: Прочитать immutable image receipt для bootstrap
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_bootstrap_image_receipt_path }}"
+  register: site_runtime_bootstrap_image_slurp
+
+- name: Разобрать immutable image receipt для bootstrap
+  ansible.builtin.set_fact:
+    site_runtime_bootstrap_image: "{{ site_runtime_bootstrap_image_slurp.content | b64decode | from_json }}"
+
+- name: Проверить identity принятого runtime перед bootstrap
+  ansible.builtin.assert:
+    that:
+      - site_runtime_bootstrap_image.instance == site_runtime_bootstrap_instance
+      - site_runtime_bootstrap_image.distribution_digest == site_runtime_bootstrap_current.digest
+      - site_runtime_bootstrap_image.config_image_id is match('^sha256:[0-9a-f]{64}$')
+      - site_runtime_bootstrap_image.project_contract.path == '/app/deploy/site-runtime.contract.yml'
+      - site_runtime_bootstrap_image.project_contract.sha256 is match('^[0-9a-f]{64}$')
+      - site_runtime_bootstrap_operation in site_runtime_bootstrap_image.project_contract.bootstrap_operations
+    fail_msg: "Принятый deployment/image receipt не разрешает requested bootstrap operation."
+
+- name: Проверить exact image работающего web перед bootstrap
+  ansible.builtin.command:
+    argv:
+      - bash
+      - -ec
+      - |
+        container_id="$(docker compose -f "$1" ps -q web)"
+        [ -n "$container_id" ]
+        docker inspect --format '{{ "{{" }}.Image{{ "}}" }}' "$container_id"
+      - bash
+      - "{{ site_runtime_bootstrap_compose_path }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_bootstrap_web_image
+  failed_when: >-
+    site_runtime_bootstrap_web_image.rc != 0 or
+    site_runtime_bootstrap_web_image.stdout | trim != site_runtime_bootstrap_image.config_image_id
+
+- name: Проверить exact transport tag перед чтением embedded contract
+  ansible.builtin.command:
+    argv:
+      - docker
+      - image
+      - inspect
+      - --format
+      - "{{ '{{' }}.Id{{ '}}' }}"
+      - "{{ site_runtime_bootstrap_image.transport_tag }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_bootstrap_transport_image
+  failed_when: >-
+    site_runtime_bootstrap_transport_image.rc != 0 or
+    site_runtime_bootstrap_transport_image.stdout | trim !=
+      site_runtime_bootstrap_image.config_image_id
+
+- name: Зафиксировать контейнеры до bootstrap preflight
+  ansible.builtin.command:
+    argv: [docker, ps, -aq]
+  check_mode: false
+  changed_when: false
+  register: site_runtime_bootstrap_containers_before
+
+- name: Прочитать embedded deployment contract из exact image
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --network
+      - none
+      - --entrypoint
+      - cat
+      - "{{ site_runtime_bootstrap_image.transport_tag }}"
+      - "{{ site_runtime_bootstrap_image.project_contract.path }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_bootstrap_contract_command
+
+- name: Вычислить exact checksum embedded deployment contract
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --network
+      - none
+      - --entrypoint
+      - python
+      - "{{ site_runtime_bootstrap_image.transport_tag }}"
+      - -c
+      - "import hashlib,pathlib; print(hashlib.sha256(pathlib.Path('/app/deploy/site-runtime.contract.yml').read_bytes()).hexdigest())"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_bootstrap_contract_checksum
+
+- name: Проверить checksum embedded deployment contract
+  ansible.builtin.assert:
+    that:
+      - site_runtime_bootstrap_contract_checksum.stdout | trim == site_runtime_bootstrap_image.project_contract.sha256
+    fail_msg: >-
+      Embedded deployment contract не совпадает с immutable image receipt:
+      expected={{ site_runtime_bootstrap_image.project_contract.sha256 }},
+      actual={{ site_runtime_bootstrap_contract_checksum.stdout | trim }}.
+
+- name: Разобрать embedded bootstrap contract
+  ansible.builtin.set_fact:
+    site_runtime_bootstrap_contract: "{{ site_runtime_bootstrap_contract_command.stdout | from_yaml }}"
+    site_runtime_bootstrap_spec: >-
+      {{
+        (site_runtime_bootstrap_contract_command.stdout | from_yaml)
+        .application.environment.bootstrap[site_runtime_bootstrap_operation]
+      }}
+
+- name: Проверить bootstrap secret на orchestration node
+  ansible.builtin.stat:
+    path: "{{ site_runtime_bootstrap_secret_path }}"
+  delegate_to: localhost
+  become: false
+  register: site_runtime_bootstrap_secret_stat
+
+- name: Принять наличие bootstrap secret по embedded contract
+  ansible.builtin.assert:
+    that:
+      - >-
+        (site_runtime_bootstrap_spec.environment | length == 0) or
+        (
+          site_runtime_bootstrap_secret_stat.stat.exists and
+          site_runtime_bootstrap_secret_stat.stat.isreg
+        )
+    fail_msg: "Bootstrap secret для requested operation отсутствует на orchestration node."
+
+- name: Проверить предыдущий successful bootstrap receipt
+  ansible.builtin.stat:
+    path: "{{ site_runtime_bootstrap_journal_dir }}/current.json"
+  register: site_runtime_bootstrap_receipt_stat
+
+- name: Прочитать предыдущий successful bootstrap receipt
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_bootstrap_journal_dir }}/current.json"
+  when: site_runtime_bootstrap_receipt_stat.stat.exists
+  register: site_runtime_bootstrap_receipt_slurp
+
+- name: Разобрать предыдущий successful bootstrap receipt
+  ansible.builtin.set_fact:
+    site_runtime_bootstrap_previous: >-
+      {{
+        (site_runtime_bootstrap_receipt_slurp.content | b64decode | from_json)
+        if site_runtime_bootstrap_receipt_stat.stat.exists
+        else {}
+      }}
+
+- name: Определить идемпотентный bootstrap
+  ansible.builtin.set_fact:
+    site_runtime_bootstrap_already_completed: >-
+      {{
+        site_runtime_bootstrap_receipt_stat.stat.exists and
+        site_runtime_bootstrap_previous.get('deployment_id', '') ==
+          site_runtime_bootstrap_current.deployment_id and
+        site_runtime_bootstrap_previous.get('operation', '') ==
+          site_runtime_bootstrap_operation and
+        site_runtime_bootstrap_previous.get('final_status', '') == 'succeeded'
+      }}
+
+- name: Создать временные bootstrap artifacts
+  when: ansible_check_mode or not site_runtime_bootstrap_already_completed
+  block:
+    - name: Создать временный каталог bootstrap tooling
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: site-runtime-bootstrap-tools-
+      check_mode: false
+      changed_when: false
+      register: site_runtime_bootstrap_tools_temp
+
+    - name: Подготовить временный Python package для bootstrap
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+      check_mode: false
+      changed_when: false
+      loop:
+        - "{{ site_runtime_bootstrap_tools_temp.path }}"
+        - "{{ site_runtime_bootstrap_tools_temp.path }}/tools"
+        - "{{ site_runtime_bootstrap_tools_temp.path }}/tools/site_runtime"
+
+    - name: Создать package markers временного bootstrap tooling
+      ansible.builtin.copy:
+        content: ""
+        dest: "{{ item }}"
+        mode: "0600"
+      check_mode: false
+      changed_when: false
+      loop:
+        - "{{ site_runtime_bootstrap_tools_temp.path }}/tools/__init__.py"
+        - "{{ site_runtime_bootstrap_tools_temp.path }}/tools/site_runtime/__init__.py"
+
+    - name: Передать bootstrap runner на целевой runtime node
+      ansible.builtin.copy:
+        src: "{{ site_runtime_bootstrap_runner_source }}"
+        dest: "{{ site_runtime_bootstrap_tools_temp.path }}/tools/site_runtime/bootstrap_runtime.py"
+        mode: "0600"
+      check_mode: false
+      changed_when: false
+
+    - name: Передать project contract helper на целевой runtime node
+      ansible.builtin.copy:
+        src: "{{ site_runtime_bootstrap_project_contract_source }}"
+        dest: "{{ site_runtime_bootstrap_tools_temp.path }}/tools/site_runtime/project_contract.py"
+        mode: "0600"
+      check_mode: false
+      changed_when: false
+
+    - name: Проверить доставленный bootstrap runner
+      ansible.builtin.stat:
+        path: "{{ site_runtime_bootstrap_tools_temp.path }}/tools/site_runtime/bootstrap_runtime.py"
+        checksum_algorithm: sha256
+      check_mode: false
+      changed_when: false
+      register: site_runtime_bootstrap_runner_target_stat
+
+    - name: Проверить доставленный project contract helper
+      ansible.builtin.stat:
+        path: "{{ site_runtime_bootstrap_tools_temp.path }}/tools/site_runtime/project_contract.py"
+        checksum_algorithm: sha256
+      check_mode: false
+      changed_when: false
+      register: site_runtime_bootstrap_project_contract_target_stat
+
+    - name: Принять exact временный bootstrap tooling
+      ansible.builtin.assert:
+        that:
+          - site_runtime_bootstrap_runner_target_stat.stat.isreg
+          - site_runtime_bootstrap_runner_target_stat.stat.mode == '0600'
+          - site_runtime_bootstrap_runner_target_stat.stat.checksum == site_runtime_bootstrap_runner_source_stat.stat.checksum
+          - site_runtime_bootstrap_project_contract_target_stat.stat.isreg
+          - site_runtime_bootstrap_project_contract_target_stat.stat.mode == '0600'
+          - site_runtime_bootstrap_project_contract_target_stat.stat.checksum == site_runtime_bootstrap_project_contract_source_stat.stat.checksum
+        fail_msg: "Временный bootstrap tooling не совпадает с controller-side source."
+
+    - name: Проверить PyYAML на целевом runtime node
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - "import yaml; assert yaml.__version__"
+      check_mode: false
+      changed_when: false
+
+    - name: Создать временный файл embedded contract
+      ansible.builtin.tempfile:
+        state: file
+        prefix: site-runtime-bootstrap-contract-
+        suffix: .yml
+      check_mode: false
+      changed_when: false
+      register: site_runtime_bootstrap_contract_temp
+
+    - name: Записать embedded contract без изменения содержимого
+      ansible.builtin.copy:
+        content: "{{ site_runtime_bootstrap_contract_command.stdout }}"
+        dest: "{{ site_runtime_bootstrap_contract_temp.path }}"
+        mode: "0600"
+      check_mode: false
+      changed_when: false
+
+    - name: Создать временный bootstrap secret
+      ansible.builtin.tempfile:
+        state: file
+        prefix: site-runtime-bootstrap-secret-
+        suffix: .env
+      check_mode: false
+      changed_when: false
+      when: site_runtime_bootstrap_spec.environment | length > 0
+      register: site_runtime_bootstrap_secret_temp
+
+    - name: Передать bootstrap secret только one-shot операции
+      ansible.builtin.copy:
+        src: "{{ site_runtime_bootstrap_secret_path }}"
+        dest: "{{ site_runtime_bootstrap_secret_temp.path }}"
+        mode: "0600"
+      check_mode: false
+      changed_when: false
+      when: site_runtime_bootstrap_spec.environment | length > 0
+      no_log: true
+
+    - name: Проверить или выполнить contract-driven bootstrap
+      ansible.builtin.command:
+        argv: >-
+          {{
+            [
+              'python3',
+              site_runtime_bootstrap_tools_temp.path ~ '/tools/site_runtime/bootstrap_runtime.py',
+              '--action', ('check' if ansible_check_mode else 'run'),
+              '--operation', site_runtime_bootstrap_operation,
+              '--contract', site_runtime_bootstrap_contract_temp.path,
+              '--compose', site_runtime_bootstrap_compose_path
+            ] +
+            (
+              ['--secret', site_runtime_bootstrap_secret_temp.path]
+              if site_runtime_bootstrap_spec.environment | length > 0
+              else []
+            )
+          }}
+      check_mode: false
+      changed_when: not ansible_check_mode
+      register: site_runtime_bootstrap_runner_command
+
+    - name: Сохранить безопасный bootstrap result
+      ansible.builtin.set_fact:
+        site_runtime_bootstrap_runner_result: "{{ site_runtime_bootstrap_runner_command.stdout | from_json }}"
+
+  always:
+    - name: Удалить временные bootstrap artifacts
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      check_mode: false
+      loop:
+        - "{{ site_runtime_bootstrap_tools_temp.path | default('') }}"
+        - "{{ site_runtime_bootstrap_contract_temp.path | default('') }}"
+        - "{{ site_runtime_bootstrap_secret_temp.path | default('') }}"
+      when: item | length > 0
+      changed_when: false
+      no_log: true
+
+- name: Создать каталог bootstrap journal
+  ansible.builtin.file:
+    path: "{{ site_runtime_bootstrap_journal_dir }}"
+    state: directory
+    mode: "0750"
+  when:
+    - not ansible_check_mode
+    - not site_runtime_bootstrap_already_completed
+
+- name: Записать successful bootstrap receipt
+  ansible.builtin.copy:
+    content: >-
+      {{
+        {
+          'bootstrap_id': now(utc=true, fmt='%Y%m%dT%H%M%SZ') ~ '-' ~ site_runtime_bootstrap_operation,
+          'instance': site_runtime_bootstrap_instance,
+          'operation': site_runtime_bootstrap_operation,
+          'deployment_id': site_runtime_bootstrap_current.deployment_id,
+          'digest': site_runtime_bootstrap_current.digest,
+          'private_health': 'succeeded',
+          'final_status': 'succeeded'
+        } | to_nice_json
+      }}
+    dest: "{{ site_runtime_bootstrap_journal_dir }}/current.json"
+    mode: "0640"
+  when:
+    - not ansible_check_mode
+    - not site_runtime_bootstrap_already_completed
+
+- name: Зафиксировать контейнеры после bootstrap
+  ansible.builtin.command:
+    argv: [docker, ps, -aq]
+  check_mode: false
+  changed_when: false
+  register: site_runtime_bootstrap_containers_after
+
+- name: Принять отсутствие постоянных bootstrap-контейнеров
+  ansible.builtin.assert:
+    that:
+      - (site_runtime_bootstrap_containers_before.stdout_lines | sort) == (site_runtime_bootstrap_containers_after.stdout_lines | sort)
+    fail_msg: "Bootstrap оставил постоянный контейнер или изменил существующий container set."
+
+- name: Удалить orchestration copy bootstrap secret после операции
+  ansible.builtin.file:
+    path: "{{ site_runtime_bootstrap_secret_path }}"
+    state: absent
+  delegate_to: localhost
+  become: false
+  when:
+    - not ansible_check_mode
+    - site_runtime_bootstrap_spec.environment | length > 0
+  no_log: true
+
+- name: Вывести безопасный результат site_runtime bootstrap
+  ansible.builtin.debug:
+    msg:
+      action: bootstrap
+      instance: "{{ site_runtime_bootstrap_instance }}"
+      operation: "{{ site_runtime_bootstrap_operation }}"
+      deployment_id: "{{ site_runtime_bootstrap_current.deployment_id }}"
+      digest: "{{ site_runtime_bootstrap_current.digest }}"
+      already_completed: "{{ site_runtime_bootstrap_already_completed }}"
+      command_invoked: >-
+        {{
+          site_runtime_bootstrap_runner_result.command_invoked | default(false)
+        }}
+      check_command_invoked: >-
+        {{
+          site_runtime_bootstrap_runner_result.check_command_invoked | default(false)
+        }}
+      private_health: succeeded
+      mutation_performed: >-
+        {{
+          (not ansible_check_mode) and
+          (not site_runtime_bootstrap_already_completed)
+        }}
+      check_mode_mutations: false
+      final_status: succeeded

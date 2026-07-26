@@ -35,6 +35,9 @@ operator/site_runtime/secrets/*
 !operator/site_runtime/backup-secrets/
 operator/site_runtime/backup-secrets/*
 !operator/site_runtime/backup-secrets/template.env
+!operator/site_runtime/bootstrap-secrets/
+operator/site_runtime/bootstrap-secrets/*
+!operator/site_runtime/bootstrap-secrets/template.env
 inventory.ini
 infra/ansible/inventory.ini
 infra/ansible/nodes.csv

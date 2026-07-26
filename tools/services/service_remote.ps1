@@ -3,7 +3,7 @@ param(
     [string]$Service,
 
     [Parameter(Position=1)]
-    [ValidateSet("plan", "apply", "absent", "purge", "reseed", "probe", "stage-image", "stage-support-images", "publication-check", "publication-prepare", "publication-http01", "publication-certificate", "publication-https", "backup-init", "backup-schedule", "backup", "restore-rehearsal", "restore-cleanup")]
+    [ValidateSet("plan", "apply", "absent", "purge", "reseed", "probe", "stage-image", "stage-support-images", "publication-check", "publication-prepare", "publication-http01", "publication-certificate", "publication-https", "bootstrap", "backup-init", "backup-schedule", "backup", "restore-rehearsal", "restore-cleanup")]
     [string]$Action,
 
     [string]$NodesFile = ".\operator\nodes.csv",
@@ -57,6 +57,8 @@ param(
     [string]$SnapshotId = "",
 
     [string]$RehearsalId = "",
+
+    [string]$Operation = "",
 
     [string]$SiteRuntimePrepareScript = "tools/site_runtime/prepare_image.ps1",
 
@@ -457,6 +459,7 @@ function New-ServiceCommand($Step, $RemoteRepoDir, $RemoteNodesFile, $RemoteStat
     if ($Step.ImageRef) { $args += @("--image-ref", (Quote-BashArg $Step.ImageRef)) }
     if ($Step.SnapshotId) { $args += @("--snapshot-id", (Quote-BashArg $Step.SnapshotId)) }
     if ($Step.RehearsalId) { $args += @("--rehearsal-id", (Quote-BashArg $Step.RehearsalId)) }
+    if ($Step.Operation) { $args += @("--operation", (Quote-BashArg $Step.Operation)) }
     if ($Step.ImageArchive) { $args += @("--image-archive", (Quote-BashArg $Step.ImageArchive)) }
     if ($Step.ImageManifest) { $args += @("--image-manifest", (Quote-BashArg $Step.ImageManifest)) }
     if ($Step.SupportArchive) { $args += @("--support-archive", (Quote-BashArg $Step.SupportArchive)) }
@@ -724,7 +727,7 @@ if ($BatchPlanFile) {
 if (-not $BatchPlanFile -and $Service -eq "host_resources" -and $Action -notin @("plan", "apply")) {
     Fail "host_resources v1 supports only plan and apply; absent/purge/reseed are intentionally disabled"
 }
-if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -notin @("plan", "probe", "stage-image", "stage-support-images", "publication-check", "publication-prepare", "publication-http01", "publication-certificate", "publication-https", "apply", "backup-init", "backup-schedule", "backup", "restore-rehearsal", "restore-cleanup")) {
+if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -notin @("plan", "probe", "stage-image", "stage-support-images", "publication-check", "publication-prepare", "publication-http01", "publication-certificate", "publication-https", "bootstrap", "apply", "backup-init", "backup-schedule", "backup", "restore-rehearsal", "restore-cleanup")) {
     Fail "site_runtime action is not supported"
 }
 if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "probe" -and $Limit -ne "vps3") {
@@ -743,6 +746,14 @@ if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -in @("pub
     if (-not $Instance -or -not $Limit) {
         Fail "site_runtime $Action requires -Instance and exactly one -Limit alias"
     }
+}
+if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "bootstrap") {
+    if (-not $Instance -or -not $Limit -or $Operation -notmatch '^[a-z0-9]+([_-][a-z0-9]+)*$') {
+        Fail "site_runtime bootstrap requires -Instance, normalized -Operation, and exactly one -Limit alias"
+    }
+}
+if (-not $BatchPlanFile -and $Operation -and ($Service -ne "site_runtime" -or $Action -ne "bootstrap")) {
+    Fail "-Operation is supported only for site_runtime bootstrap"
 }
 if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "publication-check" -and -not $Check) {
     Fail "site_runtime publication-check requires -Check"
@@ -876,6 +887,7 @@ if ($isBatch) {
         ImageRef = $ImageRef
         SnapshotId = $SnapshotId
         RehearsalId = $RehearsalId
+        Operation = $Operation
         ImageArchive = if ($Service -eq "site_runtime" -and $Action -eq "stage-image") { $remoteSiteRuntimeImageArchive } else { "" }
         ImageManifest = if ($Service -eq "site_runtime" -and $Action -eq "stage-image") { $remoteSiteRuntimeImageManifest } else { "" }
         SupportArchive = if ($Service -eq "site_runtime" -and $Action -eq "stage-support-images") { $remoteSiteRuntimeSupportArchive } else { "" }
@@ -927,7 +939,7 @@ if (-not $isBatch) {
         "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/platform_networks") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/platform_networks"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/platform_networks") $(Quote-BashArg "$remoteOperatorDir/platform_networks"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/platform_networks"); fi",
         "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/host_resources") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/host_resources"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/host_resources") $(Quote-BashArg "$remoteOperatorDir/host_resources"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/host_resources"); fi",
         "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/platform_router") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/platform_router"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/platform_router") $(Quote-BashArg "$remoteOperatorDir/platform_router"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/platform_router"); fi",
-        "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/site_runtime") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/site_runtime"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/site_runtime") $(Quote-BashArg "$remoteOperatorDir/site_runtime"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/site_runtime"); sudo find $(Quote-BashArg "$remoteOperatorDir/site_runtime") -type f \( -path '*/secrets/*' -o -path '*/backup-secrets/*' \) -exec chmod 600 {} +; fi",
+        "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/site_runtime") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/site_runtime"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/site_runtime") $(Quote-BashArg "$remoteOperatorDir/site_runtime"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/site_runtime"); sudo find $(Quote-BashArg "$remoteOperatorDir/site_runtime") -type f \( -path '*/secrets/*' -o -path '*/backup-secrets/*' -o -path '*/bootstrap-secrets/*' \) -exec chmod 600 {} +; fi",
         "sudo bash -lc $(Quote-BashArg $serviceCommand)"
     ) -join "; "
 }
@@ -951,6 +963,9 @@ if ($isBatch) {
     }
     if ($RehearsalId) {
         Write-Host "Rehearsal:    $RehearsalId"
+    }
+    if ($Operation) {
+        Write-Host "Operation:    $Operation"
     }
     if ($ImageRef) {
         Write-Host "Image:        $ImageRef"
@@ -1068,7 +1083,7 @@ foreach ($line in @(
     "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/platform_networks") ]; then run_stage $(Quote-BashArg "sync operator platform_networks config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/platform_networks"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/platform_networks") $(Quote-BashArg "$remoteOperatorDir/platform_networks"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/platform_networks")"); fi",
     "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/host_resources") ]; then run_stage $(Quote-BashArg "sync operator host_resources config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/host_resources"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/host_resources") $(Quote-BashArg "$remoteOperatorDir/host_resources"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/host_resources")"); fi",
     "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/platform_router") ]; then run_stage $(Quote-BashArg "sync operator platform_router config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/platform_router"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/platform_router") $(Quote-BashArg "$remoteOperatorDir/platform_router"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/platform_router")"); fi",
-    "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/site_runtime") ]; then run_stage $(Quote-BashArg "sync operator site_runtime config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/site_runtime"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/site_runtime") $(Quote-BashArg "$remoteOperatorDir/site_runtime"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/site_runtime"); find $(Quote-BashArg "$remoteOperatorDir/site_runtime") -type f \( -path '*/secrets/*' -o -path '*/backup-secrets/*' \) -exec chmod 600 {} +"); fi"
+    "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/site_runtime") ]; then run_stage $(Quote-BashArg "sync operator site_runtime config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/site_runtime"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/site_runtime") $(Quote-BashArg "$remoteOperatorDir/site_runtime"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/site_runtime"); find $(Quote-BashArg "$remoteOperatorDir/site_runtime") -type f \( -path '*/secrets/*' -o -path '*/backup-secrets/*' -o -path '*/bootstrap-secrets/*' \) -exec chmod 600 {} +"); fi"
 )) { $runScriptLines.Add($line) | Out-Null }
 
 if ($isBatch) {

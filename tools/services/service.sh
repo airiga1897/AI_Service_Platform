@@ -13,6 +13,7 @@ INSTANCE=""
 IMAGE_REF=""
 SNAPSHOT_ID=""
 REHEARSAL_ID=""
+OPERATION=""
 SERVICES_REGISTRY="./services.yml"
 SITE_RUNTIME_INSTANCES="./operator/site_runtime/instances.yml"
 SITE_RUNTIME_RESOLVER="./tools/site_runtime/resolve.py"
@@ -60,6 +61,7 @@ Usage:
   bash tools/services/service.sh site_runtime publication-http01 --instance NAME --limit ALIAS [--check]
   bash tools/services/service.sh site_runtime publication-certificate --instance NAME --limit ALIAS [--check]
   bash tools/services/service.sh site_runtime publication-https --instance NAME --limit ALIAS [--check]
+  bash tools/services/service.sh site_runtime bootstrap --instance NAME --operation NAME --limit ALIAS [--check]
   bash tools/services/service.sh site_runtime backup-init --instance NAME --limit ALIAS [--check]
   bash tools/services/service.sh site_runtime backup-schedule --instance NAME --limit ALIAS [--check]
   bash tools/services/service.sh site_runtime backup --instance NAME --limit ALIAS [--check]
@@ -105,6 +107,7 @@ Options:
   --limit VALUE          Ansible --limit. Default: service ansible_group.
   --instance NAME        site_runtime instance name.
   --image-ref REF        site_runtime immutable repository@sha256 reference.
+  --operation NAME       Contract-declared site_runtime bootstrap operation.
   --snapshot-id ID       Restic snapshot для site_runtime restore-rehearsal.
   --rehearsal-id ID      Точный failed rehearsal для site_runtime restore-cleanup.
   --policy-router-image-ref REF
@@ -257,6 +260,8 @@ service_playbook() {
                 echo "infra/ansible/site_runtime_image_stage.yml"
             elif [ "$ACTION" = "stage-support-images" ]; then
                 echo "infra/ansible/site_runtime_support_images_stage.yml"
+            elif [ "$ACTION" = "bootstrap" ]; then
+                echo "infra/ansible/site_runtime_bootstrap.yml"
             elif [ "$ACTION" = "publication-check" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "publication-certificate" ] || [ "$ACTION" = "publication-https" ]; then
                 echo "infra/ansible/site_runtime_publication_check.yml"
             elif [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; then
@@ -338,6 +343,13 @@ service_extra_vars() {
                     "-e" "site_runtime_state_file=$STATE_FILE" \
                     "-e" "site_runtime_resolver=$SITE_RUNTIME_RESOLVER" \
                     "-e" "site_runtime_env_resolver=$(dirname "$SITE_RUNTIME_RESOLVER")/resolve_env.py"
+            elif [ "$ACTION" = "bootstrap" ]; then
+                printf '%s\n' \
+                    "-e" "site_runtime_bootstrap_instance=$INSTANCE" \
+                    "-e" "site_runtime_bootstrap_operation=$OPERATION" \
+                    "-e" "site_runtime_bootstrap_check=$CHECK" \
+                    "-e" "site_runtime_bootstrap_runner_source=$(dirname "$SITE_RUNTIME_RESOLVER")/bootstrap_runtime.py" \
+                    "-e" "site_runtime_bootstrap_project_contract_source=$(dirname "$SITE_RUNTIME_RESOLVER")/project_contract.py"
             elif [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; then
                 printf '%s\n' \
                     "-e" "site_runtime_backup_action=$ACTION" \
@@ -401,12 +413,12 @@ case "$SERVICE" in
     *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks, host_resources, platform_router, site_runtime." ;;
 esac
 case "$ACTION" in
-    plan|apply|absent|purge|reseed|probe|stage-image|stage-support-images|publication-check|publication-prepare|publication-http01|publication-certificate|publication-https|backup-init|backup-schedule|backup|restore-rehearsal|restore-cleanup) ;;
-    *) usage; fail "Action must be one of: plan, apply, absent, purge, reseed, probe, stage-image, stage-support-images, publication-check, publication-prepare, publication-http01, publication-certificate, publication-https, backup-init, backup-schedule, backup, restore-rehearsal, restore-cleanup" ;;
+    plan|apply|absent|purge|reseed|probe|stage-image|stage-support-images|publication-check|publication-prepare|publication-http01|publication-certificate|publication-https|bootstrap|backup-init|backup-schedule|backup|restore-rehearsal|restore-cleanup) ;;
+    *) usage; fail "Action must be one of: plan, apply, absent, purge, reseed, probe, stage-image, stage-support-images, publication-check, publication-prepare, publication-http01, publication-certificate, publication-https, bootstrap, backup-init, backup-schedule, backup, restore-rehearsal, restore-cleanup" ;;
 esac
 shift 2
 
-if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" != "plan" ] && [ "$ACTION" != "probe" ] && [ "$ACTION" != "stage-image" ] && [ "$ACTION" != "stage-support-images" ] && [ "$ACTION" != "publication-check" ] && [ "$ACTION" != "publication-prepare" ] && [ "$ACTION" != "publication-http01" ] && [ "$ACTION" != "publication-certificate" ] && [ "$ACTION" != "publication-https" ] && [ "$ACTION" != "apply" ] && [ "$ACTION" != "backup-init" ] && [ "$ACTION" != "backup-schedule" ] && [ "$ACTION" != "backup" ] && [ "$ACTION" != "restore-rehearsal" ] && [ "$ACTION" != "restore-cleanup" ]; then
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" != "plan" ] && [ "$ACTION" != "probe" ] && [ "$ACTION" != "stage-image" ] && [ "$ACTION" != "stage-support-images" ] && [ "$ACTION" != "publication-check" ] && [ "$ACTION" != "publication-prepare" ] && [ "$ACTION" != "publication-http01" ] && [ "$ACTION" != "publication-certificate" ] && [ "$ACTION" != "publication-https" ] && [ "$ACTION" != "bootstrap" ] && [ "$ACTION" != "apply" ] && [ "$ACTION" != "backup-init" ] && [ "$ACTION" != "backup-schedule" ] && [ "$ACTION" != "backup" ] && [ "$ACTION" != "restore-rehearsal" ] && [ "$ACTION" != "restore-cleanup" ]; then
     fail "site_runtime action is not supported"
 fi
 if [ "$SERVICE" != "site_runtime" ] && [ "$ACTION" = "probe" ]; then
@@ -454,6 +466,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --rehearsal-id)
             REHEARSAL_ID="${2:-}"
+            shift 2
+            ;;
+        --operation)
+            OPERATION="${2:-}"
             shift 2
             ;;
         --services-registry)
@@ -532,6 +548,13 @@ if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "backup-init" ] || [ "$ACT
 fi
 if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "publication-check" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "publication-certificate" ] || [ "$ACTION" = "publication-https" ]; }; then
     [ -n "$INSTANCE" ] || fail "site_runtime $ACTION requires --instance"
+fi
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "bootstrap" ]; then
+    [ -n "$INSTANCE" ] || fail "site_runtime bootstrap requires --instance"
+    [[ "$OPERATION" =~ ^[a-z0-9]+([_-][a-z0-9]+)*$ ]] || fail "site_runtime bootstrap requires normalized --operation"
+fi
+if [ -n "$OPERATION" ] && { [ "$SERVICE" != "site_runtime" ] || [ "$ACTION" != "bootstrap" ]; }; then
+    fail "--operation is supported only for site_runtime bootstrap"
 fi
 if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "publication-check" ]; then
     [ "$CHECK" = "true" ] || fail "site_runtime publication-check requires --check"
@@ -777,14 +800,14 @@ fi
 if [ "$ACTION" = "reseed" ] && [ "$service_row_state" != "present" ]; then
     fail "$SERVICE reseed requires state=present in $STATE_FILE"
 fi
-if { [ "$ACTION" = "apply" ] || [ "$ACTION" = "probe" ] || [ "$ACTION" = "stage-image" ] || [ "$ACTION" = "stage-support-images" ] || [ "$ACTION" = "publication-check" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "publication-certificate" ] || [ "$ACTION" = "publication-https" ] || [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; } && [ "$service_row_state" != "present" ]; then
+if { [ "$ACTION" = "apply" ] || [ "$ACTION" = "probe" ] || [ "$ACTION" = "stage-image" ] || [ "$ACTION" = "stage-support-images" ] || [ "$ACTION" = "publication-check" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "publication-certificate" ] || [ "$ACTION" = "publication-https" ] || [ "$ACTION" = "bootstrap" ] || [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; } && [ "$service_row_state" != "present" ]; then
     fail "$SERVICE $ACTION requires state=present in $STATE_FILE"
 fi
 service_target_aliases="$service_active_aliases"
 if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ] || [ "$SERVICE" = "site_runtime" ]; } && [ -n "$service_candidate_aliases" ]; then
     service_target_aliases="$(append_aliases_unique "$service_target_aliases" "$service_candidate_aliases")"
 fi
-if { [ "$ACTION" = "apply" ] || [ "$ACTION" = "probe" ] || [ "$ACTION" = "stage-image" ] || [ "$ACTION" = "stage-support-images" ] || [ "$ACTION" = "publication-check" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "publication-certificate" ] || [ "$ACTION" = "publication-https" ] || [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; } && [ -z "$service_target_aliases" ]; then
+if { [ "$ACTION" = "apply" ] || [ "$ACTION" = "probe" ] || [ "$ACTION" = "stage-image" ] || [ "$ACTION" = "stage-support-images" ] || [ "$ACTION" = "publication-check" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "publication-certificate" ] || [ "$ACTION" = "publication-https" ] || [ "$ACTION" = "bootstrap" ] || [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; } && [ -z "$service_target_aliases" ]; then
     fail "No active/candidate aliases for $SERVICE found in $STATE_FILE"
 fi
 if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "stage-image" ]; then
@@ -820,7 +843,7 @@ check_args=()
 if [ "$CHECK" = "true" ]; then
     check_args=(--check)
 fi
-if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "apply" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "publication-certificate" ] || [ "$ACTION" = "publication-https" ] || [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; }; then
+if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "apply" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "publication-certificate" ] || [ "$ACTION" = "publication-https" ] || [ "$ACTION" = "bootstrap" ] || [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; }; then
     [[ "$INSTANCE" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || fail "site_runtime instance is not normalized"
     command -v flock >/dev/null 2>&1 || fail "flock not found in PATH"
     site_runtime_lock="/var/lock/ai-service-platform-site-runtime-$INSTANCE.lock"

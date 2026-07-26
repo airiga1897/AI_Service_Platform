@@ -100,12 +100,29 @@ python tools/site_runtime/import_project_env.py `
   --contract D:\Projects\Codex\AI_E_Retail\deploy\site-runtime.contract.yml `
   --source-env D:\Projects\Codex\AI_E_Retail\.env.docker `
   --target operator\site_runtime\secrets\ai-retail-mvp.env `
+  --bootstrap-operation superuser `
+  --bootstrap-target operator\site_runtime\bootstrap-secrets\ai-retail-mvp.superuser.env `
   --check
 ```
 
 После принятия отчёта та же команда без `--check` атомарно обновляет ignored
 operator secret. Существующие непустые production-секреты имеют приоритет над
 локальными; отчёт содержит только имена полей, без значений.
+
+Bootstrap выполняется отдельным сериализованным действием:
+
+```powershell
+.\tools\services\service_remote.ps1 site_runtime bootstrap `
+  -Instance ai-retail-mvp `
+  -Operation superuser `
+  -Limit vps3 `
+  -Check
+```
+
+После принятия check-mode та же команда без `-Check` запускает только команду,
+объявленную embedded contract. Bootstrap secret передаётся one-shot контейнеру,
+не добавляется в постоянный `runtime.env`, удаляется с orchestration node после
+операции и не выводится в журнал.
 
 ## Frontend runtime configuration
 

@@ -42,9 +42,15 @@ def main() -> int:
     parser.add_argument("--contract", required=True, type=Path)
     parser.add_argument("--source-env", required=True, type=Path)
     parser.add_argument("--target", required=True, type=Path)
+    parser.add_argument("--bootstrap-operation")
+    parser.add_argument("--bootstrap-target", type=Path)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     try:
+        if bool(args.bootstrap_operation) != bool(args.bootstrap_target):
+            raise ProjectContractError(
+                "--bootstrap-operation and --bootstrap-target must be used together"
+            )
         contract = load_contract(args.contract)
         source = read_env(args.source_env)
         current = read_env(args.target) if args.target.exists() else {}
@@ -77,9 +83,48 @@ def main() -> int:
             "ignored_platform_owned_keys": ignored_platform,
             "mutation_performed": False,
         }
+        bootstrap_result: dict[str, str] = {}
+        bootstrap_current: dict[str, str] = {}
+        if args.bootstrap_operation:
+            if args.bootstrap_operation not in contract.bootstrap:
+                raise ProjectContractError(
+                    f"bootstrap operation is not declared: {args.bootstrap_operation}"
+                )
+            bootstrap_keys = contract.bootstrap[args.bootstrap_operation]["environment"]
+            bootstrap_result = {key: source.get(key, "") for key in bootstrap_keys}
+            missing = sorted(key for key, value in bootstrap_result.items() if not value)
+            if missing:
+                raise ProjectContractError(
+                    "bootstrap environment is missing non-empty keys: " + ", ".join(missing)
+                )
+            bootstrap_current = (
+                read_env(args.bootstrap_target) if args.bootstrap_target.exists() else {}
+            )
+            unexpected = sorted(set(bootstrap_current).difference(bootstrap_keys))
+            if unexpected:
+                raise ProjectContractError(
+                    "bootstrap target contains unexpected keys: " + ", ".join(unexpected)
+                )
+            summary["bootstrap"] = {
+                "operation": args.bootstrap_operation,
+                "environment_keys": sorted(bootstrap_result),
+                "changed_keys": sorted(
+                    key
+                    for key in set(bootstrap_current) | set(bootstrap_result)
+                    if bootstrap_current.get(key) != bootstrap_result.get(key)
+                ),
+                "mutation_performed": False,
+            }
         if not args.check and current != result:
             _write_atomic(args.target, result)
             summary["mutation_performed"] = True
+        if (
+            not args.check
+            and args.bootstrap_target
+            and bootstrap_current != bootstrap_result
+        ):
+            _write_atomic(args.bootstrap_target, bootstrap_result)
+            summary["bootstrap"]["mutation_performed"] = True
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
         return 0
     except (OSError, ProjectContractError) as exc:
