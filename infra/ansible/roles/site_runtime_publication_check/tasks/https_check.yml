@@ -38,7 +38,7 @@
     site_runtime_publication_https_receipt: >-
       {{ site_runtime_publication_https_receipt_slurp.content | b64decode | from_json }}
 
-- name: Проверить принятый сертификат и закрытый application route
+- name: Проверить принятый сертификат перед HTTPS/SNI preflight
   ansible.builtin.assert:
     that:
       - site_runtime_publication_https_receipt.final_status == 'succeeded'
@@ -46,9 +46,7 @@
       - site_runtime_publication_https_receipt.certificate_present | bool
       - site_runtime_publication_https_receipt.certificate_accepted | bool
       - site_runtime_publication_https_receipt.certbot_distribution_digest == 'sha256:34ee91d2f43008eb78a007d22f23ed4b2eaa9a454cb27ca2c042b49527a695b4'
-      - not site_runtime_publication_https_receipt.https_route_enabled | bool
-      - not site_runtime_publication_https_receipt.application_published | bool
-    fail_msg: Для publication-https требуется принятый сертификат при закрытом HTTPS route.
+    fail_msg: Для publication-https требуется принятый сертификат.
 
 - name: Проверить наличие certificate chain и private key без вывода содержимого
   ansible.builtin.command:
@@ -94,8 +92,6 @@
             raise SystemExit("prospective HTTPS HAProxy fragments duplicated")
         if len(set(counts)) != 1:
             raise SystemExit("partial prospective HTTPS HAProxy configuration")
-        if counts[0] == 1:
-            raise SystemExit("HTTPS/SNI route is already applied")
         lines = current.splitlines(keepends=True)
         starts = [
             index for index, line in enumerate(lines)
@@ -122,13 +118,24 @@
             raise SystemExit("fail-closed HTTPS allow condition not found exactly once in frontend https_in")
         allow_line = allow_lines[0]
         acl = contract["sni_acl"]
+        anchor = contract["accept_anchor"] + "\n"
+        if counts[0] == 1:
+            if (" or " + acl) not in allow_line:
+                raise SystemExit("existing HTTPS/SNI ACL is outside fail-closed allow condition")
+            if section.count(documents["haproxy_frontend_acl"]) != 1:
+                raise SystemExit("existing HTTPS/SNI ACL is outside frontend https_in")
+            if section.count(documents["haproxy_frontend_use_backend"]) != 1:
+                raise SystemExit("existing HTTPS/SNI backend rule is outside frontend https_in")
+            if section.count(anchor) != 1:
+                raise SystemExit("HTTPS accept anchor not found exactly once in frontend https_in")
+            sys.stdout.write(current)
+            raise SystemExit(0)
         future_allow = allow_line.rstrip("\r\n") + " or " + acl + "\n"
         future_section = section.replace(
             allow_line,
             documents["haproxy_frontend_acl"] + future_allow,
             1,
         )
-        anchor = contract["accept_anchor"] + "\n"
         if future_section.count(anchor) != 1:
             raise SystemExit("HTTPS accept anchor not found exactly once in frontend https_in")
         future_section = future_section.replace(
@@ -144,6 +151,32 @@
   check_mode: false
   changed_when: false
   register: site_runtime_publication_https_haproxy_future
+
+- name: Определить состояние HTTPS/SNI route
+  ansible.builtin.set_fact:
+    site_runtime_publication_https_route_already_applied: >-
+      {{
+        (site_runtime_publication_https_haproxy_slurp.content | b64decode).count(
+          site_runtime_publication_model.render.https.documents.haproxy_frontend_acl
+        ) == 1
+        and (site_runtime_publication_https_haproxy_slurp.content | b64decode).count(
+          site_runtime_publication_model.render.https.documents.haproxy_frontend_use_backend
+        ) == 1
+        and (site_runtime_publication_https_haproxy_slurp.content | b64decode).count(
+          site_runtime_publication_model.render.https.documents.haproxy_backend
+        ) == 1
+      }}
+
+- name: Принять согласованность publication receipt и HTTPS/SNI route
+  ansible.builtin.assert:
+    that:
+      - >-
+        site_runtime_publication_https_receipt.https_route_enabled | bool
+        == site_runtime_publication_https_route_already_applied | bool
+      - >-
+        site_runtime_publication_https_receipt.application_published | bool
+        == site_runtime_publication_https_route_already_applied | bool
+    fail_msg: Publication receipt и фактический HTTPS/SNI route расходятся.
 
 - name: Проверить prospective HAProxy config без записи
   ansible.builtin.command:
@@ -364,8 +397,8 @@
         {{ (site_runtime_publication_https_environment.stdout | from_json).allowed_hosts }}
       csrf_trusted_origins: >-
         {{ (site_runtime_publication_https_environment.stdout | from_json).csrf_trusted_origins }}
-      sni_route_applied: false
-      application_published: false
+      sni_route_applied: "{{ site_runtime_publication_https_route_already_applied | bool }}"
+      application_published: "{{ site_runtime_publication_https_route_already_applied | bool }}"
       mutation_performed: false
       containers_changed: false
       volumes_changed: false

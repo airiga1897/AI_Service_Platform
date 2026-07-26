@@ -744,8 +744,8 @@ if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -in @("pub
         Fail "site_runtime $Action requires -Instance and exactly one -Limit alias"
     }
 }
-if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -in @("publication-check", "publication-https") -and -not $Check) {
-    Fail "site_runtime $Action requires -Check"
+if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "publication-check" -and -not $Check) {
+    Fail "site_runtime publication-check requires -Check"
 }
 if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "restore-rehearsal" -and -not $SnapshotId) {
     Fail "site_runtime restore-rehearsal requires -SnapshotId"

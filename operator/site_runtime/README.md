@@ -38,8 +38,12 @@ Certbot с `--pull never` через network namespace anchor, принимае�
 После сертификата команда `site_runtime publication-https ... -Check`
 проверяет только prospective HAProxy SNI, Nginx TLS и production
 `ALLOWED_HOSTS`/`CSRF_TRUSTED_ORIGINS`. Она не записывает конфигурацию, не
-перезапускает контейнеры и не открывает приложение. Вызов
-`publication-https` без `-Check` запрещён.
+перезапускает контейнеры и не открывает приложение. Отдельно подтверждённый
+вызов без `-Check` транзакционно применяет environment/Nginx, принимает private
+health, открывает только HTTPS SNI route к Nginx и выполняет внешнюю
+health/security-проверку. При ошибке предыдущая закрытая конфигурация
+восстанавливается; Gunicorn, Redis, PostgreSQL и `private_media` публичными не
+становятся.
 
 `instances.yml` — источник истины для размещения generic site runtime и его
 приватной сети. Файл хранится локально у оператора и синхронизируется на

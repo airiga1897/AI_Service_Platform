@@ -6,6 +6,7 @@
         or site_runtime_publication_action == 'publication-prepare'
         or site_runtime_publication_action == 'publication-http01'
         or site_runtime_publication_action == 'publication-certificate'
+        or site_runtime_publication_action == 'publication-https'
       - site_runtime_instance | length > 0
       - site_runtime_publication_action in ['publication-check', 'publication-prepare', 'publication-http01', 'publication-certificate']
         or site_runtime_publication_action == 'publication-https'
@@ -1183,6 +1184,12 @@
   ansible.builtin.include_tasks: https_check.yml
   when: site_runtime_publication_action == 'publication-https'
 
+- name: Применить и принять HTTPS/SNI публикацию
+  ansible.builtin.import_tasks: https_apply.yml
+  when:
+    - site_runtime_publication_action == 'publication-https'
+    - not ansible_check_mode
+
 - name: Сформировать безопасный результат проверки публикации
   ansible.builtin.set_fact:
     site_runtime_publication_result:
@@ -1281,6 +1288,7 @@
     site_runtime_publication_result: >-
       {{ site_runtime_publication_result | combine({
         'edge_app_network_attachment_planned': false,
+        'public_route_enabled': site_runtime_publication_https_result.sni_route_applied | bool,
         'https': site_runtime_publication_https_result
       }, recursive=True) }}
   when: site_runtime_publication_action == 'publication-https'
@@ -1293,8 +1301,9 @@
       - site_runtime_publication_result.https.nginx_config_valid | bool
       - site_runtime_publication_result.https.haproxy_config_valid | bool
       - site_runtime_publication_result.https.environment_valid | bool
-      - not site_runtime_publication_result.https.sni_route_applied | bool
-      - not site_runtime_publication_result.https.application_published | bool
+      - >-
+        site_runtime_publication_result.https.sni_route_applied | bool
+        == site_runtime_publication_result.https.application_published | bool
       - not site_runtime_publication_result.https.mutation_performed | bool
       - not site_runtime_publication_result.https.containers_changed | bool
       - not site_runtime_publication_result.https.volumes_changed | bool
@@ -1303,7 +1312,24 @@
     fail_msg: >-
       publication-https -Check обнаружил неполный TLS/SNI/environment contract
       или изменение runtime/edge.
-  when: site_runtime_publication_action == 'publication-https'
+  when:
+    - site_runtime_publication_action == 'publication-https'
+    - ansible_check_mode
+
+- name: Принять реальную HTTPS/SNI публикацию
+  ansible.builtin.assert:
+    that:
+      - site_runtime_publication_result.https.final_status == 'succeeded'
+      - site_runtime_publication_result.https.sni_route_applied | bool
+      - site_runtime_publication_result.https.application_published | bool
+      - site_runtime_publication_result.https.private_health == 'succeeded'
+      - site_runtime_publication_result.https.external_health == 'succeeded'
+      - site_runtime_publication_result.https.security_acceptance == 'succeeded'
+      - site_runtime_publication_result.public_route_enabled | bool
+    fail_msg: Реальный HTTPS/SNI rollout не прошёл итоговую приёмку.
+  when:
+    - site_runtime_publication_action == 'publication-https'
+    - not ansible_check_mode
 
 - name: Принять отсутствие изменений на certificate check-only рубеже
   ansible.builtin.assert:
@@ -1341,7 +1367,9 @@
       - not site_runtime_publication_result.certificate.volumes_changed | bool
       - not site_runtime_publication_result.certificate.runtime_changed | bool
       - not site_runtime_publication_result.certificate.edge_changed | bool
-      - not site_runtime_publication_result.public_route_enabled | bool
+      - >-
+        site_runtime_publication_action == 'publication-https'
+        or not site_runtime_publication_result.public_route_enabled | bool
     fail_msg: Реальный certificate action не прошёл безопасную итоговую приёмку.
   when:
     - site_runtime_publication_action == 'publication-certificate'

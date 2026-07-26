@@ -59,7 +59,7 @@ Usage:
   bash tools/services/service.sh site_runtime publication-prepare --instance NAME --limit ALIAS --check
   bash tools/services/service.sh site_runtime publication-http01 --instance NAME --limit ALIAS [--check]
   bash tools/services/service.sh site_runtime publication-certificate --instance NAME --limit ALIAS [--check]
-  bash tools/services/service.sh site_runtime publication-https --instance NAME --limit ALIAS --check
+  bash tools/services/service.sh site_runtime publication-https --instance NAME --limit ALIAS [--check]
   bash tools/services/service.sh site_runtime backup-init --instance NAME --limit ALIAS [--check]
   bash tools/services/service.sh site_runtime backup-schedule --instance NAME --limit ALIAS [--check]
   bash tools/services/service.sh site_runtime backup --instance NAME --limit ALIAS [--check]
@@ -533,8 +533,8 @@ fi
 if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "publication-check" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "publication-certificate" ] || [ "$ACTION" = "publication-https" ]; }; then
     [ -n "$INSTANCE" ] || fail "site_runtime $ACTION requires --instance"
 fi
-if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "publication-check" ] || [ "$ACTION" = "publication-https" ]; }; then
-    [ "$CHECK" = "true" ] || fail "site_runtime $ACTION requires --check"
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "publication-check" ]; then
+    [ "$CHECK" = "true" ] || fail "site_runtime publication-check requires --check"
 fi
 if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "restore-rehearsal" ] && [ -z "$SNAPSHOT_ID" ]; then
     fail "site_runtime restore-rehearsal requires --snapshot-id"

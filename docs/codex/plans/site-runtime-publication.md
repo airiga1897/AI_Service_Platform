@@ -237,7 +237,7 @@ HTTP→HTTPS redirect и проверки неизменности контей�
   -Check
 ```
 
-Action без `-Check` запрещён. Проверка:
+В режиме `-Check` действие:
 
 - принимает действующий certificate receipt и наличие chain/private key без
   вывода их содержимого;
@@ -252,13 +252,35 @@ Action без `-Check` запрещён. Проверка:
 - подтверждает неизменность контейнеров, volumes, `current.json`, Compose,
   `runtime.env`, Nginx и HAProxy;
 - подтверждает, что HTTP root только перенаправляет на HTTPS, отсутствующий
-  challenge возвращает `404`, а SNI route и application root ещё не
-  опубликованы.
+  challenge возвращает `404`; до первого rollout SNI route и application root
+  ещё не опубликованы, а после rollout проверка принимает их точное
+  согласованное состояние.
 
 Результат содержит только checksums и безопасные host/origin identities.
-Реальная запись production env, Nginx TLS config и HAProxy SNI route будет
-следующим единым операторским рубежом после принятого `publication-https
--Check`.
+После принятого `publication-https -Check` реальная публикация выполняется
+отдельно:
+
+```powershell
+.\tools\services\service_remote.ps1 site_runtime publication-https `
+  -Instance ai-retail-mvp `
+  -Limit vps3
+```
+
+Единая транзакция сохраняет закрытые snapshots `runtime.env`, Nginx и HAProxy,
+атомарно добавляет production host/CSRF, пересоздаёт только
+`web/worker/beat/nginx`, принимает private health и лишь затем открывает
+fail-closed SNI route. Публичной точкой остаётся Nginx: `/static/` и
+`/media/` он обслуживает сам, а `/`, SPA-маршруты, API, auth и admin передаёт
+Django. Gunicorn, Redis и PostgreSQL не получают host ports; `private_media` и
+`worker-healthz` извне возвращают `404`.
+
+После открытия route проверяются HTTPS root, `/healthz/`, `/readyz/`,
+статический файл, HTTP→HTTPS redirect и закрытость публичных портов внутренних
+сервисов. Успех записывается в append-only HTTPS journal и publication
+`current.json`. При ошибке восстанавливаются предыдущие environment, Nginx и
+HAProxy, runtime возвращается к закрытой конфигурации и записывается failed
+journal без секретов. Повтор принятого rollout идемпотентен и выполняет только
+health/security acceptance.
 
 Каждый реальный шаг требует отдельного подтверждения. Seed, superuser и S3-копия
 в этот контракт не входят.

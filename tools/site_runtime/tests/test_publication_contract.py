@@ -246,10 +246,10 @@ class PublicationContractTests(unittest.TestCase):
         service = (ROOT / "tools/services/service.sh").read_text(encoding="utf-8")
         remote = (ROOT / "tools/services/service_remote.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("site_runtime_publication_check.yml", service)
-        self.assertIn("site_runtime $ACTION requires --check", service)
+        self.assertIn("site_runtime publication-check requires --check", service)
         self.assertNotIn("site_runtime publication-prepare requires --check", service)
         self.assertIn('"apply" ] || [ "$ACTION" = "publication-prepare"', service)
-        self.assertIn("site_runtime $Action requires -Check", remote)
+        self.assertIn("site_runtime publication-check requires -Check", remote)
         self.assertNotIn("site_runtime publication-prepare requires -Check", remote)
         self.assertNotIn("site_runtime publication-http01 requires --check", service)
         self.assertNotIn("site_runtime publication-http01 requires -Check", remote)
@@ -260,7 +260,9 @@ class PublicationContractTests(unittest.TestCase):
             '[ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "publication-certificate" ]',
             service,
         )
-        self.assertIn("site_runtime publication-https --instance NAME --limit ALIAS --check", service)
+        self.assertIn("site_runtime publication-https --instance NAME --limit ALIAS [--check]", service)
+        self.assertNotIn("site_runtime publication-https requires --check", service)
+        self.assertNotIn("site_runtime publication-https requires -Check", remote)
         self.assertIn('"publication-certificate" ] || [ "$ACTION" = "publication-https"', service)
 
     def test_ansible_role_guards_real_mutations_from_check_mode(self) -> None:
@@ -381,7 +383,9 @@ class PublicationContractTests(unittest.TestCase):
         self.assertIn('"frontend https_in"', tasks)
         self.assertIn("future_section", tasks)
         self.assertIn("allow_condition_prefix", tasks)
-        self.assertIn("HTTPS/SNI route is already applied", tasks)
+        self.assertIn("existing HTTPS/SNI ACL is outside fail-closed allow condition", tasks)
+        self.assertIn("site_runtime_publication_https_route_already_applied", tasks)
+        self.assertIn("Publication receipt и фактический HTTPS/SNI route расходятся", tasks)
         self.assertIn("haproxy", tasks)
         self.assertIn("- /dev/stdin", tasks)
         self.assertIn("prospective Nginx TLS config с гарантированной очисткой", tasks)
@@ -392,13 +396,54 @@ class PublicationContractTests(unittest.TestCase):
         self.assertIn("CSRF_TRUSTED_ORIGINS", tasks)
         self.assertIn("other_keys_unchanged", tasks)
         self.assertIn("certificate_accepted", tasks)
-        self.assertIn("sni_route_applied: false", tasks)
-        self.assertIn("application_published: false", tasks)
+        self.assertIn("sni_route_applied:", tasks)
+        self.assertIn("application_published:", tasks)
         self.assertIn("mutation_performed: false", tasks)
         self.assertNotIn("ansible.builtin.copy", tasks)
         self.assertNotIn("docker compose", tasks)
         self.assertNotIn("network\n      - connect", tasks)
         self.assertNotIn("certonly", tasks)
+
+    def test_https_apply_is_transactional_and_keeps_backend_private(self) -> None:
+        tasks = (
+            ROOT
+            / "infra/ansible/roles/site_runtime_publication_check/tasks/https_apply.yml"
+        ).read_text(encoding="utf-8")
+        resolver = (
+            ROOT / "tools/site_runtime/resolve_publication.py"
+        ).read_text(encoding="utf-8")
+        main = (
+            ROOT / "infra/ansible/roles/site_runtime_publication_check/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Применить и принять HTTPS/SNI публикацию", main)
+        self.assertIn("not ansible_check_mode", main)
+        self.assertIn("Сохранить закрытый snapshot production environment", tasks)
+        self.assertIn("Сохранить snapshot Nginx перед HTTPS publication", tasks)
+        self.assertIn("Сохранить snapshot HAProxy перед SNI route", tasks)
+        self.assertIn("Атомарно применить production host и CSRF environment", tasks)
+        self.assertIn("--force-recreate", tasks)
+        self.assertIn("- web", tasks)
+        self.assertIn("- worker", tasks)
+        self.assertIn("- beat", tasks)
+        self.assertIn("- nginx", tasks)
+        self.assertIn("Дождаться private health до открытия SNI route", tasks)
+        self.assertIn("Атомарно применить fail-closed HAProxy SNI route", tasks)
+        self.assertIn("Проверить внешний HTTPS health и закрытые endpoints", tasks)
+        self.assertIn("5432, 6379, 8000", tasks)
+        self.assertIn("Записать успешный HTTPS/SNI journal", tasks)
+        self.assertIn("Записать failed HTTPS/SNI journal", tasks)
+        self.assertIn("Восстановить закрытый production environment после ошибки", tasks)
+        self.assertIn("Восстановить ACME-only Nginx config после ошибки", tasks)
+        self.assertIn("Восстановить HAProxy config после ошибки HTTPS/SNI", tasks)
+        self.assertIn("'previous_configuration_preserved': true", tasks)
+        self.assertIn("location /static/", resolver)
+        self.assertIn("location /media/", resolver)
+        self.assertIn("location ^~ /private_media/", resolver)
+        self.assertIn("location = /worker-healthz/", resolver)
+        self.assertIn("proxy_pass http://127.0.0.1:8000", resolver)
+        self.assertNotIn("ports:", tasks)
+        self.assertNotIn("certbot", tasks.lower())
 
 
 if __name__ == "__main__":

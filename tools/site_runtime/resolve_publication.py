@@ -91,8 +91,13 @@ backend {backend_name}_https
 server {{
     listen {https_port} ssl;
     server_name {domain};
+    client_max_body_size 25m;
     ssl_certificate /etc/letsencrypt/live/{domain}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/{domain}/privkey.pem;
+    location /static/ {{ alias /srv/static/; }}
+    location /media/ {{ alias /srv/media/; }}
+    location ^~ /private_media/ {{ return 404; }}
+    location = /worker-healthz/ {{ return 404; }}
     location / {{
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto https;
