@@ -435,6 +435,10 @@ class PublicationContractTests(unittest.TestCase):
 
         self.assertIn("Применить и принять HTTPS/SNI публикацию", main)
         self.assertIn("not ansible_check_mode", main)
+        self.assertIn(
+            "when: site_runtime_publication_action == 'publication-check'",
+            main,
+        )
         self.assertIn("Сохранить закрытый snapshot production environment", tasks)
         self.assertIn("Сохранить snapshot Nginx перед HTTPS publication", tasks)
         self.assertIn("Сохранить snapshot HAProxy перед SNI route", tasks)

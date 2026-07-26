@@ -1459,6 +1459,7 @@
       - not site_runtime_publication_result.public_route_enabled | bool
       - not site_runtime_publication_result.check_mode_mutations | bool
     fail_msg: DNS или check-only contract будущей публикации не принят.
+  when: site_runtime_publication_action == 'publication-check'
 
 - name: Принять отсутствие изменений на ACME preparation рубеже
   ansible.builtin.assert:
