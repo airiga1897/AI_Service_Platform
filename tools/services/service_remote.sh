@@ -545,7 +545,7 @@ if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "stage-image" ]; then
     require_file "$site_runtime_image_manifest" "prepared site_runtime manifest"
 fi
 if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "stage-support-images" ]; then
-    echo "Preparing exact Redis/Nginx archives on workstation..."
+    echo "Preparing exact site_runtime support images on workstation..."
     prepare_output="$(bash "$SITE_RUNTIME_SUPPORT_PREPARE_SCRIPT" "$LIMIT")"
     prepared_json="$(printf '%s\n' "$prepare_output" | tail -n 1)"
     site_runtime_image_temp_dir="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["temp_dir"])' "$prepared_json")"

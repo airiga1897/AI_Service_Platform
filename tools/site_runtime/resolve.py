@@ -93,8 +93,14 @@ def resolve(
     if runtime.get("platform") != "linux/amd64":
         raise ContractError("site_runtime v1 supports only linux/amd64")
     support_images = runtime.get("support_images") or {}
-    if support_images != {"redis": "redis:7-alpine", "nginx": "nginx:alpine"}:
-        raise ContractError("site_runtime support_images must declare redis:7-alpine and nginx:alpine")
+    if support_images != {
+        "redis": "redis@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99",
+        "nginx": "nginx@sha256:54f2a904c251d5a34adf545a72d32515a15e08418dae0266e23be2e18c66fefa",
+        "certbot": "certbot/certbot@sha256:34ee91d2f43008eb78a007d22f23ed4b2eaa9a454cb27ca2c042b49527a695b4",
+    }:
+        raise ContractError(
+            "site_runtime support_images must use accepted exact redis, nginx and certbot digests"
+        )
     volumes = runtime.get("volumes") or {}
     if not isinstance(volumes, dict) or set(volumes) != {"redis"}:
         raise ContractError("site_runtime volumes должен содержать только redis")

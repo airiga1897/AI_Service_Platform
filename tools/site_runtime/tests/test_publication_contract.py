@@ -40,10 +40,27 @@ class PublicationContractTests(unittest.TestCase):
         model = self.call()
         self.assertEqual("retail.travelltickets.ru", model["domain"])
         self.assertEqual("vps3.mine-craft.su", model["dns"]["expected_target"])
+        self.assertEqual("airiga1897@gmail.com", model["acme"]["contact_email"])
+        self.assertEqual(
+            "certbot/certbot@sha256:"
+            "34ee91d2f43008eb78a007d22f23ed4b2eaa9a454cb27ca2c042b49527a695b4",
+            model["acme"]["source_ref"],
+        )
         self.assertFalse(model["edge"]["public_route_enabled"])
         self.assertFalse(model["check_mode_mutations"])
         self.assertEqual(["/healthz/", "/readyz/"], model["health"]["external"])
         self.assertEqual(["/worker-healthz/"], model["health"]["private"])
+        self.assertEqual("webroot", model["acme"]["issuance"]["mode"])
+        self.assertEqual(
+            "container:site-runtime-ai-retail-mvp-anchor",
+            model["acme"]["issuance"]["network_mode"],
+        )
+        self.assertEqual(
+            "/var/www/acme", model["acme"]["issuance"]["webroot_path"]
+        )
+        self.assertTrue(model["acme"]["issuance"]["non_interactive"])
+        self.assertTrue(model["acme"]["issuance"]["agree_tos"])
+        self.assertTrue(model["acme"]["issuance"]["keep_until_expiring"])
 
     def test_render_keeps_tls_on_site_nginx(self) -> None:
         model = self.call()
@@ -53,6 +70,48 @@ class PublicationContractTests(unittest.TestCase):
         self.assertIn("172.31.3.10:8443", https)
         self.assertIn("listen 8443 ssl", nginx)
         self.assertIn("X-Forwarded-Proto https", nginx)
+
+    def test_https_preflight_extends_fail_closed_sni_contract(self) -> None:
+        model = self.call()
+        https = model["render"]["https"]
+        self.assertEqual(
+            "    tcp-request content silent-drop unless ",
+            https["allow_condition_prefix"],
+        )
+        self.assertEqual(
+            "    tcp-request content accept if { req_ssl_hello_type 1 }",
+            https["accept_anchor"],
+        )
+        self.assertEqual("sni_site_ai_retail_mvp", https["sni_acl"])
+        self.assertIn(
+            "acl sni_site_ai_retail_mvp req_ssl_sni -i retail.travelltickets.ru",
+            https["documents"]["haproxy_frontend_acl"],
+        )
+        self.assertIn(
+            "use_backend be_site_ai_retail_mvp_https if sni_site_ai_retail_mvp",
+            https["documents"]["haproxy_frontend_use_backend"],
+        )
+        self.assertIn("172.31.3.10:8443", https["documents"]["haproxy_backend"])
+
+    def test_https_preflight_resolves_production_environment(self) -> None:
+        application = self.call()["application"]
+        self.assertEqual(
+            [
+                "ai-retail-mvp.internal",
+                "retail.travelltickets.ru",
+                "localhost",
+                "127.0.0.1",
+            ],
+            application["runtime_allowed_hosts"],
+        )
+        self.assertEqual(
+            "ai-retail-mvp.internal,retail.travelltickets.ru,localhost,127.0.0.1",
+            application["environment"]["ALLOWED_HOSTS"],
+        )
+        self.assertEqual(
+            "https://retail.travelltickets.ru",
+            application["environment"]["CSRF_TRUSTED_ORIGINS"],
+        )
 
     def test_http_exposes_only_acme_challenge(self) -> None:
         model = self.call()
@@ -147,6 +206,32 @@ class PublicationContractTests(unittest.TestCase):
         with self.assertRaisesRegex(PublicationContractError, "placement_alias"):
             self.call(limit="vps4")
 
+    def test_rejects_invalid_acme_contact_email(self) -> None:
+        registry = yaml.safe_load(self.registry.read_text(encoding="utf-8"))
+        instances = yaml.safe_load(self.instances.read_text(encoding="utf-8"))
+        instances["instances"]["ai-retail-mvp"]["publication"]["acme_contact_email"] = "invalid"
+        with self.assertRaisesRegex(PublicationContractError, "acme_contact_email"):
+            self.call_data(registry, instances)
+
+    def test_certbot_uses_existing_exact_support_image_pipeline(self) -> None:
+        prepare = (ROOT / "tools/site_runtime/prepare_support_images.ps1").read_text(
+            encoding="utf-8"
+        )
+        stage = (
+            ROOT / "infra/ansible/roles/site_runtime_support_images_stage/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        apply = (
+            ROOT / "infra/ansible/roles/site_runtime_apply/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'certbot = "certbot/certbot@sha256:'
+            '34ee91d2f43008eb78a007d22f23ed4b2eaa9a454cb27ca2c042b49527a695b4"',
+            prepare,
+        )
+        self.assertIn("site_runtime_support_model.images | length == 3", stage)
+        self.assertIn("['certbot', 'nginx', 'redis']", stage)
+        self.assertIn("site_runtime_support_images.certbot.source_ref", apply)
+
     def test_requires_edge_haproxy_on_ingress(self) -> None:
         registry = yaml.safe_load(self.registry.read_text(encoding="utf-8"))
         instances = yaml.safe_load(self.instances.read_text(encoding="utf-8"))
@@ -161,14 +246,22 @@ class PublicationContractTests(unittest.TestCase):
         service = (ROOT / "tools/services/service.sh").read_text(encoding="utf-8")
         remote = (ROOT / "tools/services/service_remote.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("site_runtime_publication_check.yml", service)
-        self.assertIn("site_runtime publication-check requires --check", service)
+        self.assertIn("site_runtime $ACTION requires --check", service)
         self.assertNotIn("site_runtime publication-prepare requires --check", service)
         self.assertIn('"apply" ] || [ "$ACTION" = "publication-prepare"', service)
-        self.assertIn("site_runtime publication-check requires -Check", remote)
+        self.assertIn("site_runtime $Action requires -Check", remote)
         self.assertNotIn("site_runtime publication-prepare requires -Check", remote)
         self.assertNotIn("site_runtime publication-http01 requires --check", service)
         self.assertNotIn("site_runtime publication-http01 requires -Check", remote)
         self.assertIn('"publication-prepare" ] || [ "$ACTION" = "publication-http01"', service)
+        self.assertNotIn("site_runtime publication-certificate requires --check", service)
+        self.assertNotIn("site_runtime publication-certificate requires -Check", remote)
+        self.assertIn(
+            '[ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "publication-certificate" ]',
+            service,
+        )
+        self.assertIn("site_runtime publication-https --instance NAME --limit ALIAS --check", service)
+        self.assertIn('"publication-certificate" ] || [ "$ACTION" = "publication-https"', service)
 
     def test_ansible_role_guards_real_mutations_from_check_mode(self) -> None:
         tasks = (
@@ -212,6 +305,100 @@ class PublicationContractTests(unittest.TestCase):
             "certbot certonly",
         ):
             self.assertNotIn(forbidden, tasks)
+
+    def test_certificate_preflight_is_read_only_and_exact(self) -> None:
+        tasks = (
+            ROOT
+            / "infra/ansible/roles/site_runtime_publication_check/tasks/certificate_check.yml"
+        ).read_text(encoding="utf-8")
+        main = (
+            ROOT / "infra/ansible/roles/site_runtime_publication_check/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Выполнить read-only preflight выпуска TLS-сертификата", main)
+        self.assertIn("publication-certificate", main)
+        self.assertIn("site_runtime_certificate_support", tasks)
+        self.assertIn("site_runtime_certificate_certbot.config_image_id", tasks)
+        self.assertIn("site_runtime_certificate_certbot.transport_tag", tasks)
+        self.assertIn("site_runtime_certificate_nginx_acme_mounts", tasks)
+        self.assertIn("site_runtime_certificate_nginx_tls_mounts", tasks)
+        self.assertIn("site_runtime_certificate_haproxy.count", tasks)
+        self.assertIn("platform-certificate-preflight", tasks)
+        self.assertIn("NoRedirect", tasks)
+        self.assertIn('root_location == "https://" + domain + "/"', tasks)
+        self.assertIn("external_root_status", tasks)
+        self.assertIn("external_root_redirect", tasks)
+        self.assertIn("external_challenge_status", tasks)
+        self.assertIn("certificate_requested: false", tasks)
+        self.assertIn("mutation_performed: false", tasks)
+        self.assertIn("containers_changed: false", tasks)
+        self.assertIn("volumes_changed: false", tasks)
+        self.assertIn("current.json, Compose или HAProxy", tasks)
+        self.assertNotIn("docker\n      - run", tasks)
+        self.assertNotIn("certonly", tasks)
+        self.assertNotIn("state: touch", tasks)
+
+    def test_certificate_apply_is_exact_journaled_and_does_not_publish_https(self) -> None:
+        tasks = (
+            ROOT
+            / "infra/ansible/roles/site_runtime_publication_check/tasks/certificate_apply.yml"
+        ).read_text(encoding="utf-8")
+        main = (
+            ROOT / "infra/ansible/roles/site_runtime_publication_check/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Выпустить и принять TLS-сертификат без публикации приложения", main)
+        self.assertIn("not ansible_check_mode", main)
+        self.assertIn("--pull", tasks)
+        self.assertIn("- never", tasks)
+        self.assertIn("site_runtime_certificate_certbot.transport_tag", tasks)
+        self.assertIn("site_runtime_publication_model.acme.issuance.network_mode", tasks)
+        self.assertIn("--cap-drop", tasks)
+        self.assertIn("no-new-privileges:true", tasks)
+        self.assertIn("--webroot", tasks)
+        self.assertIn("--keep-until-expiring", tasks)
+        self.assertIn("no_log: true", tasks)
+        self.assertIn("ssl._ssl._test_decode_cert", tasks)
+        self.assertIn("days_remaining >= 14", tasks)
+        self.assertIn("Записать успешный certificate journal", tasks)
+        self.assertIn("Записать failed certificate journal без секретов", tasks)
+        self.assertIn("tls_preserved_for_diagnostics", tasks)
+        self.assertIn("https_route_enabled", tasks)
+        self.assertIn("'application_published': false", tasks)
+        self.assertNotIn("docker compose", tasks)
+        self.assertNotIn("network\n          - connect", tasks)
+        self.assertNotIn("haproxy -c", tasks)
+
+    def test_https_preflight_is_read_only_and_checks_future_configs(self) -> None:
+        tasks = (
+            ROOT
+            / "infra/ansible/roles/site_runtime_publication_check/tasks/https_check.yml"
+        ).read_text(encoding="utf-8")
+        main = (
+            ROOT / "infra/ansible/roles/site_runtime_publication_check/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Проверить будущую HTTPS/SNI публикацию без изменений", main)
+        self.assertIn("publication-https", main)
+        self.assertIn("prospective fail-closed HAProxy config", tasks)
+        self.assertIn('"frontend https_in"', tasks)
+        self.assertIn("future_section", tasks)
+        self.assertIn("allow_condition_prefix", tasks)
+        self.assertIn("HTTPS/SNI route is already applied", tasks)
+        self.assertIn("haproxy", tasks)
+        self.assertIn("- /dev/stdin", tasks)
+        self.assertIn("prospective Nginx TLS config с гарантированной очисткой", tasks)
+        self.assertIn("trap cleanup EXIT HUP INT TERM", tasks)
+        self.assertIn("Подтвердить удаление временного prospective Nginx config", tasks)
+        self.assertIn("events {}", tasks)
+        self.assertIn("runtime.env", tasks)
+        self.assertIn("CSRF_TRUSTED_ORIGINS", tasks)
+        self.assertIn("other_keys_unchanged", tasks)
+        self.assertIn("certificate_accepted", tasks)
+        self.assertIn("sni_route_applied: false", tasks)
+        self.assertIn("application_published: false", tasks)
+        self.assertIn("mutation_performed: false", tasks)
+        self.assertNotIn("ansible.builtin.copy", tasks)
+        self.assertNotIn("docker compose", tasks)
+        self.assertNotIn("network\n      - connect", tasks)
+        self.assertNotIn("certonly", tasks)
 
 
 if __name__ == "__main__":

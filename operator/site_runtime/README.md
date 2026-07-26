@@ -21,6 +21,26 @@ host-scoped ACME route и принимает временный marker извн�
 HTTPS-route и публичный root приложения этим действием не создаются. При ошибке
 восстанавливаются предыдущий HAProxy config и исходное network attachment.
 
+Для TLS contact email хранится только в ignored `instances.yml` в поле
+`publication.acme_contact_email`. Certbot доставляется существующей командой
+`stage-support-images`: Redis, Nginx и Certbot закреплены в canonical model по
+принятым exact digest для `linux/amd64`; рабочая станция формирует tar/manifest
+и передаёт образы через orchestration-узел. `vps3` не скачивает их из registry.
+
+Перед реальным запросом сертификата выполняется строго read-only команда
+`site_runtime publication-certificate ... -Check`. Она проверяет принятый
+HTTP-01 route, exact Certbot receipt/image, ACME/TLS volumes и read-only mounts
+Nginx, но не создаёт контейнер Certbot, challenge-файл или сертификат. Вызов
+без `-Check` является отдельным операторским рубежом: запускает только exact
+Certbot с `--pull never` через network namespace anchor, принимает сертификат и
+пишет journal. HTTPS/SNI route, public root и application env не изменяются.
+
+После сертификата команда `site_runtime publication-https ... -Check`
+проверяет только prospective HAProxy SNI, Nginx TLS и production
+`ALLOWED_HOSTS`/`CSRF_TRUSTED_ORIGINS`. Она не записывает конфигурацию, не
+перезапускает контейнеры и не открывает приложение. Вызов
+`publication-https` без `-Check` запрещён.
+
 `instances.yml` — источник истины для размещения generic site runtime и его
 приватной сети. Файл хранится локально у оператора и синхронизируется на
 активный orchestration-узел через remote wrapper.

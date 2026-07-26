@@ -3,7 +3,7 @@ param(
     [string]$Service,
 
     [Parameter(Position=1)]
-    [ValidateSet("plan", "apply", "absent", "purge", "reseed", "probe", "stage-image", "stage-support-images", "publication-check", "publication-prepare", "publication-http01", "backup-init", "backup-schedule", "backup", "restore-rehearsal", "restore-cleanup")]
+    [ValidateSet("plan", "apply", "absent", "purge", "reseed", "probe", "stage-image", "stage-support-images", "publication-check", "publication-prepare", "publication-http01", "publication-certificate", "publication-https", "backup-init", "backup-schedule", "backup", "restore-rehearsal", "restore-cleanup")]
     [string]$Action,
 
     [string]$NodesFile = ".\operator\nodes.csv",
@@ -724,7 +724,7 @@ if ($BatchPlanFile) {
 if (-not $BatchPlanFile -and $Service -eq "host_resources" -and $Action -notin @("plan", "apply")) {
     Fail "host_resources v1 supports only plan and apply; absent/purge/reseed are intentionally disabled"
 }
-if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -notin @("plan", "probe", "stage-image", "stage-support-images", "publication-check", "publication-prepare", "publication-http01", "apply", "backup-init", "backup-schedule", "backup", "restore-rehearsal", "restore-cleanup")) {
+if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -notin @("plan", "probe", "stage-image", "stage-support-images", "publication-check", "publication-prepare", "publication-http01", "publication-certificate", "publication-https", "apply", "backup-init", "backup-schedule", "backup", "restore-rehearsal", "restore-cleanup")) {
     Fail "site_runtime action is not supported"
 }
 if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "probe" -and $Limit -ne "vps3") {
@@ -739,13 +739,13 @@ if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -in @("pla
 if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -in @("backup-init", "backup-schedule", "backup", "restore-rehearsal", "restore-cleanup") -and (-not $Instance -or -not $Limit)) {
     Fail "site_runtime $Action requires -Instance and exactly one -Limit alias"
 }
-if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -in @("publication-check", "publication-prepare", "publication-http01")) {
+if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -in @("publication-check", "publication-prepare", "publication-http01", "publication-certificate", "publication-https")) {
     if (-not $Instance -or -not $Limit) {
         Fail "site_runtime $Action requires -Instance and exactly one -Limit alias"
     }
 }
-if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "publication-check" -and -not $Check) {
-    Fail "site_runtime publication-check requires -Check"
+if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -in @("publication-check", "publication-https") -and -not $Check) {
+    Fail "site_runtime $Action requires -Check"
 }
 if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -eq "restore-rehearsal" -and -not $SnapshotId) {
     Fail "site_runtime restore-rehearsal requires -SnapshotId"
@@ -1120,7 +1120,7 @@ try {
         Require-File $siteRuntimePreparedImage.manifest_path "prepared site_runtime manifest"
     }
     if (-not $isBatch -and $Service -eq "site_runtime" -and $Action -eq "stage-support-images") {
-        Write-Host "Preparing exact Redis/Nginx archives on workstation..."
+        Write-Host "Preparing exact site_runtime support images on workstation..."
         $prepareOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $SiteRuntimeSupportPrepareScript -TargetAlias $Limit
         if ($LASTEXITCODE -ne 0) { Fail "site_runtime support image preparation failed with exit code $LASTEXITCODE" }
         $siteRuntimePreparedImage = @($prepareOutput)[-1] | ConvertFrom-Json

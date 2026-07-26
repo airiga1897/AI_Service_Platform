@@ -41,7 +41,21 @@ class ResolverTests(unittest.TestCase):
         self.assertEqual(model["distribution_digest"], "sha256:" + "b" * 64)
         self.assertEqual(model["platform"], "linux/amd64")
         self.assertEqual(model["runtime_intent"]["internal_host"], "ai-retail-mvp.internal")
-        self.assertEqual(model["runtime_contract"]["support_images"]["redis"], "redis:7-alpine")
+        self.assertEqual(
+            model["runtime_contract"]["support_images"]["redis"],
+            "redis@sha256:"
+            "6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99",
+        )
+        self.assertEqual(
+            model["runtime_contract"]["support_images"]["nginx"],
+            "nginx@sha256:"
+            "54f2a904c251d5a34adf545a72d32515a15e08418dae0266e23be2e18c66fefa",
+        )
+        self.assertEqual(
+            model["runtime_contract"]["support_images"]["certbot"],
+            "certbot/certbot@sha256:"
+            "34ee91d2f43008eb78a007d22f23ed4b2eaa9a454cb27ca2c042b49527a695b4",
+        )
         self.assertEqual(
             model["runtime_contract"]["components"]["static"]["command"],
             "python manage.py collectstatic --noinput",

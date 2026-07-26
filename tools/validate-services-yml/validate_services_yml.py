@@ -588,8 +588,15 @@ def validate_runtime_instances(
             if runtime.get("entrypoint_override") != []:
                 fail(errors, f"{runtime_path}.entrypoint_override must be an empty list")
             support_images = require_mapping(errors, runtime.get("support_images"), f"{runtime_path}.support_images")
-            if support_images != {"redis": "redis:7-alpine", "nginx": "nginx:alpine"}:
-                fail(errors, f"{runtime_path}.support_images must contain redis:7-alpine and nginx:alpine")
+            if support_images != {
+                "redis": "redis@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99",
+                "nginx": "nginx@sha256:54f2a904c251d5a34adf545a72d32515a15e08418dae0266e23be2e18c66fefa",
+                "certbot": "certbot/certbot@sha256:34ee91d2f43008eb78a007d22f23ed4b2eaa9a454cb27ca2c042b49527a695b4",
+            }:
+                fail(
+                    errors,
+                    f"{runtime_path}.support_images must contain accepted exact redis, nginx and certbot digests",
+                )
             volumes = require_mapping(errors, runtime.get("volumes"), f"{runtime_path}.volumes")
             if set(volumes) != {"redis"}:
                 fail(errors, f"{runtime_path}.volumes должен содержать только redis")

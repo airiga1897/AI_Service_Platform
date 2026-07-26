@@ -1,0 +1,397 @@
+---
+- name: Зафиксировать контейнеры и volumes до certificate preflight
+  ansible.builtin.shell: >-
+    set -euo pipefail;
+    printf '{"containers":';
+    docker ps -aq | sort | python3 -c 'import json,sys; print(json.dumps([line.strip() for line in sys.stdin if line.strip()]))';
+    printf ',"volumes":';
+    docker volume ls -q | sort | python3 -c 'import json,sys; print(json.dumps([line.strip() for line in sys.stdin if line.strip()]))';
+    printf '}\n'
+  args:
+    executable: /bin/bash
+  check_mode: false
+  changed_when: false
+  register: site_runtime_certificate_inventory_before
+
+- name: Проверить принятый current.json перед выпуском сертификата
+  ansible.builtin.stat:
+    path: "{{ site_runtime_publication_stage_root }}/deployments/{{ site_runtime_instance }}/current.json"
+    checksum_algorithm: sha256
+  check_mode: false
+  changed_when: false
+  register: site_runtime_certificate_current_stat
+
+- name: Прочитать принятый current.json перед выпуском сертификата
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_publication_stage_root }}/deployments/{{ site_runtime_instance }}/current.json"
+  check_mode: false
+  register: site_runtime_certificate_current_slurp
+  when: site_runtime_certificate_current_stat.stat.exists | default(false)
+
+- name: Проверить действующий Compose перед выпуском сертификата
+  ansible.builtin.stat:
+    path: "{{ site_runtime_publication_runtime_root }}/{{ site_runtime_instance }}/docker-compose.yml"
+    checksum_algorithm: sha256
+  check_mode: false
+  changed_when: false
+  register: site_runtime_certificate_compose_stat
+
+- name: Проверить support receipt с exact Certbot
+  ansible.builtin.stat:
+    path: "{{ site_runtime_publication_stage_root }}/support/{{ inventory_hostname }}.json"
+    checksum_algorithm: sha256
+  check_mode: false
+  changed_when: false
+  register: site_runtime_certificate_support_stat
+
+- name: Проверить receipt принятой ACME/TLS preparation
+  ansible.builtin.stat:
+    path: "{{ site_runtime_publication_journal_root }}/{{ site_runtime_instance }}/current.json"
+    checksum_algorithm: sha256
+  check_mode: false
+  changed_when: false
+  register: site_runtime_certificate_publication_receipt_stat
+
+- name: Прочитать support receipt с exact Certbot
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_publication_stage_root }}/support/{{ inventory_hostname }}.json"
+  check_mode: false
+  register: site_runtime_certificate_support_slurp
+  when: site_runtime_certificate_support_stat.stat.exists | default(false)
+
+- name: Прочитать receipt принятой ACME/TLS preparation
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_publication_journal_root }}/{{ site_runtime_instance }}/current.json"
+  check_mode: false
+  register: site_runtime_certificate_publication_receipt_slurp
+  when: site_runtime_certificate_publication_receipt_stat.stat.exists | default(false)
+
+- name: Принять обязательные локальные артефакты certificate preflight
+  ansible.builtin.assert:
+    that:
+      - site_runtime_certificate_current_stat.stat.exists | default(false)
+      - site_runtime_certificate_compose_stat.stat.exists | default(false)
+      - site_runtime_certificate_support_stat.stat.exists | default(false)
+      - site_runtime_certificate_publication_receipt_stat.stat.exists | default(false)
+    fail_msg: >-
+      Для publication-certificate требуется принятый current.json,
+      действующий Compose и support receipt.
+
+- name: Разобрать current.json и support receipt
+  ansible.builtin.set_fact:
+    site_runtime_certificate_current: >-
+      {{ site_runtime_certificate_current_slurp.content | b64decode | from_json }}
+    site_runtime_certificate_support: >-
+      {{ site_runtime_certificate_support_slurp.content | b64decode | from_json }}
+    site_runtime_certificate_publication_receipt: >-
+      {{ site_runtime_certificate_publication_receipt_slurp.content | b64decode | from_json }}
+
+- name: Проверить общий support receipt certificate preflight
+  ansible.builtin.assert:
+    that:
+      - site_runtime_certificate_support.schema_version | int == 1
+      - site_runtime_certificate_support.kind == 'site-runtime-support-images'
+      - site_runtime_certificate_support.target_alias == inventory_hostname
+      - site_runtime_certificate_support.platform == 'linux/amd64'
+      - site_runtime_certificate_support.images | length == 3
+      - site_runtime_certificate_support.images | map(attribute='name') | sort == ['certbot', 'nginx', 'redis']
+      - site_runtime_certificate_publication_receipt.final_status == 'succeeded'
+      - site_runtime_certificate_publication_receipt.domain == site_runtime_publication_model.domain
+      - site_runtime_certificate_publication_receipt.storage.acme_webroot == site_runtime_publication_model.storage.acme_webroot.volume
+      - site_runtime_certificate_publication_receipt.storage.tls == site_runtime_publication_model.storage.tls.volume
+      - site_runtime_certificate_publication_receipt.preparation_render_checksums == site_runtime_publication_model.render.preparation.checksums
+    fail_msg: Support receipt не соответствует принятому site_runtime contract.
+
+- name: Принять current.json и canonical issuance contract
+  ansible.builtin.assert:
+    that:
+      - site_runtime_certificate_current.compose_checksum == site_runtime_certificate_compose_stat.stat.checksum
+      - site_runtime_certificate_current.deployment_id | length > 0
+      - site_runtime_publication_model.acme.issuance.mode == 'webroot'
+      - site_runtime_publication_model.acme.issuance.domain == site_runtime_publication_model.domain
+      - site_runtime_publication_model.acme.issuance.certificate_name == site_runtime_publication_model.domain
+      - site_runtime_publication_model.acme.issuance.webroot_path == site_runtime_publication_model.storage.acme_webroot.container_path
+      - site_runtime_publication_model.acme.issuance.tls_path == site_runtime_publication_model.storage.tls.container_path
+      - site_runtime_publication_model.acme.issuance.network_mode == 'container:site-runtime-' ~ site_runtime_instance ~ '-anchor'
+      - site_runtime_publication_model.acme.issuance.non_interactive | bool
+      - site_runtime_publication_model.acme.issuance.agree_tos | bool
+      - site_runtime_publication_model.acme.issuance.keep_until_expiring | bool
+    fail_msg: current.json или canonical issuance contract не принят.
+
+- name: Выбрать exact Certbot из support receipt
+  ansible.builtin.set_fact:
+    site_runtime_certificate_certbot: >-
+      {{
+        site_runtime_certificate_support.images
+        | selectattr('name', 'equalto', 'certbot')
+        | list
+        | first
+      }}
+
+- name: Проверить exact identity Certbot
+  ansible.builtin.assert:
+    that:
+      - site_runtime_certificate_certbot.source_ref == site_runtime_publication_model.acme.source_ref
+      - site_runtime_certificate_certbot.resolved_ref == site_runtime_publication_model.acme.source_ref
+      - site_runtime_certificate_certbot.distribution_digest == 'sha256:34ee91d2f43008eb78a007d22f23ed4b2eaa9a454cb27ca2c042b49527a695b4'
+      - site_runtime_certificate_certbot.config_image_id is match('^sha256:[0-9a-f]{64}$')
+      - site_runtime_certificate_certbot.platform == 'linux/amd64'
+      - site_runtime_certificate_certbot.transport_tag is match('^ai-service-platform/site-runtime-support:certbot-sha256-[0-9a-f]{64}$')
+    fail_msg: Certbot receipt не соответствует принятому exact digest.
+
+- name: Проверить загруженный exact Certbot image
+  ansible.builtin.command:
+    argv:
+      - docker
+      - image
+      - inspect
+      - "{{ site_runtime_certificate_certbot.transport_tag }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_certificate_certbot_inspect
+
+- name: Принять config image ID и платформу Certbot
+  ansible.builtin.assert:
+    that:
+      - (site_runtime_certificate_certbot_inspect.stdout | from_json | first).Id == site_runtime_certificate_certbot.config_image_id
+      - (site_runtime_certificate_certbot_inspect.stdout | from_json | first).Os == 'linux'
+      - (site_runtime_certificate_certbot_inspect.stdout | from_json | first).Architecture == 'amd64'
+    fail_msg: Загруженный Certbot image не совпадает с support receipt.
+
+- name: Проверить ACME webroot volume
+  ansible.builtin.command:
+    argv:
+      - docker
+      - volume
+      - inspect
+      - "{{ site_runtime_publication_model.storage.acme_webroot.volume }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_certificate_acme_volume
+
+- name: Проверить TLS volume
+  ansible.builtin.command:
+    argv:
+      - docker
+      - volume
+      - inspect
+      - "{{ site_runtime_publication_model.storage.tls.volume }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_certificate_tls_volume
+
+- name: Принять владельца ACME/TLS volumes
+  ansible.builtin.assert:
+    that:
+      - (site_runtime_certificate_acme_volume.stdout | from_json | first).Labels['ai-service-platform.managed'] == 'site_runtime'
+      - (site_runtime_certificate_acme_volume.stdout | from_json | first).Labels['ai-service-platform.instance'] == site_runtime_instance
+      - (site_runtime_certificate_acme_volume.stdout | from_json | first).Labels['ai-service-platform.storage'] == 'acme_webroot'
+      - (site_runtime_certificate_tls_volume.stdout | from_json | first).Labels['ai-service-platform.managed'] == 'site_runtime'
+      - (site_runtime_certificate_tls_volume.stdout | from_json | first).Labels['ai-service-platform.instance'] == site_runtime_instance
+      - (site_runtime_certificate_tls_volume.stdout | from_json | first).Labels['ai-service-platform.storage'] == 'tls'
+    fail_msg: ACME/TLS volumes не соответствуют canonical ownership labels.
+
+- name: Проверить mounts и состояние Nginx
+  ansible.builtin.command:
+    argv:
+      - docker
+      - inspect
+      - "{{ site_runtime_instance }}-nginx-1"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_certificate_nginx_inspect
+
+- name: Разобрать mounts Nginx
+  ansible.builtin.set_fact:
+    site_runtime_certificate_nginx: >-
+      {{ site_runtime_certificate_nginx_inspect.stdout | from_json | first }}
+    site_runtime_certificate_nginx_acme_mounts: >-
+      {{
+        (site_runtime_certificate_nginx_inspect.stdout | from_json | first).Mounts
+        | selectattr('Destination', 'equalto', site_runtime_publication_model.storage.acme_webroot.container_path)
+        | list
+      }}
+    site_runtime_certificate_nginx_tls_mounts: >-
+      {{
+        (site_runtime_certificate_nginx_inspect.stdout | from_json | first).Mounts
+        | selectattr('Destination', 'equalto', site_runtime_publication_model.storage.tls.container_path)
+        | list
+      }}
+
+- name: Принять read-only ACME/TLS mounts Nginx
+  ansible.builtin.assert:
+    that:
+      - site_runtime_certificate_nginx.State.Running | bool
+      - site_runtime_certificate_nginx_acme_mounts | length == 1
+      - site_runtime_certificate_nginx_acme_mounts[0].Type == 'volume'
+      - site_runtime_certificate_nginx_acme_mounts[0].Name == site_runtime_publication_model.storage.acme_webroot.volume
+      - not site_runtime_certificate_nginx_acme_mounts[0].RW | bool
+      - site_runtime_certificate_nginx_tls_mounts | length == 1
+      - site_runtime_certificate_nginx_tls_mounts[0].Type == 'volume'
+      - site_runtime_certificate_nginx_tls_mounts[0].Name == site_runtime_publication_model.storage.tls.volume
+      - not site_runtime_certificate_nginx_tls_mounts[0].RW | bool
+    fail_msg: Nginx не использует canonical read-only ACME/TLS mounts.
+
+- name: Проверить anchor для будущего network namespace Certbot
+  ansible.builtin.command:
+    argv:
+      - docker
+      - inspect
+      - "site-runtime-{{ site_runtime_instance }}-anchor"
+      - --format
+      - "{{ '{{json .State.Running}}' }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_certificate_anchor_running
+
+- name: Прочитать принятый HTTP-01 HAProxy config
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_publication_edge_config }}"
+  check_mode: false
+  register: site_runtime_certificate_haproxy_slurp
+
+- name: Зафиксировать HTTP-01 ingress contract в памяти
+  ansible.builtin.set_fact:
+    site_runtime_certificate_haproxy: >-
+      {{ site_runtime_certificate_haproxy_slurp.content | b64decode }}
+    site_runtime_certificate_edge_networks: >-
+      {{ site_runtime_publication_edge_networks.stdout | from_json }}
+
+- name: Принять применённый HTTP-01 ingress
+  ansible.builtin.assert:
+    that:
+      - site_runtime_publication_model.edge.application_network in site_runtime_certificate_edge_networks
+      - site_runtime_certificate_haproxy.count(site_runtime_publication_model.render.http01.documents.haproxy_frontend_rules) == 1
+      - site_runtime_certificate_haproxy.count(site_runtime_publication_model.render.http01.documents.haproxy_backend) == 1
+      - site_runtime_certificate_haproxy.count(site_runtime_publication_model.render.documents.haproxy_https_fragment) == 0
+      - site_runtime_certificate_anchor_running.stdout | from_json | bool
+    fail_msg: Принятый HTTP-01 ingress или anchor отсутствует.
+
+- name: Проверить закрытый public root и действующий HTTP-01 path извне
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import json
+        import sys
+        import urllib.error
+        import urllib.request
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        domain = sys.argv[1]
+        opener = urllib.request.build_opener(NoRedirect)
+
+        def probe(path):
+            request = urllib.request.Request("http://" + domain + path)
+            try:
+                response = opener.open(request, timeout=10)
+                return response.status, response.headers.get("Location", "")
+            except urllib.error.HTTPError as exc:
+                return exc.code, exc.headers.get("Location", "")
+
+        root_status, root_location = probe("/")
+        challenge_status, _ = probe(
+            "/.well-known/acme-challenge/platform-certificate-preflight"
+        )
+        result = {
+            "root": root_status,
+            "root_location": root_location,
+            "challenge": challenge_status,
+        }
+        print(json.dumps(result, sort_keys=True))
+        assert root_status in {301, 302, 307, 308}
+        assert root_location == "https://" + domain + "/"
+        assert challenge_status == 404
+      - "{{ site_runtime_publication_model.domain }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  register: site_runtime_certificate_external
+
+- name: Проверить наличие действующего сертификата без чтения ключа
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - "{{ site_runtime_instance }}-nginx-1"
+      - test
+      - -f
+      - "{{ site_runtime_publication_model.storage.tls.container_path }}/live/{{ site_runtime_publication_model.domain }}/fullchain.pem"
+  check_mode: false
+  changed_when: false
+  failed_when: false
+  register: site_runtime_certificate_present
+
+- name: Зафиксировать контейнеры и volumes после read-only preflight
+  ansible.builtin.shell: >-
+    set -euo pipefail;
+    printf '{"containers":';
+    docker ps -aq | sort | python3 -c 'import json,sys; print(json.dumps([line.strip() for line in sys.stdin if line.strip()]))';
+    printf ',"volumes":';
+    docker volume ls -q | sort | python3 -c 'import json,sys; print(json.dumps([line.strip() for line in sys.stdin if line.strip()]))';
+    printf '}\n'
+  args:
+    executable: /bin/bash
+  check_mode: false
+  changed_when: false
+  register: site_runtime_certificate_inventory_after
+
+- name: Повторно проверить current.json, Compose и HAProxy после preflight
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    checksum_algorithm: sha256
+  loop:
+    - "{{ site_runtime_publication_stage_root }}/deployments/{{ site_runtime_instance }}/current.json"
+    - "{{ site_runtime_publication_runtime_root }}/{{ site_runtime_instance }}/docker-compose.yml"
+    - "{{ site_runtime_publication_edge_config }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_certificate_files_after
+
+- name: Сформировать безопасный certificate preflight result
+  ansible.builtin.set_fact:
+    site_runtime_publication_certificate_result:
+      prerequisites_accepted: true
+      certificate_present: "{{ site_runtime_certificate_present.rc == 0 }}"
+      certificate_requested: false
+      application_published: false
+      certbot_receipt_accepted: true
+      certbot_image_exact: true
+      certbot_distribution_digest: "{{ site_runtime_certificate_certbot.distribution_digest }}"
+      platform: "{{ site_runtime_certificate_certbot.platform }}"
+      contact_email_configured: true
+      challenge: "{{ site_runtime_publication_model.tls.challenge }}"
+      webroot: "{{ site_runtime_publication_model.acme.issuance.webroot_path }}"
+      tls_path: "{{ site_runtime_publication_model.acme.issuance.tls_path }}"
+      future_network_namespace: "{{ site_runtime_publication_model.acme.issuance.network_mode }}"
+      non_interactive: "{{ site_runtime_publication_model.acme.issuance.non_interactive }}"
+      agree_tos: "{{ site_runtime_publication_model.acme.issuance.agree_tos }}"
+      keep_until_expiring: "{{ site_runtime_publication_model.acme.issuance.keep_until_expiring }}"
+      http01_route_applied: true
+      external_root_status: "{{ (site_runtime_certificate_external.stdout | from_json).root }}"
+      external_root_redirect: "{{ (site_runtime_certificate_external.stdout | from_json).root_location }}"
+      external_challenge_status: "{{ (site_runtime_certificate_external.stdout | from_json).challenge }}"
+      storage_mounts_valid: true
+      current_deployment_id: "{{ site_runtime_certificate_current.deployment_id }}"
+      current_compose_checksum: "{{ site_runtime_certificate_current.compose_checksum }}"
+      current_json_checksum: "{{ site_runtime_certificate_current_stat.stat.checksum }}"
+      containers_changed: false
+      volumes_changed: false
+      runtime_changed: false
+      edge_changed: false
+      mutation_performed: false
+      check_mode_mutations: false
+
+- name: Принять неизменность файлов certificate preflight
+  ansible.builtin.assert:
+    that:
+      - (site_runtime_certificate_inventory_after.stdout | from_json) == (site_runtime_certificate_inventory_before.stdout | from_json)
+      - site_runtime_certificate_files_after.results[0].stat.checksum == site_runtime_certificate_current_stat.stat.checksum
+      - site_runtime_certificate_files_after.results[1].stat.checksum == site_runtime_certificate_compose_stat.stat.checksum
+      - site_runtime_certificate_files_after.results[2].stat.checksum == (site_runtime_certificate_haproxy | hash('sha256'))
+    fail_msg: publication-certificate -Check изменил current.json, Compose или HAProxy.

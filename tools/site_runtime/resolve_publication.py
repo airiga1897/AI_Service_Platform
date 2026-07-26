@@ -20,6 +20,7 @@ class PublicationContractError(ValueError):
 
 
 DOMAIN_RE = re.compile(r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}")
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -138,6 +139,19 @@ backend {backend_name}_http
     server {instance}-nginx {backend}:{http_port} check inter 5s fall 3 rise 2
 """,
     }
+    https_documents = {
+        "haproxy_frontend_acl": f"    acl sni_{acl_name} req_ssl_sni -i {domain}\n",
+        "haproxy_frontend_use_backend": (
+            f"    use_backend {backend_name}_https if sni_{acl_name}\n"
+        ),
+        "haproxy_backend": f"""
+backend {backend_name}_https
+    mode tcp
+    option tcp-check
+    server {instance}-nginx-tls {backend}:{https_port} check inter 5s fall 3 rise 2
+""",
+        "nginx_public_fragment": nginx,
+    }
     return {
         "documents": documents,
         "checksums": _checksum_documents(documents, "publication_bundle"),
@@ -151,6 +165,13 @@ backend {backend_name}_http
             "documents": http01_documents,
             "checksums": _checksum_documents(http01_documents, "http01_bundle"),
             "insertion_anchor": "    use_backend be_acme_placeholder if is_acme",
+        },
+        "https": {
+            "documents": https_documents,
+            "checksums": _checksum_documents(https_documents, "https_bundle"),
+            "allow_condition_prefix": "    tcp-request content silent-drop unless ",
+            "accept_anchor": "    tcp-request content accept if { req_ssl_hello_type 1 }",
+            "sni_acl": f"sni_{acl_name}",
         },
     }
 
@@ -267,6 +288,19 @@ def resolve(
     https_port = operator_publication.get("https_port")
     if http_port != 8080 or https_port != 8443 or http_port == https_port:
         raise PublicationContractError("publication ports должны быть 8080/http и 8443/https")
+    acme_contact_email = str(operator_publication.get("acme_contact_email") or "")
+    if not EMAIL_RE.fullmatch(acme_contact_email):
+        raise PublicationContractError(
+            "publication.acme_contact_email должен содержать корректный contact email"
+        )
+    certbot_source_ref = str((runtime.get("support_images") or {}).get("certbot") or "")
+    if certbot_source_ref != (
+        "certbot/certbot@sha256:"
+        "34ee91d2f43008eb78a007d22f23ed4b2eaa9a454cb27ca2c042b49527a695b4"
+    ):
+        raise PublicationContractError(
+            "site_runtime support_images.certbot должен быть закреплён по принятому exact digest"
+        )
     if operator_publication.get("public_route_enabled") is not False:
         raise PublicationContractError("public_route_enabled должен оставаться false на check-only рубеже")
     if ingress_alias not in _active_aliases(state_path, "service", "site_runtime"):
@@ -282,6 +316,13 @@ def resolve(
         https_port,
         publication_storage,
     )
+    internal_host = str((placement.get("runtime") or {}).get("internal_host") or "")
+    expected_internal_host = f"{instance_name}.internal"
+    if internal_host != expected_internal_host:
+        raise PublicationContractError(
+            f"runtime.internal_host должен быть {expected_internal_host}"
+        )
+    runtime_allowed_hosts = [internal_host, domain, "localhost", "127.0.0.1"]
     return {
         "instance": instance_name,
         "placement_alias": limit,
@@ -300,6 +341,13 @@ def resolve(
         "application": {
             "allowed_hosts": publication["allowed_hosts"],
             "csrf_trusted_origins": publication["csrf_trusted_origins"],
+            "runtime_allowed_hosts": runtime_allowed_hosts,
+            "environment": {
+                "ENVIRONMENT": "prod",
+                "DEBUG": "false",
+                "ALLOWED_HOSTS": ",".join(runtime_allowed_hosts),
+                "CSRF_TRUSTED_ORIGINS": f"https://{domain}",
+            },
         },
         "health": {
             "external": publication["external_health"],
@@ -313,6 +361,22 @@ def resolve(
             "private_media_public": False,
         },
         "tls": publication["tls"],
+        "acme": {
+            "contact_email": acme_contact_email,
+            "client": "certbot",
+            "source_ref": certbot_source_ref,
+            "issuance": {
+                "mode": "webroot",
+                "domain": domain,
+                "certificate_name": domain,
+                "webroot_path": publication_storage["acme_webroot"]["container_path"],
+                "tls_path": publication_storage["tls"]["container_path"],
+                "network_mode": f"container:site-runtime-{instance_name}-anchor",
+                "non_interactive": True,
+                "agree_tos": True,
+                "keep_until_expiring": True,
+            },
+        },
         "storage": publication_storage,
         "render": rendered,
     }
