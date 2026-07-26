@@ -152,6 +152,15 @@
   changed_when: false
   register: site_runtime_publication_https_haproxy_future
 
+- name: Нормализовать prospective HAProxy config с завершающим LF
+  ansible.builtin.set_fact:
+    site_runtime_publication_https_haproxy_document: >-
+      {{
+        site_runtime_publication_https_haproxy_future.stdout
+        | regex_replace('\n*$', '')
+        ~ '\n'
+      }}
+
 - name: Определить состояние HTTPS/SNI route
   ansible.builtin.set_fact:
     site_runtime_publication_https_route_already_applied: >-
@@ -189,7 +198,7 @@
       - -c
       - -f
       - /dev/stdin
-    stdin: "{{ site_runtime_publication_https_haproxy_future.stdout }}"
+    stdin: "{{ site_runtime_publication_https_haproxy_document }}"
   check_mode: false
   changed_when: false
 
@@ -387,7 +396,7 @@
       current_haproxy_checksum: >-
         {{ (site_runtime_publication_https_haproxy_slurp.content | b64decode) | hash('sha256') }}
       prospective_haproxy_checksum: >-
-        {{ site_runtime_publication_https_haproxy_future.stdout | hash('sha256') }}
+        {{ site_runtime_publication_https_haproxy_document | hash('sha256') }}
       current_environment_checksum: >-
         {{ (site_runtime_publication_https_environment.stdout | from_json).current_checksum }}
       prospective_environment_checksum: >-

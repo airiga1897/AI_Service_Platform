@@ -174,9 +174,44 @@
       check_mode: false
       changed_when: false
 
+    - name: Принять локальный TLS endpoint до открытия SNI route
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ site_runtime_instance }}-web-1"
+          - python
+          - -c
+          - |
+            import socket
+            import ssl
+            import sys
+
+            domain = sys.argv[1]
+            context = ssl.create_default_context()
+            with socket.create_connection(("127.0.0.1", 8443), timeout=5) as raw:
+                with context.wrap_socket(raw, server_hostname=domain) as secure:
+                    secure.sendall(
+                        (
+                            "GET /healthz/ HTTP/1.1\r\n"
+                            f"Host: {domain}\r\n"
+                            "Connection: close\r\n\r\n"
+                        ).encode()
+                    )
+                    status = secure.recv(128).split(b"\r\n", 1)[0]
+            if b" 200 " not in status:
+                raise SystemExit("local TLS health did not return 200")
+          - "{{ site_runtime_publication_model.domain }}"
+      register: site_runtime_publication_https_local_tls
+      retries: 20
+      delay: 3
+      until: site_runtime_publication_https_local_tls.rc == 0
+      check_mode: false
+      changed_when: false
+
     - name: Атомарно применить fail-closed HAProxy SNI route
       ansible.builtin.copy:
-        content: "{{ site_runtime_publication_https_haproxy_future.stdout }}"
+        content: "{{ site_runtime_publication_https_haproxy_document }}"
         dest: "{{ site_runtime_publication_edge_config }}"
         owner: root
         group: root
@@ -192,6 +227,23 @@
           - "{{ site_runtime_publication_edge_container }}"
       when: >-
         (site_runtime_publication_https_haproxy_apply | default({'changed': false})).changed
+
+    - name: Принять запущенный HAProxy после применения SNI route
+      ansible.builtin.shell: |
+        set -euo pipefail
+        test "$(docker inspect "{{ site_runtime_publication_edge_container }}" \
+          --format '{{ '{{.State.Running}}' }}')" = "true"
+        docker exec "{{ site_runtime_publication_edge_container }}" \
+          haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
+        test -n "$(docker port "{{ site_runtime_publication_edge_container }}" 443/tcp)"
+      args:
+        executable: /bin/bash
+      register: site_runtime_publication_https_edge_ready
+      retries: 20
+      delay: 2
+      until: site_runtime_publication_https_edge_ready.rc == 0
+      check_mode: false
+      changed_when: false
 
     - name: Проверить внешний HTTPS health и закрытые endpoints
       ansible.builtin.command:
@@ -289,7 +341,7 @@
           "{{ site_runtime_publication_edge_config }}" \
           "{{ (site_runtime_publication_https_environment.stdout | from_json).prospective_checksum }}" \
           "{{ site_runtime_publication_model.render.https.checksums.nginx_public_fragment }}" \
-          "{{ site_runtime_publication_https_haproxy_future.stdout | hash('sha256') }}" <<'PY'
+          "{{ site_runtime_publication_https_haproxy_document | hash('sha256') }}" <<'PY'
         import hashlib
         from pathlib import Path
         import sys
@@ -354,7 +406,7 @@
               'certificate_id': site_runtime_publication_https_receipt.certificate_id,
               'environment_checksum': (site_runtime_publication_https_environment.stdout | from_json).prospective_checksum,
               'nginx_checksum': site_runtime_publication_model.render.https.checksums.nginx_public_fragment,
-              'haproxy_checksum': site_runtime_publication_https_haproxy_future.stdout | hash('sha256'),
+              'haproxy_checksum': site_runtime_publication_https_haproxy_document | hash('sha256'),
               'render_checksums': site_runtime_publication_model.render.https.checksums,
               'private_health': 'succeeded',
               'external_health': 'succeeded',
@@ -380,7 +432,7 @@
               'https_id': site_runtime_publication_https_id,
               'environment_checksum': (site_runtime_publication_https_environment.stdout | from_json).prospective_checksum,
               'nginx_checksum': site_runtime_publication_model.render.https.checksums.nginx_public_fragment,
-              'haproxy_checksum': site_runtime_publication_https_haproxy_future.stdout | hash('sha256'),
+              'haproxy_checksum': site_runtime_publication_https_haproxy_document | hash('sha256'),
               'https_render_checksums': site_runtime_publication_model.render.https.checksums,
               'https_route_enabled': true,
               'application_published': true,
