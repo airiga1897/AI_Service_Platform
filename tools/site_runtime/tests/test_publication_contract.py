@@ -401,6 +401,14 @@ class PublicationContractTests(unittest.TestCase):
         self.assertIn("CSRF_TRUSTED_ORIGINS", tasks)
         self.assertIn("other_keys_unchanged", tasks)
         self.assertIn("certificate_accepted", tasks)
+        self.assertIn(
+            "Прочитать канонический application current перед HTTPS/SNI preflight",
+            tasks,
+        )
+        self.assertIn(
+            "site_runtime_publication_https_current.compose_checksum",
+            tasks,
+        )
         self.assertIn("sni_route_applied:", tasks)
         self.assertIn("application_published:", tasks)
         self.assertIn("mutation_performed: false", tasks)
@@ -449,6 +457,18 @@ class PublicationContractTests(unittest.TestCase):
         self.assertIn("Проверить внешний HTTPS health и закрытые endpoints", tasks)
         self.assertIn("5432, 6379, 8000", tasks)
         self.assertIn("Записать успешный HTTPS/SNI journal", tasks)
+        self.assertIn(
+            "'compose_checksum': site_runtime_publication_https_current.compose_checksum",
+            tasks,
+        )
+        self.assertIn(
+            "'deployment_digest': site_runtime_publication_https_current.digest",
+            tasks,
+        )
+        self.assertNotIn(
+            "site_runtime_publication_https_receipt.compose_checksum",
+            tasks,
+        )
         self.assertIn("Записать failed HTTPS/SNI journal", tasks)
         self.assertIn("Восстановить закрытый production environment после ошибки", tasks)
         self.assertIn("Восстановить ACME-only Nginx config после ошибки", tasks)

@@ -33,16 +33,30 @@
   check_mode: false
   register: site_runtime_publication_https_receipt_slurp
 
-- name: Принять certificate receipt перед HTTPS/SNI preflight
+- name: Прочитать канонический application current перед HTTPS/SNI preflight
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_publication_https_files_before.results[0].item }}"
+  check_mode: false
+  register: site_runtime_publication_https_current_slurp
+
+- name: Принять certificate receipt и application current перед HTTPS/SNI preflight
   ansible.builtin.set_fact:
     site_runtime_publication_https_receipt: >-
       {{ site_runtime_publication_https_receipt_slurp.content | b64decode | from_json }}
+    site_runtime_publication_https_current: >-
+      {{ site_runtime_publication_https_current_slurp.content | b64decode | from_json }}
 
 - name: Проверить принятый сертификат перед HTTPS/SNI preflight
   ansible.builtin.assert:
     that:
       - site_runtime_publication_https_receipt.final_status == 'succeeded'
       - site_runtime_publication_https_receipt.domain == site_runtime_publication_model.domain
+      - >-
+        site_runtime_publication_https_receipt.deployment_id
+        == site_runtime_publication_https_current.deployment_id
+      - >-
+        site_runtime_publication_https_current.compose_checksum
+        == site_runtime_publication_https_files_before.results[1].stat.checksum
       - site_runtime_publication_https_receipt.certificate_present | bool
       - site_runtime_publication_https_receipt.certificate_accepted | bool
       - site_runtime_publication_https_receipt.certbot_distribution_digest == 'sha256:34ee91d2f43008eb78a007d22f23ed4b2eaa9a454cb27ca2c042b49527a695b4'

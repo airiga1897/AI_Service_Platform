@@ -481,8 +481,9 @@
               'action': 'publication-https',
               'instance': site_runtime_instance,
               'domain': site_runtime_publication_model.domain,
-              'deployment_id': site_runtime_publication_https_receipt.deployment_id,
-              'compose_checksum': site_runtime_publication_https_receipt.compose_checksum,
+              'deployment_id': site_runtime_publication_https_current.deployment_id,
+              'deployment_digest': site_runtime_publication_https_current.digest,
+              'compose_checksum': site_runtime_publication_https_current.compose_checksum,
               'certificate_id': site_runtime_publication_https_receipt.certificate_id,
               'environment_checksum': (site_runtime_publication_https_environment.stdout | from_json).prospective_checksum,
               'nginx_checksum': site_runtime_publication_model.render.https.checksums.nginx_public_fragment,
@@ -510,6 +511,9 @@
           {{
             site_runtime_publication_https_receipt | combine({
               'https_id': site_runtime_publication_https_id,
+              'deployment_id': site_runtime_publication_https_current.deployment_id,
+              'deployment_digest': site_runtime_publication_https_current.digest,
+              'compose_checksum': site_runtime_publication_https_current.compose_checksum,
               'environment_checksum': (site_runtime_publication_https_environment.stdout | from_json).prospective_checksum,
               'nginx_checksum': site_runtime_publication_model.render.https.checksums.nginx_public_fragment,
               'haproxy_checksum': site_runtime_publication_https_haproxy_metadata.sha256,
@@ -693,6 +697,9 @@
               'action': 'publication-https',
               'instance': site_runtime_instance,
               'domain': site_runtime_publication_model.domain,
+              'deployment_id': site_runtime_publication_https_current.deployment_id,
+              'deployment_digest': site_runtime_publication_https_current.digest,
+              'compose_checksum': site_runtime_publication_https_current.compose_checksum,
               'certificate_id': site_runtime_publication_https_receipt.certificate_id,
               'failure_phase': (
                 ansible_failed_task | default({'name': 'unknown'})
