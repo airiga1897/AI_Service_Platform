@@ -1,0 +1,39 @@
+# СГЕНЕРИРОВАННЫЙ ФАЙЛ — не редактируйте вручную.
+# Источник: services.yml + tools/render-compose/templates/telegram-client.yml.j2
+# Стек: << instance_name >> (project: << project_name >>, type: telegram-client)
+
+services:
+  << web_name >>:
+    image: "${<< env_prefix >>_IMAGE:?set immutable << env_prefix >>_IMAGE digest}"
+    env_file:
+      - ../../<< env_file >>
+    ports:
+      - "127.0.0.1:<< backend_port >>:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000<< healthcheck_path >>', timeout=<< healthcheck_timeout >>)"
+      interval: 30s
+      timeout: << healthcheck_timeout >>s
+      retries: 3
+    restart: unless-stopped
+
+  << worker_name >>:
+    image: "${<< env_prefix >>_IMAGE:?set immutable << env_prefix >>_IMAGE digest}"
+    command: ["python", "manage.py", "run_telegram_worker"]
+    env_file:
+      - ../../<< env_file >>
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - manage.py
+        - check
+      interval: 60s
+      timeout: << healthcheck_timeout >>s
+      retries: 3
+    restart: unless-stopped
+
+volumes: {}

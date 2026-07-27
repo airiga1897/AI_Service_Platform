@@ -313,6 +313,18 @@ class ValidatorBrokenFixtureTests(unittest.TestCase):
             f"long-key template error not surfaced in: {errors}",
         )
 
+    def test_telegram_client_requires_platform_database_contract(self) -> None:
+        instance = self.data["runtime_instances"]["mycleanbot"]
+        del instance["data"]["postgres"]["ownership"]
+        errors, _ = validate_data(self.data)
+        self.assertTrue(
+            any(
+                "data.postgres.ownership is required for type='telegram-client'" in e
+                for e in errors
+            ),
+            f"missing telegram-client template error in: {errors}",
+        )
+
     # ---------- replit reserved port surfaces as a warning -----------
     def test_replit_reserved_port_is_a_warning_not_an_error(self) -> None:
         # Force a Replit-reserved port (5000) onto an instance and confirm
