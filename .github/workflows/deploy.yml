@@ -181,15 +181,7 @@ jobs:
   deploy-mycleanbot:
     needs: preflight
     runs-on: ubuntu-latest
-    if: >-
-      ${{
-        (inputs.instance == 'mycleanbot' && inputs.environment == 'prod') ||
-        (
-          github.event_name == 'repository_dispatch' &&
-          github.event.client_payload.instance == 'mycleanbot' &&
-          github.event.client_payload.environment == 'prod'
-        )
-      }}
+    if: ${{ inputs.instance == 'mycleanbot' && inputs.environment == 'prod' }}
     environment:
       name: mycleanbot-prod
     steps:
@@ -258,3 +250,28 @@ jobs:
             "cd '${DEPLOY_DIR}' && \
              docker compose --env-file .env.deploy -f docker-compose.yml exec -T mycleanbot-web \
              python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=10)\""
+
+  mycleanbot-awaiting-manual-approval:
+    needs: preflight
+    runs-on: ubuntu-latest
+    if: >-
+      ${{
+        github.event_name == 'repository_dispatch' &&
+        github.event.client_payload.instance == 'mycleanbot' &&
+        github.event.client_payload.environment == 'prod'
+      }}
+    steps:
+      - name: Record deployment candidate
+        env:
+          IMAGE_REF: ${{ fromJson(needs.preflight.outputs.deploy_metadata).image_ref }}
+        run: |
+          {
+            echo "## MyCleanBot deployment candidate"
+            echo
+            echo "Preflight passed for \`${IMAGE_REF}\`."
+            echo "An operator must start the Deploy workflow manually with:"
+            echo
+            echo "- instance: \`mycleanbot\`"
+            echo "- environment: \`prod\`"
+            echo "- image_ref: \`${IMAGE_REF}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

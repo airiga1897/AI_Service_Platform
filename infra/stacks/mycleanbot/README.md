@@ -11,13 +11,17 @@ PostgreSQL не входит в Compose-стек. Платформа созда�
 `MASTER_ENCRYPTION_KEY`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`,
 `DJANGO_ALLOWED_HOSTS` и остальные production-настройки. Файл не хранится в Git.
 
-Публикация продуктового digest вызывает `repository_dispatch`; deployment
-защищён GitHub Environment `mycleanbot-prod`, перед запуском контейнеров выполняет
-миграции и завершает работу проверкой `/healthz`.
+Публикация продуктового digest вызывает `repository_dispatch`: платформа
+выполняет preflight и записывает кандидат в summary. Реальный deployment требует
+отдельного ручного `workflow_dispatch` с тем же digest, использует GitHub
+Environment `mycleanbot-prod`, перед запуском контейнеров выполняет миграции и
+завершает работу проверкой `/healthz`.
 
 Environment должен требовать ручного approval и содержать `SSH_HOST`, `SSH_USER`,
 `SSH_KEY`, опциональный `SSH_PORT`, а также `GHCR_USERNAME` и read-only
-`GHCR_TOKEN` для загрузки приватного образа.
+`GHCR_TOKEN` для загрузки приватного образа. Если тариф GitHub не поддерживает
+required reviewers для private-репозитория, обязательным gate остаётся отдельный
+ручной запуск workflow; `repository_dispatch` сам production rollout не выполняет.
 
 Compose генерируется из `services.yml`:
 
