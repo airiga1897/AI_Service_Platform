@@ -6,6 +6,7 @@ services:
   << web_name >>:
     image: "${<< env_prefix >>_IMAGE:?set immutable << env_prefix >>_IMAGE digest}"
     env_file:
+      - ./<< public_env_file >>
       - ../../<< env_file >>
     ports:
       - "127.0.0.1:<< backend_port >>:8000"
@@ -25,6 +26,7 @@ services:
     image: "${<< env_prefix >>_IMAGE:?set immutable << env_prefix >>_IMAGE digest}"
     command: ["python", "manage.py", "run_telegram_worker"]
     env_file:
+      - ./<< public_env_file >>
       - ../../<< env_file >>
     healthcheck:
       test:

@@ -531,6 +531,17 @@ def validate_runtime_instances(
         for field in ("file", "example_file"):
             if not env.get(field):
                 fail(errors, f"{node_path}.env.{field} is required")
+        public_file = env.get("public_file")
+        if public_file is not None and (
+            not isinstance(public_file, str)
+            or not public_file
+            or Path(public_file).name != public_file
+            or public_file.startswith(".")
+        ):
+            fail(
+                errors,
+                f"{node_path}.env.public_file must be a non-hidden file basename",
+            )
         wanted_files = expected_env_file_stems(instance_name)
         if wanted_files is not None:
             wanted_file, wanted_example = wanted_files
@@ -819,6 +830,16 @@ def validate_runtime_instances(
             vpn = instance_data.get("vpn") or {}
             monitoring = instance_data.get("monitoring") or {}
             healthcheck = instance_data.get("healthcheck") or {}
+            if env.get("public_file") != "mycleanbot.env":
+                fail(
+                    errors,
+                    f"{node_path}.env.public_file must be 'mycleanbot.env'",
+                )
+            if env.get("file") != ".env.mycleanbot.secrets":
+                fail(
+                    errors,
+                    f"{node_path}.env.file must be '.env.mycleanbot.secrets'",
+                )
             if not isinstance(postgres, dict) or postgres.get("ownership") != "platform":
                 fail(errors, f"{node_path}.data.postgres.ownership must be platform")
             if not isinstance(postgres, dict) or postgres.get("connection") != "DATABASE_URL":

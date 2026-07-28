@@ -5,11 +5,13 @@ immutable-образа: `mycleanbot-web` и `mycleanbot-worker`.
 
 PostgreSQL не входит в Compose-стек. Платформа создаёт базу, управляет резервным
 копированием и передаёт приложению `DATABASE_URL` через защищённый
-`/opt/stacks/mycleanbot-prod/.env.mycleanbot`.
+`/opt/stacks/mycleanbot-prod/.env.mycleanbot.secrets`.
 
-В этом же platform secret-файле должны находиться `DJANGO_SECRET_KEY`,
-`MASTER_ENCRYPTION_KEY`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`,
-`DJANGO_ALLOWED_HOSTS` и остальные production-настройки. Файл не хранится в Git.
+Конфигурация разделена по аналогии с platform `site_runtime`: несекретные
+production-настройки находятся в tracked-файле `mycleanbot.env`, а
+`DATABASE_URL`, `DJANGO_SECRET_KEY`, `MASTER_ENCRYPTION_KEY`,
+`TELEGRAM_API_ID` и `TELEGRAM_API_HASH` поступают из GitHub Environment и
+атомарно устанавливаются в secret-файл с mode `0600`.
 
 Публикация продуктового digest вызывает `repository_dispatch`: платформа
 выполняет preflight и записывает кандидат в summary. Реальный deployment требует
@@ -17,9 +19,11 @@ PostgreSQL не входит в Compose-стек. Платформа созда�
 Environment `mycleanbot-prod`, перед запуском контейнеров выполняет миграции и
 завершает работу проверкой `/healthz`.
 
-Environment должен требовать ручного approval и содержать `SSH_HOST`, `SSH_USER`,
-`SSH_KEY`, опциональный `SSH_PORT`, а также `GHCR_USERNAME` и read-only
-`GHCR_TOKEN` для загрузки приватного образа. Если тариф GitHub не поддерживает
+Environment должен содержать `SSH_HOST`, `SSH_USER`, `SSH_KEY`, опциональный
+`SSH_PORT`, `SSH_KNOWN_HOSTS`, `GHCR_USERNAME`, read-only `GHCR_TOKEN`, а также
+application secrets `DATABASE_URL`, `DJANGO_SECRET_KEY`,
+`MASTER_ENCRYPTION_KEY`, `TELEGRAM_API_ID` и `TELEGRAM_API_HASH`. Если тариф
+GitHub не поддерживает
 required reviewers для private-репозитория, обязательным gate остаётся отдельный
 ручной запуск workflow; `repository_dispatch` сам production rollout не выполняет.
 
@@ -27,14 +31,17 @@ required reviewers для private-репозитория, обязательны
 `ssh-keyscan`: ключ VPS принимается только из заранее проверенного pinned
 `known_hosts`. Rollout разрешён только ручным запуском workflow из `main`.
 
-## Production secret file
+## Production configuration
 
-Шаблон `.env.mycleanbot.example` не содержит значений. Перед установкой оператор
-получает значения у владельца и создаёт `/opt/stacks/mycleanbot-prod/.env.mycleanbot`
-с mode `0600`. Для текущего опубликованного образа одно и то же trusted-origin
-значение записывается в `DJANGO_CSRF_TRUSTED_ORIGINS` и
-`CSRF_TRUSTED_ORIGINS`. Worker запрещено запускать, пока `TELEGRAM_API_ID` и
-`TELEGRAM_API_HASH` не прошли fail-closed проверку deployment helper.
+`mycleanbot.env` хранится в Git и не содержит secrets. До первого deployment в
+нём задаются VPN-only `DJANGO_ALLOWED_HOSTS` и одинаковые
+`DJANGO_CSRF_TRUSTED_ORIGINS`/`CSRF_TRUSTED_ORIGINS`.
+
+Шаблон `.env.mycleanbot.secrets.example` содержит только пустые secret-поля.
+Workflow собирает secret-файл из GitHub Environment без вывода значений,
+передаёт его во временный путь и атомарно устанавливает на VPS с mode `0600`.
+Worker запрещено запускать, пока `TELEGRAM_API_ID` и `TELEGRAM_API_HASH` не
+прошли fail-closed проверку deployment helper.
 
 ## Backup and restore
 

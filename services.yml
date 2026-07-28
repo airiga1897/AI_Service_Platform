@@ -694,8 +694,9 @@ runtime_instances:
     access: vpn-only
     env:
       prefix: MYCLEANBOT
-      file: .env.mycleanbot
-      example_file: .env.mycleanbot.example
+      file: .env.mycleanbot.secrets
+      example_file: .env.mycleanbot.secrets.example
+      public_file: mycleanbot.env
     local:
       backend_port: 8040
     domains:
@@ -784,6 +785,7 @@ future_service_template:
     required:
       - profile
       - env.prefix
+      - env.public_file
       - local.backend_port
       - containers
       - healthcheck

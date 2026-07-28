@@ -73,6 +73,10 @@ class RenderHappyPathTests(unittest.TestCase):
             ["python", "manage.py", "run_telegram_worker"],
         )
         self.assertNotIn("ports", doc["services"]["mycleanbot-worker"])
+        self.assertEqual(
+            doc["services"]["mycleanbot-web"]["env_file"],
+            ["./mycleanbot.env", "../../.env.mycleanbot.secrets"],
+        )
         self.assertIn(
             "WorkerHeartbeat",
             " ".join(doc["services"]["mycleanbot-worker"]["healthcheck"]["test"]),

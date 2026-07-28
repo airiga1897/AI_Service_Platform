@@ -5,7 +5,8 @@ ACTION="${1:-}"
 IMAGE_REF="${2:-}"
 DEPLOY_DIR="${DEPLOY_DIR:-/opt/stacks/mycleanbot-prod}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
-ENV_FILE="${ENV_FILE:-.env.mycleanbot}"
+ENV_FILE="${ENV_FILE:-.env.mycleanbot.secrets}"
+CONFIG_FILE="${CONFIG_FILE:-mycleanbot.env}"
 STATE_DIR="${STATE_DIR:-.deploy-state}"
 BACKUP_COMMAND="${BACKUP_COMMAND:-sudo -n /usr/local/bin/ai-service-mycleanbot-backup backup}"
 IMAGE_PATTERN='^ghcr\.io/airiga1897/mycleanbot@sha256:[0-9a-f]{64}$'
@@ -13,6 +14,11 @@ IMAGE_PATTERN='^ghcr\.io/airiga1897/mycleanbot@sha256:[0-9a-f]{64}$'
 fail() {
   printf 'mycleanbot deploy error: %s\n' "$*" >&2
   exit 2
+}
+
+env_value() {
+  local key="$1"
+  sed -n "s/^${key}=//p" "$CONFIG_FILE" "$ENV_FILE" | tail -n 1
 }
 
 require_digest() {
@@ -89,30 +95,35 @@ docker_login() {
 deploy() {
   local image_ref="$1"
   local previous_ref=""
+  local config_mode
   require_digest "$image_ref"
+  [[ -f "$CONFIG_FILE" ]] || fail "tracked configuration file is missing"
+  config_mode="$(stat -c '%a' "$CONFIG_FILE")"
+  (( (8#$config_mode & 0022) == 0 )) ||
+    fail "$CONFIG_FILE must not be group- or world-writable"
   [[ -f "$ENV_FILE" ]] || fail "protected environment file is missing"
   [[ "$(stat -c '%a' "$ENV_FILE")" == "600" ]] || fail "$ENV_FILE must have mode 0600"
   local required_key
   for required_key in \
     DATABASE_URL DJANGO_SECRET_KEY MASTER_ENCRYPTION_KEY DJANGO_ALLOWED_HOSTS \
     DJANGO_CSRF_TRUSTED_ORIGINS CSRF_TRUSTED_ORIGINS; do
-    grep -Eq "^${required_key}=.+$" "$ENV_FILE" ||
-      fail "$required_key is required in the protected environment file"
+    [[ -n "$(env_value "$required_key")" ]] ||
+      fail "$required_key is required in the combined environment"
   done
-  grep -Eq '^DATABASE_URL=postgres(ql)?://.+/mycleanbot([?].*)?$' "$ENV_FILE" ||
+  [[ "$(env_value DATABASE_URL)" =~ ^postgres(ql)?://.+/mycleanbot(\?.*)?$ ]] ||
     fail "DATABASE_URL must target the isolated mycleanbot database"
-  grep -Eq '^DJANGO_DEBUG=false$' "$ENV_FILE" ||
+  [[ "$(env_value DJANGO_DEBUG)" == "false" ]] ||
     fail "DJANGO_DEBUG=false is required"
   local django_csrf
   local image_csrf
-  django_csrf="$(sed -n 's/^DJANGO_CSRF_TRUSTED_ORIGINS=//p' "$ENV_FILE" | tail -n 1)"
-  image_csrf="$(sed -n 's/^CSRF_TRUSTED_ORIGINS=//p' "$ENV_FILE" | tail -n 1)"
+  django_csrf="$(env_value DJANGO_CSRF_TRUSTED_ORIGINS)"
+  image_csrf="$(env_value CSRF_TRUSTED_ORIGINS)"
   [[ "$django_csrf" == "$image_csrf" ]] ||
     fail "the canonical and image-compatible CSRF origins must match"
   unset django_csrf image_csrf
-  grep -Eq '^TELEGRAM_API_ID=[1-9][0-9]*$' "$ENV_FILE" ||
+  [[ "$(env_value TELEGRAM_API_ID)" =~ ^[1-9][0-9]*$ ]] ||
     fail "valid TELEGRAM_API_ID is required before worker startup"
-  grep -Eq '^TELEGRAM_API_HASH=.+$' "$ENV_FILE" ||
+  [[ -n "$(env_value TELEGRAM_API_HASH)" ]] ||
     fail "valid TELEGRAM_API_HASH is required before worker startup"
 
   mkdir -p "$STATE_DIR"

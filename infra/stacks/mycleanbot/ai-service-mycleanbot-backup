@@ -10,4 +10,4 @@ action="${1:-}"
 exec python3 /usr/local/lib/ai-service-platform/postgres_tenant_backup.py \
   "$action" \
   --config /etc/ai-service-platform/mycleanbot-backup.env \
-  --app-env /opt/stacks/mycleanbot-prod/.env.mycleanbot
+  --app-env /opt/stacks/mycleanbot-prod/.env.mycleanbot.secrets

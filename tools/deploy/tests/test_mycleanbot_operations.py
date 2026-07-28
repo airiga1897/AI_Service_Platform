@@ -19,6 +19,10 @@ BACKUP = ROOT / "tools" / "postgres-tenant" / "postgres_tenant_backup.py"
 PROVISION = ROOT / "tools" / "postgres-tenant" / "provision_mycleanbot.py"
 DEPLOY_WORKFLOW = ROOT / ".github" / "workflows" / "deploy.yml"
 ROLLBACK_WORKFLOW = ROOT / ".github" / "workflows" / "rollback.yml"
+PUBLIC_CONFIG = ROOT / "infra" / "stacks" / "mycleanbot" / "mycleanbot.env"
+SECRET_EXAMPLE = (
+    ROOT / "infra" / "stacks" / "mycleanbot" / ".env.mycleanbot.secrets.example"
+)
 PROMETHEUS = (
     ROOT
     / "infra"
@@ -85,6 +89,21 @@ class BackupContractTests(unittest.TestCase):
 
 
 class DeploymentContractTests(unittest.TestCase):
+    def test_tracked_config_and_secret_contract_are_separated(self) -> None:
+        public = PUBLIC_CONFIG.read_text(encoding="utf-8")
+        secret = SECRET_EXAMPLE.read_text(encoding="utf-8")
+        for name in (
+            "DATABASE_URL",
+            "DJANGO_SECRET_KEY",
+            "MASTER_ENCRYPTION_KEY",
+            "TELEGRAM_API_ID",
+            "TELEGRAM_API_HASH",
+        ):
+            self.assertNotIn(f"{name}=", public)
+            self.assertIn(f"{name}=", secret)
+        self.assertIn("DJANGO_DEBUG=false", public)
+        self.assertIn("DJANGO_ALLOWED_HOSTS=", public)
+
     def test_remote_script_has_valid_bash_syntax(self) -> None:
         if os.name == "nt":
             self.skipTest("bash syntax is verified by the Ubuntu GitHub Actions runner")
@@ -109,6 +128,8 @@ class DeploymentContractTests(unittest.TestCase):
             "TELEGRAM_API_ID",
             "TELEGRAM_API_HASH",
             "docker login",
+            "CONFIG_FILE",
+            "env_value",
         ):
             self.assertIn(required, text)
         self.assertNotIn("ssh-keyscan", text)
@@ -121,6 +142,12 @@ class DeploymentContractTests(unittest.TestCase):
         self.assertIn("mycleanbot-awaiting-manual-approval", deploy)
         self.assertIn("mycleanbot-deployment-candidate", deploy)
         self.assertIn("SSH_KNOWN_HOSTS", deploy)
+        self.assertIn("secrets.DATABASE_URL", deploy)
+        self.assertIn("secrets.DJANGO_SECRET_KEY", deploy)
+        self.assertIn("secrets.MASTER_ENCRYPTION_KEY", deploy)
+        self.assertIn("secrets.TELEGRAM_API_ID", deploy)
+        self.assertIn("secrets.TELEGRAM_API_HASH", deploy)
+        self.assertIn("PUBLIC_ENV_FILE", deploy)
         self.assertIn("rollback-mycleanbot", rollback)
         self.assertIn("rollback-first-mycleanbot-deployment", rollback)
         self.assertNotIn("ssh-keyscan", deploy.split("deploy-mycleanbot:", 1)[1])

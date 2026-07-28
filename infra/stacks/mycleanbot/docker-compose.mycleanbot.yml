@@ -6,7 +6,8 @@ services:
   mycleanbot-web:
     image: "${MYCLEANBOT_IMAGE:?set immutable MYCLEANBOT_IMAGE digest}"
     env_file:
-      - ../../.env.mycleanbot
+      - ./mycleanbot.env
+      - ../../.env.mycleanbot.secrets
     ports:
       - "127.0.0.1:8040:8000"
     healthcheck:
@@ -25,7 +26,8 @@ services:
     image: "${MYCLEANBOT_IMAGE:?set immutable MYCLEANBOT_IMAGE digest}"
     command: ["python", "manage.py", "run_telegram_worker"]
     env_file:
-      - ../../.env.mycleanbot
+      - ./mycleanbot.env
+      - ../../.env.mycleanbot.secrets
     healthcheck:
       test:
         - CMD

@@ -85,7 +85,8 @@ class PreflightResolveTests(unittest.TestCase):
             VALID_MYCLEANBOT_REF,
         )
         self.assertEqual(metadata["vps"], "VPS1")
-        self.assertEqual(metadata["env_file"], ".env.mycleanbot")
+        self.assertEqual(metadata["env_file"], ".env.mycleanbot.secrets")
+        self.assertEqual(metadata["public_env_file"], "mycleanbot.env")
         self.assertEqual(metadata["deploy_dir"], "/opt/stacks/mycleanbot-prod")
         instance = registry["runtime_instances"]["mycleanbot"]
         self.assertFalse(instance["data"]["postgres"]["container_in_stack"])

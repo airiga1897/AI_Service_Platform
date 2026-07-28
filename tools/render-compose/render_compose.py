@@ -178,6 +178,9 @@ def _build_context(
             volumes.get("redis"), "data.volumes.redis", instance_name
         )
     elif project_type == "telegram-client":
+        ctx["public_env_file"] = _required(
+            env.get("public_file"), "env.public_file", instance_name
+        )
         ctx["backend_port"] = _required(
             local.get("backend_port"), "local.backend_port", instance_name
         )
