@@ -19,6 +19,8 @@ BACKUP = ROOT / "tools" / "postgres-tenant" / "postgres_tenant_backup.py"
 PROVISION = ROOT / "tools" / "postgres-tenant" / "provision_mycleanbot.py"
 DEPLOY_WORKFLOW = ROOT / ".github" / "workflows" / "deploy.yml"
 ROLLBACK_WORKFLOW = ROOT / ".github" / "workflows" / "rollback.yml"
+ENV_SECRET_PS1 = ROOT / "tools" / "github" / "ensure_environment_secrets.ps1"
+ENV_SECRET_SH = ROOT / "tools" / "github" / "ensure_environment_secrets.sh"
 PUBLIC_CONFIG = ROOT / "infra" / "stacks" / "mycleanbot" / "mycleanbot.env"
 SECRET_EXAMPLE = (
     ROOT / "infra" / "stacks" / "mycleanbot" / ".env.mycleanbot.secrets.example"
@@ -89,6 +91,16 @@ class BackupContractTests(unittest.TestCase):
 
 
 class DeploymentContractTests(unittest.TestCase):
+    def test_environment_secret_helpers_use_stdin_supported_by_gh(self) -> None:
+        powershell = ENV_SECRET_PS1.read_text(encoding="utf-8")
+        shell = ENV_SECRET_SH.read_text(encoding="utf-8")
+        self.assertNotIn("--body-file", powershell)
+        self.assertNotIn("--body-file", shell)
+        self.assertIn("RedirectStandardInput = $true", powershell)
+        self.assertIn("StandardInput.Write($Value)", powershell)
+        self.assertIn('gh secret set "$name"', shell)
+        self.assertIn('< "$SSH_KEY_FILE"', shell)
+
     def test_tracked_config_and_secret_contract_are_separated(self) -> None:
         public = PUBLIC_CONFIG.read_text(encoding="utf-8")
         secret = SECRET_EXAMPLE.read_text(encoding="utf-8")
