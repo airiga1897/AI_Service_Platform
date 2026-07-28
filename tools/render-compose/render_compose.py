@@ -177,6 +177,31 @@ def _build_context(
         ctx["redis_volume"] = _required(
             volumes.get("redis"), "data.volumes.redis", instance_name
         )
+    elif project_type == "telegram-client":
+        ctx["public_env_file"] = _required(
+            env.get("public_file"), "env.public_file", instance_name
+        )
+        ctx["backend_port"] = _required(
+            local.get("backend_port"), "local.backend_port", instance_name
+        )
+        ctx["healthcheck_live_path"] = _required(
+            healthcheck.get("live_path"), "healthcheck.live_path", instance_name
+        )
+        ctx["worker_heartbeat_max_age"] = _required(
+            healthcheck.get("worker_heartbeat_max_age_seconds"),
+            "healthcheck.worker_heartbeat_max_age_seconds",
+            instance_name,
+        )
+        ctx["web_name"] = _required(
+            _container_with_suffix(containers_future, "web"),
+            "containers.future[*-web]",
+            instance_name,
+        )
+        ctx["worker_name"] = _required(
+            _container_with_suffix(containers_future, "worker"),
+            "containers.future[*-worker]",
+            instance_name,
+        )
     else:
         raise RenderError(
             f"runtime_instances.{instance_name}: unsupported project type {project_type!r}"

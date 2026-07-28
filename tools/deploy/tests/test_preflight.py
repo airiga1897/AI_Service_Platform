@@ -32,6 +32,7 @@ VALID_DEV_REF = (
 )
 VALID_MVP_REF = "ghcr.io/airiga1897/ai_e_retail@sha256:" + "a" * 64
 INVALID_DEV_REF = "ghcr.io/airiga1897/ai_e_retail:wrong-tag"
+VALID_MYCLEANBOT_REF = "ghcr.io/airiga1897/mycleanbot@sha256:" + "b" * 64
 
 
 class PreflightResolveTests(unittest.TestCase):
@@ -74,6 +75,33 @@ class PreflightResolveTests(unittest.TestCase):
             resolve_preflight(registry, "ai-retail-mvp", "preprod", VALID_DEV_REF)
         metadata = resolve_preflight(registry, "ai-retail-mvp", "preprod", VALID_MVP_REF)
         self.assertEqual(metadata["image_ref"], VALID_MVP_REF)
+
+    def test_mycleanbot_prod_is_digest_only_and_platform_owned(self) -> None:
+        registry = load_real()
+        metadata = resolve_preflight(
+            registry,
+            "mycleanbot",
+            "prod",
+            VALID_MYCLEANBOT_REF,
+        )
+        self.assertEqual(metadata["vps"], "VPS1")
+        self.assertEqual(metadata["env_file"], ".env.mycleanbot.secrets")
+        self.assertEqual(metadata["public_env_file"], "mycleanbot.env")
+        self.assertEqual(metadata["deploy_dir"], "/opt/stacks/mycleanbot-prod")
+        instance = registry["runtime_instances"]["mycleanbot"]
+        self.assertFalse(instance["data"]["postgres"]["container_in_stack"])
+        self.assertEqual(
+            instance["data"]["backup"]["restore_rehearsal"],
+            "weekly-scratch-only",
+        )
+        self.assertFalse(instance["vpn"]["public_ingress"])
+        with self.assertRaises(PreflightError):
+            resolve_preflight(
+                registry,
+                "mycleanbot",
+                "prod",
+                "ghcr.io/airiga1897/mycleanbot:main",
+            )
 
     def test_unknown_environment_rejected(self) -> None:
         registry = load_real()

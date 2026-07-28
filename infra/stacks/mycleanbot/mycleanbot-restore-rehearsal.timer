@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly MyCleanBot scratch restore rehearsal
+
+[Timer]
+OnCalendar=Sun *-*-* 04:20:00 UTC
+Persistent=true
+RandomizedDelaySec=20m
+Unit=mycleanbot-restore-rehearsal.service
+
+[Install]
+WantedBy=timers.target

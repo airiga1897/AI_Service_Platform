@@ -531,6 +531,17 @@ def validate_runtime_instances(
         for field in ("file", "example_file"):
             if not env.get(field):
                 fail(errors, f"{node_path}.env.{field} is required")
+        public_file = env.get("public_file")
+        if public_file is not None and (
+            not isinstance(public_file, str)
+            or not public_file
+            or Path(public_file).name != public_file
+            or public_file.startswith(".")
+        ):
+            fail(
+                errors,
+                f"{node_path}.env.public_file must be a non-hidden file basename",
+            )
         wanted_files = expected_env_file_stems(instance_name)
         if wanted_files is not None:
             wanted_file, wanted_example = wanted_files
@@ -813,17 +824,76 @@ def validate_runtime_instances(
                 else:
                     seen_databases[db_name] = db_path
 
+        if instance_data.get("type") == "telegram-client":
+            postgres = data_block.get("postgres") if isinstance(data_block, dict) else {}
+            backup = data_block.get("backup") if isinstance(data_block, dict) else {}
+            vpn = instance_data.get("vpn") or {}
+            monitoring = instance_data.get("monitoring") or {}
+            healthcheck = instance_data.get("healthcheck") or {}
+            if env.get("public_file") != "mycleanbot.env":
+                fail(
+                    errors,
+                    f"{node_path}.env.public_file must be 'mycleanbot.env'",
+                )
+            if env.get("file") != ".env.mycleanbot.secrets":
+                fail(
+                    errors,
+                    f"{node_path}.env.file must be '.env.mycleanbot.secrets'",
+                )
+            if not isinstance(postgres, dict) or postgres.get("ownership") != "platform":
+                fail(errors, f"{node_path}.data.postgres.ownership must be platform")
+            if not isinstance(postgres, dict) or postgres.get("connection") != "DATABASE_URL":
+                fail(errors, f"{node_path}.data.postgres.connection must be DATABASE_URL")
+            if not isinstance(postgres, dict) or postgres.get("container_in_stack") is not False:
+                fail(errors, f"{node_path}.data.postgres.container_in_stack must be false")
+            if not isinstance(backup, dict) or backup.get("ownership") != "platform":
+                fail(errors, f"{node_path}.data.backup.ownership must be platform")
+            if not isinstance(backup, dict) or backup.get("restore_rehearsal") != "weekly-scratch-only":
+                fail(
+                    errors,
+                    f"{node_path}.data.backup.restore_rehearsal must be weekly-scratch-only",
+                )
+            if instance_data.get("access") != "vpn-only":
+                fail(errors, f"{node_path}.access must be vpn-only")
+            if not isinstance(vpn, dict) or vpn.get("container_bind") != "127.0.0.1":
+                fail(errors, f"{node_path}.vpn.container_bind must be 127.0.0.1")
+            if not isinstance(vpn, dict) or vpn.get("public_ingress") is not False:
+                fail(errors, f"{node_path}.vpn.public_ingress must be false")
+            if not isinstance(vpn, dict) or vpn.get("tls_required") is not True:
+                fail(errors, f"{node_path}.vpn.tls_required must be true")
+            if not isinstance(monitoring, dict) or monitoring.get("ownership") != "platform":
+                fail(errors, f"{node_path}.monitoring.ownership must be platform")
+            if not isinstance(healthcheck, dict) or healthcheck.get("live_path") != "/livez":
+                fail(errors, f"{node_path}.healthcheck.live_path must be /livez")
+            heartbeat_age = (
+                healthcheck.get("worker_heartbeat_max_age_seconds")
+                if isinstance(healthcheck, dict)
+                else None
+            )
+            if (
+                isinstance(heartbeat_age, bool)
+                or not isinstance(heartbeat_age, int)
+                or heartbeat_age < 1
+            ):
+                fail(
+                    errors,
+                    f"{node_path}.healthcheck.worker_heartbeat_max_age_seconds"
+                    " must be a positive integer",
+                )
+
         # ---- future_service_template required fields --------------------
         instance_type = instance_data.get("type")
-        if instance_type in ("site", "telegram-bot"):
+        if instance_type in ("site", "telegram-bot", "telegram-client"):
             # Support both the short key (`site` / `bot`) and the long key
             # (`site` / `telegram-bot`) under future_service_template, so the
             # registry can evolve without breaking this validator.
             candidate_keys: tuple[str, ...]
             if instance_type == "site":
                 candidate_keys = ("site",)
-            else:
+            elif instance_type == "telegram-bot":
                 candidate_keys = ("telegram-bot", "bot")
+            else:
+                candidate_keys = ("telegram-client",)
 
             tpl = None
             template_key = candidate_keys[0]

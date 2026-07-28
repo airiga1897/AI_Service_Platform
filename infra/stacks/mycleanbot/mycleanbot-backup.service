@@ -1,0 +1,14 @@
+[Unit]
+Description=AI Service Platform MyCleanBot PostgreSQL backup
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/bin/ai-service-mycleanbot-backup backup
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target

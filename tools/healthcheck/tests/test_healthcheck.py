@@ -152,7 +152,7 @@ class ProbeTests(unittest.TestCase):
 
 class RunCliTests(unittest.TestCase):
     def test_run_returns_exit_0_when_all_ok_or_skipped(self) -> None:
-        # preprod: один реальный target + три placeholder skipped. Мок 200.
+        # preprod: один реальный target, остальные без preprod-домена skipped. Мок 200.
         with mock.patch.object(hc.urlrequest, "urlopen", return_value=_fake_response(200)):
             args = hc.parse_args(["--env", "preprod", "--json"])
             exit_code, output = hc.run(args)
@@ -161,7 +161,10 @@ class RunCliTests(unittest.TestCase):
         self.assertEqual(report["env"], "preprod")
         self.assertEqual(report["summary"]["fail"], 0)
         self.assertEqual(report["summary"]["ok"], 1)
-        self.assertEqual(report["summary"]["skipped"], 3)
+        self.assertEqual(
+            report["summary"]["skipped"],
+            report["summary"]["total"] - 1,
+        )
 
     def test_run_returns_exit_1_on_any_fail(self) -> None:
         with mock.patch.object(hc.urlrequest, "urlopen", return_value=_fake_response(503)):

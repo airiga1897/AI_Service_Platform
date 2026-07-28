@@ -61,6 +61,31 @@ class RenderHappyPathTests(unittest.TestCase):
                 self.assertIn(f"../../{instance['env']['file']}", rendered)
                 self.assertIn(instance["healthcheck"]["path"], rendered)
 
+    def test_mycleanbot_uses_platform_postgres_without_database_container(self) -> None:
+        doc = yaml.safe_load(render_stack("mycleanbot", REGISTRY))
+        self.assertEqual(
+            set(doc["services"]),
+            {"mycleanbot-web", "mycleanbot-worker"},
+        )
+        self.assertNotIn("postgres", str(doc).lower())
+        self.assertEqual(
+            doc["services"]["mycleanbot-worker"]["command"],
+            ["python", "manage.py", "run_telegram_worker"],
+        )
+        self.assertNotIn("ports", doc["services"]["mycleanbot-worker"])
+        self.assertEqual(
+            doc["services"]["mycleanbot-web"]["env_file"],
+            ["./mycleanbot.env", "../../.env.mycleanbot.secrets"],
+        )
+        self.assertIn(
+            "WorkerHeartbeat",
+            " ".join(doc["services"]["mycleanbot-worker"]["healthcheck"]["test"]),
+        )
+        self.assertIn(
+            "/livez",
+            " ".join(doc["services"]["mycleanbot-web"]["healthcheck"]["test"]),
+        )
+
 
 class RenderErrorTests(unittest.TestCase):
     def test_unknown_stack_raises(self) -> None:

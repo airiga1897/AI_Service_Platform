@@ -6,6 +6,10 @@
 
 name: Rollback
 
+concurrency:
+  group: rollback-${{ inputs.instance }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
 on:
   workflow_dispatch:
     inputs:
@@ -18,6 +22,7 @@ on:
           - aromaflow-demo
           - ai-retail-mvp
           - ai-retail-dev
+          - mycleanbot
       environment:
         description: Deploy environment
         required: true
@@ -26,7 +31,7 @@ on:
           - preprod
           - prod
       to_ref:
-        description: Previous immutable image ref to re-deploy (required)
+        description: Previous immutable image ref, or undeployed for the first rollout
         required: false
 
 jobs:
@@ -39,13 +44,28 @@ jobs:
 
       - name: Проверка to_ref
         id: resolve_ref
+        env:
+          INPUT_REF: ${{ inputs.to_ref }}
+          INPUT_INSTANCE: ${{ inputs.instance }}
+          INPUT_ENVIRONMENT: ${{ inputs.environment }}
         run: |
-          if [ -z "${{ inputs.to_ref }}" ]; then
-            echo "to_ref is required. Deploy-state tag lookup is not implemented yet."
-            echo "Pass the previous immutable image ref explicitly."
+          if [ -z "${INPUT_REF}" ]; then
+            echo "to_ref is required. Read .deploy-state/previous or pass undeployed for the first rollout."
             exit 1
           fi
-          echo "image_ref=${{ inputs.to_ref }}" >> "$GITHUB_OUTPUT"
+          if [[ "${INPUT_REF}" == *$'\n'* || "${INPUT_REF}" == *$'\r'* ]]; then
+            echo "to_ref must be a single line."
+            exit 1
+          fi
+          if [ "${INPUT_REF}" = "undeployed" ]; then
+            if [ "${INPUT_INSTANCE}" != "mycleanbot" ] || [ "${INPUT_ENVIRONMENT}" != "prod" ]; then
+              echo "undeployed is allowed only for the first MyCleanBot production rollback."
+              exit 1
+            fi
+            echo "image_ref=ghcr.io/airiga1897/mycleanbot@sha256:0000000000000000000000000000000000000000000000000000000000000000" >> "$GITHUB_OUTPUT"
+          else
+            echo "image_ref=${INPUT_REF}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Установка Python
         uses: actions/setup-python@v5
@@ -74,12 +94,18 @@ jobs:
   unsupported-rollback:
     needs: preflight
     runs-on: ubuntu-latest
-    if: ${{ inputs.instance != 'ai-retail-dev' || inputs.environment != 'preprod' }}
+    if: >-
+      ${{
+        !(
+          (inputs.instance == 'ai-retail-dev' && inputs.environment == 'preprod') ||
+          (inputs.instance == 'mycleanbot' && inputs.environment == 'prod')
+        )
+      }}
     steps:
       - name: Проверка разрешённого rollback
         run: |
           echo "Rollback is intentionally not enabled for instance=${{ inputs.instance }} environment=${{ inputs.environment }}."
-          echo "Only ai-retail-dev/preprod is enabled in this milestone."
+          echo "Enabled rollback targets: ai-retail-dev/preprod and mycleanbot/prod."
           exit 1
 
   rollback:
@@ -106,3 +132,90 @@ jobs:
             exit 0
           fi
           echo "SSH rollback would re-deploy ${IMAGE_REF} here."
+
+  rollback-mycleanbot:
+    needs: preflight
+    runs-on: ubuntu-latest
+    if: >-
+      ${{
+        github.ref == 'refs/heads/main' &&
+        inputs.instance == 'mycleanbot' &&
+        inputs.environment == 'prod' &&
+        inputs.to_ref != 'undeployed'
+      }}
+    environment:
+      name: mycleanbot-prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Re-deploy accepted previous digest
+        env:
+          IMAGE_REF: ${{ inputs.to_ref }}
+          DEPLOY_DIR: ${{ fromJson(needs.preflight.outputs.deploy_metadata).deploy_dir }}
+          COMPOSE_FILE: ${{ fromJson(needs.preflight.outputs.deploy_metadata).compose_file }}
+          ENV_FILE: ${{ fromJson(needs.preflight.outputs.deploy_metadata).env_file }}
+          PUBLIC_ENV_FILE: ${{ fromJson(needs.preflight.outputs.deploy_metadata).public_env_file }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        run: |
+          set -euo pipefail
+          SSH_PORT="${SSH_PORT:-22}"
+          test -n "${SSH_KNOWN_HOSTS:-}" && test -n "${GHCR_TOKEN:-}"
+          mkdir -p deploy-bundle
+          cp "${COMPOSE_FILE}" deploy-bundle/docker-compose.yml
+          sed -i "s#../../${ENV_FILE}#${ENV_FILE}#g" deploy-bundle/docker-compose.yml
+          cp "$(dirname "${COMPOSE_FILE}")/${PUBLIC_ENV_FILE}" \
+            "deploy-bundle/${PUBLIC_ENV_FILE}"
+          cp tools/deploy/mycleanbot_remote.sh deploy-bundle/
+          chmod 755 deploy-bundle/mycleanbot_remote.sh
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${SSH_KEY}" > ~/.ssh/ai-service-platform-deploy
+          printf '%s\n' "${SSH_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/ai-service-platform-deploy ~/.ssh/known_hosts
+          scp -i ~/.ssh/ai-service-platform-deploy -P "${SSH_PORT}" \
+            deploy-bundle/docker-compose.yml "deploy-bundle/${PUBLIC_ENV_FILE}" \
+            deploy-bundle/mycleanbot_remote.sh \
+            "${SSH_USER}@${SSH_HOST}:${DEPLOY_DIR}/"
+          printf '%s' "${GHCR_TOKEN}" | \
+            ssh -i ~/.ssh/ai-service-platform-deploy -p "${SSH_PORT}" "${SSH_USER}@${SSH_HOST}" \
+              "cd '${DEPLOY_DIR}' && GHCR_USERNAME='${GHCR_USERNAME}' DEPLOY_DIR='${DEPLOY_DIR}' ENV_FILE='${ENV_FILE}' CONFIG_FILE='${PUBLIC_ENV_FILE}' ./mycleanbot_remote.sh rollback '${IMAGE_REF}'"
+
+  rollback-first-mycleanbot-deployment:
+    needs: preflight
+    runs-on: ubuntu-latest
+    if: >-
+      ${{
+        github.ref == 'refs/heads/main' &&
+        inputs.instance == 'mycleanbot' &&
+        inputs.environment == 'prod' &&
+        inputs.to_ref == 'undeployed'
+      }}
+    environment:
+      name: mycleanbot-prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stop only MyCleanBot application containers
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          SSH_PORT="${SSH_PORT:-22}"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${SSH_KEY}" > ~/.ssh/ai-service-platform-deploy
+          printf '%s\n' "${SSH_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/ai-service-platform-deploy ~/.ssh/known_hosts
+          scp -i ~/.ssh/ai-service-platform-deploy -P "${SSH_PORT}" \
+            tools/deploy/mycleanbot_remote.sh \
+            "${SSH_USER}@${SSH_HOST}:/opt/stacks/mycleanbot-prod/"
+          ssh -i ~/.ssh/ai-service-platform-deploy -p "${SSH_PORT}" "${SSH_USER}@${SSH_HOST}" \
+            "cd /opt/stacks/mycleanbot-prod && chmod 755 mycleanbot_remote.sh && ./mycleanbot_remote.sh rollback undeployed"

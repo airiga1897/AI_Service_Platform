@@ -40,6 +40,7 @@ jobs:
           test -d infra/stacks/aromaflow-demo
           test -d infra/stacks/ai-retail-mvp
           test -d infra/stacks/ai-retail-dev
+          test -d infra/stacks/mycleanbot
           test -d infra/edge/softether
 
       - name: Валидация реестра сервисов (services.yml)

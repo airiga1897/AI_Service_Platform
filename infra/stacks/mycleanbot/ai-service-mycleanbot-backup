@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+action="${1:-}"
+[[ "$action" =~ ^(init|backup|restore-rehearsal)$ ]] || {
+  echo "usage: ai-service-mycleanbot-backup init|backup|restore-rehearsal" >&2
+  exit 2
+}
+
+exec python3 /usr/local/lib/ai-service-platform/postgres_tenant_backup.py \
+  "$action" \
+  --config /etc/ai-service-platform/mycleanbot-backup.env \
+  --app-env /opt/stacks/mycleanbot-prod/.env.mycleanbot.secrets

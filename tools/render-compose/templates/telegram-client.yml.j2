@@ -1,0 +1,43 @@
+# СГЕНЕРИРОВАННЫЙ ФАЙЛ — не редактируйте вручную.
+# Источник: services.yml + tools/render-compose/templates/telegram-client.yml.j2
+# Стек: << instance_name >> (project: << project_name >>, type: telegram-client)
+
+services:
+  << web_name >>:
+    image: "${<< env_prefix >>_IMAGE:?set immutable << env_prefix >>_IMAGE digest}"
+    env_file:
+      - ./<< public_env_file >>
+      - ../../<< env_file >>
+    ports:
+      - "127.0.0.1:<< backend_port >>:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000<< healthcheck_live_path >>', timeout=<< healthcheck_timeout >>); urllib.request.urlopen('http://127.0.0.1:8000<< healthcheck_path >>', timeout=<< healthcheck_timeout >>)"
+      interval: 30s
+      timeout: << healthcheck_timeout >>s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  << worker_name >>:
+    image: "${<< env_prefix >>_IMAGE:?set immutable << env_prefix >>_IMAGE digest}"
+    command: ["python", "manage.py", "run_telegram_worker"]
+    env_file:
+      - ./<< public_env_file >>
+      - ../../<< env_file >>
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os; os.environ.setdefault('DJANGO_SETTINGS_MODULE','config.settings'); import django; django.setup(); from datetime import timedelta; from django.utils import timezone; from core.models import WorkerHeartbeat; h=WorkerHeartbeat.objects.filter(name='telegram-supervisor').first(); assert h and h.updated_at >= timezone.now()-timedelta(seconds=<< worker_heartbeat_max_age >>)"
+      interval: 30s
+      timeout: << healthcheck_timeout >>s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+volumes: {}

@@ -331,6 +331,25 @@ projects:
       backend: services/ai-retail/backend
       frontend: services/ai-retail/frontend
 
+  mycleanbot:
+    display_name: MyCleanBot
+    type: telegram-client
+    status: external-github-managed
+    owner: airiga1897
+    source:
+      policy: github
+      repository: https://github.com/airiga1897/MyCleanBot
+      bootstrap_ref: main
+      stable_branches:
+        development: main
+        production: main
+      release_policy:
+        production: immutable-main-image
+      deploy_refs:
+        preferred: image_ref
+        allowed_source_refs:
+          - main
+
 runtime_instances:
   aromaflow-work:
     project: aromaflowai
@@ -667,6 +686,80 @@ runtime_instances:
           deploy_dir: /opt/stacks/ai-retail-dev-preprod
           deploy_state_tag_prefix: deploy/ai-retail-dev/preprod/
 
+  mycleanbot:
+    type: telegram-client
+    project: mycleanbot
+    role: private-telegram-self-filter
+    profile: mycleanbot
+    access: vpn-only
+    env:
+      prefix: MYCLEANBOT
+      file: .env.mycleanbot.secrets
+      example_file: .env.mycleanbot.secrets.example
+      public_file: mycleanbot.env
+    local:
+      backend_port: 8040
+    domains:
+      local:
+        - http://localhost:8040
+      preprod: []
+      prod: []
+    containers:
+      future:
+        - mycleanbot-web
+        - mycleanbot-worker
+    healthcheck:
+      live_path: /livez
+      path: /healthz
+      expected_status: 200
+      timeout_seconds: 10
+      worker_heartbeat_max_age_seconds: 45
+    data:
+      database: mycleanbot
+      postgres:
+        ownership: platform
+        connection: DATABASE_URL
+        container_in_stack: false
+      backup:
+        ownership: platform
+        format: pg_dump-custom-restic
+        schedule: daily
+        retention:
+          daily: 14
+          weekly: 4
+          monthly: 6
+        repository_check: after-each-backup
+        restore_rehearsal: weekly-scratch-only
+        production_restore: explicit-approval-only
+    vpn:
+      ingress_owner: platform
+      container_bind: 127.0.0.1
+      reverse_proxy_template: infra/stacks/mycleanbot/nginx.mycleanbot-vpn.conf.template
+      public_ingress: false
+      tls_required: true
+    monitoring:
+      ownership: platform
+      web_liveness: /livez
+      readiness_and_worker_heartbeat: /healthz
+      postgres_exporter: required
+      backup_freshness_metric: mycleanbot_backup_last_success_timestamp_seconds
+      restore_rehearsal_metric: mycleanbot_restore_rehearsal_last_success_timestamp_seconds
+    deploy:
+      allowed_image_ref_pattern: '^ghcr\.io/airiga1897/mycleanbot@sha256:[0-9a-f]{64}$'
+      release_guard: immutable-released-image
+      source:
+        repository: https://github.com/airiga1897/MyCleanBot
+        bootstrap_ref: main
+        preferred_deploy_artifact: image_ref
+      branches:
+        prod: main
+      environments:
+        prod:
+          vps: VPS1
+          compose_file: infra/stacks/mycleanbot/docker-compose.mycleanbot.yml
+          deploy_dir: /opt/stacks/mycleanbot-prod
+          deploy_state_tag_prefix: deploy/mycleanbot/prod/
+
 future_service_template:
   site:
     type: site
@@ -687,3 +780,21 @@ future_service_template:
       - webhook.prod
       - containers
       - healthcheck
+  telegram-client:
+    type: telegram-client
+    required:
+      - profile
+      - env.prefix
+      - env.public_file
+      - local.backend_port
+      - containers
+      - healthcheck
+      - data.database
+      - data.postgres.ownership
+      - data.postgres.container_in_stack
+      - data.backup.ownership
+      - data.backup.restore_rehearsal
+      - healthcheck.live_path
+      - healthcheck.worker_heartbeat_max_age_seconds
+      - vpn.public_ingress
+      - monitoring.ownership
