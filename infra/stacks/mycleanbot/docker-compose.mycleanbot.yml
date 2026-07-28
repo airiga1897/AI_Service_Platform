@@ -3,13 +3,34 @@
 # Стек: mycleanbot (project: mycleanbot, type: telegram-client)
 
 services:
+  mycleanbot-route:
+    image: "${MYCLEANBOT_ROUTE_IMAGE:?set platform route image}"
+    pull_policy: never
+    container_name: mycleanbot-route
+    cap_add: [NET_ADMIN]
+    command:
+      - /bin/sh
+      - -ec
+      - >-
+        while true; do ip route replace
+        172.30.8.10/32 via
+        172.31.1.2;
+        sleep 5; done
+    ports:
+      - "127.0.0.1:8040:8000"
+    restart: unless-stopped
+    networks:
+      app:
+        ipv4_address: 172.31.1.10
+
   mycleanbot-web:
     image: "${MYCLEANBOT_IMAGE:?set immutable MYCLEANBOT_IMAGE digest}"
+    network_mode: service:mycleanbot-route
     env_file:
       - ./mycleanbot.env
       - ../../.env.mycleanbot.secrets
-    ports:
-      - "127.0.0.1:8040:8000"
+    depends_on:
+      - mycleanbot-route
     healthcheck:
       test:
         - CMD
@@ -24,10 +45,13 @@ services:
 
   mycleanbot-worker:
     image: "${MYCLEANBOT_IMAGE:?set immutable MYCLEANBOT_IMAGE digest}"
+    network_mode: service:mycleanbot-route
     command: ["python", "manage.py", "run_telegram_worker"]
     env_file:
       - ./mycleanbot.env
       - ../../.env.mycleanbot.secrets
+    depends_on:
+      - mycleanbot-route
     healthcheck:
       test:
         - CMD
@@ -39,5 +63,10 @@ services:
       retries: 3
       start_period: 60s
     restart: unless-stopped
+
+networks:
+  app:
+    external: true
+    name: ai_service_app_vps1
 
 volumes: {}

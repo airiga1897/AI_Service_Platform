@@ -3,9 +3,21 @@
 Приватный Telegram self-filter разворачивается на VPS1 двумя процессами одного
 immutable-образа: `mycleanbot-web` и `mycleanbot-worker`.
 
+Оба процесса разделяют network namespace platform-owned контейнера
+`mycleanbot-route`. Он использует локальный image уже принятого
+`platform-router`, подключается к `ai_service_app_vps1` с адресом
+`172.31.1.10` и поддерживает только маршрут
+`172.30.8.10/32 via 172.31.1.2`. Это инфраструктурный route-anchor, а не
+третий процесс продукта; он не содержит PostgreSQL и не публикует внешний порт.
+
 PostgreSQL не входит в Compose-стек. Платформа создаёт базу, управляет резервным
 копированием и передаёт приложению `DATABASE_URL` через защищённый
 `/opt/stacks/mycleanbot-prod/.env.mycleanbot.secrets`.
+
+До установки runtime-файлов оператор обязан проверить, что на VPS1 работают
+`platform-router`, `ai_service_app_vps1` и узкая TCP policy MyCleanBot к
+`172.30.8.10:5432`. Ручной публичный маршрут или прямой PostgreSQL listener
+запрещены.
 
 Конфигурация разделена по аналогии с platform `site_runtime`: несекретные
 production-настройки находятся в tracked-файле `mycleanbot.env`, а

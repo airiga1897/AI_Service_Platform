@@ -335,6 +335,18 @@ class ValidatorBrokenFixtureTests(unittest.TestCase):
         )
         self.assertTrue(any("vpn.public_ingress must be false" in error for error in errors))
 
+    def test_telegram_client_requires_canonical_platform_route(self) -> None:
+        instance = self.data["runtime_instances"]["mycleanbot"]
+        instance["data"]["postgres"]["router_ipv4"] = "172.31.1.99"
+        errors, _ = validate_data(self.data)
+        self.assertTrue(
+            any(
+                "data.postgres.router_ipv4 must be '172.31.1.2'" in error
+                for error in errors
+            ),
+            errors,
+        )
+
     def test_telegram_client_requires_scratch_restore_and_worker_heartbeat(self) -> None:
         instance = self.data["runtime_instances"]["mycleanbot"]
         instance["data"]["backup"]["restore_rehearsal"] = "none"

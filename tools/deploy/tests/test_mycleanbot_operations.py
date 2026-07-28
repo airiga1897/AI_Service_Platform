@@ -115,6 +115,8 @@ class DeploymentContractTests(unittest.TestCase):
             self.assertIn(f"{name}=", secret)
         self.assertIn("DJANGO_DEBUG=false", public)
         self.assertIn("DJANGO_ALLOWED_HOSTS=", public)
+        self.assertIn("MINI_APP_RECONCILE_SECONDS=300", public)
+        self.assertIn("MINI_APP_ADMIN_EMAILS=", public)
 
     def test_remote_script_has_valid_bash_syntax(self) -> None:
         if os.name == "nt":
@@ -142,6 +144,11 @@ class DeploymentContractTests(unittest.TestCase):
             "docker login",
             "CONFIG_FILE",
             "env_value",
+            "MYCLEANBOT_ROUTE_IMAGE",
+            "docker network inspect ai_service_app_vps1",
+            "platform route container is missing",
+            "socket.create_connection(('172.30.8.10', 5432), 5)",
+            "up -d mycleanbot-route",
         ):
             self.assertIn(required, text)
         self.assertNotIn("ssh-keyscan", text)
