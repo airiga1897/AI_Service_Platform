@@ -32,6 +32,30 @@ class PlatformRouterRouteContractTests(unittest.TestCase):
             tasks,
         )
 
+    def test_client_to_client_route_uses_target_client_as_next_hop(self) -> None:
+        tasks = PLATFORM_ROUTER_TASKS.read_text(encoding="utf-8")
+        reconcile = (
+            ROOT
+            / "infra"
+            / "ansible"
+            / "roles"
+            / "platform_router"
+            / "templates"
+            / "platform-router-reconcile.sh.j2"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("peer_clients = l3_link.get(\"standby_clients\") or {}", tasks)
+        self.assertIn('"softether_client_next_hop": policy_vpn_next_hop', tasks)
+        self.assertIn(
+            'via "{{ policy.softether_client_next_hop }}"',
+            reconcile,
+        )
+        self.assertIn('"softether_return_cidr": return_route_cidr', tasks)
+        self.assertIn(
+            'via "{{ policy.softether_return_next_hop }}"',
+            reconcile,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
