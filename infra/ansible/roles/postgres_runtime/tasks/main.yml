@@ -295,8 +295,8 @@
         seen_password_secrets.add(password_secret)
 
         extensions = item.get("extensions") or []
-        if not isinstance(extensions, list) or not extensions:
-            fail(f"{path}.extensions must be a non-empty list")
+        if not isinstance(extensions, list):
+            fail(f"{path}.extensions must be a list")
         normalized_product_extensions = []
         for extension in extensions:
             extension = str(extension).strip()
