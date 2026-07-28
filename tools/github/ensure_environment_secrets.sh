@@ -60,13 +60,8 @@ EOF
 write_secret_from_string() {
     local name="$1"
     local value="$2"
-    local tmp
-    tmp="$(mktemp)"
-    trap 'rm -f "$tmp"' RETURN
-    printf '%s' "$value" > "$tmp"
-    gh secret set "$name" --repo "$REPO" --env "$ENVIRONMENT" --body-file "$tmp"
-    rm -f "$tmp"
-    trap - RETURN
+    printf '%s' "$value" |
+        gh secret set "$name" --repo "$REPO" --env "$ENVIRONMENT"
     echo "Secret ensured: $name"
 }
 
@@ -175,7 +170,7 @@ echo "Ensuring Environment secrets for $ENVIRONMENT"
 write_secret_from_string "SSH_HOST" "$SSH_HOST"
 write_secret_from_string "SSH_USER" "$SSH_USER"
 write_secret_from_string "SSH_PORT" "$SSH_PORT"
-gh secret set SSH_KEY --repo "$REPO" --env "$ENVIRONMENT" --body-file "$SSH_KEY_FILE"
+gh secret set SSH_KEY --repo "$REPO" --env "$ENVIRONMENT" < "$SSH_KEY_FILE"
 echo "Secret ensured: SSH_KEY"
 
 echo "GitHub Environment secrets are ready: $ENVIRONMENT"
