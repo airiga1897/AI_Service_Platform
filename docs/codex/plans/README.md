@@ -61,8 +61,10 @@ these paths and installs log rotation on every current and future VPS. See
 - [Future VPS transport](future-vps-transport-softether-s2s-and-ssh-tunnel.md) - SoftEther site-to-site/cascade и SSH tunnel fallback.
 - [Future SD-WAN-like egress controller](future-sd-wan-like-egress-controller.md) - direct/cascade path selection for approved targets with health checks and safe route reconciliation.
 - [Future security checks](future-security-sast-sca-dast.md) - SAST, SCA/OSA и DAST в report-only режиме.
+- [Future site_runtime GitHub Actions CD](future-site-runtime-github-actions-cd.md) — approved deployment exact product digest через ограниченный gateway на orchestration node после приёмки ручного MVP.
 - [Future platform role node migration](future-platform-role-node-migration-and-primary-promotion.md) - перенос physical node и назначение нового active node.
 - [Future operator state node retirement tool](future-operator-state-node-retirement-tool.md) - безопасное удаление VPS из service placement, cascade topology, inventory inputs и operator secrets.
+- [Future operator layout refactor](future-operator-layout-refactor.md) — возможное разнесение canonical CSV manifests и bootstrap public key по подкаталогам только как согласованная миграция tooling и удалённых путей.
 - [Future management control plane and knowledge retrieval](future-management-control-plane-and-knowledge-retrieval.md) - web control plane и AI semantic knowledge layer.
 - [Future data services and platform auth](future-data-services-and-platform-auth.md) - PostgreSQL, MariaDB reserved и platform auth.
 - [Controlled pgvector runtime migration](pgvector-runtime-migration.md) - standby-first PostgreSQL image migration required by AI_E_Retail.
