@@ -142,6 +142,11 @@ class DeploymentContractTests(unittest.TestCase):
             "docker login",
             "CONFIG_FILE",
             "env_value",
+            "MYCLEANBOT_ROUTE_IMAGE",
+            "docker network inspect ai_service_app_vps1",
+            "platform route container is missing",
+            "socket.create_connection(('172.30.8.10', 5432), 5)",
+            "up -d mycleanbot-route",
         ):
             self.assertIn(required, text)
         self.assertNotIn("ssh-keyscan", text)

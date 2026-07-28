@@ -65,9 +65,25 @@ class RenderHappyPathTests(unittest.TestCase):
         doc = yaml.safe_load(render_stack("mycleanbot", REGISTRY))
         self.assertEqual(
             set(doc["services"]),
-            {"mycleanbot-web", "mycleanbot-worker"},
+            {"mycleanbot-route", "mycleanbot-web", "mycleanbot-worker"},
         )
         self.assertNotIn("postgres", str(doc).lower())
+        route = doc["services"]["mycleanbot-route"]
+        self.assertEqual(route["cap_add"], ["NET_ADMIN"])
+        self.assertEqual(route["networks"]["app"]["ipv4_address"], "172.31.1.10")
+        self.assertEqual(route["ports"], ["127.0.0.1:8040:8000"])
+        self.assertEqual(
+            doc["networks"]["app"]["name"],
+            "ai_service_app_vps1",
+        )
+        self.assertEqual(
+            doc["services"]["mycleanbot-web"]["network_mode"],
+            "service:mycleanbot-route",
+        )
+        self.assertEqual(
+            doc["services"]["mycleanbot-worker"]["network_mode"],
+            "service:mycleanbot-route",
+        )
         self.assertEqual(
             doc["services"]["mycleanbot-worker"]["command"],
             ["python", "manage.py", "run_telegram_worker"],

@@ -846,6 +846,18 @@ def validate_runtime_instances(
                 fail(errors, f"{node_path}.data.postgres.connection must be DATABASE_URL")
             if not isinstance(postgres, dict) or postgres.get("container_in_stack") is not False:
                 fail(errors, f"{node_path}.data.postgres.container_in_stack must be false")
+            expected_postgres_network = {
+                "app_network": "ai_service_app_vps1",
+                "route_anchor_ipv4": "172.31.1.10",
+                "router_ipv4": "172.31.1.2",
+                "route_destination": "172.30.8.10/32",
+            }
+            for field, expected in expected_postgres_network.items():
+                if not isinstance(postgres, dict) or postgres.get(field) != expected:
+                    fail(
+                        errors,
+                        f"{node_path}.data.postgres.{field} must be {expected!r}",
+                    )
             if not isinstance(backup, dict) or backup.get("ownership") != "platform":
                 fail(errors, f"{node_path}.data.backup.ownership must be platform")
             if not isinstance(backup, dict) or backup.get("restore_rehearsal") != "weekly-scratch-only":

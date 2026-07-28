@@ -706,6 +706,7 @@ runtime_instances:
       prod: []
     containers:
       future:
+        - mycleanbot-route
         - mycleanbot-web
         - mycleanbot-worker
     healthcheck:
@@ -720,6 +721,10 @@ runtime_instances:
         ownership: platform
         connection: DATABASE_URL
         container_in_stack: false
+        app_network: ai_service_app_vps1
+        route_anchor_ipv4: 172.31.1.10
+        router_ipv4: 172.31.1.2
+        route_destination: 172.30.8.10/32
       backup:
         ownership: platform
         format: pg_dump-custom-restic

@@ -10,6 +10,7 @@ CONFIG_FILE="${CONFIG_FILE:-mycleanbot.env}"
 STATE_DIR="${STATE_DIR:-.deploy-state}"
 BACKUP_COMMAND="${BACKUP_COMMAND:-sudo -n /usr/local/bin/ai-service-mycleanbot-backup backup}"
 IMAGE_PATTERN='^ghcr\.io/airiga1897/mycleanbot@sha256:[0-9a-f]{64}$'
+ROUTE_CONTAINER="${ROUTE_CONTAINER:-platform-router}"
 
 fail() {
   printf 'mycleanbot deploy error: %s\n' "$*" >&2
@@ -33,16 +34,46 @@ compose() {
 
 write_deploy_env() {
   local image_ref="$1"
+  local route_image
   local temporary
+  route_image="$(docker inspect "$ROUTE_CONTAINER" --format '{{.Config.Image}}')" ||
+    fail "platform route container is not available"
+  [[ -n "$route_image" ]] || fail "platform route image is empty"
+  docker image inspect "$route_image" >/dev/null ||
+    fail "platform route image is not present locally"
   temporary="$(mktemp "${DEPLOY_DIR}/.env.deploy.XXXXXX")"
   chmod 600 "$temporary"
-  printf 'MYCLEANBOT_IMAGE=%s\n' "$image_ref" >"$temporary"
+  {
+    printf 'MYCLEANBOT_IMAGE=%s\n' "$image_ref"
+    printf 'MYCLEANBOT_ROUTE_IMAGE=%s\n' "$route_image"
+  } >"$temporary"
   mv -f "$temporary" .env.deploy
+}
+
+verify_postgres_route() {
+  local image_ref="$1"
+  local expected_route_image
+  local configured_route_image
+  expected_route_image="$(docker inspect "$ROUTE_CONTAINER" --format '{{.Config.Image}}')"
+  configured_route_image="$(
+    compose "$image_ref" ps -q mycleanbot-route |
+      xargs -r docker inspect --format '{{.Config.Image}}'
+  )"
+  [[ -n "$expected_route_image" && "$configured_route_image" == "$expected_route_image" ]] ||
+    fail "mycleanbot-route does not use the accepted platform route image"
+  compose "$image_ref" exec -T mycleanbot-route \
+    sh -ec "ip route show 172.30.8.10/32 | grep -F 'via 172.31.1.2'" >/dev/null ||
+    fail "MyCleanBot PostgreSQL route is not ready"
+  compose "$image_ref" run --rm --no-deps mycleanbot-web \
+    python -c \
+    "import socket; socket.create_connection(('172.30.8.10', 5432), 5).close()" ||
+    fail "MyCleanBot PostgreSQL TCP path is not ready"
 }
 
 verify_runtime() {
   local image_ref="$1"
   local configured
+  verify_postgres_route "$image_ref"
   for service in mycleanbot-web mycleanbot-worker; do
     configured="$(compose "$image_ref" ps -q "$service" | xargs -r docker inspect --format '{{.Config.Image}}')"
     [[ "$configured" == "$image_ref" ]] || fail "$service does not use the accepted digest"
@@ -67,7 +98,7 @@ restore_previous_runtime() {
   local previous_ref="$1"
   if [[ -n "$previous_ref" ]]; then
     write_deploy_env "$previous_ref"
-    compose "$previous_ref" pull
+    compose "$previous_ref" pull mycleanbot-web mycleanbot-worker
     compose "$previous_ref" up -d --remove-orphans
     verify_runtime "$previous_ref"
   else
@@ -133,7 +164,12 @@ deploy() {
     require_digest "$previous_ref"
   fi
 
-  MYCLEANBOT_IMAGE="$image_ref" docker compose -f "$COMPOSE_FILE" config --quiet
+  docker network inspect ai_service_app_vps1 >/dev/null ||
+    fail "platform application network is missing"
+  docker inspect "$ROUTE_CONTAINER" >/dev/null ||
+    fail "platform route container is missing"
+  write_deploy_env "$image_ref"
+  compose "$image_ref" config --quiet
 
   # The platform backup command owns its credentials and must complete before
   # any migration. It must not print DATABASE_URL or passwords.
@@ -141,9 +177,11 @@ deploy() {
 
   docker_login
 
-  write_deploy_env "$image_ref"
-  compose "$image_ref" pull
-  compose "$image_ref" run --rm mycleanbot-web python manage.py migrate --noinput
+  compose "$image_ref" pull mycleanbot-web mycleanbot-worker
+  compose "$image_ref" up -d mycleanbot-route
+  verify_postgres_route "$image_ref"
+  compose "$image_ref" run --rm --no-deps mycleanbot-web \
+    python manage.py migrate --noinput
   compose "$image_ref" up -d --remove-orphans
 
   if ! verify_runtime "$image_ref"; then
@@ -180,7 +218,7 @@ rollback() {
   [[ -f "$STATE_DIR/current" ]] && current_ref="$(<"$STATE_DIR/current")"
   require_digest "$current_ref"
   write_deploy_env "$target_ref"
-  compose "$target_ref" pull
+  compose "$target_ref" pull mycleanbot-web mycleanbot-worker
   compose "$target_ref" up -d --remove-orphans
   if ! verify_runtime "$target_ref"; then
     write_deploy_env "$current_ref"
