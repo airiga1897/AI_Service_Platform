@@ -1169,7 +1169,21 @@
     PY
       if [ "$route_destination" = "true" ]; then
         if [ -n "$vpn_iface" ]; then
-          docker exec -u 0 "$container" ip route replace "$destination_ipv4/32" via "$vpn_next_hop" dev "$vpn_iface"
+          vpn_ready=false
+          for _attempt in $(seq 1 30); do
+            if docker exec -u 0 "$container" sh -ceu \
+              'ip link show dev "$1" | grep -q "UP" && ip -4 addr show dev "$1" | grep -q "inet "' \
+              sh "$vpn_iface"; then
+              vpn_ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$vpn_ready" != "true" ]; then
+            echo "VPN route interface did not become ready: $vpn_iface" >&2
+            exit 1
+          fi
+          docker exec -u 0 "$container" ip route replace "$destination_ipv4/32" via "$vpn_next_hop" dev "$vpn_iface" onlink
         else
           docker exec -u 0 "$container" ip route replace "$destination_ipv4/32" via "$next_hop"
         fi
