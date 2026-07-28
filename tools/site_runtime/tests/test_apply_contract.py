@@ -229,7 +229,12 @@ class ComposeContractTests(unittest.TestCase):
         self.assertIn('"docker", "compose", "-f", compose_file, "ps", "-aq", "web", "worker"', tasks)
         self.assertNotIn('"site-runtime-{{ site_runtime_instance }}-web"', tasks)
         self.assertIn("site_runtime_current_deployment.get('storage', {})", tasks)
+        self.assertIn(
+            "site_runtime_current_deployment.get('environment_checksum') == site_runtime_environment_checksum",
+            tasks,
+        )
         self.assertIn("'storage': site_runtime_storage_identity", tasks)
+        self.assertIn("'environment_checksum': site_runtime_environment_checksum", tasks)
 
     def test_runtime_env_declares_postgresql_engine(self) -> None:
         env_template = (ROOT / "infra/ansible/roles/site_runtime_apply/templates/runtime.env.j2").read_text(encoding="utf-8")

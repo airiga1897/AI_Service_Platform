@@ -345,6 +345,7 @@
       {{
         site_runtime_current_deployment.get('digest') == site_runtime_model.distribution_digest
         and site_runtime_current_deployment.get('compose_checksum') == site_runtime_compose_checksum
+        and site_runtime_current_deployment.get('environment_checksum') == site_runtime_environment_checksum
         and site_runtime_current_deployment.get('storage', {}) == site_runtime_storage_identity
       }}
 
@@ -614,7 +615,8 @@
         content: >-
           {{ {'deployment_id': site_runtime_deployment_id, 'deployment_time_utc': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ'),
           'alias': inventory_hostname, 'previous_digest': site_runtime_previous_digest, 'current_digest': site_runtime_model.distribution_digest,
-          'compose_checksum': site_runtime_compose_checksum, 'support_image_digests': site_runtime_support_receipt.images | map(attribute='distribution_digest') | list,
+          'compose_checksum': site_runtime_compose_checksum, 'environment_checksum': site_runtime_environment_checksum,
+          'support_image_digests': site_runtime_support_receipt.images | map(attribute='distribution_digest') | list,
           'storage': site_runtime_storage_identity,
           'static_status': site_runtime_static_status, 'migration_status': site_runtime_migration_status,
           'health_result': site_runtime_health_status,
@@ -628,7 +630,8 @@
       ansible.builtin.copy:
         content: >-
           {{ {'deployment_id': site_runtime_deployment_id, 'digest': site_runtime_model.distribution_digest,
-          'compose_checksum': site_runtime_compose_checksum, 'storage': site_runtime_storage_identity} | to_nice_json }}
+          'compose_checksum': site_runtime_compose_checksum, 'environment_checksum': site_runtime_environment_checksum,
+          'storage': site_runtime_storage_identity} | to_nice_json }}
         dest: "{{ site_runtime_stage_root }}/deployments/{{ site_runtime_instance }}/current.json"
         mode: "0640"
 
@@ -673,7 +676,8 @@
         content: >-
           {{ {'deployment_id': site_runtime_deployment_id, 'deployment_time_utc': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ'),
           'alias': inventory_hostname, 'previous_digest': site_runtime_previous_digest, 'current_digest': site_runtime_model.distribution_digest,
-          'compose_checksum': site_runtime_compose_checksum, 'storage': site_runtime_storage_identity,
+          'compose_checksum': site_runtime_compose_checksum, 'environment_checksum': site_runtime_environment_checksum,
+          'storage': site_runtime_storage_identity,
           'static_status': site_runtime_static_status | default('not_started'),
           'migration_status': site_runtime_migration_status | default('not_started'),
           'health_result': site_runtime_health_status | default('not_started'),
@@ -768,6 +772,7 @@
       alias: "{{ inventory_hostname }}"
       deployment_identity: "{{ site_runtime_model.image_ref }}"
       compose_checksum: "{{ site_runtime_compose_checksum }}"
+      environment_checksum: "{{ site_runtime_environment_checksum }}"
       support_images: "{{ site_runtime_support_receipt.images | map(attribute='resolved_ref') | list }}"
       storage: "{{ site_runtime_storage_identity }}"
       unmanaged_private_media_entries: "{{ site_runtime_unmanaged_private_media_entries }}"
