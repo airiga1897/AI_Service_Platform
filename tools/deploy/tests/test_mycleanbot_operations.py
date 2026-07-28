@@ -5,9 +5,9 @@ from __future__ import annotations
 import importlib.util
 import os
 import subprocess
-import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import jinja2
 import yaml
@@ -16,6 +16,18 @@ import yaml
 ROOT = Path(__file__).resolve().parents[3]
 REMOTE = ROOT / "tools" / "deploy" / "mycleanbot_remote.sh"
 BACKUP = ROOT / "tools" / "postgres-tenant" / "postgres_tenant_backup.py"
+BACKUP_WRAPPER = (
+    ROOT / "infra" / "stacks" / "mycleanbot" / "ai-service-mycleanbot-backup"
+)
+BACKUP_NETNS = (
+    ROOT / "infra" / "stacks" / "mycleanbot" / "mycleanbot-backup-netns"
+)
+BACKUP_ROUTES = (
+    ROOT / "infra" / "stacks" / "mycleanbot" / "mycleanbot-backup-routes"
+)
+BACKUP_SSHD = (
+    ROOT / "infra" / "stacks" / "mycleanbot" / "sshd_config_mycleanbot_backup"
+)
 PROVISION = ROOT / "tools" / "postgres-tenant" / "provision_mycleanbot.py"
 DEPLOY_WORKFLOW = ROOT / ".github" / "workflows" / "deploy.yml"
 ROLLBACK_WORKFLOW = ROOT / ".github" / "workflows" / "rollback.yml"
@@ -51,15 +63,43 @@ provision_spec.loader.exec_module(provision_module)
 
 
 class BackupContractTests(unittest.TestCase):
+    def test_restore_rehearsal_uses_and_removes_ephemeral_postgres(self) -> None:
+        wrapper = BACKUP_WRAPPER.read_text(encoding="utf-8")
+        self.assertIn("SCRATCH_POSTGRES_IMAGE", wrapper)
+        self.assertIn("--name \"$scratch_container\"", wrapper)
+        self.assertIn("--network ai_service_app_vps1", wrapper)
+        self.assertIn("trap cleanup_scratch EXIT", wrapper)
+        self.assertIn("docker rm -f \"$scratch_container\"", wrapper)
+        self.assertNotIn("POSTGRES_SUPERUSER_PASSWORD", wrapper)
+
+    def test_backup_sftp_is_bound_only_inside_private_namespace(self) -> None:
+        netns = BACKUP_NETNS.read_text(encoding="utf-8")
+        sshd = BACKUP_SSHD.read_text(encoding="utf-8")
+        self.assertIn('namespace="mycleanbot-backup"', netns)
+        self.assertIn('network="ai_service_data_vps5"', netns)
+        self.assertIn('endpoint="172.30.5.10/24"', netns)
+        self.assertIn('gateway="172.30.5.2"', netns)
+        self.assertIn("ListenAddress 172.30.5.10", sshd)
+        self.assertIn("Port 22", sshd)
+        self.assertIn("PasswordAuthentication no", sshd)
+        self.assertIn("AllowTcpForwarding no", sshd)
+        self.assertNotIn("0.0.0.0", sshd)
+
+    def test_backup_host_routes_use_only_platform_router(self) -> None:
+        routes = BACKUP_ROUTES.read_text(encoding="utf-8")
+        self.assertIn('router_ipv4="172.31.1.2"', routes)
+        self.assertIn('"172.30.8.10/32" "172.30.5.10/32"', routes)
+        self.assertIn('ip route replace "$destination" via "$router_ipv4"', routes)
+        self.assertNotIn("89.125.250.123", routes)
+        self.assertNotIn("138.16.224.181", routes)
+
     def test_env_parser_does_not_expand_or_log_values(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "secret.env"
-            path.write_text(
-                "DATABASE_URL=postgresql://tenant:${PASSWORD}@db/mycleanbot\n"
-                "RESTIC_REPOSITORY=/srv/restic\n",
-                encoding="utf-8",
-            )
-            values = backup_module.load_env(path)
+        path = mock.Mock()
+        path.read_text.return_value = (
+            "DATABASE_URL=postgresql://tenant:${PASSWORD}@db/mycleanbot\n"
+            "RESTIC_REPOSITORY=/srv/restic\n"
+        )
+        values = backup_module.load_env(path)
         self.assertEqual(values["RESTIC_REPOSITORY"], "/srv/restic")
         self.assertEqual(
             values["DATABASE_URL"],

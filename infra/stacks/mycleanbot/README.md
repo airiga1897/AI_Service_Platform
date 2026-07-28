@@ -108,3 +108,20 @@ Compose генерируется из `services.yml`:
 python3 tools/render-compose/render_compose.py --stack mycleanbot
 python3 tools/render-compose/render_compose.py --stack mycleanbot --check
 ```
+
+## Private backup transport
+
+Backup traffic never uses a public VPS address. On VPS1,
+`mycleanbot-backup-routes.service` installs only two host routes through
+`platform-router`: `172.30.8.10/32` for PostgreSQL and `172.30.5.10/32` for
+SFTP. On VPS5, `mycleanbot-backup-netns.service` creates an isolated network
+namespace on `ai_service_data_vps5`; the dedicated sshd listens only on
+`172.30.5.10:22` inside that namespace. No host port, HAProxy route, public DNS
+record, or public firewall rule is created for SFTP.
+
+The SFTP account accepts only its dedicated key, restricted to the observed
+VPS1 platform source `172.31.1.1`. The client uses
+`ssh_config_mycleanbot_backup` and a pinned VPS5 Ed25519 host key obtained
+through the trusted operator channel; runtime `ssh-keyscan` is forbidden.
+The chroot is `/opt/backups/ai-service-platform/mycleanbot` and Restic writes
+only below `/repository/restic`.

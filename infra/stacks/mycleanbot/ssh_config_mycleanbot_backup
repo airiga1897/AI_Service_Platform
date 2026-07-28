@@ -1,0 +1,9 @@
+Host mycleanbot-backup-vps5
+    HostName 172.30.5.10
+    Port 22
+    User mycleanbot_backup
+    IdentityFile /etc/ai-service-platform/mycleanbot-restic-sftp-key
+    UserKnownHostsFile /etc/ai-service-platform/mycleanbot-vps5-known-hosts
+    StrictHostKeyChecking yes
+    IdentitiesOnly yes
+    BatchMode yes
