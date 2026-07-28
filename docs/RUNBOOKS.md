@@ -186,6 +186,25 @@ CLI читает `services.yml`, формирует URL по `healthcheck.path`,
 
 См. также [`DEPLOYMENT.md`](DEPLOYMENT.md) и [ADR-0006](adr/0006-deploy-from-immutable-image-refs.md).
 
+### MyCleanBot production handoff
+
+`repository_dispatch` с типом `mycleanbot-image-published` выполняет только
+platform preflight и публикует candidate receipt. Production rollout возможен
+только отдельным ручным `workflow_dispatch` из `main` с
+`instance=mycleanbot`, `environment=prod` и полным GHCR digest.
+
+До первого запуска должны независимо пройти: platform CI, render-compose check,
+remote Compose config, проверка отдельной PostgreSQL role/database, encrypted
+backup, scratch restore rehearsal, VPN-only route, monitoring probes и rollback
+helper. Merge, создание credentials, изменение VPS и первый deployment — четыре
+отдельные operator approval gates.
+
+Rollback запускается вручную с предыдущим digest из
+`/opt/stacks/mycleanbot-prod/.deploy-state/previous`. Для первого deployment
+допускается `to_ref=undeployed`, который только останавливает application
+containers. Database restore требует отдельного явного подтверждения и
+остановленных writers.
+
 ### Legacy `ai-retail-dev` predeploy proof
 
 This procedure predates role-based product placement. Do not infer a target VPS

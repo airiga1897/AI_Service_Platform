@@ -87,6 +87,13 @@ class PreflightResolveTests(unittest.TestCase):
         self.assertEqual(metadata["vps"], "VPS1")
         self.assertEqual(metadata["env_file"], ".env.mycleanbot")
         self.assertEqual(metadata["deploy_dir"], "/opt/stacks/mycleanbot-prod")
+        instance = registry["runtime_instances"]["mycleanbot"]
+        self.assertFalse(instance["data"]["postgres"]["container_in_stack"])
+        self.assertEqual(
+            instance["data"]["backup"]["restore_rehearsal"],
+            "weekly-scratch-only",
+        )
+        self.assertFalse(instance["vpn"]["public_ingress"])
         with self.assertRaises(PreflightError):
             resolve_preflight(
                 registry,

@@ -181,6 +181,14 @@ def _build_context(
         ctx["backend_port"] = _required(
             local.get("backend_port"), "local.backend_port", instance_name
         )
+        ctx["healthcheck_live_path"] = _required(
+            healthcheck.get("live_path"), "healthcheck.live_path", instance_name
+        )
+        ctx["worker_heartbeat_max_age"] = _required(
+            healthcheck.get("worker_heartbeat_max_age_seconds"),
+            "healthcheck.worker_heartbeat_max_age_seconds",
+            instance_name,
+        )
         ctx["web_name"] = _required(
             _container_with_suffix(containers_future, "web"),
             "containers.future[*-web]",

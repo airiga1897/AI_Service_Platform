@@ -4,6 +4,7 @@ global:
 
 rule_files:
   - /etc/prometheus/alert-rules.yml
+  - /etc/prometheus/mycleanbot-alert-rules.yml
 
 alerting:
   alertmanagers:
@@ -44,3 +45,24 @@ scrape_configs:
       - targets: ["{{ groups['prod'][0] }}:{{ hostvars[groups['prod'][0]]['haproxy_exporter_port'] }}"]
         labels:
           instance: "VPS1-haproxy"
+
+{% if mycleanbot_monitor_url | default('') %}
+  - job_name: "mycleanbot_http"
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - "{{ mycleanbot_monitor_url }}/livez"
+          - "{{ mycleanbot_monitor_url }}/healthz"
+        labels:
+          instance: "mycleanbot-prod"
+          access: "vpn-only"
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: target
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+{% endif %}

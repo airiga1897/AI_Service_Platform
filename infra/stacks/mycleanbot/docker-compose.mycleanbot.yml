@@ -14,10 +14,11 @@ services:
         - CMD
         - python
         - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=10)"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/livez', timeout=10); urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=10)"
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 30s
     restart: unless-stopped
 
   mycleanbot-worker:
@@ -29,11 +30,12 @@ services:
       test:
         - CMD
         - python
-        - manage.py
-        - check
-      interval: 60s
+        - -c
+        - "import os; os.environ.setdefault('DJANGO_SETTINGS_MODULE','config.settings'); import django; django.setup(); from datetime import timedelta; from django.utils import timezone; from core.models import WorkerHeartbeat; h=WorkerHeartbeat.objects.filter(name='telegram-supervisor').first(); assert h and h.updated_at >= timezone.now()-timedelta(seconds=45)"
+      interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 60s
     restart: unless-stopped
 
 volumes: {}

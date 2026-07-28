@@ -9,6 +9,10 @@
 
 name: Deploy
 
+concurrency:
+  group: deploy-${{ github.event_name == 'repository_dispatch' && github.event.client_payload.instance || inputs.instance }}-${{ github.event_name == 'repository_dispatch' && github.event.client_payload.environment || inputs.environment }}
+  cancel-in-progress: false
+
 on:
   repository_dispatch:
     types:
@@ -181,7 +185,13 @@ jobs:
   deploy-mycleanbot:
     needs: preflight
     runs-on: ubuntu-latest
-    if: ${{ inputs.instance == 'mycleanbot' && inputs.environment == 'prod' }}
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' &&
+        github.ref == 'refs/heads/main' &&
+        inputs.instance == 'mycleanbot' &&
+        inputs.environment == 'prod'
+      }}
     environment:
       name: mycleanbot-prod
     steps:
@@ -202,40 +212,38 @@ jobs:
           SSH_USER: ${{ secrets.SSH_USER }}
           SSH_KEY: ${{ secrets.SSH_KEY }}
           SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
           GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
         run: |
           set -euo pipefail
           test -n "${SSH_HOST:-}" && test -n "${SSH_USER:-}" && test -n "${SSH_KEY:-}"
+          test -n "${SSH_KNOWN_HOSTS:-}"
           test -n "${GHCR_USERNAME:-}" && test -n "${GHCR_TOKEN:-}"
           SSH_PORT="${SSH_PORT:-22}"
 
           mkdir -p deploy-bundle
           cp "${COMPOSE_FILE}" deploy-bundle/docker-compose.yml
           sed -i "s#../../${ENV_FILE}#${ENV_FILE}#g" deploy-bundle/docker-compose.yml
-          printf 'MYCLEANBOT_IMAGE=%s\n' "${IMAGE_REF}" > deploy-bundle/.env.deploy
+          cp tools/deploy/mycleanbot_remote.sh deploy-bundle/
+          chmod 755 deploy-bundle/mycleanbot_remote.sh
 
           install -m 700 -d ~/.ssh
           printf '%s\n' "${SSH_KEY}" > ~/.ssh/ai-service-platform-deploy
           chmod 600 ~/.ssh/ai-service-platform-deploy
-          ssh-keyscan -p "${SSH_PORT}" -H "${SSH_HOST}" >> ~/.ssh/known_hosts
+          printf '%s\n' "${SSH_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
 
           ssh -i ~/.ssh/ai-service-platform-deploy -p "${SSH_PORT}" "${SSH_USER}@${SSH_HOST}" \
             "mkdir -p '${DEPLOY_DIR}'"
           scp -i ~/.ssh/ai-service-platform-deploy -P "${SSH_PORT}" \
-            deploy-bundle/docker-compose.yml deploy-bundle/.env.deploy \
+            deploy-bundle/docker-compose.yml deploy-bundle/mycleanbot_remote.sh \
             "${SSH_USER}@${SSH_HOST}:${DEPLOY_DIR}/"
           ssh -i ~/.ssh/ai-service-platform-deploy -p "${SSH_PORT}" "${SSH_USER}@${SSH_HOST}" \
-            "test -f '${DEPLOY_DIR}/${ENV_FILE}'"
+            "test -f '${DEPLOY_DIR}/${ENV_FILE}' && test \"\$(stat -c '%a' '${DEPLOY_DIR}/${ENV_FILE}')\" = 600"
           printf '%s' "${GHCR_TOKEN}" | \
             ssh -i ~/.ssh/ai-service-platform-deploy -p "${SSH_PORT}" "${SSH_USER}@${SSH_HOST}" \
-            "docker login ghcr.io --username '${GHCR_USERNAME}' --password-stdin"
-          ssh -i ~/.ssh/ai-service-platform-deploy -p "${SSH_PORT}" "${SSH_USER}@${SSH_HOST}" \
-            "cd '${DEPLOY_DIR}' && \
-             docker compose --env-file .env.deploy -f docker-compose.yml pull && \
-             docker compose --env-file .env.deploy -f docker-compose.yml run --rm mycleanbot-web python manage.py migrate --noinput && \
-             docker compose --env-file .env.deploy -f docker-compose.yml up -d --remove-orphans && \
-             docker compose --env-file .env.deploy -f docker-compose.yml ps"
+            "cd '${DEPLOY_DIR}' && GHCR_USERNAME='${GHCR_USERNAME}' DEPLOY_DIR='${DEPLOY_DIR}' ENV_FILE='${ENV_FILE}' ./mycleanbot_remote.sh deploy '${IMAGE_REF}'"
 
       - name: Verify MyCleanBot health
         env:
@@ -247,9 +255,7 @@ jobs:
           set -euo pipefail
           SSH_PORT="${SSH_PORT:-22}"
           ssh -i ~/.ssh/ai-service-platform-deploy -p "${SSH_PORT}" "${SSH_USER}@${SSH_HOST}" \
-            "cd '${DEPLOY_DIR}' && \
-             docker compose --env-file .env.deploy -f docker-compose.yml exec -T mycleanbot-web \
-             python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=10)\""
+            "cd '${DEPLOY_DIR}' && ./mycleanbot_remote.sh verify"
 
   mycleanbot-awaiting-manual-approval:
     needs: preflight
@@ -264,7 +270,31 @@ jobs:
       - name: Record deployment candidate
         env:
           IMAGE_REF: ${{ fromJson(needs.preflight.outputs.deploy_metadata).image_ref }}
+          SOURCE_SHA: ${{ github.event.client_payload.source_sha }}
         run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+
+          source_sha = os.environ.get("SOURCE_SHA", "")
+          if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+              raise SystemExit("source_sha must be a 40-character lowercase hex SHA")
+          with open("mycleanbot-candidate.json", "w", encoding="utf-8") as handle:
+              json.dump(
+                  {
+                      "instance": "mycleanbot",
+                      "environment": "prod",
+                      "image_ref": os.environ["IMAGE_REF"],
+                      "source_sha": source_sha,
+                      "rollout": "manual-workflow-dispatch-required",
+                  },
+                  handle,
+                  indent=2,
+                  sort_keys=True,
+              )
+              handle.write("\n")
+          PY
           {
             echo "## MyCleanBot deployment candidate"
             echo
@@ -275,3 +305,9 @@ jobs:
             echo "- environment: \`prod\`"
             echo "- image_ref: \`${IMAGE_REF}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish candidate receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: mycleanbot-deployment-candidate
+          path: mycleanbot-candidate.json

@@ -72,6 +72,15 @@ class RenderHappyPathTests(unittest.TestCase):
             doc["services"]["mycleanbot-worker"]["command"],
             ["python", "manage.py", "run_telegram_worker"],
         )
+        self.assertNotIn("ports", doc["services"]["mycleanbot-worker"])
+        self.assertIn(
+            "WorkerHeartbeat",
+            " ".join(doc["services"]["mycleanbot-worker"]["healthcheck"]["test"]),
+        )
+        self.assertIn(
+            "/livez",
+            " ".join(doc["services"]["mycleanbot-web"]["healthcheck"]["test"]),
+        )
 
 
 class RenderErrorTests(unittest.TestCase):
