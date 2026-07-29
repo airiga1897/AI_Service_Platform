@@ -191,3 +191,33 @@ Gunicorn/Redis/PostgreSQL/private media. Затем новый deployment receip
 - Runtime image digest, effective configuration и contract checksum записаны
   в deployment journal/current receipt.
 - Повторный bootstrap и повторный apply идемпотентны.
+
+## Статус MVP до проверки заказчиком
+
+На 28 июля 2026 года ручной MVP rollout считается завершённым и замороженным до
+проверки заказчиком:
+
+- принят immutable image
+  `ghcr.io/airiga1897/ai_e_retail@sha256:a87cc5b5df301e342ae71bfb99258fa928215d7aec79140b5e3786c9bac58803`;
+- принят deployment `20260728T011608Z-a87cc5b5df30`;
+- HTTPS, private/public health, Celery и canonical PostgreSQL topology приняты;
+- вход суперпользователя работает;
+- дополнительные `demo_data`, reset, restart/recreate runtime и финальный backup
+  до обратной связи заказчика не выполняются.
+
+### Отложенное исправление повторяемого consent-сценария
+
+Обычный `load_demo_data` при существующих доменных данных должен сохранять их и
+сбрасывать `UserProfile.consent_date` у всех фиксированных demo-пользователей и
+суперпользователя. Сейчас demo-пользователи обрабатываются корректно, но поиск
+суперпользователя зависит от `DJANGO_SUPERUSER_USERNAME`. Эта переменная
+изолирована в bootstrap-secret операции `superuser` и не передаётся операции
+`demo_data`; при нестандартном username используется ошибочный fallback
+`admin`.
+
+После проверки заказчиком исправление выполняется в продукте без миграции и без
+расширения bootstrap secrets: `load_demo_data` выбирает фиксированные
+`DEMO_USERNAMES` и фактические записи `is_superuser=True`. Добавляется тест
+суперпользователя с нестандартным username, затем выпускается новый immutable
+image и выполняется обычный canonical rollout. Отдельная разрушительная
+`demo_data_reset` для этого сценария не требуется.
