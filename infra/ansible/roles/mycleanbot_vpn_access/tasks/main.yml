@@ -7,6 +7,7 @@
       - mycleanbot_vpn_access_image is match('^docker\.io/library/nginx@sha256:[0-9a-f]{64}$')
       - mycleanbot_vpn_access_endpoint_ipv4 != mycleanbot_vpn_access_backend_ipv4
       - mycleanbot_vpn_access_operator_cidr == '10.89.1.0/24'
+      - mycleanbot_vpn_access_router_ipv4 == '172.31.1.2'
       - mycleanbot_vpn_access_backend_port | int == 8000
     fail_msg: MyCleanBot VPN access inputs do not satisfy the private immutable ingress contract.
 

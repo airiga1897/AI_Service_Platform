@@ -53,6 +53,7 @@ class MyCleanBotVpnAccessContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("allow {{ mycleanbot_vpn_access_operator_cidr }};", nginx)
+        self.assertIn("allow {{ mycleanbot_vpn_access_router_ipv4 }};", nginx)
         self.assertIn("deny all;", nginx)
         self.assertIn(
             "proxy_pass http://{{ mycleanbot_vpn_access_backend_ipv4 }}:"

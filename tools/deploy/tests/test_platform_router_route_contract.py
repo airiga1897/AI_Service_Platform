@@ -56,6 +56,18 @@ class PlatformRouterRouteContractTests(unittest.TestCase):
             reconcile,
         )
 
+    def test_target_source_nat_is_explicit_and_policy_scoped(self) -> None:
+        tasks = PLATFORM_ROUTER_TASKS.read_text(encoding="utf-8")
+
+        self.assertIn('policy.get("target_snat_ipv4")', tasks)
+        self.assertIn('"target_snat_ipv4": target_snat_ipv4', tasks)
+        self.assertIn("-j SNAT --to-source \"$target_snat_ipv4\"", tasks)
+        self.assertIn(
+            '-s "$source_cidr" -d "$destination_ipv4/32" '
+            '--dport "$destination_port"',
+            tasks,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
