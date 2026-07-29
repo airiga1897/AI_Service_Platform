@@ -328,8 +328,53 @@
             target_alias = str(policy.get("target_alias") or link.get("target_alias"))
             if alias not in {source_alias, target_alias}:
                 continue
+            policy_vpn_next_hop = client_server_ip
+            if (
+                alias == source_alias
+                and client_name
+                and target_alias != str(link.get("target_alias") or "")
+            ):
+                peer_clients = l3_link.get("standby_clients") or {}
+                peer_client = peer_clients.get(target_alias) if isinstance(peer_clients, dict) else {}
+                peer_client_ip_value = str((peer_client or {}).get("client_ip") or "")
+                if not peer_client_ip_value:
+                    fail(
+                        f"platform_router policy {policy.get('name')} target client "
+                        f"{target_alias} has no configured VPN client IP"
+                    )
+                peer_client_ip = ipaddress.ip_address(peer_client_ip_value)
+                if peer_client_ip not in vpn_subnet:
+                    fail(
+                        f"platform_router policy {policy.get('name')} target client "
+                        f"{target_alias} must have an IP inside {vpn_subnet}"
+                    )
+                policy_vpn_next_hop = str(peer_client_ip)
             target_source_cidr = ipaddress.ip_network(str(policy.get("target_source_cidr") or source_cidr), strict=False)
             effective_source_cidr = target_source_cidr if alias == target_alias else source_cidr
+            return_route_cidr = ""
+            return_route_next_hop = ""
+            if (
+                alias == target_alias
+                and client_name
+                and target_source_cidr == source_cidr
+                and source_alias != str(link.get("target_alias") or "")
+            ):
+                peer_clients = l3_link.get("standby_clients") or {}
+                peer_client = peer_clients.get(source_alias) if isinstance(peer_clients, dict) else {}
+                peer_client_ip_value = str((peer_client or {}).get("client_ip") or "")
+                if not peer_client_ip_value:
+                    fail(
+                        f"platform_router policy {policy.get('name')} source client "
+                        f"{source_alias} has no configured VPN client IP"
+                    )
+                peer_client_ip = ipaddress.ip_address(peer_client_ip_value)
+                if peer_client_ip not in vpn_subnet:
+                    fail(
+                        f"platform_router policy {policy.get('name')} source client "
+                        f"{source_alias} must have an IP inside {vpn_subnet}"
+                    )
+                return_route_cidr = str(source_cidr)
+                return_route_next_hop = str(peer_client_ip)
             policies.append({
                 "name": str(policy.get("name") or f"{protocol}-{destination_ipv4}-{destination_port}"),
                 "link_name": str(link.get("name") or link_name),
@@ -342,7 +387,9 @@
                 "route_destination": alias == source_alias,
                 "softether_client_name": client_name or "",
                 "softether_client_iface": client_iface,
-                "softether_client_server_ip": client_server_ip,
+                "softether_client_next_hop": policy_vpn_next_hop,
+                "softether_return_cidr": return_route_cidr,
+                "softether_return_next_hop": return_route_next_hop,
             })
 
     if data_ipv4 is None or app_ipv4 is None:
@@ -1153,7 +1200,7 @@
     docker exec -u 0 "$container" iptables -t nat -C POSTROUTING -j PLATFORM_ROUTER_POSTROUTING 2>/dev/null ||
       docker exec -u 0 "$container" iptables -t nat -A POSTROUTING -j PLATFORM_ROUTER_POSTROUTING
     docker exec -u 0 "$container" iptables -t nat -F PLATFORM_ROUTER_POSTROUTING
-    python3 - "$policies_json" <<'PY' | while IFS='|' read -r proto source_cidr destination_ipv4 destination_port route_destination vpn_iface vpn_next_hop; do
+    python3 - "$policies_json" <<'PY' | while IFS='|' read -r proto source_cidr destination_ipv4 destination_port route_destination vpn_iface vpn_next_hop return_cidr return_next_hop; do
     import json
     import sys
     for item in json.loads(sys.argv[1]):
@@ -1164,15 +1211,34 @@
             str(item["destination_port"]),
             "true" if item["route_destination"] else "false",
             item.get("softether_client_iface") or "",
-            item.get("softether_client_server_ip") or "",
+            item.get("softether_client_next_hop") or "",
+            item.get("softether_return_cidr") or "",
+            item.get("softether_return_next_hop") or "",
         ]))
     PY
       if [ "$route_destination" = "true" ]; then
         if [ -n "$vpn_iface" ]; then
-          docker exec -u 0 "$container" ip route replace "$destination_ipv4/32" via "$vpn_next_hop" dev "$vpn_iface"
+          vpn_ready=false
+          for _attempt in $(seq 1 30); do
+            if docker exec -u 0 "$container" sh -ceu \
+              'ip link show dev "$1" | grep -q "UP" && ip -4 addr show dev "$1" | grep -q "inet "' \
+              sh "$vpn_iface"; then
+              vpn_ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$vpn_ready" != "true" ]; then
+            echo "VPN route interface did not become ready: $vpn_iface" >&2
+            exit 1
+          fi
+          docker exec -u 0 "$container" ip route replace "$destination_ipv4/32" via "$vpn_next_hop" dev "$vpn_iface" onlink
         else
           docker exec -u 0 "$container" ip route replace "$destination_ipv4/32" via "$next_hop"
         fi
+      fi
+      if [ -n "$return_cidr" ]; then
+        docker exec -u 0 "$container" ip route replace "$return_cidr" via "$return_next_hop" dev "$vpn_iface" onlink
       fi
       docker exec -u 0 "$container" iptables -A FORWARD -p "$proto" -s "$source_cidr" -d "$destination_ipv4/32" --dport "$destination_port" -j ACCEPT
       docker exec -u 0 "$container" iptables -A FORWARD -p "$proto" -s "$destination_ipv4/32" --sport "$destination_port" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT

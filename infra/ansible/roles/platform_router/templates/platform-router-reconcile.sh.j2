@@ -11,7 +11,10 @@ while true; do
     ip addr replace "{{ client.client_ip }}/{{ client.prefixlen }}" dev "{{ client.iface }}" || true
 {% for policy in platform_router_model.policies %}
 {% if policy.route_destination and policy.softether_client_name == client.name %}
-    ip route replace "{{ policy.destination_ipv4 }}/32" via "{{ client.server_ip }}" dev "{{ client.iface }}" || true
+    ip route replace "{{ policy.destination_ipv4 }}/32" via "{{ policy.softether_client_next_hop }}" dev "{{ client.iface }}" || true
+{% endif %}
+{% if policy.softether_return_cidr and policy.softether_client_name == client.name %}
+    ip route replace "{{ policy.softether_return_cidr }}" via "{{ policy.softether_return_next_hop }}" dev "{{ client.iface }}" || true
 {% endif %}
 {% endfor %}
   fi
