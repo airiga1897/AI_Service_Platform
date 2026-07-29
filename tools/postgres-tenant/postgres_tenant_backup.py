@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -72,6 +73,19 @@ def database_url(app_env: dict[str, str]) -> str:
 def url_with_database(url: str, database: str) -> str:
     parts = urlsplit(url)
     return urlunsplit((parts.scheme, parts.netloc, "/" + quote(database), parts.query, ""))
+
+
+def url_with_host(url: str, hostname: str) -> str:
+    parts = urlsplit(url)
+    if parts.scheme not in ("postgresql", "postgres") or not parts.hostname:
+        raise BackupError("invalid PostgreSQL URL")
+    parsed_host = ipaddress.ip_address(hostname)
+    if parsed_host.version != 4:
+        raise BackupError("scratch PostgreSQL host must be an IPv4 address")
+    userinfo = parts.netloc.rsplit("@", 1)[0] + "@" if "@" in parts.netloc else ""
+    port = f":{parts.port}" if parts.port else ""
+    netloc = f"{userinfo}{parsed_host}{port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, ""))
 
 
 def postgres_env(url: str, *, database: str | None = None) -> dict[str, str]:
@@ -224,6 +238,10 @@ def restore_rehearsal(config: dict[str, str], app_env: dict[str, str]) -> dict[s
         raise BackupError("POSTGRES_ADMIN_URL is required for scratch restore")
     if unquote(urlsplit(admin_url).username or "") == "mycleanbot":
         raise BackupError("POSTGRES_ADMIN_URL must not use the tenant role")
+    scratch_host = os.environ.get("MYCLEANBOT_SCRATCH_POSTGRES_HOST", "")
+    if not scratch_host:
+        raise BackupError("MYCLEANBOT_SCRATCH_POSTGRES_HOST is required")
+    admin_url = url_with_host(admin_url, scratch_host)
     app_url = database_url(app_env)
     username = urlsplit(app_url).username
     if not username:
