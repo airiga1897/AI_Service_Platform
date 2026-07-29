@@ -82,15 +82,15 @@ summary или application logs.
 Контейнер приложения публикуется только на `127.0.0.1:8040`. Для начального
 доступа через Windows `hosts` платформа запускает отдельный
 `mycleanbot-private-ingress` без published ports. Он использует immutable Nginx
-image, принимает TLS только на `172.22.254.10:443` внутри
-`ai_service_vpn_policy`, разрешает source `softether-edge` `172.22.254.2` и
-проксирует к `mycleanbot-route` `172.31.1.10:8000` через локальную app-сеть.
+image, принимает TLS на `172.31.1.11:443` внутри `ai_service_app_vps1`,
+разрешает только routed-hub source `10.89.1.0/24` и проксирует к
+`mycleanbot-route` `172.31.1.10:8000` через локальную app-сеть.
 Public ingress для instance запрещён validator'ом.
 
-Роль `mycleanbot_vpn_access` не создаёт сертификат, не включает policy network
-и не меняет VPS без `mycleanbot_vpn_access_change_approved=true`. До apply
-оператор должен по доверенному каналу подготовить DNS-01 сертификат, включить
-policy network только на VPS1 и проверить attachment `softether-edge`.
+Роль `mycleanbot_vpn_access` не создаёт сертификат или L3 hub и не меняет VPS
+без `mycleanbot_vpn_access_change_approved=true`. До apply оператор должен по
+доверенному каналу подготовить DNS-01 сертификат и отдельно применить
+`l3-vps1`/`platform-router` policy из платформенного runbook.
 
 HTTP probes, PostgreSQL, backup/restore и `telegram-supervisor` heartbeat
 остаются обязательными сигналами MyCleanBot, но будут включены в единый

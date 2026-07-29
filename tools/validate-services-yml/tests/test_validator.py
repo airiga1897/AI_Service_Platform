@@ -342,7 +342,7 @@ class ValidatorBrokenFixtureTests(unittest.TestCase):
         errors, _ = validate_data(self.data)
         self.assertTrue(
             any(
-                "vpn.private_endpoint_ipv4 must be '172.22.254.10'" in error
+                "vpn.private_endpoint_ipv4 must be '172.31.1.11'" in error
                 for error in errors
             ),
             errors,

@@ -55,5 +55,10 @@ jobs:
       - name: Syntax-check MyCleanBot VPN-only access
         run: ansible-playbook infra/ansible/mycleanbot_vpn_access.yml --syntax-check -i 'vps1,'
 
+      - name: Syntax-check per-node L3 VPN and platform router
+        run: |
+          ansible-playbook infra/ansible/softether_l3_vps.yml --syntax-check -i 'vps1,'
+          ansible-playbook infra/ansible/platform_router.yml --syntax-check -i 'vps1,'
+
       - name: Smoke-тесты инструментов
         run: make test

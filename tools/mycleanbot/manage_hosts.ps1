@@ -3,7 +3,7 @@ param(
     [ValidateSet("plan", "apply", "verify", "remove")]
     [string]$Action,
 
-    [string]$Address = "172.22.254.10",
+    [string]$Address = "172.31.1.11",
 
     [string]$Hostname = "mycleanbot.mine-craft.su",
 
@@ -26,8 +26,8 @@ function Require-Administrator {
     }
 }
 
-if ($Address -ne "172.22.254.10") {
-    Fail "only the approved private endpoint 172.22.254.10 is allowed"
+if ($Address -ne "172.31.1.11") {
+    Fail "only the approved private endpoint 172.31.1.11 is allowed"
 }
 if ($Hostname -ne "mycleanbot.mine-craft.su") {
     Fail "only mycleanbot.mine-craft.su is managed by this helper"

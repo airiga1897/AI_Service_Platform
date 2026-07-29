@@ -237,11 +237,17 @@ layer is frozen:
 
 ### SoftEther P2P Status
 
-`softether_l3_vps` is the approved non-cascade transport pattern for inter-VPS
-point-to-point links. It must not use `CascadeCreate`, Local Bridge, shared
-`CascadeLab`, or any shared L2 fabric. `l3-vpsN.mine-craft.su` is the only
-public SNI for a P2P server: port `443` is transport and port `5555` is
-management when management is explicitly exposed.
+`softether_l3_vps` is the standard per-node L3 VPN runtime. Each server node
+uses `l3-vpsN.mine-craft.su`: port `443` is transport and port `5555` is
+management when management is explicitly exposed. Deploying the runtime does
+not create a full mesh; every use remains an explicit hub/link plus a
+`platform_router` policy.
+
+Inter-VPS links must not use `CascadeCreate`, a shared Local Bridge,
+`CascadeLab`, or any shared L2 fabric. A client-access hub may use a dedicated
+Linux TAP only to terminate that one hub inside the local `platform_router`
+network namespace. The TAP must have its own subnet, DHCP pool and pushed route
+allowlist; it must not bridge to a Docker or physical interface.
 
 The operator source of truth for this layer is `operator/softether/l3-vps`.
 The internal service name is also `softether_l3_vps`. Secret shape examples live
@@ -255,10 +261,9 @@ between service containers directly. The planned service boundary is:
 platform service -> platform_router -> L3/P2P transport -> platform_router -> platform service
 ```
 
-`softether_l3_vps` should be treated as transport only. It should not be the place
-where Postgres, Redis, nginx, or application routing policy lives. That policy
-belongs in a future `platform_router` role with explicit source/destination
-allowlists.
+`softether_l3_vps` is transport only. It is not where Postgres, Redis, nginx,
+or application policy lives. Policy belongs in `platform_router` with explicit
+source/destination allowlists.
 
 The current per-node platform network convention is:
 
@@ -299,6 +304,13 @@ first link, `vps8` runs `platform-router-softether-server` in the
 `platform-router` network namespace, so `l3-vps8.mine-craft.su:5555` routes to
 server management. `vps4` runs `platform-router-softether-client`; client
 management is local through SSH and `vpncmd /CLIENT`, not public SNI.
+
+The first standardized per-node rollout is `l3-vps1`. Its MyCleanBot hub is
+separate from `P2PPgPrimaryVps8`, uses `10.89.1.0/24`, has no default route,
+and pushes only `172.31.1.11/32`. Public management reuses the already bound
+HAProxy `:5555` listener with SNI `l3-vps1.mine-craft.su`; the backend remains
+restricted by the SoftEther admin-IP allowlist. See
+`docs/examples/l3-vps1-mycleanbot.example.yml`.
 
 For the PostgreSQL proof path, source `platform-router` containers install a
 route to `172.30.8.10/32` through `vpn_l3vps0`, but they do not SNAT the

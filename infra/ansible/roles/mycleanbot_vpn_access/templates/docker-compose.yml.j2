@@ -28,14 +28,10 @@ services:
       start_period: 10s
     restart: unless-stopped
     networks:
-      vpn_policy:
+      app:
         ipv4_address: {{ mycleanbot_vpn_access_endpoint_ipv4 }}
-      app: {}
 
 networks:
-  vpn_policy:
-    external: true
-    name: {{ mycleanbot_vpn_access_policy_network_name }}
   app:
     external: true
     name: {{ mycleanbot_vpn_access_app_network_name }}

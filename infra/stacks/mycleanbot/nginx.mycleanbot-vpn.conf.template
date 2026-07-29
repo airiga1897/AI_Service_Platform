@@ -9,7 +9,7 @@ server {
     ssl_certificate_key ${TLS_KEY};
 
     allow 127.0.0.1;
-    allow ${VPN_EDGE_IP};
+    allow ${L3_OPERATOR_CIDR};
     deny all;
 
     location = /ingress-livez {
