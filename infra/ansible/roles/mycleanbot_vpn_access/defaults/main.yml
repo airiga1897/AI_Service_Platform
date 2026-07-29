@@ -1,0 +1,23 @@
+---
+mycleanbot_vpn_access_state: present
+mycleanbot_vpn_access_change_approved: false
+
+mycleanbot_vpn_access_root_dir: /opt/ai-service-platform/mycleanbot_vpn_access
+mycleanbot_vpn_access_compose_file: "{{ mycleanbot_vpn_access_root_dir }}/docker-compose.yml"
+mycleanbot_vpn_access_container_name: mycleanbot-private-ingress
+mycleanbot_vpn_access_image: "docker.io/library/nginx@sha256:8a4f4b94275ff59d809477799cbbaf1a7ab65ed1871403d05e31fd66bdb8db82"
+mycleanbot_vpn_access_platform: linux/amd64
+
+mycleanbot_vpn_access_hostname: mycleanbot.mine-craft.su
+mycleanbot_vpn_access_policy_network_name: ai_service_vpn_policy
+mycleanbot_vpn_access_policy_network_subnet: 172.22.254.0/24
+mycleanbot_vpn_access_edge_container_name: softether-edge
+mycleanbot_vpn_access_edge_ipv4: 172.22.254.2
+mycleanbot_vpn_access_endpoint_ipv4: 172.22.254.10
+
+mycleanbot_vpn_access_app_network_name: ai_service_app_vps1
+mycleanbot_vpn_access_backend_ipv4: 172.31.1.10
+mycleanbot_vpn_access_backend_port: 8000
+
+mycleanbot_vpn_access_tls_certificate: "/etc/letsencrypt/live/{{ mycleanbot_vpn_access_hostname }}/fullchain.pem"
+mycleanbot_vpn_access_tls_key: "/etc/letsencrypt/live/{{ mycleanbot_vpn_access_hostname }}/privkey.pem"

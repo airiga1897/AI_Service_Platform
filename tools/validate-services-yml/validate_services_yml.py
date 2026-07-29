@@ -873,6 +873,20 @@ def validate_runtime_instances(
                 fail(errors, f"{node_path}.vpn.public_ingress must be false")
             if not isinstance(vpn, dict) or vpn.get("tls_required") is not True:
                 fail(errors, f"{node_path}.vpn.tls_required must be true")
+            expected_vpn_contract = {
+                "hostname": "mycleanbot.mine-craft.su",
+                "policy_network": "ai_service_vpn_policy",
+                "policy_subnet": "172.22.254.0/24",
+                "edge_ipv4": "172.22.254.2",
+                "private_endpoint_ipv4": "172.22.254.10",
+                "app_network": "ai_service_app_vps1",
+                "backend_ipv4": "172.31.1.10",
+                "backend_port": 8000,
+                "hosts_bootstrap": True,
+            }
+            for field, expected in expected_vpn_contract.items():
+                if not isinstance(vpn, dict) or vpn.get(field) != expected:
+                    fail(errors, f"{node_path}.vpn.{field} must be {expected!r}")
             if not isinstance(monitoring, dict) or monitoring.get("ownership") != "platform":
                 fail(errors, f"{node_path}.monitoring.ownership must be platform")
             if not isinstance(healthcheck, dict) or healthcheck.get("live_path") != "/livez":

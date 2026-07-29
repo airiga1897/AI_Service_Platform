@@ -335,6 +335,23 @@ class ValidatorBrokenFixtureTests(unittest.TestCase):
         )
         self.assertTrue(any("vpn.public_ingress must be false" in error for error in errors))
 
+    def test_telegram_client_requires_private_hosts_vpn_contract(self) -> None:
+        instance = self.data["runtime_instances"]["mycleanbot"]
+        instance["vpn"]["private_endpoint_ipv4"] = "89.125.250.123"
+        instance["vpn"]["hosts_bootstrap"] = False
+        errors, _ = validate_data(self.data)
+        self.assertTrue(
+            any(
+                "vpn.private_endpoint_ipv4 must be '172.22.254.10'" in error
+                for error in errors
+            ),
+            errors,
+        )
+        self.assertTrue(
+            any("vpn.hosts_bootstrap must be True" in error for error in errors),
+            errors,
+        )
+
     def test_telegram_client_requires_canonical_platform_route(self) -> None:
         instance = self.data["runtime_instances"]["mycleanbot"]
         instance["data"]["postgres"]["router_ipv4"] = "172.31.1.99"

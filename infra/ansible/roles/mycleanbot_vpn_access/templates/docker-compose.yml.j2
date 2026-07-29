@@ -1,0 +1,41 @@
+services:
+  mycleanbot-private-ingress:
+    image: {{ mycleanbot_vpn_access_image }}
+    platform: {{ mycleanbot_vpn_access_platform }}
+    container_name: {{ mycleanbot_vpn_access_container_name }}
+    pull_policy: always
+    expose:
+      - "443/tcp"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - {{ mycleanbot_vpn_access_tls_certificate }}:/etc/nginx/tls/fullchain.pem:ro
+      - {{ mycleanbot_vpn_access_tls_key }}:/etc/nginx/tls/privkey.pem:ro
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+      - /tmp
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --no-check-certificate
+        - --spider
+        - https://127.0.0.1/ingress-livez
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      vpn_policy:
+        ipv4_address: {{ mycleanbot_vpn_access_endpoint_ipv4 }}
+      app: {}
+
+networks:
+  vpn_policy:
+    external: true
+    name: {{ mycleanbot_vpn_access_policy_network_name }}
+  app:
+    external: true
+    name: {{ mycleanbot_vpn_access_app_network_name }}

@@ -1,0 +1,9 @@
+---
+- name: MyCleanBot VPN-only HTTPS access
+  hosts: vps1
+  become: true
+  gather_facts: false
+  vars:
+    mycleanbot_vpn_access_state: present
+  roles:
+    - mycleanbot_vpn_access

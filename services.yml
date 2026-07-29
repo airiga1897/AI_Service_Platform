@@ -742,6 +742,15 @@ runtime_instances:
       reverse_proxy_template: infra/stacks/mycleanbot/nginx.mycleanbot-vpn.conf.template
       public_ingress: false
       tls_required: true
+      hostname: mycleanbot.mine-craft.su
+      policy_network: ai_service_vpn_policy
+      policy_subnet: 172.22.254.0/24
+      edge_ipv4: 172.22.254.2
+      private_endpoint_ipv4: 172.22.254.10
+      app_network: ai_service_app_vps1
+      backend_ipv4: 172.31.1.10
+      backend_port: 8000
+      hosts_bootstrap: true
     monitoring:
       ownership: platform
       web_liveness: /livez
