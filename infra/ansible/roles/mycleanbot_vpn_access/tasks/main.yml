@@ -1,0 +1,208 @@
+---
+- name: Validate MyCleanBot VPN access inputs
+  ansible.builtin.assert:
+    that:
+      - mycleanbot_vpn_access_state in ['present', 'absent']
+      - mycleanbot_vpn_access_hostname == 'mycleanbot.mine-craft.su'
+      - mycleanbot_vpn_access_image is match('^docker\.io/library/nginx@sha256:[0-9a-f]{64}$')
+      - mycleanbot_vpn_access_endpoint_ipv4 != mycleanbot_vpn_access_edge_ipv4
+      - mycleanbot_vpn_access_backend_port | int == 8000
+    fail_msg: MyCleanBot VPN access inputs do not satisfy the private immutable ingress contract.
+
+- name: Require explicit approval before changing VPS runtime
+  ansible.builtin.assert:
+    that:
+      - mycleanbot_vpn_access_change_approved | bool
+    fail_msg: >-
+      Set mycleanbot_vpn_access_change_approved=true only after the explicit
+      MyCleanBot VPN ingress VPS-change approval.
+  when: not ansible_check_mode
+
+- name: Inspect required Docker networks
+  ansible.builtin.command:
+    cmd: "docker network inspect {{ item }}"
+  loop:
+    - "{{ mycleanbot_vpn_access_policy_network_name }}"
+    - "{{ mycleanbot_vpn_access_app_network_name }}"
+  register: mycleanbot_vpn_access_network_inspect
+  changed_when: false
+  when: mycleanbot_vpn_access_state == 'present'
+
+- name: Validate private policy network and endpoint ownership
+  ansible.builtin.shell: |
+    set -euo pipefail
+    docker network inspect "{{ mycleanbot_vpn_access_policy_network_name }}" |
+      python3 -c '
+    import ipaddress
+    import json
+    import os
+    import sys
+
+    network = json.load(sys.stdin)[0]
+    expected_subnet = ipaddress.ip_network(os.environ["EXPECTED_SUBNET"], strict=True)
+    endpoint = ipaddress.ip_address(os.environ["ENDPOINT_IP"])
+    edge_ip = os.environ["EDGE_IP"]
+    edge_name = os.environ["EDGE_NAME"]
+    configs = network.get("IPAM", {}).get("Config", [])
+    subnets = {item.get("Subnet") for item in configs}
+    if str(expected_subnet) not in subnets or endpoint not in expected_subnet:
+        raise SystemExit("unexpected VPN policy subnet or endpoint")
+    containers = network.get("Containers") or {}
+    edge_matches = [
+        item for item in containers.values()
+        if item.get("Name") == edge_name
+        and str(item.get("IPv4Address", "")).split("/", 1)[0] == edge_ip
+    ]
+    if len(edge_matches) != 1:
+        raise SystemExit("softether-edge is not attached at the approved policy IP")
+    endpoint_owners = [
+        item.get("Name") for item in containers.values()
+        if str(item.get("IPv4Address", "")).split("/", 1)[0] == str(endpoint)
+        and item.get("Name") != os.environ["INGRESS_NAME"]
+    ]
+    if endpoint_owners:
+        raise SystemExit("private endpoint IP is owned by another container")
+    '
+  args:
+    executable: /bin/bash
+  environment:
+    EXPECTED_SUBNET: "{{ mycleanbot_vpn_access_policy_network_subnet }}"
+    ENDPOINT_IP: "{{ mycleanbot_vpn_access_endpoint_ipv4 }}"
+    EDGE_IP: "{{ mycleanbot_vpn_access_edge_ipv4 }}"
+    EDGE_NAME: "{{ mycleanbot_vpn_access_edge_container_name }}"
+    INGRESS_NAME: "{{ mycleanbot_vpn_access_container_name }}"
+  changed_when: false
+  when:
+    - mycleanbot_vpn_access_state == 'present'
+    - not ansible_check_mode
+
+- name: Check MyCleanBot TLS files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    follow: true
+  loop:
+    - "{{ mycleanbot_vpn_access_tls_certificate }}"
+    - "{{ mycleanbot_vpn_access_tls_key }}"
+  register: mycleanbot_vpn_access_tls_stats
+  when: mycleanbot_vpn_access_state == 'present'
+
+- name: Require protected MyCleanBot TLS files
+  ansible.builtin.assert:
+    that:
+      - mycleanbot_vpn_access_tls_stats.results[0].stat.exists
+      - mycleanbot_vpn_access_tls_stats.results[0].stat.isreg
+      - (mycleanbot_vpn_access_tls_stats.results[0].stat.mode | default('')) in ['0444', '0644']
+      - mycleanbot_vpn_access_tls_stats.results[1].stat.exists
+      - mycleanbot_vpn_access_tls_stats.results[1].stat.isreg
+      - (mycleanbot_vpn_access_tls_stats.results[1].stat.mode | default('')) in ['0400', '0600']
+    fail_msg: TLS certificate must be public-readable and the private key must be root-only.
+  when:
+    - mycleanbot_vpn_access_state == 'present'
+    - not ansible_check_mode
+
+- name: Create MyCleanBot VPN access runtime directory
+  ansible.builtin.file:
+    path: "{{ mycleanbot_vpn_access_root_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  when: mycleanbot_vpn_access_state == 'present'
+
+- name: Render MyCleanBot private Nginx configuration
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: "{{ mycleanbot_vpn_access_root_dir }}/nginx.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  when: mycleanbot_vpn_access_state == 'present'
+
+- name: Render MyCleanBot VPN access Compose
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ mycleanbot_vpn_access_compose_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: mycleanbot_vpn_access_state == 'present'
+
+- name: Validate MyCleanBot VPN access Compose
+  ansible.builtin.command:
+    cmd: "docker compose -f {{ mycleanbot_vpn_access_compose_file }} config --quiet"
+  changed_when: false
+  when:
+    - mycleanbot_vpn_access_state == 'present'
+    - not ansible_check_mode
+
+- name: Pull immutable MyCleanBot VPN ingress image
+  ansible.builtin.command:
+    cmd: "docker pull {{ mycleanbot_vpn_access_image }}"
+  register: mycleanbot_vpn_access_pull
+  changed_when: "'Downloaded newer image' in (mycleanbot_vpn_access_pull.stdout | default(''))"
+  when:
+    - mycleanbot_vpn_access_state == 'present'
+    - not ansible_check_mode
+
+- name: Start MyCleanBot private ingress
+  ansible.builtin.command:
+    cmd: "docker compose -f {{ mycleanbot_vpn_access_compose_file }} up -d"
+    chdir: "{{ mycleanbot_vpn_access_root_dir }}"
+  register: mycleanbot_vpn_access_up
+  changed_when: >
+    (mycleanbot_vpn_access_up.stdout ~ mycleanbot_vpn_access_up.stderr)
+    is search('(?i)(creating|created|recreating|recreated|starting|started|pulling|pulled)')
+  when:
+    - mycleanbot_vpn_access_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify MyCleanBot ingress has no published ports
+  ansible.builtin.shell: |
+    set -euo pipefail
+    published="$(docker inspect "{{ mycleanbot_vpn_access_container_name }}" \
+      --format '{% raw %}{{json .HostConfig.PortBindings}}{% endraw %}')"
+    [ "$published" = "null" ] || [ "$published" = "{}" ]
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - mycleanbot_vpn_access_state == 'present'
+    - not ansible_check_mode
+
+- name: Verify MyCleanBot ingress health and private endpoint
+  ansible.builtin.shell: |
+    set -euo pipefail
+    expected="{{ mycleanbot_vpn_access_endpoint_ipv4 }}"
+    for attempt in $(seq 1 20); do
+      state="$(docker inspect "{{ mycleanbot_vpn_access_container_name }}" \
+        --format '{% raw %}{{.State.Health.Status}}{% endraw %}' 2>/dev/null || true)"
+      actual="$(docker inspect "{{ mycleanbot_vpn_access_container_name }}" \
+        --format '{% raw %}{{with index .NetworkSettings.Networks "ai_service_vpn_policy"}}{{.IPAddress}}{{end}}{% endraw %}' 2>/dev/null || true)"
+      if [ "$state" = "healthy" ] && [ "$actual" = "$expected" ]; then
+        exit 0
+      fi
+      sleep 2
+    done
+    exit 1
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - mycleanbot_vpn_access_state == 'present'
+    - not ansible_check_mode
+
+- name: Check MyCleanBot VPN access Compose before removal
+  ansible.builtin.stat:
+    path: "{{ mycleanbot_vpn_access_compose_file }}"
+  register: mycleanbot_vpn_access_compose_stat
+  when: mycleanbot_vpn_access_state == 'absent'
+
+- name: Stop only MyCleanBot private ingress
+  ansible.builtin.command:
+    cmd: "docker compose -f {{ mycleanbot_vpn_access_compose_file }} down"
+    chdir: "{{ mycleanbot_vpn_access_root_dir }}"
+  changed_when: true
+  when:
+    - mycleanbot_vpn_access_state == 'absent'
+    - mycleanbot_vpn_access_compose_stat.stat.exists | default(false)
+    - not ansible_check_mode

@@ -30,7 +30,7 @@ jobs:
           cache: pip
 
       - name: Установка Python-зависимостей
-        run: python -m pip install --upgrade pip pyyaml jinja2
+        run: python -m pip install --upgrade pip pyyaml jinja2 ansible-core
 
       - name: Проверка раскладки репозитория
         run: |
@@ -51,6 +51,9 @@ jobs:
 
       - name: Проверка дрейфа render-edge
         run: make render-edge-check
+
+      - name: Syntax-check MyCleanBot VPN-only access
+        run: ansible-playbook infra/ansible/mycleanbot_vpn_access.yml --syntax-check -i 'vps1,'
 
       - name: Smoke-тесты инструментов
         run: make test

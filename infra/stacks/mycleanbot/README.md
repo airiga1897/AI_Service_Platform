@@ -79,15 +79,22 @@ summary или application logs.
 
 ## VPN-only ingress and monitoring
 
-Контейнер публикуется только на `127.0.0.1:8040`. Шаблон
-`nginx.mycleanbot-vpn.conf.template` рендерится только после получения VPN
-listen-address, hostname и TLS paths и слушает исключительно VPN interface.
+Контейнер приложения публикуется только на `127.0.0.1:8040`. Для начального
+доступа через Windows `hosts` платформа запускает отдельный
+`mycleanbot-private-ingress` без published ports. Он использует immutable Nginx
+image, принимает TLS только на `172.22.254.10:443` внутри
+`ai_service_vpn_policy`, разрешает source `softether-edge` `172.22.254.2` и
+проксирует к `mycleanbot-route` `172.31.1.10:8000` через локальную app-сеть.
 Public ingress для instance запрещён validator'ом.
 
-Prometheus на management node использует Blackbox Exporter для `/livez` и
-`/healthz`. `/healthz` проверяет PostgreSQL и DB-backed heartbeat
-`telegram-supervisor`. Node Exporter textfile metrics контролируют свежесть
-backup и scratch restore rehearsal.
+Роль `mycleanbot_vpn_access` не создаёт сертификат, не включает policy network
+и не меняет VPS без `mycleanbot_vpn_access_change_approved=true`. До apply
+оператор должен по доверенному каналу подготовить DNS-01 сертификат, включить
+policy network только на VPS1 и проверить attachment `softether-edge`.
+
+HTTP probes, PostgreSQL, backup/restore и `telegram-supervisor` heartbeat
+остаются обязательными сигналами MyCleanBot, но будут включены в единый
+platform-wide monitoring, а не в отдельный monitoring stack проекта.
 
 ## Deployment state and rollback
 
