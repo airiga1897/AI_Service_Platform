@@ -865,6 +865,11 @@ def validate_runtime_instances(
                     errors,
                     f"{node_path}.data.backup.restore_rehearsal must be weekly-scratch-only",
                 )
+            if not isinstance(backup, dict) or backup.get("scratch_ipv4") != "172.31.1.13":
+                fail(
+                    errors,
+                    f"{node_path}.data.backup.scratch_ipv4 must be '172.31.1.13'",
+                )
             if instance_data.get("access") != "vpn-only":
                 fail(errors, f"{node_path}.access must be vpn-only")
             if not isinstance(vpn, dict) or vpn.get("container_bind") != "127.0.0.1":
