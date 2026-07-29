@@ -256,10 +256,16 @@
     import json
     import os
     path = json.loads(os.environ["SECRET_FILES_JSON"])[0]
-    required = {"server_password", "hub_password", "client_user", "client_password"}
     with open(path, encoding="utf-8") as handle:
         data = json.load(handle)
-    print(json.dumps({key: str(data[key]) for key in sorted(required)}))
+    result = {
+        "server_password": str(data["server_password"]),
+        "hub_password": str(data["hub_password"]),
+        "client_user": str(data.get("client_user") or ""),
+        "client_password": str(data.get("client_password") or ""),
+        "client_users": data.get("client_users") or {},
+    }
+    print(json.dumps(result, sort_keys=True))
     PY
   args:
     executable: /bin/bash

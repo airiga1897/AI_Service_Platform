@@ -5,7 +5,8 @@
       - mycleanbot_vpn_access_state in ['present', 'absent']
       - mycleanbot_vpn_access_hostname == 'mycleanbot.mine-craft.su'
       - mycleanbot_vpn_access_image is match('^docker\.io/library/nginx@sha256:[0-9a-f]{64}$')
-      - mycleanbot_vpn_access_endpoint_ipv4 != mycleanbot_vpn_access_edge_ipv4
+      - mycleanbot_vpn_access_endpoint_ipv4 != mycleanbot_vpn_access_backend_ipv4
+      - mycleanbot_vpn_access_operator_cidr == '10.89.1.0/24'
       - mycleanbot_vpn_access_backend_port | int == 8000
     fail_msg: MyCleanBot VPN access inputs do not satisfy the private immutable ingress contract.
 
@@ -22,16 +23,15 @@
   ansible.builtin.command:
     cmd: "docker network inspect {{ item }}"
   loop:
-    - "{{ mycleanbot_vpn_access_policy_network_name }}"
     - "{{ mycleanbot_vpn_access_app_network_name }}"
   register: mycleanbot_vpn_access_network_inspect
   changed_when: false
   when: mycleanbot_vpn_access_state == 'present'
 
-- name: Validate private policy network and endpoint ownership
+- name: Validate private app network and endpoint ownership
   ansible.builtin.shell: |
     set -euo pipefail
-    docker network inspect "{{ mycleanbot_vpn_access_policy_network_name }}" |
+    docker network inspect "{{ mycleanbot_vpn_access_app_network_name }}" |
       python3 -c '
     import ipaddress
     import json
@@ -41,20 +41,11 @@
     network = json.load(sys.stdin)[0]
     expected_subnet = ipaddress.ip_network(os.environ["EXPECTED_SUBNET"], strict=True)
     endpoint = ipaddress.ip_address(os.environ["ENDPOINT_IP"])
-    edge_ip = os.environ["EDGE_IP"]
-    edge_name = os.environ["EDGE_NAME"]
     configs = network.get("IPAM", {}).get("Config", [])
     subnets = {item.get("Subnet") for item in configs}
     if str(expected_subnet) not in subnets or endpoint not in expected_subnet:
-        raise SystemExit("unexpected VPN policy subnet or endpoint")
+        raise SystemExit("unexpected MyCleanBot app subnet or endpoint")
     containers = network.get("Containers") or {}
-    edge_matches = [
-        item for item in containers.values()
-        if item.get("Name") == edge_name
-        and str(item.get("IPv4Address", "")).split("/", 1)[0] == edge_ip
-    ]
-    if len(edge_matches) != 1:
-        raise SystemExit("softether-edge is not attached at the approved policy IP")
     endpoint_owners = [
         item.get("Name") for item in containers.values()
         if str(item.get("IPv4Address", "")).split("/", 1)[0] == str(endpoint)
@@ -66,10 +57,8 @@
   args:
     executable: /bin/bash
   environment:
-    EXPECTED_SUBNET: "{{ mycleanbot_vpn_access_policy_network_subnet }}"
+    EXPECTED_SUBNET: "{{ mycleanbot_vpn_access_app_network_subnet }}"
     ENDPOINT_IP: "{{ mycleanbot_vpn_access_endpoint_ipv4 }}"
-    EDGE_IP: "{{ mycleanbot_vpn_access_edge_ipv4 }}"
-    EDGE_NAME: "{{ mycleanbot_vpn_access_edge_container_name }}"
     INGRESS_NAME: "{{ mycleanbot_vpn_access_container_name }}"
   changed_when: false
   when:
@@ -176,8 +165,12 @@
     for attempt in $(seq 1 20); do
       state="$(docker inspect "{{ mycleanbot_vpn_access_container_name }}" \
         --format '{% raw %}{{.State.Health.Status}}{% endraw %}' 2>/dev/null || true)"
-      actual="$(docker inspect "{{ mycleanbot_vpn_access_container_name }}" \
-        --format '{% raw %}{{with index .NetworkSettings.Networks "ai_service_vpn_policy"}}{{.IPAddress}}{{end}}{% endraw %}' 2>/dev/null || true)"
+      actual="$(docker inspect "{{ mycleanbot_vpn_access_container_name }}" 2>/dev/null |
+        NETWORK="{{ mycleanbot_vpn_access_app_network_name }}" python3 -c '
+      import json, os, sys
+      data = json.load(sys.stdin)[0]
+      print(data.get("NetworkSettings", {}).get("Networks", {}).get(os.environ["NETWORK"], {}).get("IPAddress", ""))
+      ' || true)"
       if [ "$state" = "healthy" ] && [ "$actual" = "$expected" ]; then
         exit 0
       fi

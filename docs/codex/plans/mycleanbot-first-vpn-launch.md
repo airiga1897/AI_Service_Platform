@@ -15,11 +15,11 @@ a pull request or performs the first product rollout without its explicit gate.
 The bootstrap access path is:
 
 ```text
-Windows hosts: mycleanbot.mine-craft.su -> 172.22.254.10
-  -> operator VPN on VPS1
-  -> softether-edge 172.22.254.2
-  -> ai_service_vpn_policy
-  -> mycleanbot-private-ingress 172.22.254.10:443
+Windows hosts: mycleanbot.mine-craft.su -> 172.31.1.11
+  -> l3-vps1.mine-craft.su:443 / MyCleanBotOperatorVps1
+  -> routed TAP 10.89.1.0/24
+  -> platform-router allowlist
+  -> mycleanbot-private-ingress 172.31.1.11:443
   -> ai_service_app_vps1
   -> mycleanbot-route 172.31.1.10:8000
   -> mycleanbot-web
@@ -27,7 +27,8 @@ Windows hosts: mycleanbot.mine-craft.su -> 172.22.254.10
 
 `mycleanbot-private-ingress` has no `ports` mapping. It uses a pinned
 linux/amd64 Nginx digest, mounts an existing certificate read-only and accepts
-requests only from loopback and the approved `softether-edge` policy address.
+requests only from loopback and the isolated `10.89.1.0/24` operator hub.
+The hub has no default route and DHCP pushes only `172.31.1.11/32`.
 The worker still has no published port.
 
 The current public DNS state must not be confused with publication. On
@@ -62,33 +63,41 @@ Before any VPS change:
 
 1. Reconcile the trusted VPS1 host key on the active orchestration node from
    operator-owned pinned material. `ssh-keyscan` is forbidden.
-2. Confirm the exact VPN policy subnet `172.22.254.0/24` and that
-   `172.22.254.10` is unused.
-3. Confirm no public MyCleanBot HAProxy route exists.
-4. Prepare the DNS-01 certificate without adding a public A/AAAA record.
-5. Take a read-only inventory of the existing VPN, Docker networks, containers
+2. Confirm that `10.89.1.0/24`, `172.27.1.0/24`, `172.29.1.0/24` and
+   `172.31.1.11` do not overlap existing routes or endpoints.
+3. Confirm VPS1 disk and available-memory headroom, then plan the
+   `host_resources` transition from 512 MiB to 1024 MiB swap with
+   `vm.swappiness=10`.
+4. Confirm no public MyCleanBot HAProxy route exists.
+5. Prepare the DNS-01 certificate without adding a public A/AAAA record.
+6. Take a read-only inventory of the existing VPN, Docker networks, containers
    and listeners.
-6. Obtain explicit approval for the VPS change.
+7. Obtain explicit approval for the VPS change.
 
 ## Approved apply sequence
 
 After that approval:
 
-1. Re-enable `ai_service_vpn_policy` only on VPS1 through the existing
-   `vpn_edge` role. Expected `softether-edge` address is `172.22.254.2`.
-2. Apply `infra/ansible/mycleanbot_vpn_access.yml` with:
+1. Apply the reviewed VPS1 `host_resources` plan and verify `/swapfile`,
+   `/etc/fstab`, active swap size and `vm.swappiness=10`.
+2. Add the reviewed `l3-vps1` operator link, platform-router policy and
+   HAProxy SNI fragments from
+   `docs/examples/l3-vps1-mycleanbot.example.yml`.
+3. Add `softether_l3_vps` service and edge-route desired state only on VPS1,
+   then apply `softether_l3_vps`, `platform_router` and `edge_haproxy`.
+4. Apply `infra/ansible/mycleanbot_vpn_access.yml` with:
 
    ```text
    mycleanbot_vpn_access_change_approved=true
    ```
 
-3. Verify the ingress container uses the pinned digest, has no published ports,
-   owns only `172.22.254.10` on the policy network and can reach only the local
+5. Verify the ingress container uses the pinned digest, has no published ports,
+   owns only `172.31.1.11` on the app network and can reach only the local
    MyCleanBot backend contract through the app network.
-4. On the Windows operator workstation, add one administrator-managed line:
+6. On the Windows operator workstation, add one administrator-managed line:
 
    ```text
-   172.22.254.10 mycleanbot.mine-craft.su
+   172.31.1.11 mycleanbot.mine-craft.su
    ```
 
    Use the tracked helper so unrelated hosts entries are preserved:
@@ -100,11 +109,12 @@ After that approval:
    .\tools\mycleanbot\manage_hosts.ps1 verify
    ```
 
-5. The helper flushes the Windows DNS cache. With VPN connected, verify the certificate and
-   `/ingress-livez`. With VPN disconnected, confirm that `172.22.254.10` is
+7. The helper flushes the Windows DNS cache. With the `l3-vps1` operator hub
+   connected, verify the certificate and `/ingress-livez`. With it disconnected,
+   confirm that `172.31.1.11` is
    unreachable.
-6. Verify PostgreSQL tenant isolation, backup and scratch restore rehearsal.
-7. Stop and request the separate first-rollout confirmation.
+8. Verify PostgreSQL tenant isolation, backup and scratch restore rehearsal.
+9. Stop and request the separate first-rollout confirmation.
 
 ## First rollout
 
@@ -124,8 +134,9 @@ container, tenant-only database access and successful VPN-only HTTPS access.
 
 Access rollback stops only `mycleanbot-private-ingress` and removes the single
 managed Windows hosts line with
-`.\tools\mycleanbot\manage_hosts.ps1 remove`. It does not remove the VPN edge,
-policy network, application, PostgreSQL or backup data.
+`.\tools\mycleanbot\manage_hosts.ps1 remove`. The routed hub and its one
+platform-router policy are then removed from desired state without touching
+the ordinary VPN ingress, application, PostgreSQL or backup data.
 
 First product rollout rollback stops only `mycleanbot-web` and
 `mycleanbot-worker` when no previous digest exists. Schema rollback and restore

@@ -293,8 +293,37 @@
             client_ip = ipaddress.ip_address(str(l3_link["client_ip"]))
             if server_ip not in vpn_subnet or client_ip not in vpn_subnet:
                 fail(f"softether_l3_vps link {link_name} VPN endpoint IPs must be inside {vpn_subnet}")
-            if not management_network.get("enabled"):
-                fail(f"softether_l3_vps link {link_name} server sidecar requires server management network")
+            access_mode = str(l3_link.get("access_mode") or "secure_nat").strip().lower()
+            if access_mode not in {"secure_nat", "routed_tap"}:
+                fail(f"softether_l3_vps link {link_name} has unsupported access_mode: {access_mode}")
+            tap_name = str(l3_link.get("tap_name") or "").strip()
+            client_pool_start = ipaddress.ip_address(str(l3_link.get("client_pool_start") or client_ip))
+            client_pool_end = ipaddress.ip_address(str(l3_link.get("client_pool_end") or client_ip))
+            pushed_routes = [
+                ipaddress.ip_network(str(item), strict=True)
+                for item in (l3_link.get("pushed_routes") or [])
+            ]
+            if access_mode == "routed_tap":
+                if not tap_name or len(tap_name) > 11 or not all(ch.isalnum() or ch in "_-" for ch in tap_name):
+                    fail(f"softether_l3_vps link {link_name} routed_tap requires a safe tap_name of at most 11 characters")
+                if client_pool_start not in vpn_subnet or client_pool_end not in vpn_subnet or client_pool_start > client_pool_end:
+                    fail(f"softether_l3_vps link {link_name} client pool must be ordered and inside {vpn_subnet}")
+                if server_ip >= client_pool_start and server_ip <= client_pool_end:
+                    fail(f"softether_l3_vps link {link_name} server IP must not be inside the client pool")
+                if not pushed_routes:
+                    fail(f"softether_l3_vps link {link_name} routed_tap requires at least one pushed route")
+            admin_allowed_source = str(
+                l3_link.get("server_admin_allowed_source_ipv4")
+                or management_network.get("allowed_source_ipv4")
+                or "127.0.0.1"
+            )
+            if admin_allowed_source != "127.0.0.1":
+                parsed_admin_source = ipaddress.ip_address(admin_allowed_source)
+                if parsed_admin_source not in l3_network_subnet and not management_network.get("enabled"):
+                    fail(
+                        f"softether_l3_vps link {link_name} admin source {parsed_admin_source} "
+                        f"must be in the server transport network when no management network is configured"
+                    )
             softether_servers.append({
                 "enabled": True,
                 "name": str(link.get("name") or link_name),
@@ -307,10 +336,17 @@
                 "extra_listeners": [992],
                 "server_ip": str(server_ip),
                 "client_ip": str(client_ip),
+                "client_pool_start": str(client_pool_start),
+                "client_pool_end": str(client_pool_end),
                 "netmask": str(vpn_subnet.netmask),
+                "prefixlen": vpn_subnet.prefixlen,
+                "access_mode": access_mode,
+                "tap_name": tap_name,
+                "tap_iface": "tap_" + tap_name if tap_name else "",
+                "pushed_routes": [str(item) for item in pushed_routes],
                 "secret_file": os.path.join(l3_secrets_dir, str(l3_link["name"]) + ".json"),
                 "vpncmd_timeout_seconds": int(os.environ["SOFTETHER_CLIENT_VPNCMD_TIMEOUT_SECONDS"]),
-                "management_allowed_source_ipv4": management_network["allowed_source_ipv4"],
+                "management_allowed_source_ipv4": admin_allowed_source,
             })
 
         for policy in link.get("policies") or []:
@@ -536,6 +572,18 @@
         item["client_password"] = str(data.get("client_password") or "")
         item["client_users"] = data.get("client_users") or {}
         result[path] = item
+    server_paths = {
+        str(item.get("secret_file") or "")
+        for item in model.get("softether_servers", [])
+        if str(item.get("secret_file") or "")
+    }
+    server_passwords = {result[path]["server_password"] for path in server_paths}
+    if len(server_passwords) > 1:
+        print(
+            "all hubs in one per-node SoftEther server runtime must share its server_password",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     print(json.dumps(result, sort_keys=True))
     PY
   args:
@@ -864,7 +912,7 @@
 
 - name: Start platform_router container
   ansible.builtin.command:
-    cmd: docker compose -f "{{ platform_router_compose_file }}" up -d
+    cmd: docker compose -f "{{ platform_router_compose_file }}" up -d --remove-orphans
     chdir: "{{ platform_router_root_dir }}"
   register: platform_router_compose_up
   changed_when: >
@@ -876,7 +924,7 @@
 
 - name: Recreate platform_router stack when route reconciler changed
   ansible.builtin.command:
-    cmd: docker compose -f "{{ platform_router_compose_file }}" up -d --force-recreate
+    cmd: docker compose -f "{{ platform_router_compose_file }}" up -d --force-recreate --remove-orphans
     chdir: "{{ platform_router_root_dir }}"
   changed_when: true
   when:
@@ -1072,6 +1120,8 @@
     client_ip="{{ item.client_ip }}"
     netmask="{{ item.netmask }}"
     public_port="{{ item.public_port }}"
+    access_mode="{{ item.access_mode }}"
+    tap_name="{{ item.tap_name }}"
 
     cleanup_vpncmd() {
       docker exec "$server_container" sh -c 'pkill -KILL vpncmd 2>/dev/null || true' >/dev/null 2>&1 || true
@@ -1160,9 +1210,11 @@
         [ -n "$client_user" ] || continue
         printf 'UserPasswordSet %s /PASSWORD:%s\n' "$client_user" "$client_password"
       done < "$users_input"
-      printf 'SecureNatEnable\n'
-      printf 'SecureNatHostSet /MAC:none /IP:%s /MASK:%s\n' "$server_ip" "$netmask"
-      printf 'DhcpSet /START:%s /END:%s /MASK:%s /EXPIRE:7200 /GW:%s /DNS:1.1.1.1 /DNS2:8.8.8.8 /DOMAIN:none /LOG:yes\n' "$client_ip" "$client_ip" "$netmask" "$server_ip"
+      if [ "$access_mode" = "secure_nat" ]; then
+        printf 'SecureNatEnable\n'
+        printf 'SecureNatHostSet /MAC:none /IP:%s /MASK:%s\n' "$server_ip" "$netmask"
+        printf 'DhcpSet /START:%s /END:%s /MASK:%s /EXPIRE:7200 /GW:%s /DNS:1.1.1.1 /DNS2:8.8.8.8 /DOMAIN:none /LOG:yes\n' "$client_ip" "$client_ip" "$netmask" "$server_ip"
+      fi
       printf 'Flush\n'
     } > "$input"
     run_vpncmd_batch /tmp/platform-router-softether-server-config.out < "$input" || {
@@ -1171,6 +1223,13 @@
       sed -E 's#/PASSWORD:[^[:space:]]+#/PASSWORD:<redacted>#g' /tmp/platform-router-softether-server-config.out >&2
       exit 1
     }
+
+    if [ "$access_mode" = "routed_tap" ]; then
+      run_vpncmd "$server_vpncmd_endpoint" /SERVER /PASSWORD:"$password" /HUB:"$hub" /CMD SecureNatDisable >/dev/null 2>&1 || true
+      bridges="$(run_vpncmd "$server_vpncmd_endpoint" /SERVER /PASSWORD:"$password" /CMD BridgeList 2>/dev/null || true)"
+      echo "$bridges" | grep -Fq "tap_${tap_name}" ||
+        run_vpncmd "$server_vpncmd_endpoint" /SERVER /PASSWORD:"$password" /CMD BridgeCreate "$hub" /DEVICE:"$tap_name" /TAP:yes >/dev/null
+    fi
   args:
     executable: /bin/bash
   environment:

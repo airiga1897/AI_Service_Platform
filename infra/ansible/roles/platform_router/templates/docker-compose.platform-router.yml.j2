@@ -49,6 +49,10 @@ services:
     container_name: {{ platform_router_model.softether_server_runtime.container_name }}
     command: ["/usr/local/bin/softether-entrypoint.sh", "server"]
     network_mode: "service:{{ platform_router_model.container_name }}"
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
     volumes:
       - ./{{ platform_router_model.softether_server_runtime.data_dir }}:/mnt
       - ./{{ platform_router_model.softether_server_runtime.logs_dir }}:/mnt/server_log

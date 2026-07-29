@@ -875,3 +875,9 @@ The role refuses unknown active swap sources, insufficient disk/memory
 headroom, and destructive `absent`/`purge` actions. After apply, verify
 `swapon --show`, `/etc/fstab`, `sysctl vm.swappiness`, and perform the first
 reboot persistence rehearsal on the `vps3` canary before continuing.
+
+Before the first MyCleanBot rollout, inventory VPS1 and reconcile its current
+512 MiB swap to the platform emergency baseline of 1024 MiB with
+`vm.swappiness=10`. Apply only through `host_resources`, only after its disk and
+available-memory gates pass. The role's atomic replacement restores the
+previous swapfile if activation of the replacement fails.
