@@ -48,6 +48,7 @@ if [[ "$action" == "restore-rehearsal" ]]; then
       -c 'CREATE ROLE mycleanbot NOLOGIN;' >/dev/null
 fi
 
+MYCLEANBOT_SCRATCH_POSTGRES_HOST="$scratch_ipv4" \
 python3 /usr/local/lib/ai-service-platform/postgres_tenant_backup.py \
   "$action" \
   --config "$config" \

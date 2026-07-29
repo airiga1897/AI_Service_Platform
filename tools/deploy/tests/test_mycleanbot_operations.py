@@ -70,6 +70,10 @@ class BackupContractTests(unittest.TestCase):
         self.assertIn("--network ai_service_app_vps1", wrapper)
         self.assertIn("scratch_ipv4=172.31.1.13", wrapper)
         self.assertIn('--ip "$scratch_ipv4"', wrapper)
+        self.assertIn(
+            'MYCLEANBOT_SCRATCH_POSTGRES_HOST="$scratch_ipv4"',
+            wrapper,
+        )
         self.assertNotIn("--ip 172.31.1.11", wrapper)
         self.assertIn("trap cleanup_scratch EXIT", wrapper)
         self.assertIn("docker rm -f \"$scratch_container\"", wrapper)
@@ -132,6 +136,27 @@ class BackupContractTests(unittest.TestCase):
             "postgresql://admin@db:5432/restore_mycleanbot_20260728010101"
             "?sslmode=require",
         )
+
+    def test_scratch_host_rewrite_preserves_credentials_port_and_query(self) -> None:
+        result = backup_module.url_with_host(
+            "postgresql://admin:p%40ss@172.31.1.11:5432/postgres?sslmode=require",
+            "172.31.1.13",
+        )
+        self.assertEqual(
+            result,
+            "postgresql://admin:p%40ss@172.31.1.13:5432/postgres"
+            "?sslmode=require",
+        )
+
+    def test_scratch_host_rewrite_rejects_non_ip_target(self) -> None:
+        with self.assertRaisesRegex(
+            (backup_module.BackupError, ValueError),
+            "IPv4|does not appear",
+        ):
+            backup_module.url_with_host(
+                "postgresql://admin@172.31.1.11/postgres",
+                "scratch.example.invalid",
+            )
 
     def test_libpq_environment_keeps_password_out_of_command_arguments(self) -> None:
         env = backup_module.postgres_env(
