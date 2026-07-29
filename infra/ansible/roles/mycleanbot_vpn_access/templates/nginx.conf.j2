@@ -9,6 +9,7 @@ server {
 
     allow 127.0.0.1;
     allow {{ mycleanbot_vpn_access_operator_cidr }};
+    allow {{ mycleanbot_vpn_access_router_ipv4 }};
     deny all;
 
     location = /ingress-livez {

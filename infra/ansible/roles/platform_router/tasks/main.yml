@@ -387,6 +387,15 @@
                 policy_vpn_next_hop = str(peer_client_ip)
             target_source_cidr = ipaddress.ip_network(str(policy.get("target_source_cidr") or source_cidr), strict=False)
             effective_source_cidr = target_source_cidr if alias == target_alias else source_cidr
+            target_snat_ipv4 = ""
+            if alias == target_alias and policy.get("target_snat_ipv4"):
+                parsed_target_snat_ipv4 = ipaddress.ip_address(str(policy["target_snat_ipv4"]))
+                if parsed_target_snat_ipv4 not in {data_ipv4, app_ipv4}:
+                    fail(
+                        f"platform_router policy {policy.get('name')} target_snat_ipv4 "
+                        f"must equal the target router data_ipv4 or app_ipv4"
+                    )
+                target_snat_ipv4 = str(parsed_target_snat_ipv4)
             return_route_cidr = ""
             return_route_next_hop = ""
             if (
@@ -426,6 +435,7 @@
                 "softether_client_next_hop": policy_vpn_next_hop,
                 "softether_return_cidr": return_route_cidr,
                 "softether_return_next_hop": return_route_next_hop,
+                "target_snat_ipv4": target_snat_ipv4,
             })
 
     if data_ipv4 is None or app_ipv4 is None:
@@ -1259,7 +1269,7 @@
     docker exec -u 0 "$container" iptables -t nat -C POSTROUTING -j PLATFORM_ROUTER_POSTROUTING 2>/dev/null ||
       docker exec -u 0 "$container" iptables -t nat -A POSTROUTING -j PLATFORM_ROUTER_POSTROUTING
     docker exec -u 0 "$container" iptables -t nat -F PLATFORM_ROUTER_POSTROUTING
-    python3 - "$policies_json" <<'PY' | while IFS='|' read -r proto source_cidr destination_ipv4 destination_port route_destination vpn_iface vpn_next_hop return_cidr return_next_hop; do
+    python3 - "$policies_json" <<'PY' | while IFS='|' read -r proto source_cidr destination_ipv4 destination_port route_destination vpn_iface vpn_next_hop return_cidr return_next_hop target_snat_ipv4; do
     import json
     import sys
     for item in json.loads(sys.argv[1]):
@@ -1273,6 +1283,7 @@
             item.get("softether_client_next_hop") or "",
             item.get("softether_return_cidr") or "",
             item.get("softether_return_next_hop") or "",
+            item.get("target_snat_ipv4") or "",
         ]))
     PY
       if [ "$route_destination" = "true" ]; then
@@ -1298,6 +1309,11 @@
       fi
       if [ -n "$return_cidr" ]; then
         docker exec -u 0 "$container" ip route replace "$return_cidr" via "$return_next_hop" dev "$vpn_iface" onlink
+      fi
+      if [ -n "$target_snat_ipv4" ]; then
+        docker exec -u 0 "$container" iptables -t nat -A PLATFORM_ROUTER_POSTROUTING \
+          -p "$proto" -s "$source_cidr" -d "$destination_ipv4/32" --dport "$destination_port" \
+          -j SNAT --to-source "$target_snat_ipv4"
       fi
       docker exec -u 0 "$container" iptables -A FORWARD -p "$proto" -s "$source_cidr" -d "$destination_ipv4/32" --dport "$destination_port" -j ACCEPT
       docker exec -u 0 "$container" iptables -A FORWARD -p "$proto" -s "$destination_ipv4/32" --sport "$destination_port" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT

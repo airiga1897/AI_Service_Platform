@@ -12,6 +12,7 @@ mycleanbot_vpn_access_hostname: mycleanbot.mine-craft.su
 mycleanbot_vpn_access_app_network_name: ai_service_app_vps1
 mycleanbot_vpn_access_app_network_subnet: 172.31.1.0/24
 mycleanbot_vpn_access_operator_cidr: 10.89.1.0/24
+mycleanbot_vpn_access_router_ipv4: 172.31.1.2
 mycleanbot_vpn_access_endpoint_ipv4: 172.31.1.11
 mycleanbot_vpn_access_backend_ipv4: 172.31.1.10
 mycleanbot_vpn_access_backend_port: 8000
