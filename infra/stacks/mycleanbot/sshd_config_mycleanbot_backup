@@ -1,0 +1,19 @@
+Port 22
+ListenAddress 172.30.5.10
+Protocol 2
+HostKey /etc/ssh/ssh_host_ed25519_key
+UsePAM no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+PermitRootLogin no
+AllowUsers mycleanbot_backup
+AuthorizedKeysFile /opt/backups/ai-service-platform/mycleanbot/repository/.ssh/authorized_keys
+PermitEmptyPasswords no
+AllowTcpForwarding no
+X11Forwarding no
+PermitTunnel no
+Subsystem sftp internal-sftp
+ChrootDirectory /opt/backups/ai-service-platform/mycleanbot
+ForceCommand internal-sftp
+LogLevel VERBOSE

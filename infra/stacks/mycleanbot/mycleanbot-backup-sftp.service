@@ -1,0 +1,14 @@
+[Unit]
+Description=MyCleanBot private backup SFTP endpoint
+After=mycleanbot-backup-netns.service
+Requires=mycleanbot-backup-netns.service
+
+[Service]
+Type=notify
+ExecStart=/usr/sbin/ip netns exec mycleanbot-backup /usr/sbin/sshd -D -e -f /etc/ssh/sshd_config_mycleanbot_backup
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

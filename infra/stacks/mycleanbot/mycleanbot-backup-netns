@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+action="${1:-}"
+namespace="mycleanbot-backup"
+network="ai_service_data_vps5"
+host_veth="mcbbackup0"
+namespace_veth="mcbbackup1"
+endpoint="172.30.5.10/24"
+gateway="172.30.5.2"
+
+network_bridge() {
+  local network_id bridge
+  network_id="$(docker network inspect -f '{{.Id}}' "$network")"
+  bridge="$(docker network inspect \
+    -f '{{index .Options "com.docker.network.bridge.name"}}' "$network")"
+  if [[ -z "$bridge" || "$bridge" == "<no value>" ]]; then
+    bridge="br-${network_id:0:12}"
+  fi
+  ip link show "$bridge" >/dev/null
+  printf '%s\n' "$bridge"
+}
+
+case "$action" in
+  up)
+    if ip netns list | awk '{print $1}' | grep -Fxq "$namespace"; then
+      ip netns exec "$namespace" ip -4 addr show dev "$namespace_veth" |
+        grep -Fq "172.30.5.10/24"
+      exit 0
+    fi
+    bridge="$(network_bridge)"
+    ip netns add "$namespace"
+    trap 'ip netns del "$namespace" >/dev/null 2>&1 || true' ERR
+    ip link add "$host_veth" type veth peer name "$namespace_veth"
+    ip link set "$host_veth" master "$bridge"
+    ip link set "$host_veth" up
+    ip link set "$namespace_veth" netns "$namespace"
+    ip netns exec "$namespace" ip link set lo up
+    ip netns exec "$namespace" ip addr add "$endpoint" dev "$namespace_veth"
+    ip netns exec "$namespace" ip link set "$namespace_veth" up
+    ip netns exec "$namespace" ip route add default via "$gateway"
+    trap - ERR
+    ;;
+  down)
+    ip netns del "$namespace" >/dev/null 2>&1 || true
+    ;;
+  *)
+    echo "usage: mycleanbot-backup-netns up|down" >&2
+    exit 2
+    ;;
+esac

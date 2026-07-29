@@ -1,6 +1,7 @@
 [Unit]
 Description=AI Service Platform MyCleanBot scratch restore rehearsal
-After=network-online.target mycleanbot-backup.service
+After=network-online.target docker.service mycleanbot-backup.service mycleanbot-backup-routes.service
+Requires=docker.service mycleanbot-backup-routes.service
 
 [Service]
 Type=oneshot

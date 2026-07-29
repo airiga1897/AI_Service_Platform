@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+action="${1:-}"
+router_container="platform-router"
+router_network="ai_service_app_vps1"
+router_ipv4="172.31.1.2"
+destinations=("172.30.8.10/32" "172.30.5.10/32")
+
+require_router() {
+  local actual
+  actual="$(docker inspect \
+    -f '{{with index .NetworkSettings.Networks "ai_service_app_vps1"}}{{.IPAddress}}{{end}}' \
+    "$router_container")"
+  if [[ "$actual" != "$router_ipv4" ]]; then
+    echo "unexpected platform-router address on $router_network" >&2
+    exit 1
+  fi
+}
+
+case "$action" in
+  up)
+    require_router
+    for destination in "${destinations[@]}"; do
+      ip route replace "$destination" via "$router_ipv4"
+    done
+    ;;
+  down)
+    for destination in "${destinations[@]}"; do
+      if ip route show "$destination" | grep -Fq "via $router_ipv4"; then
+        ip route del "$destination"
+      fi
+    done
+    ;;
+  *)
+    echo "usage: mycleanbot-backup-routes up|down" >&2
+    exit 2
+    ;;
+esac

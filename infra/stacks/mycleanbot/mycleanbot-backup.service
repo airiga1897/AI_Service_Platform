@@ -1,6 +1,7 @@
 [Unit]
 Description=AI Service Platform MyCleanBot PostgreSQL backup
-After=network-online.target
+After=network-online.target mycleanbot-backup-routes.service
+Requires=mycleanbot-backup-routes.service
 
 [Service]
 Type=oneshot
