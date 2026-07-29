@@ -68,9 +68,25 @@ class BackupContractTests(unittest.TestCase):
         self.assertIn("SCRATCH_POSTGRES_IMAGE", wrapper)
         self.assertIn("--name \"$scratch_container\"", wrapper)
         self.assertIn("--network ai_service_app_vps1", wrapper)
+        self.assertIn("scratch_ipv4=172.31.1.13", wrapper)
+        self.assertIn('--ip "$scratch_ipv4"', wrapper)
+        self.assertNotIn("--ip 172.31.1.11", wrapper)
         self.assertIn("trap cleanup_scratch EXIT", wrapper)
         self.assertIn("docker rm -f \"$scratch_container\"", wrapper)
         self.assertNotIn("POSTGRES_SUPERUSER_PASSWORD", wrapper)
+
+        registry = yaml.safe_load((ROOT / "services.yml").read_text(encoding="utf-8"))
+        runtime = registry["runtime_instances"]["mycleanbot"]
+        scratch_ipv4 = runtime["data"]["backup"]["scratch_ipv4"]
+        self.assertEqual("172.31.1.13", scratch_ipv4)
+        self.assertNotIn(
+            scratch_ipv4,
+            {
+                runtime["data"]["postgres"]["route_anchor_ipv4"],
+                runtime["vpn"]["private_endpoint_ipv4"],
+                runtime["monitoring"].get("private_endpoint_ipv4"),
+            },
+        )
 
     def test_backup_sftp_is_bound_only_inside_private_namespace(self) -> None:
         netns = BACKUP_NETNS.read_text(encoding="utf-8")

@@ -64,6 +64,9 @@ Worker запрещено запускать, пока `TELEGRAM_API_ID` и `TEL
 dump и число application relations с manifest и всегда удаляет scratch database.
 Поэтому первоначальная пустая tenant DB тоже проверяется до первой миграции.
 Production database не является целью rehearsal.
+Ephemeral scratch PostgreSQL использует зарезервированный `172.31.1.13`,
+отдельный от route anchor (`172.31.1.10`), private ingress (`172.31.1.11`) и
+временного monitoring tail (`172.31.1.12`).
 
 Перед созданием tenant оператор запускает
 `provision_mycleanbot.py plan`, затем read-only `audit`. `apply` разрешён только

@@ -735,6 +735,7 @@ runtime_instances:
           monthly: 6
         repository_check: after-each-backup
         restore_rehearsal: weekly-scratch-only
+        scratch_ipv4: 172.31.1.13
         production_restore: explicit-approval-only
     vpn:
       ingress_owner: platform

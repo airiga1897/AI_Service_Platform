@@ -10,6 +10,7 @@ action="${1:-}"
 config=/etc/ai-service-platform/mycleanbot-backup.env
 app_env=/opt/stacks/mycleanbot-prod/.env.mycleanbot.secrets
 scratch_container=mycleanbot-restore-scratch
+scratch_ipv4=172.31.1.13
 
 cleanup_scratch() {
   docker rm -f "$scratch_container" >/dev/null 2>&1 || true
@@ -29,7 +30,7 @@ if [[ "$action" == "restore-rehearsal" ]]; then
     --name "$scratch_container" \
     --label ai-service-platform.owner=mycleanbot-backup \
     --network ai_service_app_vps1 \
-    --ip 172.31.1.11 \
+    --ip "$scratch_ipv4" \
     -e POSTGRES_PASSWORD_FILE=/run/secrets/scratch-password \
     -v /etc/ai-service-platform/mycleanbot-scratch-postgres-password:/run/secrets/scratch-password:ro \
     "$SCRATCH_POSTGRES_IMAGE" >/dev/null
