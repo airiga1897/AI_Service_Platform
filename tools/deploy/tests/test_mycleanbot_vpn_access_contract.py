@@ -70,6 +70,15 @@ class MyCleanBotVpnAccessContractTests(unittest.TestCase):
         self.assertIn("docker network inspect", tasks)
         self.assertIn("unexpected MyCleanBot app subnet or endpoint", tasks)
         self.assertIn("Require protected MyCleanBot TLS files", tasks)
+        self.assertIn(
+            "python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0];",
+            tasks,
+        )
+        self.assertNotIn(
+            'NETWORK="{{ mycleanbot_vpn_access_app_network_name }}" '
+            "python3 -c '\n",
+            tasks,
+        )
         self.assertNotIn("ssh-keyscan", tasks)
         self.assertNotIn("0.0.0.0", tasks)
 

@@ -166,11 +166,7 @@
       state="$(docker inspect "{{ mycleanbot_vpn_access_container_name }}" \
         --format '{% raw %}{{.State.Health.Status}}{% endraw %}' 2>/dev/null || true)"
       actual="$(docker inspect "{{ mycleanbot_vpn_access_container_name }}" 2>/dev/null |
-        NETWORK="{{ mycleanbot_vpn_access_app_network_name }}" python3 -c '
-      import json, os, sys
-      data = json.load(sys.stdin)[0]
-      print(data.get("NetworkSettings", {}).get("Networks", {}).get(os.environ["NETWORK"], {}).get("IPAddress", ""))
-      ' || true)"
+        NETWORK="{{ mycleanbot_vpn_access_app_network_name }}" python3 -c 'import json, os, sys; data = json.load(sys.stdin)[0]; print(data.get("NetworkSettings", {}).get("Networks", {}).get(os.environ["NETWORK"], {}).get("IPAddress", ""))' || true)"
       if [ "$state" = "healthy" ] && [ "$actual" = "$expected" ]; then
         exit 0
       fi
