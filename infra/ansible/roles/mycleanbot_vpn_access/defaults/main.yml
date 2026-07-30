@@ -2,6 +2,10 @@
 mycleanbot_vpn_access_state: present
 mycleanbot_vpn_access_change_approved: false
 
+mycleanbot_vpn_access_deploy_user: depuser
+mycleanbot_vpn_access_backup_command: /usr/local/bin/ai-service-mycleanbot-backup backup
+mycleanbot_vpn_access_deploy_sudoers_file: /etc/sudoers.d/depuser-mycleanbot
+
 mycleanbot_vpn_access_root_dir: /opt/ai-service-platform/mycleanbot_vpn_access
 mycleanbot_vpn_access_compose_file: "{{ mycleanbot_vpn_access_root_dir }}/docker-compose.yml"
 mycleanbot_vpn_access_container_name: mycleanbot-private-ingress

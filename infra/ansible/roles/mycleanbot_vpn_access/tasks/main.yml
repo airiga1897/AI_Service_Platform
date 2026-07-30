@@ -9,6 +9,9 @@
       - mycleanbot_vpn_access_operator_cidr == '10.89.1.0/24'
       - mycleanbot_vpn_access_router_ipv4 == '172.31.1.2'
       - mycleanbot_vpn_access_backend_port | int == 8000
+      - mycleanbot_vpn_access_deploy_user == 'depuser'
+      - mycleanbot_vpn_access_backup_command == '/usr/local/bin/ai-service-mycleanbot-backup backup'
+      - mycleanbot_vpn_access_deploy_sudoers_file == '/etc/sudoers.d/depuser-mycleanbot'
     fail_msg: MyCleanBot VPN access inputs do not satisfy the private immutable ingress contract.
 
 - name: Require explicit approval before changing VPS runtime
@@ -19,6 +22,18 @@
       Set mycleanbot_vpn_access_change_approved=true only after the explicit
       MyCleanBot VPN ingress VPS-change approval.
   when: not ansible_check_mode
+
+- name: Install narrow MyCleanBot pre-deployment backup permission
+  ansible.builtin.copy:
+    content: >-
+      {{ mycleanbot_vpn_access_deploy_user }} ALL=(root) NOPASSWD:
+      {{ mycleanbot_vpn_access_backup_command }}
+    dest: "{{ mycleanbot_vpn_access_deploy_sudoers_file }}"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+  when: mycleanbot_vpn_access_state == 'present'
 
 - name: Inspect required Docker networks
   ansible.builtin.command:

@@ -66,6 +66,12 @@ class MyCleanBotVpnAccessContractTests(unittest.TestCase):
         tasks = (
             ROOT / "infra/ansible/roles/mycleanbot_vpn_access/tasks/main.yml"
         ).read_text(encoding="utf-8")
+        defaults = yaml.safe_load(
+            (
+                ROOT
+                / "infra/ansible/roles/mycleanbot_vpn_access/defaults/main.yml"
+            ).read_text(encoding="utf-8")
+        )
 
         self.assertIn("mycleanbot_vpn_access_change_approved | bool", tasks)
         self.assertIn("docker network inspect", tasks)
@@ -82,6 +88,17 @@ class MyCleanBotVpnAccessContractTests(unittest.TestCase):
         )
         self.assertNotIn("ssh-keyscan", tasks)
         self.assertNotIn("0.0.0.0", tasks)
+        self.assertEqual(
+            "/usr/local/bin/ai-service-mycleanbot-backup backup",
+            defaults["mycleanbot_vpn_access_backup_command"],
+        )
+        self.assertEqual(
+            "/etc/sudoers.d/depuser-mycleanbot",
+            defaults["mycleanbot_vpn_access_deploy_sudoers_file"],
+        )
+        self.assertIn("validate: /usr/sbin/visudo -cf %s", tasks)
+        self.assertIn("ALL=(root) NOPASSWD:", tasks)
+        self.assertNotIn("NOPASSWD: ALL", tasks)
 
     def test_windows_hosts_helper_manages_only_one_private_entry(self) -> None:
         helper = (ROOT / "tools/mycleanbot/manage_hosts.ps1").read_text(
