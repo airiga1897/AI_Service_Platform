@@ -196,6 +196,10 @@ class DeploymentContractTests(unittest.TestCase):
             self.assertIn(f"{name}=", secret)
         self.assertIn("DJANGO_DEBUG=false", public)
         self.assertIn("DJANGO_ALLOWED_HOSTS=", public)
+        self.assertIn(
+            "DJANGO_ALLOWED_HOSTS=mycleanbot.mine-craft.su,127.0.0.1",
+            public,
+        )
         self.assertIn("MINI_APP_RECONCILE_SECONDS=300", public)
         self.assertIn("MINI_APP_ADMIN_EMAILS=", public)
 
