@@ -99,6 +99,7 @@ class MyCleanBotVpnAccessContractTests(unittest.TestCase):
         self.assertIn("validate: /usr/sbin/visudo -cf %s", tasks)
         self.assertIn("ALL=(root) NOPASSWD:", tasks)
         self.assertNotIn("NOPASSWD: ALL", tasks)
+        self.assertIn("up -d --force-recreate", tasks)
 
     def test_windows_hosts_helper_manages_only_one_private_entry(self) -> None:
         helper = (ROOT / "tools/mycleanbot/manage_hosts.ps1").read_text(
