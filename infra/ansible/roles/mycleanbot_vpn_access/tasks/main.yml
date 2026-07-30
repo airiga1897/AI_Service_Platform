@@ -149,9 +149,11 @@
     - mycleanbot_vpn_access_state == 'present'
     - not ansible_check_mode
 
-- name: Start MyCleanBot private ingress
+- name: Recreate MyCleanBot private ingress to reload protected bind mounts
   ansible.builtin.command:
-    cmd: "docker compose -f {{ mycleanbot_vpn_access_compose_file }} up -d"
+    cmd: >-
+      docker compose -f {{ mycleanbot_vpn_access_compose_file }}
+      up -d --force-recreate
     chdir: "{{ mycleanbot_vpn_access_root_dir }}"
   register: mycleanbot_vpn_access_up
   changed_when: >
