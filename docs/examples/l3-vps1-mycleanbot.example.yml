@@ -23,6 +23,10 @@ links:
     client_ip: 10.89.1.10
     client_pool_start: 10.89.1.10
     client_pool_end: 10.89.1.20
+    managed_client_user_prefix: mcb_user_
+    managed_client_user_limit: 9
+    protected_client_users:
+      - operator_arm
     access_mode: routed_tap
     tap_name: opmc1
     pushed_routes:

@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import pathlib
 import re
+import json
+import subprocess
+import sys
+import tempfile
 import unittest
 
 import yaml
@@ -25,6 +29,12 @@ class MyCleanBotVpnAccessContractTests(unittest.TestCase):
         self.assertEqual("172.31.1.11", vpn["private_endpoint_ipv4"])
         self.assertEqual("172.31.1.10", vpn["backend_ipv4"])
         self.assertTrue(vpn["hosts_bootstrap"])
+        self.assertEqual("10.89.1.10", vpn["client_pool_start"])
+        self.assertEqual("10.89.1.20", vpn["client_pool_end"])
+        self.assertTrue(vpn["per_invitation_accounts"])
+        self.assertEqual("mcb_user_", vpn["managed_user_prefix"])
+        self.assertEqual(["operator_arm"], vpn["protected_users"])
+        self.assertEqual(9, vpn["managed_user_limit"])
 
     def test_ingress_compose_has_no_host_port_and_uses_digest(self) -> None:
         compose = (
@@ -114,6 +124,137 @@ class MyCleanBotVpnAccessContractTests(unittest.TestCase):
         self.assertIn("an unmanaged hosts entry already references", helper)
         self.assertNotIn("Set-DnsClientServerAddress", helper)
         self.assertNotIn("Remove-Item", helper)
+
+    def test_platform_router_reconciles_only_explicit_managed_users(self) -> None:
+        tasks = (
+            ROOT / "infra/ansible/roles/platform_router/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        example = (
+            ROOT / "docs/examples/l3-vps1-mycleanbot.example.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("managed_client_user_prefix", tasks)
+        self.assertIn("protected_client_users", tasks)
+        self.assertIn("SessionDisconnect", tasks)
+        self.assertIn("UserDelete", tasks)
+        self.assertIn("no_log:", tasks)
+        self.assertIn("managed_client_user_prefix: mcb_user_", example)
+        self.assertIn("- operator_arm", example)
+
+    def test_per_invitation_helper_never_prints_passwords(self) -> None:
+        helper = ROOT / "tools/mycleanbot/manage_vpn_users.py"
+        temporary_base = (
+            ROOT.parent.parent if ROOT.parent.name == ".codex-worktrees" else ROOT
+        )
+        with tempfile.TemporaryDirectory(dir=temporary_base) as temporary:
+            operator_dir = pathlib.Path(temporary) / "operator"
+            secret_path = operator_dir / "softether-secret.json"
+            registry_path = operator_dir / "vpn-users.json"
+            delivery_dir = operator_dir / "vpn-delivery"
+            secret_path.parent.mkdir(parents=True)
+            initial = {
+                "server_password": "server-secret",
+                "hub_password": "hub-secret",
+                "client_users": {
+                    "operator-arm": {
+                        "client_user": "operator_arm",
+                        "client_password": "operator-secret",
+                    }
+                },
+            }
+            secret_path.write_text(json.dumps(initial), encoding="utf-8")
+
+            plan = subprocess.run(
+                [
+                    sys.executable,
+                    str(helper),
+                    "issue",
+                    "--invitation-id",
+                    "42",
+                    "--operator-dir",
+                    str(operator_dir),
+                    "--secret-path",
+                    str(secret_path),
+                    "--registry-path",
+                    str(registry_path),
+                    "--delivery-dir",
+                    str(delivery_dir),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertIn('"mutations": false', plan.stdout)
+            self.assertFalse(registry_path.exists())
+
+            issued = subprocess.run(
+                [
+                    sys.executable,
+                    str(helper),
+                    "issue",
+                    "--invitation-id",
+                    "42",
+                    "--operator-dir",
+                    str(operator_dir),
+                    "--secret-path",
+                    str(secret_path),
+                    "--registry-path",
+                    str(registry_path),
+                    "--delivery-dir",
+                    str(delivery_dir),
+                    "--apply",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            secret = json.loads(secret_path.read_text(encoding="utf-8"))
+            generated_password = secret["client_users"]["invitation-42"][
+                "client_password"
+            ]
+            self.assertNotIn(generated_password, issued.stdout)
+            self.assertEqual(
+                "operator_arm",
+                secret["client_users"]["operator-arm"]["client_user"],
+            )
+            delivery_path = delivery_dir / "invitation-42.json"
+            delivery = json.loads(delivery_path.read_text(encoding="utf-8"))
+            self.assertEqual(generated_password, delivery["password"])
+            self.assertEqual(
+                "172.31.1.11 mycleanbot.mine-craft.su",
+                delivery["hosts_entry"],
+            )
+
+            revoked = subprocess.run(
+                [
+                    sys.executable,
+                    str(helper),
+                    "revoke",
+                    "--invitation-id",
+                    "42",
+                    "--operator-dir",
+                    str(operator_dir),
+                    "--secret-path",
+                    str(secret_path),
+                    "--registry-path",
+                    str(registry_path),
+                    "--delivery-dir",
+                    str(delivery_dir),
+                    "--apply",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotIn(generated_password, revoked.stdout)
+            secret = json.loads(secret_path.read_text(encoding="utf-8"))
+            self.assertNotIn("invitation-42", secret["client_users"])
+            self.assertFalse(delivery_path.exists())
+            registry = json.loads(
+                registry_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual("revoked", registry["entries"]["42"]["status"])
+            self.assertIn("tombstone_until", registry["entries"]["42"])
 
 
 if __name__ == "__main__":

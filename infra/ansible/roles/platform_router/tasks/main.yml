@@ -92,6 +92,7 @@
     import ipaddress
     import json
     import os
+    import re
     import sys
 
     try:
@@ -312,6 +313,47 @@
                     fail(f"softether_l3_vps link {link_name} server IP must not be inside the client pool")
                 if not pushed_routes:
                     fail(f"softether_l3_vps link {link_name} routed_tap requires at least one pushed route")
+            managed_client_user_prefix = str(
+                l3_link.get("managed_client_user_prefix") or ""
+            ).strip()
+            protected_client_users = [
+                str(value).strip()
+                for value in (l3_link.get("protected_client_users") or [])
+                if str(value).strip()
+            ]
+            managed_client_user_limit = int(
+                l3_link.get("managed_client_user_limit") or 0
+            )
+            if managed_client_user_prefix:
+                if not re.fullmatch(
+                    r"[A-Za-z][A-Za-z0-9_]{2,23}",
+                    managed_client_user_prefix,
+                ):
+                    fail(
+                        f"softether_l3_vps link {link_name} has unsafe "
+                        "managed_client_user_prefix"
+                    )
+                if managed_client_user_limit < 1 or managed_client_user_limit > 20:
+                    fail(
+                        f"softether_l3_vps link {link_name} managed client user "
+                        "limit must be between 1 and 20"
+                    )
+                if any(
+                    value.startswith(managed_client_user_prefix)
+                    for value in protected_client_users
+                ):
+                    fail(
+                        f"softether_l3_vps link {link_name} protected client users "
+                        "must be outside the managed prefix"
+                    )
+                if any(
+                    not re.fullmatch(r"[A-Za-z0-9_]{1,64}", value)
+                    for value in protected_client_users
+                ):
+                    fail(
+                        f"softether_l3_vps link {link_name} has an unsafe "
+                        "protected client username"
+                    )
             admin_allowed_source = str(
                 l3_link.get("server_admin_allowed_source_ipv4")
                 or management_network.get("allowed_source_ipv4")
@@ -347,6 +389,9 @@
                 "secret_file": os.path.join(l3_secrets_dir, str(l3_link["name"]) + ".json"),
                 "vpncmd_timeout_seconds": int(os.environ["SOFTETHER_CLIENT_VPNCMD_TIMEOUT_SECONDS"]),
                 "management_allowed_source_ipv4": admin_allowed_source,
+                "managed_client_user_prefix": managed_client_user_prefix,
+                "managed_client_user_limit": managed_client_user_limit,
+                "protected_client_users": protected_client_users,
             })
 
         for policy in link.get("policies") or []:
@@ -1132,6 +1177,9 @@
     public_port="{{ item.public_port }}"
     access_mode="{{ item.access_mode }}"
     tap_name="{{ item.tap_name }}"
+    managed_client_user_prefix="{{ item.managed_client_user_prefix }}"
+    managed_client_user_limit="{{ item.managed_client_user_limit }}"
+    protected_client_users_json='{{ item.protected_client_users | to_json }}'
 
     cleanup_vpncmd() {
       docker exec "$server_container" sh -c 'pkill -KILL vpncmd 2>/dev/null || true' >/dev/null 2>&1 || true
@@ -1212,6 +1260,96 @@
         fi
       fi
     done < "$users_input"
+
+    if [ -n "$managed_client_user_prefix" ]; then
+      desired_managed_users="$(mktemp)"
+      existing_managed_users="$(mktemp)"
+      orphaned_managed_users="$(mktemp)"
+      user_list_output="$(mktemp)"
+      session_list_output="$(mktemp)"
+      session_names="$(mktemp)"
+      trap 'rm -f "$users_input" "$input" "$user_check_output" "$user_create_output" "$desired_managed_users" "$existing_managed_users" "$orphaned_managed_users" "$user_list_output" "$session_list_output" "$session_names"; cleanup_vpncmd' EXIT
+
+      python3 - "$users_input" "$managed_client_user_prefix" "$managed_client_user_limit" "$protected_client_users_json" <<'PY' > "$desired_managed_users"
+    import json
+    import sys
+
+    users_file, prefix, raw_limit, protected_json = sys.argv[1:]
+    protected = set(json.loads(protected_json or "[]"))
+    users = []
+    with open(users_file, encoding="utf-8") as handle:
+        for line in handle:
+            username = line.partition("|")[0].strip()
+            if username.startswith(prefix):
+                if not username[len(prefix):].isdigit():
+                    raise SystemExit("managed SoftEther username has an unsafe suffix")
+                if username in protected:
+                    raise SystemExit("protected SoftEther username cannot be managed")
+                users.append(username)
+    if len(users) > int(raw_limit):
+        raise SystemExit("managed SoftEther user limit exceeded")
+    print("\n".join(sorted(set(users))))
+    PY
+
+      {
+        printf 'Hub %s\n' "$hub"
+        printf 'UserList\n'
+      } | run_vpncmd_batch "$user_list_output"
+      python3 - "$user_list_output" "$managed_client_user_prefix" <<'PY' > "$existing_managed_users"
+    import re
+    import sys
+
+    path, prefix = sys.argv[1:]
+    safe = re.compile(r"^[A-Za-z0-9_]+$")
+    found = set()
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            for field in line.split("|"):
+                value = field.strip()
+                if value.startswith(prefix) and safe.fullmatch(value):
+                    found.add(value)
+    print("\n".join(sorted(found)))
+    PY
+      comm -23 "$existing_managed_users" "$desired_managed_users" > "$orphaned_managed_users"
+
+      while IFS= read -r orphaned_user; do
+        [ -n "$orphaned_user" ] || continue
+        {
+          printf 'Hub %s\n' "$hub"
+          printf 'SessionList\n'
+        } | run_vpncmd_batch "$session_list_output"
+        python3 - "$session_list_output" "$orphaned_user" <<'PY' > "$session_names"
+    import re
+    import sys
+
+    path, username = sys.argv[1:]
+    safe_session = re.compile(r"^[A-Za-z0-9_.:-]+$")
+    current_session = ""
+    sessions = set()
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            fields = [field.strip() for field in line.split("|")]
+            if len(fields) < 2:
+                continue
+            if fields[0] == "Session Name":
+                current_session = fields[1]
+            elif fields[0] == "User Name" and fields[1] == username:
+                if safe_session.fullmatch(current_session):
+                    sessions.add(current_session)
+            elif username in fields[1:] and safe_session.fullmatch(fields[0]):
+                sessions.add(fields[0])
+    print("\n".join(sorted(sessions)))
+    PY
+        {
+          printf 'Hub %s\n' "$hub"
+          while IFS= read -r session_name; do
+            [ -n "$session_name" ] || continue
+            printf 'SessionDisconnect %s\n' "$session_name"
+          done < "$session_names"
+          printf 'UserDelete %s\n' "$orphaned_user"
+        } | run_vpncmd_batch "$user_create_output"
+      done < "$orphaned_managed_users"
+    fi
 
     {
       printf 'Hub %s\n' "$hub"
