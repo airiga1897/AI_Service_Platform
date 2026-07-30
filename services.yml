@@ -748,6 +748,13 @@ runtime_instances:
       server_sni: l3-vps1.mine-craft.su
       hub: MyCleanBotOperatorVps1
       client_subnet: 10.89.1.0/24
+      client_pool_start: 10.89.1.10
+      client_pool_end: 10.89.1.20
+      per_invitation_accounts: true
+      managed_user_prefix: mcb_user_
+      protected_users:
+        - operator_arm
+      managed_user_limit: 9
       router_ipv4: 10.89.1.1
       private_endpoint_ipv4: 172.31.1.11
       app_network: ai_service_app_vps1

@@ -193,6 +193,10 @@ platform preflight и публикует candidate receipt. Production rollout �
 только отдельным ручным `workflow_dispatch` из `main` с
 `instance=mycleanbot`, `environment=prod` и полным GHCR digest.
 
+Персональные VPN-учётки приглашённых пользователей выпускаются и отзываются
+отдельно по [MyCleanBot VPN users runbook](MYCLEANBOT_VPN_USERS.md). Приложение
+не получает административный доступ к SoftEther.
+
 До первого запуска должны независимо пройти: platform CI, render-compose check,
 remote Compose config, проверка отдельной PostgreSQL role/database, encrypted
 backup, scratch restore rehearsal, VPN-only route, monitoring probes и rollback
