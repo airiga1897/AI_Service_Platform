@@ -2,7 +2,8 @@
 
 ## Status
 
-Implementation is present in `codex/feature/aieretail08`, but production policy
+Policy implementation is present and the isolated marked transport milestone is
+implemented in `codex/feature/aieretail09`, but production policy
 is not applied. The canary remains blocked until the three currently available
 non-RU transport gateways (`vps1`, `vps2`, `vps4`) and the first RU dataset are
 explicitly accepted.
@@ -33,6 +34,8 @@ replies therefore retain the ingress route and are not reclassified.
 - `operator/geo_policy/data/ru_ipv4.json` records source, RIPE coverage,
   SHA-256, prefix/address counts, fetch time, and the last-known-good chain.
 - `/opt/ai-service-platform/geo_policy/current.json` is the VPS3 runtime receipt.
+- `/var/lib/ai-service-platform/platform_router/current.json` is the accepted
+  transport receipt that GeoPolicy must match before every check or apply.
 - `platform_router` owns the variable-length set of transport gateways and their pre-provisioned
   route-mark/table contracts. GeoPolicy owns destination classification and
   active-path selection.
@@ -66,6 +69,8 @@ Copy-Item `
   .\operator\geo_policy\config.yml.example `
   .\operator\geo_policy\config.yml
 
+python .\tools\geo_policy\prepare_transport_secrets.py
+
 .\tools\geo_policy\refresh_dataset.ps1 -AcceptInitial
 
 python -m tools.geo_policy.collect_candidates `
@@ -77,7 +82,7 @@ Copy the generated root SHA, exact proposal ID, accepted aliases, gateways,
 route marks, and route tables into `config.yml`. Change `state` to `accepted`
 only after reviewing them.
 
-Before GeoPolicy preflight, `platform_router` must have provisioned:
+Before GeoPolicy preflight, `platform_router` must have provisioned and accepted:
 
 - first-ranked table `5301` with the accepted default gateway and rule for mark
   `0x530003`;
@@ -88,7 +93,8 @@ Before GeoPolicy preflight, `platform_router` must have provisioned:
 - return paths and egress NAT on all remote gateways.
 
 The engine does not hard-code three paths: `egress.paths` is ordered and may
-later grow or shrink. Marks are allocated consecutively from `route_mark`.
+later grow or shrink. Each alias owns an explicit stable `route_mark` and
+`route_table`; ranking changes only preference order and never reallocates them.
 A single accepted path is valid but explicitly has no failover redundancy.
 Default `auto` preserves the current receipt alias when it remains configured;
 otherwise it selects the first path. Removing an alias therefore requires a

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import unittest
 from unittest import mock
 
@@ -13,7 +14,8 @@ from tools.geo_policy.geo_policy import (
     render_nft,
     validate_config,
 )
-from tools.geo_policy.runtime import dataset_status, safe_probe_path
+from tools.geo_policy.prepare_transport_secrets import PATHS
+from tools.geo_policy.runtime import dataset_status, ensure_route_contract, safe_probe_path
 
 
 def config() -> dict:
@@ -40,7 +42,6 @@ def config() -> dict:
                 "unknown_public": "egress",
                 "special_or_internal": "direct",
                 "fail_closed": True,
-                "route_mark": "0x530003",
             },
             "egress": {
                 "approval_id": "approval-1",
@@ -52,20 +53,23 @@ def config() -> dict:
                 "paths": [
                     {
                         "alias": "vps1",
-                        "gateway_ipv4": "172.22.252.41",
+                        "gateway_ipv4": "172.31.3.2",
                         "route_table": 5301,
+                        "route_mark": "0x530003",
                         "country_code": "NL",
                     },
                     {
                         "alias": "vps2",
-                        "gateway_ipv4": "172.22.252.42",
+                        "gateway_ipv4": "172.31.3.2",
                         "route_table": 5302,
+                        "route_mark": "0x530004",
                         "country_code": "KZ",
                     },
                     {
                         "alias": "vps4",
-                        "gateway_ipv4": "172.22.252.44",
+                        "gateway_ipv4": "172.31.3.2",
                         "route_table": 5303,
+                        "route_mark": "0x530005",
                         "country_code": "DE",
                     },
                 ],
@@ -104,8 +108,9 @@ class ConfigTests(unittest.TestCase):
         ].append("FI")
         four["geo_policy"]["egress"]["paths"].append({
             "alias": "vps5",
-            "gateway_ipv4": "172.22.252.45",
+            "gateway_ipv4": "172.31.3.2",
             "route_table": 5304,
+            "route_mark": "0x530006",
             "country_code": "FI",
         })
         self.assertEqual(len(validate_config(four).paths), 4)
@@ -126,6 +131,21 @@ class ConfigTests(unittest.TestCase):
         document = config()
         document["geo_policy"]["egress"]["paths"][0]["country_code"] = "FR"
         with self.assertRaisesRegex(ContractError, "supported-country receipt"):
+            validate_config(document)
+
+    def test_route_mark_is_stable_when_ranking_changes(self) -> None:
+        document = config()
+        document["geo_policy"]["egress"]["paths"].reverse()
+        policy = validate_config(document)
+        self.assertEqual(
+            {item.alias: item.route_mark for item in policy.paths},
+            {"vps1": 0x530003, "vps2": 0x530004, "vps4": 0x530005},
+        )
+
+    def test_rejects_duplicate_route_mark(self) -> None:
+        document = config()
+        document["geo_policy"]["egress"]["paths"][1]["route_mark"] = "0x530003"
+        with self.assertRaisesRegex(ContractError, "route marks must be unique"):
             validate_config(document)
 
 
@@ -158,6 +178,25 @@ class RoutingTests(unittest.TestCase):
         self.assertIn("meta mark set 0x530003 ct mark set 0x530003", first)
         self.assertIn("meta mark set 0x530004 ct mark set 0x530004", second)
         self.assertIn("meta mark set 0x530005 ct mark set 0x530005", third)
+
+    def test_transport_receipt_must_match_stable_path_contract(self) -> None:
+        policy = validate_config(config())
+        receipt = json.dumps({
+            "final_status": "succeeded",
+            "egress_paths": [{
+                "alias": "vps1",
+                "gateway_ipv4": "172.31.3.2",
+                "route_table": 5301,
+                "route_mark": "0xdead",
+                "status": "ready",
+            }],
+        })
+        with (
+            mock.patch("pathlib.Path.is_file", return_value=True),
+            mock.patch("pathlib.Path.read_text", return_value=receipt),
+        ):
+            with self.assertRaisesRegex(ContractError, "transport receipt"):
+                ensure_route_contract(policy, False, "current.json")
 
 
 class DatasetTests(unittest.TestCase):
@@ -222,6 +261,22 @@ class RankingTests(unittest.TestCase):
         }]})
         self.assertEqual([item["alias"] for item in result["paths"]], ["vps1"])
         self.assertEqual(result["redundancy"], "unavailable")
+
+
+class TransportSecretTests(unittest.TestCase):
+    def test_contract_has_three_paths_and_reuses_vps1_server_runtime(self) -> None:
+        self.assertEqual(
+            set(PATHS),
+            {
+                "geo-egress-vps3-vps1",
+                "geo-egress-vps3-vps2",
+                "geo-egress-vps3-vps4",
+            },
+        )
+        self.assertEqual(
+            PATHS["geo-egress-vps3-vps1"],
+            "mycleanbot-operator-vps1",
+        )
 
 
 class FailoverTests(unittest.TestCase):

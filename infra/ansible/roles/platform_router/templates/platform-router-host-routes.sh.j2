@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+action="${1:-apply}"
+state_dir={{ platform_router_receipt_dir | quote }}
+state_file="$state_dir/host-routes.state"
+mkdir -p "$state_dir"
+chmod 0700 "$state_dir"
+
+if [ -f "$state_file" ]; then
+  while IFS='|' read -r old_mark old_table old_priority; do
+    [ -n "$old_mark" ] || continue
+    while ip rule del fwmark "$old_mark"/0xffffffff table "$old_table" priority "$old_priority" 2>/dev/null; do :; done
+    ip -4 route flush table "$old_table" 2>/dev/null || true
+  done < "$state_file"
+fi
+
+if [ "$action" = "remove" ]; then
+  rm -f "$state_file"
+  exit 0
+fi
+
+temporary="$(mktemp "$state_dir/.host-routes.XXXXXX")"
+trap 'rm -f "$temporary"' EXIT
+
+sysctl -w net.ipv4.conf.all.src_valid_mark=1 >/dev/null
+sysctl -w net.ipv4.conf.all.rp_filter=2 >/dev/null
+sysctl -w net.ipv4.conf.default.rp_filter=2 >/dev/null
+
+{% for path in platform_router_model.egress_paths | default([]) %}
+{% if path.role == "source" %}
+ip -4 route get {{ path.gateway_ipv4 }} >/dev/null
+ip -4 route replace table {{ path.route_table }} default via {{ path.gateway_ipv4 }}
+ip rule add fwmark {{ path.route_mark }}/0xffffffff table {{ path.route_table }} priority {{ path.route_rule_priority }}
+ip -4 route get 1.1.1.1 mark {{ path.route_mark_decimal }} | grep -F "via {{ path.gateway_ipv4 }}" >/dev/null
+printf '%s|%s|%s\n' '{{ path.route_mark }}' '{{ path.route_table }}' '{{ path.route_rule_priority }}' >> "$temporary"
+{% endif %}
+{% endfor %}
+
+chmod 0600 "$temporary"
+mv -f "$temporary" "$state_file"
+trap - EXIT

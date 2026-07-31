@@ -33,6 +33,9 @@ data are not secrets, but they are generated and accepted separately from code.
    into `config.yml`, set `approval_id` to the exact proposal ID, then change
    `state` to `accepted`. The `paths` list may later grow or shrink without a
    code change; one accepted path is valid but has no redundancy.
+   The three paths intentionally share source gateway `172.31.3.2`; their
+   explicit marks and tables are stable per alias. GeoPolicy also requires the
+   accepted `/var/lib/ai-service-platform/platform_router/current.json` receipt.
 7. Run only the mutation-free preflight:
 
    ```powershell

@@ -103,6 +103,7 @@ class EgressPath:
     alias: str
     gateway_ipv4: str
     route_table: int
+    route_mark: int
     country_code: str
 
 
@@ -115,7 +116,6 @@ class GeoPolicy:
     source_classes: dict[str, tuple[str, ...]]
     excluded_destinations: tuple[str, ...]
     paths: tuple[EgressPath, ...]
-    route_mark: int
     fail_closed: bool
     approval_id: str
     fail_after: int
@@ -234,6 +234,7 @@ def validate_config(document: dict[str, Any], alias: str | None = None) -> GeoPo
         table = int(item.get("route_table") or 0)
         if table < 1 or table > 0x7FFFFFFF:
             raise ContractError(f"egress.{label}.route_table is invalid")
+        route_mark = _mark(item.get("route_mark"), f"egress.{label}.route_mark")
         country_code = str(item.get("country_code") or "").strip().upper()
         if state == "accepted" and country_code not in supported_codes:
             raise ContractError(
@@ -242,18 +243,15 @@ def validate_config(document: dict[str, Any], alias: str | None = None) -> GeoPo
             )
         if country_code == "RU":
             raise ContractError(f"egress.{label}.country_code must not be RU")
-        return EgressPath(path_alias, str(gateway), table, country_code)
+        return EgressPath(path_alias, str(gateway), table, route_mark, country_code)
 
     paths = tuple(path(item, index) for index, item in enumerate(paths_value))
     if len({item.alias for item in paths}) != len(paths):
         raise ContractError("egress path aliases must be unique")
-    if len({item.gateway_ipv4 for item in paths}) != len(paths):
-        raise ContractError("egress path gateways must be unique")
     if len({item.route_table for item in paths}) != len(paths):
         raise ContractError("egress path route tables must be unique")
-    route_mark = _mark(routing.get("route_mark"), "routing.route_mark")
-    if route_mark + len(paths) - 1 > 0xFFFFFFFF:
-        raise ContractError("routing.route_mark does not leave enough marks for egress.paths")
+    if len({item.route_mark for item in paths}) != len(paths):
+        raise ContractError("egress path route marks must be unique")
 
     health = _require_mapping(policy.get("health"), "geo_policy.health")
     fail_after = int(health.get("fail_after") or 0)
@@ -283,7 +281,6 @@ def validate_config(document: dict[str, Any], alias: str | None = None) -> GeoPo
         source_classes=source_classes,
         excluded_destinations=tuple(str(item) for item in parsed_exclusions),
         paths=paths,
-        route_mark=route_mark,
         fail_closed=fail_closed,
         approval_id=approval_id,
         fail_after=fail_after,
@@ -436,7 +433,10 @@ def render_nft(policy: GeoPolicy, ru_cidrs: Iterable[str], active_path: str) -> 
     sources = _nft_elements(policy.sources)
     exclusions = _nft_elements(policy.excluded_destinations)
     ru_values = _nft_elements(ru)
-    active_mark = policy.route_mark + (aliases.index(active_path) if active_path != "blocked" else 0)
+    active_mark = next(
+        (item.route_mark for item in policy.paths if item.alias == active_path),
+        policy.paths[0].route_mark,
+    )
     mark = f"0x{active_mark:x}"
     classify_action = "drop" if active_path == "blocked" else f"meta mark set {mark} ct mark set {mark}"
     return (

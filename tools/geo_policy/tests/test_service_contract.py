@@ -26,6 +26,9 @@ class ServiceContractTests(unittest.TestCase):
         self.assertIn("paths:", config)
         for alias in ("vps1", "vps2", "vps4"):
             self.assertIn(f"alias: {alias}", config)
+        for mark in ("0x530003", "0x530004", "0x530005"):
+            self.assertIn(f'route_mark: "{mark}"', config)
+        self.assertNotIn("routing:\n    route_mark:", config)
         self.assertNotIn("primary:", config)
         self.assertNotIn("backup:", config)
 
@@ -40,6 +43,7 @@ class ServiceContractTests(unittest.TestCase):
         self.assertIn("Run mutation-free GeoPolicy runtime preflight", role)
         self.assertIn("changed_when: false", role)
         self.assertIn("Global IPv6 bypass detected", role)
+        self.assertIn("--transport-receipt", role)
         self.assertIn("not ansible_check_mode", role)
 
     def test_refresh_uses_lock_atomic_moves_and_reapplies_dataset(self) -> None:

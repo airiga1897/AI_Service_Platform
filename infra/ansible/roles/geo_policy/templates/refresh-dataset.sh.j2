@@ -33,6 +33,7 @@ if ! PYTHONPATH="$root" python3 "$root/tools/geo_policy/runtime.py" apply \
   --config "$root/config.yml" \
   --dataset "$root/ru_ipv4.cidrs" \
   --receipt "$root/current.json" \
+  --transport-receipt "{{ geo_policy_transport_receipt_file }}" \
   --active-path "$active_path" \
   --probe-scope active >/dev/null; then
   mv -f "$tmp/previous.cidrs" "$root/ru_ipv4.cidrs"
@@ -42,6 +43,7 @@ if ! PYTHONPATH="$root" python3 "$root/tools/geo_policy/runtime.py" apply \
     --config "$root/config.yml" \
     --dataset "$root/ru_ipv4.cidrs" \
     --receipt "$root/current.json" \
+    --transport-receipt "{{ geo_policy_transport_receipt_file }}" \
     --active-path "$active_path" \
     --probe-scope active >/dev/null
   exit 1

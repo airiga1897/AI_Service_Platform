@@ -121,6 +121,53 @@
         item for item in (load_yaml(l3_links_file).get("links") or [])
         if str(item.get("state", "present")).lower() == "present"
     ]
+    configured_egress_paths = [
+        item for item in (config.get("egress_paths") or [])
+        if str(item.get("state", "present")).lower() == "present"
+    ]
+
+    def parse_mark(value, label):
+        try:
+            result = int(str(value), 0)
+        except (TypeError, ValueError) as exc:
+            fail(f"{label} must be an integer or hexadecimal mark: {exc}")
+        if result < 1 or result > 0xFFFFFFFF:
+            fail(f"{label} must be between 1 and 0xffffffff")
+        return result
+
+    seen_egress_aliases = set()
+    seen_egress_marks = set()
+    seen_egress_tables = set()
+    seen_egress_links = set()
+    seen_egress_subnets = set()
+    for item in configured_egress_paths:
+        path_alias = str(item.get("alias") or "").strip()
+        link_name = str(item.get("l3_vps_link") or "").strip()
+        source_alias = str(item.get("source_alias") or "").strip()
+        target_alias = str(item.get("target_alias") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", path_alias):
+            fail("platform_router egress path alias is invalid")
+        if not link_name or not source_alias or not target_alias or source_alias == target_alias:
+            fail(f"platform_router egress path {path_alias} has invalid endpoints or link")
+        route_mark = parse_mark(item.get("route_mark"), f"egress path {path_alias} route_mark")
+        route_table = int(item.get("route_table") or 0)
+        if route_table < 1 or route_table > 0x7FFFFFFF:
+            fail(f"platform_router egress path {path_alias} route_table is invalid")
+        matching_l3 = [value for value in l3_links if str(value.get("name") or "") == link_name]
+        if len(matching_l3) != 1:
+            fail(f"platform_router egress path {path_alias} references missing/non-unique link {link_name}")
+        vpn_subnet = str(ipaddress.ip_network(str(matching_l3[0].get("subnet") or ""), strict=True))
+        if str(matching_l3[0].get("runtime_mode") or "").strip().lower() != "platform_router_sidecar":
+            fail(f"platform_router egress path {path_alias} must use platform_router_sidecar")
+        if str(matching_l3[0].get("access_mode") or "").strip().lower() != "routed_tap":
+            fail(f"platform_router egress path {path_alias} must use routed_tap")
+        if path_alias in seen_egress_aliases or route_mark in seen_egress_marks or route_table in seen_egress_tables or link_name in seen_egress_links or vpn_subnet in seen_egress_subnets:
+            fail("platform_router egress aliases, marks, tables, links, and VPN subnets must be unique")
+        seen_egress_aliases.add(path_alias)
+        seen_egress_marks.add(route_mark)
+        seen_egress_tables.add(route_table)
+        seen_egress_links.add(link_name)
+        seen_egress_subnets.add(vpn_subnet)
 
     selected = [
         link for link in (config.get("links") or [])
@@ -161,6 +208,7 @@
     policies = []
     softether_clients = []
     softether_servers = []
+    egress_paths = []
 
     for link in selected:
         link_name = str(link.get("l3_vps_link") or link.get("name") or "").strip()
@@ -304,6 +352,9 @@
                 ipaddress.ip_network(str(item), strict=True)
                 for item in (l3_link.get("pushed_routes") or [])
             ]
+            dhcp_enabled = l3_link.get("dhcp_enabled", True)
+            if not isinstance(dhcp_enabled, bool):
+                fail(f"softether l3-vps link {link_name} dhcp_enabled must be boolean")
             if access_mode == "routed_tap":
                 if not tap_name or len(tap_name) > 11 or not all(ch.isalnum() or ch in "_-" for ch in tap_name):
                     fail(f"softether_l3_vps link {link_name} routed_tap requires a safe tap_name of at most 11 characters")
@@ -311,7 +362,7 @@
                     fail(f"softether_l3_vps link {link_name} client pool must be ordered and inside {vpn_subnet}")
                 if server_ip >= client_pool_start and server_ip <= client_pool_end:
                     fail(f"softether_l3_vps link {link_name} server IP must not be inside the client pool")
-                if not pushed_routes:
+                if dhcp_enabled and not pushed_routes:
                     fail(f"softether_l3_vps link {link_name} routed_tap requires at least one pushed route")
             managed_client_user_prefix = str(
                 l3_link.get("managed_client_user_prefix") or ""
@@ -386,6 +437,7 @@
                 "tap_name": tap_name,
                 "tap_iface": "tap_" + tap_name if tap_name else "",
                 "pushed_routes": [str(item) for item in pushed_routes],
+                "dhcp_enabled": dhcp_enabled,
                 "secret_file": os.path.join(l3_secrets_dir, str(l3_link["name"]) + ".json"),
                 "vpncmd_timeout_seconds": int(os.environ["SOFTETHER_CLIENT_VPNCMD_TIMEOUT_SECONDS"]),
                 "management_allowed_source_ipv4": admin_allowed_source,
@@ -483,8 +535,84 @@
                 "target_snat_ipv4": target_snat_ipv4,
             })
 
+    for item in configured_egress_paths:
+        source_alias = str(item["source_alias"])
+        target_alias = str(item["target_alias"])
+        if alias not in {source_alias, target_alias}:
+            continue
+        path_alias = str(item["alias"])
+        link_name = str(item["l3_vps_link"])
+        matching_links = [
+            value for value in (config.get("links") or [])
+            if str(value.get("l3_vps_link") or value.get("name") or "") == link_name
+            and str(value.get("state", "present")).lower() == "present"
+        ]
+        if len(matching_links) != 1:
+            fail(f"platform_router egress path {path_alias} requires one present platform_router link")
+        matching_l3 = [value for value in l3_links if str(value.get("name") or "") == link_name][0]
+        source_cidrs = [
+            ipaddress.ip_network(str(value), strict=True)
+            for value in (item.get("source_cidrs") or [])
+        ]
+        if not source_cidrs or any(value.version != 4 or value.prefixlen != 32 for value in source_cidrs):
+            fail(f"platform_router egress path {path_alias} requires IPv4 /32 source_cidrs")
+        route_mark = parse_mark(item.get("route_mark"), f"egress path {path_alias} route_mark")
+        route_table = int(item["route_table"])
+        source_gateway = ipaddress.ip_address(str(item.get("source_gateway_ipv4") or ""))
+        target_snat = ipaddress.ip_address(str(item.get("target_snat_ipv4") or ""))
+        role = "source" if alias == source_alias else "target"
+        path = {
+            "alias": path_alias,
+            "role": role,
+            "source_alias": source_alias,
+            "target_alias": target_alias,
+            "l3_vps_link": link_name,
+            "route_mark": f"0x{route_mark:x}",
+            "route_mark_decimal": route_mark,
+            "route_table": route_table,
+            "route_rule_priority": 10000 + route_table,
+            "gateway_ipv4": str(source_gateway),
+            "target_snat_ipv4": str(target_snat),
+            "source_cidrs": [str(value) for value in source_cidrs],
+            "tunnel_next_hop": str(matching_l3["server_ip"]),
+            "status": "planned",
+        }
+        if path["route_rule_priority"] > 32765:
+            fail(f"platform_router egress path {path_alias} route priority is too large")
+        if role == "source":
+            if source_gateway != app_ipv4:
+                fail(f"platform_router egress path {path_alias} gateway must equal the source app router IP")
+            clients = [value for value in softether_clients if value["name"] == str(matching_links[0].get("name") or link_name)]
+            if len(clients) != 1:
+                fail(f"platform_router egress path {path_alias} has no unique source tunnel")
+            path["tunnel_iface"] = clients[0]["iface"]
+        else:
+            if target_snat != app_ipv4:
+                fail(f"platform_router egress path {path_alias} SNAT must equal the target app router IP")
+            servers = [value for value in softether_servers if value["name"] == str(matching_links[0].get("name") or link_name)]
+            if len(servers) != 1 or not servers[0].get("tap_iface"):
+                fail(f"platform_router egress path {path_alias} has no unique target tap")
+            path["tunnel_iface"] = servers[0]["tap_iface"]
+        egress_paths.append(path)
+
     if data_ipv4 is None or app_ipv4 is None:
         fail(f"platform_router {alias} has no data/app router addresses")
+
+    def unique_networks(values, label):
+        result = []
+        by_name = {}
+        for value in values:
+            name = value["name"]
+            comparable = {key: item for key, item in value.items() if key != "compose_name"}
+            if name in by_name and by_name[name] != comparable:
+                fail(f"platform_router {alias} has conflicting {label} network {name}")
+            if name not in by_name:
+                by_name[name] = comparable
+                result.append(value)
+        return result
+
+    transport_networks = unique_networks(transport_networks, "transport")
+    management_networks = unique_networks(management_networks, "management")
 
     softether_server_runtime = {
         "enabled": bool(softether_servers),
@@ -521,6 +649,7 @@
         "app_network_name": str(node_networks["app"]["name"]),
         "app_ipv4": str(app_ipv4),
         "policies": policies,
+        "egress_paths": egress_paths,
         "softether_client": softether_client,
         "softether_server": softether_server,
         "softether_server_runtime": softether_server_runtime,
@@ -735,6 +864,30 @@
     mode: "0755"
   register: platform_router_reconcile_template
   when: platform_router_state == 'present'
+
+- name: Render platform_router host marked-route reconciler
+  ansible.builtin.template:
+    src: platform-router-host-routes.sh.j2
+    dest: "{{ platform_router_host_routes_script }}"
+    mode: "0755"
+  register: platform_router_host_routes_template
+  when: platform_router_state == 'present'
+
+- name: Render platform_router host marked-route systemd unit
+  ansible.builtin.template:
+    src: platform-router-host-routes.service.j2
+    dest: "/etc/systemd/system/{{ platform_router_host_routes_service }}"
+    mode: "0644"
+  register: platform_router_host_routes_unit
+  when: platform_router_state == 'present'
+
+- name: Reload systemd after platform_router host-route unit change
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when:
+    - platform_router_state == 'present'
+    - platform_router_host_routes_unit.changed | default(false)
+    - not ansible_check_mode
 
 - name: Render platform_router SoftEther server admin IP allowlist
   ansible.builtin.copy:
@@ -1400,6 +1553,7 @@
     container="{{ platform_router_model.container_name }}"
     next_hop="{{ platform_router_model.next_hop_ipv4 }}"
     policies_json='{{ platform_router_model.policies | to_json }}'
+    egress_paths_json='{{ platform_router_model.egress_paths | default([]) | to_json }}'
     docker exec -u 0 "$container" sh -ceu 'sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true'
     docker exec -u 0 "$container" iptables -P FORWARD DROP
     docker exec -u 0 "$container" iptables -F FORWARD
@@ -1456,8 +1610,181 @@
       docker exec -u 0 "$container" iptables -A FORWARD -p "$proto" -s "$source_cidr" -d "$destination_ipv4/32" --dport "$destination_port" -j ACCEPT
       docker exec -u 0 "$container" iptables -A FORWARD -p "$proto" -s "$destination_ipv4/32" --sport "$destination_port" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
     done
+    python3 - "$egress_paths_json" <<'PY' | while IFS='|' read -r role vpn_iface target_snat source_cidrs_json; do
+    import json
+    import sys
+    for item in json.loads(sys.argv[1]):
+        print("|".join([
+            item["role"],
+            item["tunnel_iface"],
+            item["target_snat_ipv4"],
+            json.dumps(item["source_cidrs"], separators=(",", ":")),
+        ]))
+    PY
+      vpn_ready=false
+      for _attempt in $(seq 1 30); do
+        if docker exec -u 0 "$container" sh -ceu \
+          'ip link show dev "$1" | grep -q "UP" && ip -4 addr show dev "$1" | grep -q "inet "' \
+          sh "$vpn_iface"; then
+          vpn_ready=true
+          break
+        fi
+        sleep 1
+      done
+      if [ "$vpn_ready" != "true" ]; then
+        echo "GeoPolicy egress interface did not become ready: $vpn_iface" >&2
+        exit 1
+      fi
+      python3 - "$source_cidrs_json" <<'PY' | while IFS= read -r source_cidr; do
+    import json
+    import sys
+    for item in json.loads(sys.argv[1]):
+        print(item)
+    PY
+        if [ "$role" = "source" ]; then
+          docker exec -u 0 "$container" iptables -A FORWARD -s "$source_cidr" -o "$vpn_iface" -j ACCEPT
+          docker exec -u 0 "$container" iptables -A FORWARD -d "$source_cidr" -i "$vpn_iface" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+        else
+          docker exec -u 0 "$container" iptables -t nat -A PLATFORM_ROUTER_POSTROUTING \
+            -i "$vpn_iface" -s "$source_cidr" -j SNAT --to-source "$target_snat"
+          docker exec -u 0 "$container" iptables -A FORWARD -i "$vpn_iface" -s "$source_cidr" -j ACCEPT
+          docker exec -u 0 "$container" iptables -A FORWARD -o "$vpn_iface" -d "$source_cidr" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+        fi
+      done
+    done
   args:
     executable: /bin/bash
+  changed_when: false
+  when:
+    - platform_router_state == 'present'
+    - not ansible_check_mode
+
+- name: Enable persistent platform_router host marked routes
+  ansible.builtin.systemd:
+    name: "{{ platform_router_host_routes_service }}"
+    enabled: true
+    state: "{{ (platform_router_host_routes_template.changed | default(false)) | ternary('restarted', 'started') }}"
+  when:
+    - platform_router_state == 'present'
+    - (platform_router_model.egress_paths | default([]) | selectattr('role', 'equalto', 'source') | list | length) > 0
+    - not ansible_check_mode
+
+- name: Disable stale platform_router host marked routes without source paths
+  ansible.builtin.systemd:
+    name: "{{ platform_router_host_routes_service }}"
+    enabled: false
+    state: stopped
+  failed_when: false
+  when:
+    - platform_router_state == 'present'
+    - (platform_router_model.egress_paths | default([]) | selectattr('role', 'equalto', 'source') | list | length) == 0
+    - not ansible_check_mode
+
+- name: Verify platform_router marked egress transport
+  ansible.builtin.shell: |
+    set -euo pipefail
+    container="{{ platform_router_model.container_name }}"
+    paths_json='{{ platform_router_model.egress_paths | default([]) | to_json }}'
+    python3 - "$paths_json" <<'PY' | while IFS='|' read -r path_alias role route_mark route_mark_decimal route_table priority gateway vpn_iface vpn_next_hop target_snat source_cidrs_json; do
+    import json
+    import sys
+    for item in json.loads(sys.argv[1]):
+        print("|".join([
+            item["alias"], item["role"], item["route_mark"],
+            str(item["route_mark_decimal"]), str(item["route_table"]),
+            str(item["route_rule_priority"]), item["gateway_ipv4"],
+            item["tunnel_iface"], item["tunnel_next_hop"],
+            item["target_snat_ipv4"],
+            json.dumps(item["source_cidrs"], separators=(",", ":")),
+        ]))
+    PY
+      if [ "$role" = "source" ]; then
+        ip -4 rule show | grep -F "fwmark $route_mark lookup $route_table" >/dev/null
+        ip -4 route show table "$route_table" | grep -F "default via $gateway" >/dev/null
+        ip -4 route get 1.1.1.1 mark "$route_mark_decimal" | grep -F "via $gateway" >/dev/null
+        docker exec -u 0 "$container" ip -4 rule show | grep -F "fwmark $route_mark lookup $route_table" >/dev/null
+        docker exec -u 0 "$container" ip -4 route show table "$route_table" | grep -F "default via $vpn_next_hop dev $vpn_iface" >/dev/null
+      else
+        docker exec -u 0 "$container" ip -4 addr show dev "$vpn_iface" | grep -F "inet $vpn_next_hop/" >/dev/null
+        python3 - "$source_cidrs_json" <<'PY' | while IFS= read -r source_cidr; do
+    import json
+    import sys
+    for item in json.loads(sys.argv[1]):
+        print(item)
+    PY
+          docker exec -u 0 "$container" iptables -t nat -S PLATFORM_ROUTER_POSTROUTING |
+            grep -F -- "-i $vpn_iface -s $source_cidr -j SNAT --to-source $target_snat" >/dev/null
+        done
+      fi
+    done
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - platform_router_state == 'present'
+    - (platform_router_model.egress_paths | default([]) | length) > 0
+    - not ansible_check_mode
+
+- name: Ensure platform_router receipt directory
+  ansible.builtin.file:
+    path: "{{ platform_router_receipt_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when:
+    - platform_router_state == 'present'
+    - not ansible_check_mode
+
+- name: Write accepted platform_router transport receipt
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - "$MODEL_JSON" "$RECEIPT" <<'PY'
+    import datetime as dt
+    import json
+    import os
+    import pathlib
+    import sys
+    import tempfile
+
+    model = json.loads(sys.argv[1])
+    receipt = pathlib.Path(sys.argv[2])
+    paths = []
+    for item in model.get("egress_paths", []):
+        accepted = dict(item)
+        accepted["status"] = "ready"
+        paths.append(accepted)
+    payload = {
+        "schema_version": 1,
+        "alias": model["alias"],
+        "final_status": "succeeded",
+        "egress_paths": paths,
+        "accepted_at": dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+    }
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{receipt.name}.", dir=receipt.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, sort_keys=True, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, receipt)
+        directory = os.open(receipt.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    MODEL_JSON: "{{ platform_router_model | to_json }}"
+    RECEIPT: "{{ platform_router_receipt_file }}"
   changed_when: false
   when:
     - platform_router_state == 'present'
@@ -1484,6 +1811,16 @@
   when:
     - platform_router_state == 'absent'
     - platform_router_compose_stat.stat.exists | default(false)
+    - not ansible_check_mode
+
+- name: Disable platform_router host marked routes during removal
+  ansible.builtin.systemd:
+    name: "{{ platform_router_host_routes_service }}"
+    enabled: false
+    state: stopped
+  failed_when: false
+  when:
+    - platform_router_state == 'absent'
     - not ansible_check_mode
 
 - name: Purge platform_router runtime data when explicitly requested

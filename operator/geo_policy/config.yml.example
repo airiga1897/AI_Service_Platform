@@ -38,7 +38,6 @@ geo_policy:
     unknown_public: egress
     special_or_internal: direct
     fail_closed: true
-    route_mark: "0x530003"
 
   dataset:
     country: RU
@@ -63,19 +62,19 @@ geo_policy:
       supported_country_codes: []
     paths:
       - alias: vps1
-        # Documentation-only TEST-NET value; replace before acceptance.
-        gateway_ipv4: 192.0.2.1
+        gateway_ipv4: 172.31.3.2
         route_table: 5301
+        route_mark: "0x530003"
         country_code: ""
       - alias: vps2
-        # Documentation-only TEST-NET value; replace before acceptance.
-        gateway_ipv4: 192.0.2.2
+        gateway_ipv4: 172.31.3.2
         route_table: 5302
+        route_mark: "0x530004"
         country_code: ""
       - alias: vps4
-        # Documentation-only TEST-NET value; replace before acceptance.
-        gateway_ipv4: 192.0.2.4
+        gateway_ipv4: 172.31.3.2
         route_table: 5303
+        route_mark: "0x530005"
         country_code: ""
 
   health:

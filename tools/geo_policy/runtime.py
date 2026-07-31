@@ -78,10 +78,10 @@ def marked_https_get(host: str, path: str, mark: int, timeout: float = 10.0) -> 
 
 
 def path_mark(policy: Any, path: str) -> int:
-    aliases = tuple(item.alias for item in policy.paths)
-    if path not in aliases:
-        raise ContractError("path must be a configured egress alias")
-    return policy.route_mark + aliases.index(path)
+    for item in policy.paths:
+        if item.alias == path:
+            return item.route_mark
+    raise ContractError("path must be a configured egress alias")
 
 
 def probe_path(config: dict[str, Any], policy: Any, path: str) -> dict[str, Any]:
@@ -140,11 +140,41 @@ def render_transaction(nft_table: str) -> str:
     return f"flush table inet {TABLE_NAME}\ntable inet {TABLE_NAME} {{\n{body}\n}}\n"
 
 
-def ensure_route_contract(policy: Any, mutate: bool) -> list[dict[str, Any]]:
+def ensure_route_contract(
+    policy: Any,
+    mutate: bool,
+    transport_receipt_path: str | None = None,
+) -> list[dict[str, Any]]:
+    transport_paths: dict[str, dict[str, Any]] = {}
+    if transport_receipt_path:
+        receipt_file = pathlib.Path(transport_receipt_path)
+        if not receipt_file.is_file():
+            raise ContractError("accepted platform_router transport receipt is absent")
+        receipt = json.loads(receipt_file.read_text(encoding="utf-8"))
+        if receipt.get("final_status") != "succeeded":
+            raise ContractError("platform_router transport receipt is not accepted")
+        transport_paths = {
+            str(item.get("alias") or ""): item
+            for item in receipt.get("egress_paths") or []
+        }
     result = []
-    for index, item in enumerate(policy.paths):
+    for item in policy.paths:
         name = item.alias
-        mark = policy.route_mark + index
+        mark = item.route_mark
+        if transport_paths:
+            accepted = transport_paths.get(name)
+            expected = {
+                "gateway_ipv4": item.gateway_ipv4,
+                "route_table": item.route_table,
+                "route_mark": f"0x{mark:x}",
+                "status": "ready",
+            }
+            if not accepted or any(
+                accepted.get(key) != value for key, value in expected.items()
+            ):
+                raise ContractError(
+                    f"{name} does not match the accepted platform_router transport receipt"
+                )
         route_get = run(["ip", "-4", "route", "get", item.gateway_ipv4])
         if "unreachable" in route_get.stdout:
             raise ContractError(f"{name} gateway is unreachable: {item.gateway_ipv4}")
@@ -244,6 +274,7 @@ def apply_policy(
     active_path: str,
     check_only: bool,
     probe_scope: str = "all",
+    transport_receipt_path: str | None = None,
 ) -> dict[str, Any]:
     document = load_yaml(config_path)
     policy = validate_config(document)
@@ -281,7 +312,11 @@ def apply_policy(
         active_path = current_path if current_path in {*aliases, "blocked"} else aliases[0]
     if active_path not in {*aliases, "blocked"}:
         raise ContractError("active_path must be auto, blocked, or a configured egress alias")
-    routes = ensure_route_contract(policy, mutate=False)
+    routes = ensure_route_contract(
+        policy,
+        mutate=False,
+        transport_receipt_path=transport_receipt_path,
+    )
     if probe_scope not in {"all", "active", "none"}:
         raise ContractError("probe_scope must be all, active, or none")
     probe_names: tuple[str, ...]
@@ -363,6 +398,7 @@ def main() -> int:
     parser.add_argument("--receipt", required=True)
     parser.add_argument("--active-path", default="auto")
     parser.add_argument("--probe-scope", choices=("all", "active", "none"), default="all")
+    parser.add_argument("--transport-receipt")
     args = parser.parse_args()
     document = load_yaml(args.config)
     policy = validate_config(document)
@@ -374,9 +410,14 @@ def main() -> int:
             args.active_path,
             args.action == "check",
             args.probe_scope,
+            args.transport_receipt,
         )
     elif args.action == "probe":
-        routes = ensure_route_contract(policy, mutate=False)
+        routes = ensure_route_contract(
+            policy,
+            mutate=False,
+            transport_receipt_path=args.transport_receipt,
+        )
         result = {
             "action": "probe",
             "routes": routes,
@@ -411,6 +452,7 @@ def main() -> int:
                 next_state["active_path"],
                 False,
                 "none",
+                args.transport_receipt,
             )
             result.update({
                 key: next_state[key]
@@ -448,6 +490,7 @@ def main() -> int:
             rollback["active_path"],
             False,
             "active",
+            args.transport_receipt,
         )
         result["action"] = "rollback"
         result["rollback_status"] = "succeeded"

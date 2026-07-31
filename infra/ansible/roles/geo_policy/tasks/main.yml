@@ -147,6 +147,8 @@
           - "{{ geo_policy_temp.path }}/ru_ipv4.cidrs"
           - --receipt
           - "{{ geo_policy_root_dir }}/current.json"
+          - --transport-receipt
+          - "{{ geo_policy_transport_receipt_file }}"
           - --active-path
           - "{{ geo_policy_active_path }}"
       environment:
@@ -210,6 +212,8 @@
               - "{{ geo_policy_dataset_file }}"
               - --receipt
               - "{{ geo_policy_receipt_file }}"
+              - --transport-receipt
+              - "{{ geo_policy_transport_receipt_file }}"
               - --active-path
               - "{{ geo_policy_active_path }}"
           environment:
@@ -256,6 +260,8 @@
           - "{{ geo_policy_dataset_file }}"
           - --receipt
           - "{{ geo_policy_receipt_file }}"
+          - --transport-receipt
+          - "{{ geo_policy_transport_receipt_file }}"
       environment:
         PYTHONPATH: "{{ geo_policy_root_dir }}"
       register: geo_policy_rollback

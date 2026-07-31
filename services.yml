@@ -221,10 +221,13 @@ platform:
         - vps2
         - vps4
       path_count: variable
+      mark_assignment: stable-explicit-per-alias
+      shared_source_gateway: 172.31.3.2
       fail_after: 3
       recover_after: 5
       recovery_hold_seconds: 300
       transport_contract: required-platform-router-provisioned-mark-tables
+      transport_receipt: /var/lib/ai-service-platform/platform_router/current.json
     data_outputs:
       - haproxy_country_lists
       - vpn_geodns_targets

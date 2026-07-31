@@ -1,0 +1,13 @@
+[Unit]
+Description=AI Service Platform marked platform-router host routes
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={{ platform_router_host_routes_script }} apply
+ExecStop={{ platform_router_host_routes_script }} remove
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

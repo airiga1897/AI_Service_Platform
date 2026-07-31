@@ -5,11 +5,24 @@ mkdir -p /var/lib/misc
 
 while true; do
   sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+  egress_state=/run/platform-router-egress-routes.state
+  if [ -f "$egress_state" ]; then
+    while IFS='|' read -r old_mark old_table old_priority; do
+      [ -n "$old_mark" ] || continue
+      while ip rule del fwmark "$old_mark"/0xffffffff table "$old_table" priority "$old_priority" 2>/dev/null; do :; done
+      ip -4 route flush table "$old_table" 2>/dev/null || true
+    done < "$egress_state"
+  fi
+  egress_state_next="$egress_state.$$"
+  : > "$egress_state_next"
 {% for server in platform_router_model.softether_servers | default([]) %}
 {% if server.access_mode == "routed_tap" %}
   if ip link show "{{ server.tap_iface }}" >/dev/null 2>&1; then
     ip link set "{{ server.tap_iface }}" up || true
+    sysctl -w "net.ipv6.conf.{{ server.tap_iface }}.disable_ipv6=1" >/dev/null 2>&1 || true
+    ip -6 addr flush dev "{{ server.tap_iface }}" scope link >/dev/null 2>&1 || true
     ip addr replace "{{ server.server_ip }}/{{ server.prefixlen }}" dev "{{ server.tap_iface }}" || true
+{% if server.dhcp_enabled | default(true) %}
     dnsmasq_pid="/run/dnsmasq-{{ server.tap_name }}.pid"
     dnsmasq_running=false
     if [ -s "$dnsmasq_pid" ]; then
@@ -33,6 +46,7 @@ while true; do
         --dhcp-leasefile="/var/lib/misc/dnsmasq-{{ server.tap_name }}.leases" \
         --pid-file="$dnsmasq_pid"
     fi
+{% endif %}
   fi
 {% endif %}
 {% endfor %}
@@ -42,6 +56,14 @@ while true; do
     sysctl -w "net.ipv6.conf.{{ client.iface }}.disable_ipv6=1" >/dev/null 2>&1 || true
     ip -6 addr flush dev "{{ client.iface }}" scope link >/dev/null 2>&1 || true
     ip addr replace "{{ client.client_ip }}/{{ client.prefixlen }}" dev "{{ client.iface }}" || true
+{% for path in platform_router_model.egress_paths | default([]) %}
+{% if path.role == "source" and path.tunnel_iface == client.iface %}
+    while ip rule del fwmark {{ path.route_mark }}/0xffffffff table {{ path.route_table }} priority {{ path.route_rule_priority }} 2>/dev/null; do :; done
+    ip rule add fwmark {{ path.route_mark }}/0xffffffff table {{ path.route_table }} priority {{ path.route_rule_priority }}
+    ip route replace table {{ path.route_table }} default via {{ path.tunnel_next_hop }} dev "{{ path.tunnel_iface }}" onlink
+    printf '%s|%s|%s\n' '{{ path.route_mark }}' '{{ path.route_table }}' '{{ path.route_rule_priority }}' >> "$egress_state_next"
+{% endif %}
+{% endfor %}
 {% for policy in platform_router_model.policies %}
 {% if policy.route_destination and policy.softether_client_name == client.name %}
     ip route replace "{{ policy.destination_ipv4 }}/32" via "{{ policy.softether_client_next_hop }}" dev "{{ client.iface }}" || true
@@ -52,5 +74,6 @@ while true; do
 {% endfor %}
   fi
 {% endfor %}
+  mv -f "$egress_state_next" "$egress_state"
   sleep 5
 done

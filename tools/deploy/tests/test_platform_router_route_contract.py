@@ -1,11 +1,33 @@
 from pathlib import Path
 import unittest
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[3]
 PLATFORM_ROUTER_TASKS = (
     ROOT / "infra" / "ansible" / "roles" / "platform_router" / "tasks" / "main.yml"
 )
+PLATFORM_ROUTER_CONFIG = ROOT / "operator" / "platform_router" / "config.yml"
+HOST_ROUTE_TEMPLATE = (
+    ROOT
+    / "infra"
+    / "ansible"
+    / "roles"
+    / "platform_router"
+    / "templates"
+    / "platform-router-host-routes.sh.j2"
+)
+ROUTE_RECONCILER = (
+    ROOT
+    / "infra"
+    / "ansible"
+    / "roles"
+    / "platform_router"
+    / "templates"
+    / "platform-router-reconcile.sh.j2"
+)
+TRANSPORT_EXAMPLE = ROOT / "docs" / "examples" / "geo-egress-vps3-transports.example.yml"
 
 
 class PlatformRouterRouteContractTests(unittest.TestCase):
@@ -67,6 +89,75 @@ class PlatformRouterRouteContractTests(unittest.TestCase):
             '--dport "$destination_port"',
             tasks,
         )
+
+    def test_geo_egress_paths_have_stable_explicit_marks(self) -> None:
+        document = yaml.safe_load(PLATFORM_ROUTER_CONFIG.read_text(encoding="utf-8"))
+        paths = document["platform_router"]["egress_paths"]
+        self.assertEqual(
+            {
+                item["alias"]: (item["route_mark"], item["route_table"])
+                for item in paths
+            },
+            {
+                "vps1": ("0x530003", 5301),
+                "vps2": ("0x530004", 5302),
+                "vps4": ("0x530005", 5303),
+            },
+        )
+        self.assertEqual({item["source_gateway_ipv4"] for item in paths}, {"172.31.3.2"})
+        self.assertEqual(len({item["route_mark"] for item in paths}), len(paths))
+        self.assertEqual(len({item["route_table"] for item in paths}), len(paths))
+        self.assertEqual(len({item["l3_vps_link"] for item in paths}), len(paths))
+
+    def test_tracked_transport_example_has_three_isolated_routed_taps(self) -> None:
+        example = yaml.safe_load(TRANSPORT_EXAMPLE.read_text(encoding="utf-8"))
+        links = example["l3_links"]
+        self.assertEqual([item["hub"] for item in links], [
+            "GeoEgressVps3Vps1",
+            "GeoEgressVps3Vps2",
+            "GeoEgressVps3Vps4",
+        ])
+        self.assertEqual({item["tap_name"] for item in links}, {"ge31", "ge32", "ge34"})
+        self.assertEqual(len({item["subnet"] for item in links}), 3)
+        self.assertFalse(example["defaults"]["dhcp_enabled"])
+        self.assertEqual(example["defaults"]["access_mode"], "routed_tap")
+
+    def test_host_and_router_tables_use_the_same_mark_contract(self) -> None:
+        host = HOST_ROUTE_TEMPLATE.read_text(encoding="utf-8")
+        router = ROUTE_RECONCILER.read_text(encoding="utf-8")
+        self.assertIn("ip rule add fwmark {{ path.route_mark }}", host)
+        self.assertIn("ip -4 route replace table {{ path.route_table }} default", host)
+        self.assertIn("ip rule add fwmark {{ path.route_mark }}", router)
+        self.assertIn("dev \"{{ path.tunnel_iface }}\" onlink", router)
+
+    def test_host_routes_remove_stale_dynamic_path_state(self) -> None:
+        host = HOST_ROUTE_TEMPLATE.read_text(encoding="utf-8")
+        router = ROUTE_RECONCILER.read_text(encoding="utf-8")
+        tasks = PLATFORM_ROUTER_TASKS.read_text(encoding="utf-8")
+
+        self.assertIn('state_file="$state_dir/host-routes.state"', host)
+        self.assertIn('ip rule del fwmark "$old_mark"', host)
+        self.assertIn('ip -4 route flush table "$old_table"', host)
+        self.assertIn("Disable stale platform_router host marked routes", tasks)
+        self.assertIn("Disable platform_router host marked routes during removal", tasks)
+        self.assertIn("platform-router-egress-routes.state", router)
+        self.assertIn('ip rule del fwmark "$old_mark"', router)
+        self.assertIn('ip -4 route flush table "$old_table"', router)
+
+    def test_remote_egress_nat_is_scoped_to_source_cidrs_and_tap(self) -> None:
+        tasks = PLATFORM_ROUTER_TASKS.read_text(encoding="utf-8")
+        self.assertIn('-i "$vpn_iface" -s "$source_cidr" -j SNAT', tasks)
+        self.assertIn('"source_cidrs": [str(value) for value in source_cidrs]', tasks)
+        self.assertIn('accepted["status"] = "ready"', tasks)
+
+    def test_multiple_hubs_require_one_server_runtime_credential(self) -> None:
+        tasks = PLATFORM_ROUTER_TASKS.read_text(encoding="utf-8")
+        self.assertIn(
+            "all hubs in one per-node SoftEther server runtime must share its server_password",
+            tasks,
+        )
+        self.assertIn("unique_networks(transport_networks", tasks)
+        self.assertIn("dhcp_enabled must be boolean", tasks)
 
 
 if __name__ == "__main__":
