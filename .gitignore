@@ -11,6 +11,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .DS_Store
+.codex-worktrees/
 logs/*
 !logs/.gitkeep
 
@@ -38,6 +39,11 @@ operator/site_runtime/backup-secrets/*
 !operator/site_runtime/bootstrap-secrets/
 operator/site_runtime/bootstrap-secrets/*
 !operator/site_runtime/bootstrap-secrets/template.env
+!operator/geo_policy/
+operator/geo_policy/*
+!operator/geo_policy/.gitignore
+!operator/geo_policy/README.md
+!operator/geo_policy/config.yml.example
 inventory.ini
 infra/ansible/inventory.ini
 infra/ansible/nodes.csv

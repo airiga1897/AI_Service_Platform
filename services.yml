@@ -197,9 +197,34 @@ platform:
       - origin-ip-shielding-when-supported
     note: Стандартный web-CDN отвечает за доставку сайта и защиту. VPN-трафик может рассматриваться позднее только через L4 TCP-прокси, Anycast или сервисы типа GeoDNS.
   geo_policy:
-    status: planned-shared-platform-service
+    status: implemented-vps3-canary-not-applied
     owner: infrastructure
     purpose: one shared geo decision source for edge protection, VPN nearest routing, egress policy, and CDN policy inputs
+    canary:
+      alias: vps3
+      address_family: ipv4
+      source_classes:
+        site_runtime: 172.31.3.10/32
+        vpn_ingress: 172.20.0.2/32
+      enforcement: host-nftables-connmark-policy-routing
+      fail_mode: scoped-non-ru-fail-closed
+      production_applied: false
+    dataset:
+      primary: ipdeny-ru-aggregated-ipv4
+      sanity_guard: ripe-delegated-statistics
+      max_age_hours: 72
+      first_acceptance: explicit-operator-approval
+    egress:
+      selection: approved-ordered-paths
+      current_candidate_aliases:
+        - vps1
+        - vps2
+        - vps4
+      path_count: variable
+      fail_after: 3
+      recover_after: 5
+      recovery_hold_seconds: 300
+      transport_contract: required-platform-router-provisioned-mark-tables
     data_outputs:
       - haproxy_country_lists
       - vpn_geodns_targets

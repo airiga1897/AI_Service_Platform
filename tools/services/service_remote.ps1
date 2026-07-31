@@ -3,7 +3,7 @@ param(
     [string]$Service,
 
     [Parameter(Position=1)]
-    [ValidateSet("plan", "apply", "absent", "purge", "reseed", "probe", "stage-image", "stage-support-images", "publication-check", "publication-prepare", "publication-http01", "publication-certificate", "publication-https", "bootstrap", "backup-init", "backup-schedule", "backup", "restore-rehearsal", "restore-cleanup")]
+    [ValidateSet("plan", "apply", "rollback", "absent", "purge", "reseed", "probe", "stage-image", "stage-support-images", "publication-check", "publication-prepare", "publication-http01", "publication-certificate", "publication-https", "bootstrap", "backup-init", "backup-schedule", "backup", "restore-rehearsal", "restore-cleanup")]
     [string]$Action,
 
     [string]$NodesFile = ".\operator\nodes.csv",
@@ -44,6 +44,8 @@ param(
 
     [string]$EgressPolicyToolsDir = "tools/egress_policy",
 
+    [string]$GeoPolicyToolsDir = "tools/geo_policy",
+
     [string]$ServicesRegistryFile = "services.yml",
 
     [string]$SiteRuntimeToolsDir = "tools/site_runtime",
@@ -77,6 +79,9 @@ param(
     [switch]$ReinitStandby,
 
     [switch]$PlatformRouterSoftetherDebug,
+
+    [ValidatePattern('^(auto|[A-Za-z0-9][A-Za-z0-9_.-]*)$')]
+    [string]$GeoPolicyActivePath = "auto",
 
     [switch]$DetachedRemoteJob,
 
@@ -154,7 +159,7 @@ function Split-RemoteParentPath($Path) {
     return $text.Substring(0, $index)
 }
 
-function New-TarGzBundle($ServiceRunnerScript, $CreateInventoryScript, $AnsibleDir, $PolicyRouterDockerDir, $PolicyGatewayDockerDir, $SoftetherVpnclientDockerDir, $EgressPolicyToolsDir, $ServicesRegistryFile, $SiteRuntimeToolsDir, $NodesFile, $StateFile, $NetworksFile) {
+function New-TarGzBundle($ServiceRunnerScript, $CreateInventoryScript, $AnsibleDir, $PolicyRouterDockerDir, $PolicyGatewayDockerDir, $SoftetherVpnclientDockerDir, $EgressPolicyToolsDir, $GeoPolicyToolsDir, $ServicesRegistryFile, $SiteRuntimeToolsDir, $NodesFile, $StateFile, $NetworksFile) {
     if (-not (Get-Command tar -ErrorAction SilentlyContinue)) {
         Fail "tar not found in PATH. It is required to upload service bundles as a single archive."
     }
@@ -178,6 +183,8 @@ function New-TarGzBundle($ServiceRunnerScript, $CreateInventoryScript, $AnsibleD
         $toolsStagingDir = Join-Path (Join-Path $stagingDir "tools") "egress_policy"
         New-Item -ItemType Directory -Path (Split-Path -Parent $toolsStagingDir) -Force | Out-Null
         Copy-Item -LiteralPath $EgressPolicyToolsDir -Destination $toolsStagingDir -Recurse
+        $geoPolicyToolsStagingDir = Join-Path (Join-Path $stagingDir "tools") "geo_policy"
+        Copy-Item -LiteralPath $GeoPolicyToolsDir -Destination $geoPolicyToolsStagingDir -Recurse
         Copy-Item -LiteralPath $ServicesRegistryFile -Destination (Join-Path $stagingDir "services.yml")
         $siteRuntimeToolsStagingDir = Join-Path (Join-Path $stagingDir "tools") "site_runtime"
         Copy-Item -LiteralPath $SiteRuntimeToolsDir -Destination $siteRuntimeToolsStagingDir -Recurse
@@ -187,7 +194,7 @@ function New-TarGzBundle($ServiceRunnerScript, $CreateInventoryScript, $AnsibleD
         Copy-Item -LiteralPath $StateFile -Destination (Join-Path $operatorStagingDir "state.csv")
         Copy-Item -LiteralPath $NetworksFile -Destination (Join-Path $operatorStagingDir "networks.csv")
         $operatorSourceDir = Split-Path -Parent (Resolve-Path -LiteralPath $NodesFile).Path
-        foreach ($operatorSubdir in @("haproxy", "softether", "edge_banlist", "postgres", "platform_networks", "host_resources", "platform_router", "site_runtime")) {
+        foreach ($operatorSubdir in @("haproxy", "softether", "edge_banlist", "postgres", "platform_networks", "host_resources", "platform_router", "geo_policy", "site_runtime")) {
             $sourceSubdir = Join-Path $operatorSourceDir $operatorSubdir
             if (Test-Path -LiteralPath $sourceSubdir -PathType Container) {
                 Copy-Item -LiteralPath $sourceSubdir -Destination (Join-Path $operatorStagingDir $operatorSubdir) -Recurse
@@ -398,7 +405,7 @@ function Read-BatchPlan($Path) {
         if (-not $step.service -or -not $step.action) {
             Fail "BatchPlanFile step $index must include service and action"
         }
-        if ($step.service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks", "host_resources", "platform_router", "site_runtime")) {
+        if ($step.service -notin @("edge_haproxy", "vpn_edge", "vpn_cascade", "policy_gateway", "edge_candidate_collector", "edge_banlist", "postgres_runtime", "softether_l3_vps", "platform_networks", "host_resources", "platform_router", "geo_policy", "site_runtime")) {
             Fail "BatchPlanFile step $index has unsupported service: $($step.service)"
         }
         if ($step.action -notin @("plan", "apply", "absent", "purge", "reseed", "probe")) {
@@ -427,6 +434,14 @@ function Read-BatchPlan($Path) {
         if ([bool]$step.platform_router_softether_debug -and $step.service -ne "platform_router") {
             Fail "BatchPlanFile step $index uses platform_router_softether_debug outside platform_router"
         }
+        $geoPolicyActivePath = [string]$step.geo_policy_active_path
+        if (-not $geoPolicyActivePath) { $geoPolicyActivePath = "auto" }
+        if ($step.service -eq "geo_policy" -and $geoPolicyActivePath -notmatch '^(auto|[A-Za-z0-9][A-Za-z0-9_.-]*)$') {
+            Fail "BatchPlanFile step ${index}: geo_policy_active_path must be auto or a safe configured egress alias"
+        }
+        if ($step.service -ne "geo_policy" -and $geoPolicyActivePath -ne "auto") {
+            Fail "BatchPlanFile step $index uses geo_policy_active_path outside geo_policy"
+        }
         $label = [string]$step.label
         if (-not $label) {
             $label = "$($step.service) $($step.action)"
@@ -440,6 +455,7 @@ function Read-BatchPlan($Path) {
             ConfirmPurge = [bool]$step.confirm_purge
             ReinitStandby = [bool]$step.reinit_standby
             PlatformRouterSoftetherDebug = [bool]$step.platform_router_softether_debug
+            GeoPolicyActivePath = $geoPolicyActivePath
             Label = $label
         }) | Out-Null
     }
@@ -477,6 +493,9 @@ function New-ServiceCommand($Step, $RemoteRepoDir, $RemoteNodesFile, $RemoteStat
     if ($Step.ConfirmPurge) { $args += "--confirm-purge" }
     if ($Step.ReinitStandby) { $args += "--reinit-standby" }
     if ($Step.PlatformRouterSoftetherDebug) { $args += "--platform-router-softether-debug" }
+    if ($Step.Service -eq "geo_policy") {
+        $args += @("--geo-policy-active-path", (Quote-BashArg $Step.GeoPolicyActivePath))
+    }
 
     return @(
         "set -e",
@@ -718,6 +737,9 @@ if ($ReinitStandby) {
 if ($PlatformRouterSoftetherDebug -and $Service -ne "platform_router") {
     Fail "-PlatformRouterSoftetherDebug is supported only for service platform_router"
 }
+if ($GeoPolicyActivePath -ne "auto" -and $Service -ne "geo_policy") {
+    Fail "-GeoPolicyActivePath is supported only for service geo_policy"
+}
 
 if ($BatchPlanFile) {
     Require-File $BatchPlanFile "BatchPlanFile"
@@ -726,6 +748,20 @@ if ($BatchPlanFile) {
 }
 if (-not $BatchPlanFile -and $Service -eq "host_resources" -and $Action -notin @("plan", "apply")) {
     Fail "host_resources v1 supports only plan and apply; absent/purge/reseed are intentionally disabled"
+}
+if (-not $BatchPlanFile -and $Service -eq "geo_policy") {
+    if ($Action -notin @("plan", "apply", "rollback", "absent")) {
+        Fail "geo_policy supports only plan, apply, rollback, and absent"
+    }
+    if ($Limit -ne "vps3") {
+        Fail "geo_policy canary requires exactly -Limit vps3"
+    }
+    if ($Action -eq "rollback" -and $Check) {
+        Fail "geo_policy rollback does not support -Check"
+    }
+}
+if (-not $BatchPlanFile -and $Action -eq "rollback" -and $Service -ne "geo_policy") {
+    Fail "rollback is supported only for geo_policy"
 }
 if (-not $BatchPlanFile -and $Service -eq "site_runtime" -and $Action -notin @("plan", "probe", "stage-image", "stage-support-images", "publication-check", "publication-prepare", "publication-http01", "publication-certificate", "publication-https", "bootstrap", "apply", "backup-init", "backup-schedule", "backup", "restore-rehearsal", "restore-cleanup")) {
     Fail "site_runtime action is not supported"
@@ -839,6 +875,9 @@ if (-not (Test-Path -LiteralPath $SoftetherVpnclientDockerDir -PathType Containe
 if (-not (Test-Path -LiteralPath $EgressPolicyToolsDir -PathType Container)) {
     Fail "EgressPolicyToolsDir not found: $EgressPolicyToolsDir"
 }
+if (-not (Test-Path -LiteralPath $GeoPolicyToolsDir -PathType Container)) {
+    Fail "GeoPolicyToolsDir not found: $GeoPolicyToolsDir"
+}
 Require-File $ServicesRegistryFile "ServicesRegistryFile"
 if (-not (Test-Path -LiteralPath $SiteRuntimeToolsDir -PathType Container)) {
     Fail "SiteRuntimeToolsDir not found: $SiteRuntimeToolsDir"
@@ -854,6 +893,7 @@ $remotePolicyRouterDockerTemp = "$remoteBundleDir/docker/policy-router"
 $remotePolicyGatewayDockerTemp = "$remoteBundleDir/docker/policy-gateway"
 $remoteSoftetherVpnclientDockerTemp = "$remoteBundleDir/docker/softether-vpnclient"
 $remoteEgressPolicyToolsTemp = "$remoteBundleDir/tools/egress_policy"
+$remoteGeoPolicyToolsTemp = "$remoteBundleDir/tools/geo_policy"
 $remoteSiteRuntimeToolsTemp = "$remoteBundleDir/tools/site_runtime"
 $remoteServicesRegistryTemp = "$remoteBundleDir/services.yml"
 $remoteOperatorCsvTemp = "$remoteBundleDir/operator"
@@ -896,6 +936,7 @@ if ($isBatch) {
         ConfirmPurge = [bool]$ConfirmPurge
         ReinitStandby = [bool]$ReinitStandby
         PlatformRouterSoftetherDebug = [bool]$PlatformRouterSoftetherDebug
+        GeoPolicyActivePath = $GeoPolicyActivePath
         PolicyRouterImageRef = $PolicyRouterImageRef
         BuildPolicyRouterImage = [bool]$BuildPolicyRouterImage
         Label = if ($Limit) { "$Service $Action for $Limit" } else { "$Service $Action" }
@@ -912,6 +953,8 @@ if (-not $isBatch) {
         "sudo install -m 700 $(Quote-BashArg $remoteCreateInventoryTemp) $(Quote-BashArg "$RemoteRepoDir/tools/bootstrap/create_inventory.sh")",
         "sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/tools/egress_policy")",
         "sudo cp -a $(Quote-BashArg $remoteEgressPolicyToolsTemp) $(Quote-BashArg "$RemoteRepoDir/tools/egress_policy")",
+        "sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/tools/geo_policy")",
+        "sudo cp -a $(Quote-BashArg $remoteGeoPolicyToolsTemp) $(Quote-BashArg "$RemoteRepoDir/tools/geo_policy")",
         "sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/tools/site_runtime")",
         "sudo cp -a $(Quote-BashArg $remoteSiteRuntimeToolsTemp) $(Quote-BashArg "$RemoteRepoDir/tools/site_runtime")",
         "sudo install -m 644 $(Quote-BashArg $remoteServicesRegistryTemp) $(Quote-BashArg "$RemoteRepoDir/services.yml")",
@@ -939,6 +982,7 @@ if (-not $isBatch) {
         "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/platform_networks") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/platform_networks"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/platform_networks") $(Quote-BashArg "$remoteOperatorDir/platform_networks"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/platform_networks"); fi",
         "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/host_resources") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/host_resources"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/host_resources") $(Quote-BashArg "$remoteOperatorDir/host_resources"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/host_resources"); fi",
         "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/platform_router") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/platform_router"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/platform_router") $(Quote-BashArg "$remoteOperatorDir/platform_router"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/platform_router"); fi",
+        "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/geo_policy") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/geo_policy"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/geo_policy") $(Quote-BashArg "$remoteOperatorDir/geo_policy"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/geo_policy"); fi",
         "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/site_runtime") ]; then sudo rm -rf $(Quote-BashArg "$remoteOperatorDir/site_runtime"); sudo cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/site_runtime") $(Quote-BashArg "$remoteOperatorDir/site_runtime"); sudo chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/site_runtime"); sudo find $(Quote-BashArg "$remoteOperatorDir/site_runtime") -type f \( -path '*/secrets/*' -o -path '*/backup-secrets/*' -o -path '*/bootstrap-secrets/*' \) -exec chmod 600 {} +; fi",
         "sudo bash -lc $(Quote-BashArg $serviceCommand)"
     ) -join "; "
@@ -1036,6 +1080,7 @@ $remoteServiceDisplay = if ($isBatch) { "batch plan: $($batchSteps.Count) steps"
     if ($ConfirmPurge) { $remoteServiceDisplayArgs += "--confirm-purge" }
     if ($ReinitStandby) { $remoteServiceDisplayArgs += "--reinit-standby" }
     if ($PlatformRouterSoftetherDebug) { $remoteServiceDisplayArgs += "--platform-router-softether-debug" }
+    if ($Service -eq "geo_policy") { $remoteServiceDisplayArgs += @("--geo-policy-active-path", $GeoPolicyActivePath) }
     $remoteServiceDisplayArgs -join " "
 }
 $runScriptLines = New-Object System.Collections.Generic.List[string]
@@ -1058,6 +1103,8 @@ foreach ($line in @(
     "run_stage $(Quote-BashArg "install inventory generator") sudo install -m 700 $(Quote-BashArg $remoteCreateInventoryTemp) $(Quote-BashArg "$RemoteRepoDir/tools/bootstrap/create_inventory.sh")",
     "run_stage $(Quote-BashArg "remove previous egress policy tools") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/tools/egress_policy")",
     "run_stage $(Quote-BashArg "install egress policy tools") sudo cp -a $(Quote-BashArg $remoteEgressPolicyToolsTemp) $(Quote-BashArg "$RemoteRepoDir/tools/egress_policy")",
+    "run_stage $(Quote-BashArg "remove previous GeoPolicy tools") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/tools/geo_policy")",
+    "run_stage $(Quote-BashArg "install GeoPolicy tools") sudo cp -a $(Quote-BashArg $remoteGeoPolicyToolsTemp) $(Quote-BashArg "$RemoteRepoDir/tools/geo_policy")",
     "run_stage $(Quote-BashArg "remove previous site_runtime tools") sudo rm -rf $(Quote-BashArg "$RemoteRepoDir/tools/site_runtime")",
     "run_stage $(Quote-BashArg "install site_runtime tools") sudo cp -a $(Quote-BashArg $remoteSiteRuntimeToolsTemp) $(Quote-BashArg "$RemoteRepoDir/tools/site_runtime")",
     "run_stage $(Quote-BashArg "install services registry") sudo install -m 644 $(Quote-BashArg $remoteServicesRegistryTemp) $(Quote-BashArg "$RemoteRepoDir/services.yml")",
@@ -1083,6 +1130,7 @@ foreach ($line in @(
     "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/platform_networks") ]; then run_stage $(Quote-BashArg "sync operator platform_networks config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/platform_networks"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/platform_networks") $(Quote-BashArg "$remoteOperatorDir/platform_networks"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/platform_networks")"); fi",
     "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/host_resources") ]; then run_stage $(Quote-BashArg "sync operator host_resources config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/host_resources"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/host_resources") $(Quote-BashArg "$remoteOperatorDir/host_resources"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/host_resources")"); fi",
     "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/platform_router") ]; then run_stage $(Quote-BashArg "sync operator platform_router config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/platform_router"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/platform_router") $(Quote-BashArg "$remoteOperatorDir/platform_router"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/platform_router")"); fi",
+    "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/geo_policy") ]; then run_stage $(Quote-BashArg "sync operator geo_policy config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/geo_policy"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/geo_policy") $(Quote-BashArg "$remoteOperatorDir/geo_policy"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/geo_policy")"); fi",
     "if [ -d $(Quote-BashArg "$remoteOperatorCsvTemp/site_runtime") ]; then run_stage $(Quote-BashArg "sync operator site_runtime config") sudo bash -lc $(Quote-BashArg "rm -rf $(Quote-BashArg "$remoteOperatorDir/site_runtime"); cp -a $(Quote-BashArg "$remoteOperatorCsvTemp/site_runtime") $(Quote-BashArg "$remoteOperatorDir/site_runtime"); chown -R ansible:ansible $(Quote-BashArg "$remoteOperatorDir/site_runtime"); find $(Quote-BashArg "$remoteOperatorDir/site_runtime") -type f \( -path '*/secrets/*' -o -path '*/backup-secrets/*' -o -path '*/bootstrap-secrets/*' \) -exec chmod 600 {} +"); fi"
 )) { $runScriptLines.Add($line) | Out-Null }
 
@@ -1143,7 +1191,7 @@ try {
         Require-File $siteRuntimePreparedImage.manifest_path "prepared site_runtime support manifest"
     }
     Write-Host "Preparing local service bundle..."
-    $bundle = New-TarGzBundle $ServiceRunnerScript $CreateInventoryScript $AnsibleDir $PolicyRouterDockerDir $PolicyGatewayDockerDir $SoftetherVpnclientDockerDir $EgressPolicyToolsDir $ServicesRegistryFile $SiteRuntimeToolsDir $NodesFile $StateFile $NetworksFile
+    $bundle = New-TarGzBundle $ServiceRunnerScript $CreateInventoryScript $AnsibleDir $PolicyRouterDockerDir $PolicyGatewayDockerDir $SoftetherVpnclientDockerDir $EgressPolicyToolsDir $GeoPolicyToolsDir $ServicesRegistryFile $SiteRuntimeToolsDir $NodesFile $StateFile $NetworksFile
     if ($useDetachedRemoteJob) {
         Write-LfScript $runScriptPath $runScriptLines
     }
@@ -1190,6 +1238,7 @@ try {
         "test -f $(Quote-BashArg $remoteServiceRunnerTemp)",
         "test -f $(Quote-BashArg $remoteCreateInventoryTemp)",
         "test -d $(Quote-BashArg $remoteEgressPolicyToolsTemp)",
+        "test -d $(Quote-BashArg $remoteGeoPolicyToolsTemp)",
         "test -d $(Quote-BashArg $remoteSiteRuntimeToolsTemp)",
         "test -f $(Quote-BashArg $remoteServicesRegistryTemp)",
         "test -d $(Quote-BashArg $remoteAnsibleTemp)",

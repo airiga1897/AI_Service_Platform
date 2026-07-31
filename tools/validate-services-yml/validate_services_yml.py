@@ -315,8 +315,16 @@ def validate_platform(errors: list[str], data: dict[str, Any]) -> None:
         fail(errors, "platform.legacy_edge_colocation.containers must record historical softether")
 
     geo_policy = require_mapping(errors, platform.get("geo_policy"), "platform.geo_policy")
-    if geo_policy.get("status") != "planned-shared-platform-service":
-        fail(errors, "platform.geo_policy.status must be planned-shared-platform-service")
+    geo_status = geo_policy.get("status")
+    if geo_status not in {
+        "planned-shared-platform-service",
+        "implemented-vps3-canary-not-applied",
+    }:
+        fail(
+            errors,
+            "platform.geo_policy.status must be planned-shared-platform-service "
+            "or implemented-vps3-canary-not-applied",
+        )
     outputs = set(require_list(errors, geo_policy.get("data_outputs"), "platform.geo_policy.data_outputs"))
     for output in (
         "haproxy_country_lists",
@@ -326,6 +334,38 @@ def validate_platform(errors: list[str], data: dict[str, Any]) -> None:
     ):
         if output not in outputs:
             fail(errors, f"platform.geo_policy.data_outputs must include {output}")
+    if geo_status == "implemented-vps3-canary-not-applied":
+        canary = require_mapping(errors, geo_policy.get("canary"), "platform.geo_policy.canary")
+        if canary.get("alias") != "vps3":
+            fail(errors, "platform.geo_policy.canary.alias must be vps3")
+        if canary.get("address_family") != "ipv4":
+            fail(errors, "platform.geo_policy.canary.address_family must be ipv4")
+        if canary.get("production_applied") is not False:
+            fail(errors, "platform.geo_policy.canary.production_applied must remain false before rollout")
+        source_classes = require_mapping(
+            errors,
+            canary.get("source_classes"),
+            "platform.geo_policy.canary.source_classes",
+        )
+        if source_classes.get("site_runtime") != "172.31.3.10/32":
+            fail(errors, "platform.geo_policy site_runtime source must be 172.31.3.10/32")
+        if source_classes.get("vpn_ingress") != "172.20.0.2/32":
+            fail(errors, "platform.geo_policy vpn_ingress source must be 172.20.0.2/32")
+        egress = require_mapping(errors, geo_policy.get("egress"), "platform.geo_policy.egress")
+        if egress.get("selection") != "approved-ordered-paths":
+            fail(errors, "platform.geo_policy.egress.selection must be approved-ordered-paths")
+        aliases = require_list(
+            errors,
+            egress.get("current_candidate_aliases"),
+            "platform.geo_policy.egress.current_candidate_aliases",
+        )
+        if aliases != ["vps1", "vps2", "vps4"]:
+            fail(
+                errors,
+                "platform.geo_policy current canary candidates must be vps1,vps2,vps4",
+            )
+        if egress.get("path_count") != "variable":
+            fail(errors, "platform.geo_policy.egress.path_count must be variable")
 
     site_cdn = require_mapping(errors, platform.get("site_cdn"), "platform.site_cdn")
     if site_cdn.get("status") != "future-optional":

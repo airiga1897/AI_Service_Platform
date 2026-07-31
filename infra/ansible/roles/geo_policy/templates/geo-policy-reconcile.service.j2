@@ -1,0 +1,17 @@
+[Unit]
+Description=AI Service Platform GeoPolicy egress reconciler
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=PYTHONPATH={{ geo_policy_root_dir }}
+ExecStart=/usr/bin/flock -n /run/ai-service-platform-geo-policy.lock /usr/bin/python3 {{ geo_policy_tools_dir }}/runtime.py reconcile --config {{ geo_policy_config_file }} --dataset {{ geo_policy_dataset_file }} --receipt {{ geo_policy_receipt_file }}
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths={{ geo_policy_root_dir }} /run

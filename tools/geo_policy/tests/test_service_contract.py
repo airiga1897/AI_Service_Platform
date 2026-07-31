@@ -1,0 +1,67 @@
+from __future__ import annotations
+
+import pathlib
+import unittest
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[3]
+
+
+def text(relative: str) -> str:
+    return (ROOT / relative).read_text(encoding="utf-8")
+
+
+class ServiceContractTests(unittest.TestCase):
+    def test_service_runner_exposes_check_override_and_rollback(self) -> None:
+        runner = text("tools/services/service.sh")
+        self.assertIn("geo_policy apply --limit vps3", runner)
+        self.assertIn("--geo-policy-active-path", runner)
+        self.assertIn("geo_policy rollback --limit vps3", runner)
+        self.assertIn('"geo_policy_active_path=$GEO_POLICY_ACTIVE_PATH"', runner)
+        self.assertIn('GEO_POLICY_ACTIVE_PATH="auto"', runner)
+        self.assertNotIn("primary|backup", runner)
+
+    def test_operator_contract_uses_a_variable_ordered_path_list(self) -> None:
+        config = text("operator/geo_policy/config.yml.example")
+        self.assertIn("paths:", config)
+        for alias in ("vps1", "vps2", "vps4"):
+            self.assertIn(f"alias: {alias}", config)
+        self.assertNotIn("primary:", config)
+        self.assertNotIn("backup:", config)
+
+    def test_remote_runner_bundles_geo_policy_tools_and_operator_intent(self) -> None:
+        runner = text("tools/services/service_remote.ps1")
+        self.assertIn('[string]$GeoPolicyToolsDir = "tools/geo_policy"', runner)
+        self.assertIn('"geo_policy", "site_runtime"', runner)
+        self.assertIn("GeoPolicyActivePath", runner)
+
+    def test_check_is_mutation_free_and_guards_ipv6(self) -> None:
+        role = text("infra/ansible/roles/geo_policy/tasks/main.yml")
+        self.assertIn("Run mutation-free GeoPolicy runtime preflight", role)
+        self.assertIn("changed_when: false", role)
+        self.assertIn("Global IPv6 bypass detected", role)
+        self.assertIn("not ansible_check_mode", role)
+
+    def test_refresh_uses_lock_atomic_moves_and_reapplies_dataset(self) -> None:
+        refresh = text(
+            "infra/ansible/roles/geo_policy/templates/refresh-dataset.sh.j2"
+        )
+        service = text(
+            "infra/ansible/roles/geo_policy/templates/geo-policy-refresh.service.j2"
+        )
+        self.assertIn('mv -f "$tmp/ru_ipv4.cidrs"', refresh)
+        self.assertIn('"$root/tools/geo_policy/runtime.py" apply', refresh)
+        self.assertNotIn('"$root/tools/geo_policy/runtime.py" reconcile', refresh)
+        self.assertIn("/usr/bin/flock", service)
+
+    def test_absent_removes_policy_but_preserves_transport_contract(self) -> None:
+        role = text("infra/ansible/roles/geo_policy/tasks/main.yml")
+        runtime = text("tools/geo_policy/runtime.py")
+        self.assertIn("preserving platform_router transport", role)
+        self.assertIn('"transport_contract_preserved": True', runtime)
+        self.assertNotIn('"route", "flush", "table"', runtime)
+        self.assertIn("Remove GeoPolicy systemd units", role)
+
+
+if __name__ == "__main__":
+    unittest.main()

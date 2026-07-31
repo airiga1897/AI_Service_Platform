@@ -1,0 +1,16 @@
+[Unit]
+Description=Refresh validated RU IPv4 GeoPolicy dataset
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/flock -w 60 /run/ai-service-platform-geo-policy.lock {{ geo_policy_root_dir }}/refresh-dataset.sh
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths={{ geo_policy_root_dir }} /run

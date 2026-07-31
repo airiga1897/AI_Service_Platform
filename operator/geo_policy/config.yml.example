@@ -1,0 +1,89 @@
+---
+schema_version: 1
+geo_policy:
+  name: vps3-site-runtime-vpn
+  state: proposed
+  ingress_alias: vps3
+  ipv4_only: true
+  ipv6_guard_containers:
+    - site-runtime-ai-retail-mvp-anchor
+    - softether-edge
+
+  source_classes:
+    site_runtime:
+      - 172.31.3.10/32
+    vpn_ingress:
+      - 172.20.0.2/32
+
+  # These ranges always retain the ordinary VPS3 path.
+  excluded_destinations:
+    - 0.0.0.0/8
+    - 10.0.0.0/8
+    - 100.64.0.0/10
+    - 127.0.0.0/8
+    - 169.254.0.0/16
+    - 172.16.0.0/12
+    - 192.0.0.0/24
+    - 192.0.2.0/24
+    - 192.168.0.0/16
+    - 198.18.0.0/15
+    - 198.51.100.0/24
+    - 203.0.113.0/24
+    - 224.0.0.0/4
+    - 240.0.0.0/4
+
+  routing:
+    ru_public: direct
+    non_ru_public: egress
+    unknown_public: egress
+    special_or_internal: direct
+    fail_closed: true
+    route_mark: "0x530003"
+
+  dataset:
+    country: RU
+    family: ipv4
+    ipdeny_url: https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone
+    ripe_guard_url: https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-extended-latest
+    max_age_hours: 72
+    refresh_calendar: "*-*-* 04:15:00"
+    # Set only when accepting the first generated metadata receipt.
+    accepted_sha256: ""
+
+  # Copy the ordered paths from an explicitly accepted ranking proposal.
+  # Every gateway must already be a reachable transport endpoint from VPS3.
+  # The list may grow or shrink; order defines failover preference.
+  egress:
+    approval_id: ""
+    openai_country_acceptance:
+      source_url: https://help.openai.com/en/articles/5347006-openai-api-supported-countries-and-territories/
+      checked_at: ""
+      # Record only countries observed in the accepted ranking proposal after
+      # checking them against the official list.
+      supported_country_codes: []
+    paths:
+      - alias: vps1
+        # Documentation-only TEST-NET value; replace before acceptance.
+        gateway_ipv4: 192.0.2.1
+        route_table: 5301
+        country_code: ""
+      - alias: vps2
+        # Documentation-only TEST-NET value; replace before acceptance.
+        gateway_ipv4: 192.0.2.2
+        route_table: 5302
+        country_code: ""
+      - alias: vps4
+        # Documentation-only TEST-NET value; replace before acceptance.
+        gateway_ipv4: 192.0.2.4
+        route_table: 5303
+        country_code: ""
+
+  health:
+    fail_after: 3
+    recover_after: 5
+    probe_interval_seconds: 15
+    recovery_hold_seconds: 300
+    country_probe_host: api.country.is
+    country_probe_path: /
+    openai_probe_host: api.openai.com
+    openai_probe_path: /v1/models

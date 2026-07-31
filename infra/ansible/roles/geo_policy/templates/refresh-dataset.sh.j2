@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+
+root={{ geo_policy_root_dir | quote }}
+tmp="$(mktemp -d "$root/.refresh.XXXXXX")"
+cleanup() {
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
+
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  --output "$tmp/ipdeny.zone" \
+  'https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone'
+curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  --output "$tmp/ripe.stats" \
+  'https://ftp.ripe.net/pub/stats/ripencc/delegated-ripencc-extended-latest'
+
+PYTHONPATH="$root" python3 "$root/tools/geo_policy/geo_policy.py" build-dataset \
+  --ipdeny-file "$tmp/ipdeny.zone" \
+  --ripe-file "$tmp/ripe.stats" \
+  --previous-metadata "$root/ru_ipv4.json" \
+  --output-cidrs "$tmp/ru_ipv4.cidrs" \
+  --output-metadata "$tmp/ru_ipv4.json" >/dev/null
+
+cp "$root/ru_ipv4.cidrs" "$tmp/previous.cidrs"
+cp "$root/ru_ipv4.json" "$tmp/previous.json"
+active_path="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["active_path"])' "$root/current.json")"
+chmod 0644 "$tmp/ru_ipv4.cidrs" "$tmp/ru_ipv4.json"
+mv -f "$tmp/ru_ipv4.cidrs" "$root/ru_ipv4.cidrs"
+mv -f "$tmp/ru_ipv4.json" "$root/ru_ipv4.json"
+python3 -c 'import os,sys; fd=os.open(sys.argv[1], os.O_RDONLY); os.fsync(fd); os.close(fd)' "$root"
+if ! PYTHONPATH="$root" python3 "$root/tools/geo_policy/runtime.py" apply \
+  --config "$root/config.yml" \
+  --dataset "$root/ru_ipv4.cidrs" \
+  --receipt "$root/current.json" \
+  --active-path "$active_path" \
+  --probe-scope active >/dev/null; then
+  mv -f "$tmp/previous.cidrs" "$root/ru_ipv4.cidrs"
+  mv -f "$tmp/previous.json" "$root/ru_ipv4.json"
+  python3 -c 'import os,sys; fd=os.open(sys.argv[1], os.O_RDONLY); os.fsync(fd); os.close(fd)' "$root"
+  PYTHONPATH="$root" python3 "$root/tools/geo_policy/runtime.py" apply \
+    --config "$root/config.yml" \
+    --dataset "$root/ru_ipv4.cidrs" \
+    --receipt "$root/current.json" \
+    --active-path "$active_path" \
+    --probe-scope active >/dev/null
+  exit 1
+fi

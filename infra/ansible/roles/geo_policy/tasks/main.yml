@@ -1,0 +1,344 @@
+---
+- name: Validate GeoPolicy action and target
+  ansible.builtin.assert:
+    that:
+      - geo_policy_state in ['present', 'absent']
+      - geo_policy_action in ['check', 'apply', 'rollback', 'absent']
+      - geo_policy_active_path == 'auto' or geo_policy_active_path is match('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+      - inventory_hostname == 'vps3'
+    fail_msg: "GeoPolicy canary supports check|apply|rollback on vps3 only."
+
+- name: Check GeoPolicy controller artifacts
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+  delegate_to: localhost
+  become: false
+  register: geo_policy_controller_stats
+  loop:
+    - { path: "{{ geo_policy_operator_config_file }}", label: "operator config" }
+    - { path: "{{ geo_policy_operator_dataset_file }}", label: "RU CIDR dataset" }
+    - { path: "{{ geo_policy_operator_metadata_file }}", label: "dataset metadata" }
+    - { path: "{{ geo_policy_tool_source }}", label: "GeoPolicy model" }
+    - { path: "{{ geo_policy_runtime_source }}", label: "GeoPolicy runtime" }
+  when: geo_policy_state == 'present'
+
+- name: Require exact GeoPolicy controller artifacts
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg
+    fail_msg: "Missing {{ item.item.label }}: {{ item.item.path }}"
+  loop: "{{ geo_policy_controller_stats.results | default([]) }}"
+  when: geo_policy_state == 'present'
+
+- name: Prepare and validate temporary GeoPolicy bundle
+  when: geo_policy_state == 'present'
+  block:
+    - name: Create temporary GeoPolicy bundle
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: geo-policy-
+      check_mode: false
+      changed_when: false
+      register: geo_policy_temp
+
+    - name: Create temporary Python package
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+      loop:
+        - "{{ geo_policy_temp.path }}/tools"
+        - "{{ geo_policy_temp.path }}/tools/geo_policy"
+      check_mode: false
+      changed_when: false
+
+    - name: Create temporary package markers
+      ansible.builtin.copy:
+        content: ""
+        dest: "{{ item }}"
+        mode: "0600"
+      loop:
+        - "{{ geo_policy_temp.path }}/tools/__init__.py"
+        - "{{ geo_policy_temp.path }}/tools/geo_policy/__init__.py"
+      check_mode: false
+      changed_when: false
+
+    - name: Copy GeoPolicy bundle to target
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ geo_policy_temp.path }}/{{ item.dest }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { src: "{{ geo_policy_tool_source }}", dest: "tools/geo_policy/geo_policy.py", mode: "0600" }
+        - { src: "{{ geo_policy_runtime_source }}", dest: "tools/geo_policy/runtime.py", mode: "0600" }
+        - { src: "{{ geo_policy_operator_config_file }}", dest: "config.yml", mode: "0600" }
+        - { src: "{{ geo_policy_operator_dataset_file }}", dest: "ru_ipv4.cidrs", mode: "0600" }
+        - { src: "{{ geo_policy_operator_metadata_file }}", dest: "ru_ipv4.json", mode: "0600" }
+      check_mode: false
+      changed_when: false
+
+    - name: Validate GeoPolicy Python dependencies
+      ansible.builtin.command:
+        argv: [python3, -c, "import yaml; assert yaml.__version__"]
+      check_mode: false
+      changed_when: false
+
+    - name: Validate GeoPolicy host dependencies
+      ansible.builtin.shell: |
+        set -euo pipefail
+        for command in docker nft ip curl flock; do
+          command -v "$command" >/dev/null
+        done
+      args:
+        executable: /bin/bash
+      check_mode: false
+      changed_when: false
+
+    - name: Validate accepted GeoPolicy contract
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ geo_policy_temp.path }}/tools/geo_policy/geo_policy.py"
+          - validate-config
+          - --config
+          - "{{ geo_policy_temp.path }}/config.yml"
+          - --alias
+          - vps3
+      environment:
+        PYTHONPATH: "{{ geo_policy_temp.path }}"
+      check_mode: false
+      changed_when: false
+      register: geo_policy_contract_check
+
+    - name: Verify scoped containers have no global IPv6 address
+      ansible.builtin.shell: |
+        set -euo pipefail
+        python3 - "$CONFIG" <<'PY' | while IFS= read -r container; do
+        import sys, yaml
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            config = yaml.safe_load(handle) or {}
+        for item in config["geo_policy"].get("ipv6_guard_containers") or []:
+            print(item)
+        PY
+          docker inspect "$container" >/dev/null
+          if docker inspect "$container" --format '{{ "{{" }}range .NetworkSettings.Networks{{ "}}" }}{{ "{{" }}.GlobalIPv6Address{{ "}}" }}{{ "{{" }}end{{ "}}" }}' |
+             grep -Eq '[0-9a-fA-F:]'; then
+            echo "Global IPv6 bypass detected in $container" >&2
+            exit 1
+          fi
+        done
+      args:
+        executable: /bin/bash
+      environment:
+        CONFIG: "{{ geo_policy_temp.path }}/config.yml"
+      check_mode: false
+      changed_when: false
+
+    - name: Run mutation-free GeoPolicy runtime preflight
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ geo_policy_temp.path }}/tools/geo_policy/runtime.py"
+          - check
+          - --config
+          - "{{ geo_policy_temp.path }}/config.yml"
+          - --dataset
+          - "{{ geo_policy_temp.path }}/ru_ipv4.cidrs"
+          - --receipt
+          - "{{ geo_policy_root_dir }}/current.json"
+          - --active-path
+          - "{{ geo_policy_active_path }}"
+      environment:
+        PYTHONPATH: "{{ geo_policy_temp.path }}"
+      check_mode: false
+      changed_when: false
+      register: geo_policy_preflight
+      when: geo_policy_action != 'rollback'
+
+    - name: Install accepted GeoPolicy runtime
+      when:
+        - geo_policy_action == 'apply'
+        - not ansible_check_mode
+      block:
+        - name: Create persistent GeoPolicy directories
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "0700"
+          loop:
+            - "{{ geo_policy_root_dir }}"
+            - "{{ geo_policy_root_dir }}/tools"
+            - "{{ geo_policy_tools_dir }}"
+
+        - name: Install accepted GeoPolicy artifacts
+          ansible.builtin.copy:
+            src: "{{ geo_policy_temp.path }}/{{ item.src }}"
+            dest: "{{ item.dest }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: "{{ item.mode }}"
+          loop:
+            - { src: "tools/__init__.py", dest: "{{ geo_policy_root_dir }}/tools/__init__.py", mode: "0600" }
+            - { src: "tools/geo_policy/__init__.py", dest: "{{ geo_policy_tools_dir }}/__init__.py", mode: "0600" }
+            - { src: "tools/geo_policy/geo_policy.py", dest: "{{ geo_policy_tools_dir }}/geo_policy.py", mode: "0700" }
+            - { src: "tools/geo_policy/runtime.py", dest: "{{ geo_policy_tools_dir }}/runtime.py", mode: "0700" }
+            - { src: "config.yml", dest: "{{ geo_policy_config_file }}", mode: "0600" }
+            - { src: "ru_ipv4.cidrs", dest: "{{ geo_policy_dataset_file }}", mode: "0644" }
+            - { src: "ru_ipv4.json", dest: "{{ geo_policy_metadata_file }}", mode: "0644" }
+
+        - name: Install GeoPolicy dataset refresh script
+          ansible.builtin.template:
+            src: refresh-dataset.sh.j2
+            dest: "{{ geo_policy_root_dir }}/refresh-dataset.sh"
+            owner: root
+            group: root
+            mode: "0700"
+
+        - name: Apply accepted GeoPolicy atomically
+          ansible.builtin.command:
+            argv:
+              - python3
+              - "{{ geo_policy_tools_dir }}/runtime.py"
+              - apply
+              - --config
+              - "{{ geo_policy_config_file }}"
+              - --dataset
+              - "{{ geo_policy_dataset_file }}"
+              - --receipt
+              - "{{ geo_policy_receipt_file }}"
+              - --active-path
+              - "{{ geo_policy_active_path }}"
+          environment:
+            PYTHONPATH: "{{ geo_policy_root_dir }}"
+          register: geo_policy_apply
+
+        - name: Install GeoPolicy systemd units
+          ansible.builtin.template:
+            src: "{{ item.src }}"
+            dest: "/etc/systemd/system/{{ item.dest }}"
+            owner: root
+            group: root
+            mode: "0644"
+          loop:
+            - { src: "geo-policy-reconcile.service.j2", dest: "{{ geo_policy_reconcile_service }}" }
+            - { src: "geo-policy-reconcile.timer.j2", dest: "{{ geo_policy_reconcile_timer }}" }
+            - { src: "geo-policy-refresh.service.j2", dest: "{{ geo_policy_refresh_service }}" }
+            - { src: "geo-policy-refresh.timer.j2", dest: "{{ geo_policy_refresh_timer }}" }
+          register: geo_policy_units
+
+        - name: Reload systemd for GeoPolicy
+          ansible.builtin.systemd:
+            daemon_reload: true
+          when: geo_policy_units.changed
+
+        - name: Enable GeoPolicy timers
+          ansible.builtin.systemd:
+            name: "{{ item }}"
+            enabled: true
+            state: started
+          loop:
+            - "{{ geo_policy_reconcile_timer }}"
+            - "{{ geo_policy_refresh_timer }}"
+
+    - name: Roll back GeoPolicy to previous receipt
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ geo_policy_tools_dir }}/runtime.py"
+          - rollback
+          - --config
+          - "{{ geo_policy_config_file }}"
+          - --dataset
+          - "{{ geo_policy_dataset_file }}"
+          - --receipt
+          - "{{ geo_policy_receipt_file }}"
+      environment:
+        PYTHONPATH: "{{ geo_policy_root_dir }}"
+      register: geo_policy_rollback
+      when:
+        - geo_policy_action == 'rollback'
+        - not ansible_check_mode
+
+    - name: Report safe GeoPolicy result
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            (
+              geo_policy_rollback.stdout
+              if (geo_policy_rollback is defined and geo_policy_rollback.stdout is defined)
+              else (
+                geo_policy_apply.stdout
+                if (geo_policy_apply is defined and geo_policy_apply.stdout is defined)
+                else geo_policy_preflight.stdout
+              )
+            ) | from_json
+          }}
+  always:
+    - name: Remove temporary GeoPolicy bundle
+      ansible.builtin.file:
+        path: "{{ geo_policy_temp.path }}"
+        state: absent
+      when: geo_policy_temp is defined and geo_policy_temp.path is defined
+      check_mode: false
+      changed_when: false
+
+- name: Remove GeoPolicy timers and runtime
+  when:
+    - geo_policy_state == 'absent'
+    - not ansible_check_mode
+  block:
+    - name: Disable GeoPolicy timers
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: false
+        state: stopped
+      failed_when: false
+      loop:
+        - "{{ geo_policy_reconcile_timer }}"
+        - "{{ geo_policy_refresh_timer }}"
+
+    - name: Check persistent GeoPolicy contract
+      ansible.builtin.stat:
+        path: "{{ geo_policy_config_file }}"
+      register: geo_policy_persistent_config
+
+    - name: Remove managed GeoPolicy nftables table while preserving platform_router transport
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ geo_policy_tools_dir }}/runtime.py"
+          - remove
+          - --config
+          - "{{ geo_policy_config_file }}"
+          - --dataset
+          - "{{ geo_policy_dataset_file }}"
+          - --receipt
+          - "{{ geo_policy_receipt_file }}"
+      environment:
+        PYTHONPATH: "{{ geo_policy_root_dir }}"
+      when: geo_policy_persistent_config.stat.exists
+
+    - name: Remove GeoPolicy systemd units
+      ansible.builtin.file:
+        path: "/etc/systemd/system/{{ item }}"
+        state: absent
+      loop:
+        - "{{ geo_policy_reconcile_service }}"
+        - "{{ geo_policy_reconcile_timer }}"
+        - "{{ geo_policy_refresh_service }}"
+        - "{{ geo_policy_refresh_timer }}"
+      register: geo_policy_removed_units
+
+    - name: Reload systemd after GeoPolicy removal
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: geo_policy_removed_units.changed
+
+    - name: Remove GeoPolicy runtime directory
+      ansible.builtin.file:
+        path: "{{ geo_policy_root_dir }}"
+        state: absent

@@ -2,6 +2,7 @@
 
 - **Статус:** Accepted
 - **Дата:** 2026-05-15
+- **Уточнено:** [ADR-0008](0008-vps3-destination-geo-egress-canary.md)
 
 ## Контекст
 

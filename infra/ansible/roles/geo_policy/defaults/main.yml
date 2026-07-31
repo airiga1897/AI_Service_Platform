@@ -1,0 +1,19 @@
+---
+geo_policy_state: present
+geo_policy_action: check
+geo_policy_active_path: auto
+geo_policy_operator_config_file: "{{ playbook_dir }}/../../operator/geo_policy/config.yml"
+geo_policy_operator_dataset_file: "{{ playbook_dir }}/../../operator/geo_policy/data/ru_ipv4.cidrs"
+geo_policy_operator_metadata_file: "{{ playbook_dir }}/../../operator/geo_policy/data/ru_ipv4.json"
+geo_policy_tool_source: "{{ playbook_dir }}/../../tools/geo_policy/geo_policy.py"
+geo_policy_runtime_source: "{{ playbook_dir }}/../../tools/geo_policy/runtime.py"
+geo_policy_root_dir: /opt/ai-service-platform/geo_policy
+geo_policy_tools_dir: "{{ geo_policy_root_dir }}/tools/geo_policy"
+geo_policy_config_file: "{{ geo_policy_root_dir }}/config.yml"
+geo_policy_dataset_file: "{{ geo_policy_root_dir }}/ru_ipv4.cidrs"
+geo_policy_metadata_file: "{{ geo_policy_root_dir }}/ru_ipv4.json"
+geo_policy_receipt_file: "{{ geo_policy_root_dir }}/current.json"
+geo_policy_reconcile_service: ai-service-platform-geo-policy-reconcile.service
+geo_policy_reconcile_timer: ai-service-platform-geo-policy-reconcile.timer
+geo_policy_refresh_service: ai-service-platform-geo-policy-refresh.service
+geo_policy_refresh_timer: ai-service-platform-geo-policy-refresh.timer
