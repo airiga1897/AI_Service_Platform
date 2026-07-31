@@ -1,0 +1,13 @@
+[Unit]
+Description=MyCleanBot backup routes through platform-router
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/mycleanbot-backup-routes up
+ExecStop=/usr/local/sbin/mycleanbot-backup-routes down
+
+[Install]
+WantedBy=multi-user.target

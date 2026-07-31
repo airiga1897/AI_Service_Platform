@@ -76,16 +76,36 @@ function Invoke-GhApi($Arguments) {
 }
 
 function Write-SecretFromString($Name, $Value) {
-    $tmp = New-TemporaryFile
+    if ($Repo -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
+        Fail "Repo contains unsupported characters"
+    }
+    if ($Environment -notmatch '^[A-Za-z0-9_.-]+$') {
+        Fail "Environment contains unsupported characters"
+    }
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = (Get-Command gh).Source
+    $startInfo.Arguments = "secret set $Name --repo $Repo --env $Environment"
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
     try {
-        Set-Content -LiteralPath $tmp -Value $Value -Encoding ascii -NoNewline
-        & gh secret set $Name --repo $Repo --env $Environment --body-file $tmp
-        if ($LASTEXITCODE -ne 0) {
-            Fail "Failed to set GitHub Environment secret: $Name"
+        [void]$process.Start()
+        $process.StandardInput.Write($Value)
+        $process.StandardInput.Close()
+        [void]$process.StandardOutput.ReadToEnd()
+        $errorOutput = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) {
+            Fail "Failed to set GitHub Environment secret ${Name}: $errorOutput"
         }
         Write-Host "Secret ensured: $Name"
     } finally {
-        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        $process.Dispose()
     }
 }
 
@@ -147,10 +167,6 @@ Write-SecretFromString "SSH_HOST" $SshHost
 Write-SecretFromString "SSH_USER" $SshUser
 Write-SecretFromString "SSH_PORT" $SshPort
 
-& gh secret set SSH_KEY --repo $Repo --env $Environment --body-file $SshKeyFile
-if ($LASTEXITCODE -ne 0) {
-    Fail "Failed to set GitHub Environment secret: SSH_KEY"
-}
-Write-Host "Secret ensured: SSH_KEY"
+Write-SecretFromString "SSH_KEY" ([System.IO.File]::ReadAllText($SshKeyFile))
 
 Write-Host "GitHub Environment secrets are ready: $Environment"

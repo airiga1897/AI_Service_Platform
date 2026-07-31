@@ -61,6 +61,47 @@ class RenderHappyPathTests(unittest.TestCase):
                 self.assertIn(f"../../{instance['env']['file']}", rendered)
                 self.assertIn(instance["healthcheck"]["path"], rendered)
 
+    def test_mycleanbot_uses_platform_postgres_without_database_container(self) -> None:
+        doc = yaml.safe_load(render_stack("mycleanbot", REGISTRY))
+        self.assertEqual(
+            set(doc["services"]),
+            {"mycleanbot-route", "mycleanbot-web", "mycleanbot-worker"},
+        )
+        self.assertNotIn("postgres", str(doc).lower())
+        route = doc["services"]["mycleanbot-route"]
+        self.assertEqual(route["cap_add"], ["NET_ADMIN"])
+        self.assertEqual(route["networks"]["app"]["ipv4_address"], "172.31.1.10")
+        self.assertEqual(route["ports"], ["127.0.0.1:8040:8000"])
+        self.assertEqual(
+            doc["networks"]["app"]["name"],
+            "ai_service_app_vps1",
+        )
+        self.assertEqual(
+            doc["services"]["mycleanbot-web"]["network_mode"],
+            "service:mycleanbot-route",
+        )
+        self.assertEqual(
+            doc["services"]["mycleanbot-worker"]["network_mode"],
+            "service:mycleanbot-route",
+        )
+        self.assertEqual(
+            doc["services"]["mycleanbot-worker"]["command"],
+            ["python", "manage.py", "run_telegram_worker"],
+        )
+        self.assertNotIn("ports", doc["services"]["mycleanbot-worker"])
+        self.assertEqual(
+            doc["services"]["mycleanbot-web"]["env_file"],
+            ["./mycleanbot.env", "../../.env.mycleanbot.secrets"],
+        )
+        self.assertIn(
+            "WorkerHeartbeat",
+            " ".join(doc["services"]["mycleanbot-worker"]["healthcheck"]["test"]),
+        )
+        self.assertIn(
+            "/livez",
+            " ".join(doc["services"]["mycleanbot-web"]["healthcheck"]["test"]),
+        )
+
 
 class RenderErrorTests(unittest.TestCase):
     def test_unknown_stack_raises(self) -> None:

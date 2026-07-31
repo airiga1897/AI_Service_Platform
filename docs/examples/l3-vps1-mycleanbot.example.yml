@@ -1,0 +1,83 @@
+# Merge these non-secret fragments into the operator-owned files only after
+# reviewing the plan and receiving explicit VPS-change approval.
+#
+# Desired state must add vps1 to both the `service,softether_l3_vps` and
+# `edge_route,softether_l3_vps` present alias sets without removing vps8 or any
+# candidate aliases. The per-link secret file is
+# operator/softether/l3-vps/secrets/mycleanbot-operator-vps1.json and follows
+# operator/softether/l3-vps/secrets/template.json. Never commit that file.
+
+# operator/softether/l3-vps/links.yml
+links:
+  - name: mycleanbot-operator-vps1
+    state: present
+    server_alias: vps1
+    client_alias: operator-arm
+    runtime_mode: platform_router_sidecar
+    server_sni: l3-vps1.mine-craft.su
+    management_sni: l3-vps1.mine-craft.su
+    public_port: 443
+    hub: MyCleanBotOperatorVps1
+    subnet: 10.89.1.0/24
+    server_ip: 10.89.1.1
+    client_ip: 10.89.1.10
+    client_pool_start: 10.89.1.10
+    client_pool_end: 10.89.1.20
+    managed_client_user_prefix: mcb_user_
+    managed_client_user_limit: 9
+    protected_client_users:
+      - operator_arm
+    access_mode: routed_tap
+    tap_name: opmc1
+    pushed_routes:
+      - 172.31.1.11/32
+    server_network_name: ai_service_softether_l3_vps_node1_transport
+    server_network_subnet: 172.27.1.0/24
+    server_container_ipv4: 172.27.1.2
+    server_management_network_name: ai_service_softether_l3_vps_node1_mgmt
+    server_management_network_subnet: 172.29.1.0/24
+    server_management_container_ipv4: 172.29.1.2
+    server_management_allowed_source_ipv4: 172.29.1.3
+    purpose: mycleanbot_operator_access
+
+# operator/platform_router/config.yml -> platform_router.links
+platform_router_link:
+  name: mycleanbot-operator-vps1
+  state: present
+  l3_vps_link: mycleanbot-operator-vps1
+  source_alias: operator-arm
+  target_alias: vps1
+  routers:
+    vps1:
+      transport_ipv4: 172.27.1.2
+      data_ipv4: 172.30.1.2
+      app_ipv4: 172.31.1.2
+  policies:
+    - name: mycleanbot-operator-https
+      state: present
+      source_alias: operator-arm
+      target_alias: vps1
+      protocol: tcp
+      source_cidr: 10.89.1.0/24
+      target_source_cidr: 10.89.1.0/24
+      destination_ipv4: 172.31.1.11
+      destination_port: 443
+
+# operator/haproxy/routes.yml -> softether_l3_vps.per_alias
+haproxy_alias:
+  vps1:
+    sni:
+      - l3-vps1.mine-craft.su
+    management_sni:
+      - l3-vps1.mine-craft.su
+    backend:
+      host: 172.27.1.2
+      management_host: 172.29.1.2
+    network:
+      name: ai_service_softether_l3_vps_node1_transport
+      subnet: 172.27.1.0/24
+      container_ipv4: 172.27.1.3
+    management_network:
+      name: ai_service_softether_l3_vps_node1_mgmt
+      subnet: 172.29.1.0/24
+      container_ipv4: 172.29.1.3

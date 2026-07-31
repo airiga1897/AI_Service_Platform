@@ -879,11 +879,27 @@ function New-VpnCascadeRoutesBlock($Aliases, $Domain) {
 function New-SoftetherP2PAliasBlock($Aliases, $Domain) {
     $lines = New-Object System.Collections.Generic.List[string]
     foreach ($alias in $Aliases) {
+        $match = [regex]::Match([string]$alias, "^vps([1-9][0-9]*)$")
+        if (-not $match.Success) {
+            Fail "softether_l3_vps alias must use the canonical vpsN form: $alias"
+        }
+        $nodeNumber = [int]$match.Groups[1].Value
         $lines.Add("    ${alias}:")
         $lines.Add("      sni:")
         $lines.Add("        - l3-${alias}.${Domain}")
         $lines.Add("      management_sni:")
         $lines.Add("        - l3-${alias}.${Domain}")
+        $lines.Add("      backend:")
+        $lines.Add("        host: 172.27.${nodeNumber}.2")
+        $lines.Add("        management_host: 172.29.${nodeNumber}.2")
+        $lines.Add("      network:")
+        $lines.Add("        name: ai_service_softether_l3_vps_node${nodeNumber}_transport")
+        $lines.Add("        subnet: 172.27.${nodeNumber}.0/24")
+        $lines.Add("        container_ipv4: 172.27.${nodeNumber}.3")
+        $lines.Add("      management_network:")
+        $lines.Add("        name: ai_service_softether_l3_vps_node${nodeNumber}_mgmt")
+        $lines.Add("        subnet: 172.29.${nodeNumber}.0/24")
+        $lines.Add("        container_ipv4: 172.29.${nodeNumber}.3")
     }
     return @($lines)
 }

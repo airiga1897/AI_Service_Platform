@@ -80,6 +80,7 @@
     set -euo pipefail
     python3 - <<'PY'
     import csv
+    import ipaddress
     import json
     import os
     import sys
@@ -228,6 +229,8 @@
         if not sni:
             sni = [f"l3-{alias}.{default_sni_domain}"]
         management_sni = unique_strings(per_alias.get("management_sni") or [])
+        network_cfg = per_alias.get("network") or {}
+        management_network_cfg = per_alias.get("management_network") or {}
         ports = {
             "https": 443,
             "management": 5555,
@@ -235,8 +238,34 @@
             "backend_management": 5555,
         }
         ports.update(cfg.get("ports") or {})
-        backend_host = (cfg.get("backend") or {}).get("host") or default_p2p_host
-        management_backend_host = (cfg.get("backend") or {}).get("management_host") or default_p2p_management_host
+        backend_cfg = {}
+        backend_cfg.update(cfg.get("backend") or {})
+        backend_cfg.update(per_alias.get("backend") or {})
+        backend_host = backend_cfg.get("host") or default_p2p_host
+        management_backend_host = backend_cfg.get("management_host") or default_p2p_management_host
+        network = {
+            "name": str(network_cfg.get("name") or os.environ["DEFAULT_P2P_NETWORK_NAME"]),
+            "subnet": str(network_cfg.get("subnet") or os.environ["DEFAULT_P2P_NETWORK_SUBNET"]),
+            "container_ipv4": str(network_cfg.get("container_ipv4") or os.environ["DEFAULT_P2P_CONTAINER_IPV4"]),
+        }
+        management_network = {
+            "name": str(management_network_cfg.get("name") or os.environ["DEFAULT_P2P_MANAGEMENT_NETWORK_NAME"]),
+            "subnet": str(management_network_cfg.get("subnet") or os.environ["DEFAULT_P2P_MANAGEMENT_NETWORK_SUBNET"]),
+            "container_ipv4": str(management_network_cfg.get("container_ipv4") or os.environ["DEFAULT_P2P_MANAGEMENT_CONTAINER_IPV4"]),
+        }
+        parsed_network = ipaddress.ip_network(network["subnet"], strict=True)
+        parsed_management_network = ipaddress.ip_network(management_network["subnet"], strict=True)
+        if ipaddress.ip_address(network["container_ipv4"]) not in parsed_network:
+            fail(f"routes.yml softether_l3_vps network container IP must be inside its subnet for alias {alias}")
+        if ipaddress.ip_address(backend_host) not in parsed_network:
+            fail(f"routes.yml softether_l3_vps backend host must be inside its network for alias {alias}")
+        if management_sni:
+            if ipaddress.ip_address(management_network["container_ipv4"]) not in parsed_management_network:
+                fail(f"routes.yml softether_l3_vps management container IP must be inside its subnet for alias {alias}")
+            if ipaddress.ip_address(management_backend_host) not in parsed_management_network:
+                fail(f"routes.yml softether_l3_vps management backend must be inside its network for alias {alias}")
+            if parsed_network.overlaps(parsed_management_network):
+                fail(f"routes.yml softether_l3_vps transport and management networks overlap for alias {alias}")
         postgres_cfg = cfg.get("postgres") or {}
         postgres = {
             "enabled": bool(postgres_cfg),
@@ -254,6 +283,8 @@
                 "management_sni": management_sni,
                 "backend_host": backend_host,
                 "backend_management_host": management_backend_host,
+                "network": network,
+                "management_network": management_network,
                 "ports": ports,
                 "postgres": postgres,
             },
@@ -335,6 +366,12 @@
     DEFAULT_CASCADE_MANAGEMENT_HOST: "{{ edge_haproxy_softether_cascade_management_host }}"
     DEFAULT_P2P_HOST: "{{ edge_haproxy_softether_l3_vps_host }}"
     DEFAULT_P2P_MANAGEMENT_HOST: "{{ edge_haproxy_softether_l3_vps_management_host }}"
+    DEFAULT_P2P_NETWORK_NAME: "{{ edge_haproxy_p2p_network_name }}"
+    DEFAULT_P2P_NETWORK_SUBNET: "{{ edge_haproxy_p2p_network_subnet }}"
+    DEFAULT_P2P_CONTAINER_IPV4: "{{ edge_haproxy_p2p_container_ipv4 }}"
+    DEFAULT_P2P_MANAGEMENT_NETWORK_NAME: "{{ edge_haproxy_p2p_management_network_name }}"
+    DEFAULT_P2P_MANAGEMENT_NETWORK_SUBNET: "{{ edge_haproxy_p2p_management_network_subnet }}"
+    DEFAULT_P2P_MANAGEMENT_CONTAINER_IPV4: "{{ edge_haproxy_p2p_management_container_ipv4 }}"
     DEFAULT_SNI_DOMAIN: "{{ edge_haproxy_default_sni_domain }}"
     DEFAULT_GAME_RATE: "{{ edge_haproxy_minecraft_game_rate_limit }}"
     DEFAULT_RCON_RATE: "{{ edge_haproxy_minecraft_rcon_rate_limit }}"
@@ -352,6 +389,18 @@
   ansible.builtin.set_fact:
     edge_haproxy_route_model: "{{ edge_haproxy_route_model_command.stdout | trim | from_json }}"
   when: edge_haproxy_state == 'present'
+
+- name: Select per-node SoftEther L3 backend networks
+  ansible.builtin.set_fact:
+    edge_haproxy_p2p_network_name: "{{ edge_haproxy_route_model.softether_l3_vps.network.name }}"
+    edge_haproxy_p2p_network_subnet: "{{ edge_haproxy_route_model.softether_l3_vps.network.subnet }}"
+    edge_haproxy_p2p_container_ipv4: "{{ edge_haproxy_route_model.softether_l3_vps.network.container_ipv4 }}"
+    edge_haproxy_p2p_management_network_name: "{{ edge_haproxy_route_model.softether_l3_vps.management_network.name }}"
+    edge_haproxy_p2p_management_network_subnet: "{{ edge_haproxy_route_model.softether_l3_vps.management_network.subnet }}"
+    edge_haproxy_p2p_management_container_ipv4: "{{ edge_haproxy_route_model.softether_l3_vps.management_network.container_ipv4 }}"
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.softether_l3_vps_enabled | default(false)
 
 - name: Ensure edge_haproxy runtime directories
   ansible.builtin.file:

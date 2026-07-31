@@ -1,0 +1,72 @@
+# СГЕНЕРИРОВАННЫЙ ФАЙЛ — не редактируйте вручную.
+# Источник: services.yml + tools/render-compose/templates/telegram-client.yml.j2
+# Стек: << instance_name >> (project: << project_name >>, type: telegram-client)
+
+services:
+  << route_name >>:
+    image: "${<< env_prefix >>_ROUTE_IMAGE:?set platform route image}"
+    pull_policy: never
+    container_name: << route_name >>
+    cap_add: [NET_ADMIN]
+    command:
+      - /bin/sh
+      - -ec
+      - >-
+        while true; do ip route replace
+        << postgres_route_destination >> via
+        << postgres_router_ipv4 >>;
+        sleep 5; done
+    ports:
+      - "127.0.0.1:<< backend_port >>:8000"
+    restart: unless-stopped
+    networks:
+      app:
+        ipv4_address: << route_anchor_ipv4 >>
+
+  << web_name >>:
+    image: "${<< env_prefix >>_IMAGE:?set immutable << env_prefix >>_IMAGE digest}"
+    network_mode: service:<< route_name >>
+    env_file:
+      - ./<< public_env_file >>
+      - ../../<< env_file >>
+    depends_on:
+      - << route_name >>
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000<< healthcheck_live_path >>', timeout=<< healthcheck_timeout >>); urllib.request.urlopen('http://127.0.0.1:8000<< healthcheck_path >>', timeout=<< healthcheck_timeout >>)"
+      interval: 30s
+      timeout: << healthcheck_timeout >>s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  << worker_name >>:
+    image: "${<< env_prefix >>_IMAGE:?set immutable << env_prefix >>_IMAGE digest}"
+    network_mode: service:<< route_name >>
+    command: ["python", "manage.py", "run_telegram_worker"]
+    env_file:
+      - ./<< public_env_file >>
+      - ../../<< env_file >>
+    depends_on:
+      - << route_name >>
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os; os.environ.setdefault('DJANGO_SETTINGS_MODULE','config.settings'); import django; django.setup(); from datetime import timedelta; from django.utils import timezone; from core.models import WorkerHeartbeat; h=WorkerHeartbeat.objects.filter(name='telegram-supervisor').first(); assert h and h.updated_at >= timezone.now()-timedelta(seconds=<< worker_heartbeat_max_age >>)"
+      interval: 30s
+      timeout: << healthcheck_timeout >>s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+networks:
+  app:
+    external: true
+    name: << app_network >>
+
+volumes: {}

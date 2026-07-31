@@ -313,6 +313,65 @@ class ValidatorBrokenFixtureTests(unittest.TestCase):
             f"long-key template error not surfaced in: {errors}",
         )
 
+    def test_telegram_client_requires_platform_database_contract(self) -> None:
+        instance = self.data["runtime_instances"]["mycleanbot"]
+        del instance["data"]["postgres"]["ownership"]
+        errors, _ = validate_data(self.data)
+        self.assertTrue(
+            any(
+                "data.postgres.ownership is required for type='telegram-client'" in e
+                for e in errors
+            ),
+            f"missing telegram-client template error in: {errors}",
+        )
+
+    def test_telegram_client_rejects_database_container_and_public_ingress(self) -> None:
+        instance = self.data["runtime_instances"]["mycleanbot"]
+        instance["data"]["postgres"]["container_in_stack"] = True
+        instance["vpn"]["public_ingress"] = True
+        errors, _ = validate_data(self.data)
+        self.assertTrue(
+            any("data.postgres.container_in_stack must be false" in error for error in errors)
+        )
+        self.assertTrue(any("vpn.public_ingress must be false" in error for error in errors))
+
+    def test_telegram_client_requires_private_hosts_vpn_contract(self) -> None:
+        instance = self.data["runtime_instances"]["mycleanbot"]
+        instance["vpn"]["private_endpoint_ipv4"] = "89.125.250.123"
+        instance["vpn"]["hosts_bootstrap"] = False
+        errors, _ = validate_data(self.data)
+        self.assertTrue(
+            any(
+                "vpn.private_endpoint_ipv4 must be '172.31.1.11'" in error
+                for error in errors
+            ),
+            errors,
+        )
+        self.assertTrue(
+            any("vpn.hosts_bootstrap must be True" in error for error in errors),
+            errors,
+        )
+
+    def test_telegram_client_requires_canonical_platform_route(self) -> None:
+        instance = self.data["runtime_instances"]["mycleanbot"]
+        instance["data"]["postgres"]["router_ipv4"] = "172.31.1.99"
+        errors, _ = validate_data(self.data)
+        self.assertTrue(
+            any(
+                "data.postgres.router_ipv4 must be '172.31.1.2'" in error
+                for error in errors
+            ),
+            errors,
+        )
+
+    def test_telegram_client_requires_scratch_restore_and_worker_heartbeat(self) -> None:
+        instance = self.data["runtime_instances"]["mycleanbot"]
+        instance["data"]["backup"]["restore_rehearsal"] = "none"
+        instance["healthcheck"]["worker_heartbeat_max_age_seconds"] = 0
+        errors, _ = validate_data(self.data)
+        self.assertTrue(any("weekly-scratch-only" in error for error in errors))
+        self.assertTrue(any("positive integer" in error for error in errors))
+
     # ---------- replit reserved port surfaces as a warning -----------
     def test_replit_reserved_port_is_a_warning_not_an_error(self) -> None:
         # Force a Replit-reserved port (5000) onto an instance and confirm

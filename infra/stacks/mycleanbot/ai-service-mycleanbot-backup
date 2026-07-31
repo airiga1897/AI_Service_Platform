@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+action="${1:-}"
+[[ "$action" =~ ^(init|backup|restore-rehearsal)$ ]] || {
+  echo "usage: ai-service-mycleanbot-backup init|backup|restore-rehearsal" >&2
+  exit 2
+}
+
+config=/etc/ai-service-platform/mycleanbot-backup.env
+app_env=/opt/stacks/mycleanbot-prod/.env.mycleanbot.secrets
+scratch_container=mycleanbot-restore-scratch
+scratch_ipv4=172.31.1.13
+
+cleanup_scratch() {
+  docker rm -f "$scratch_container" >/dev/null 2>&1 || true
+}
+
+if [[ "$action" == "restore-rehearsal" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$config"
+  set +a
+  docker inspect "$scratch_container" >/dev/null 2>&1 && {
+    echo "scratch container already exists" >&2
+    exit 2
+  }
+  trap cleanup_scratch EXIT
+  docker run -d \
+    --name "$scratch_container" \
+    --label ai-service-platform.owner=mycleanbot-backup \
+    --network ai_service_app_vps1 \
+    --ip "$scratch_ipv4" \
+    -e POSTGRES_PASSWORD_FILE=/run/secrets/scratch-password \
+    -v /etc/ai-service-platform/mycleanbot-scratch-postgres-password:/run/secrets/scratch-password:ro \
+    "$SCRATCH_POSTGRES_IMAGE" >/dev/null
+  for _ in $(seq 1 30); do
+    if docker exec "$scratch_container" \
+      pg_isready -U postgres -d postgres >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  docker exec "$scratch_container" \
+    pg_isready -U postgres -d postgres >/dev/null
+  docker exec "$scratch_container" \
+    psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+      -c 'CREATE ROLE mycleanbot NOLOGIN;' >/dev/null
+fi
+
+MYCLEANBOT_SCRATCH_POSTGRES_HOST="$scratch_ipv4" \
+python3 /usr/local/lib/ai-service-platform/postgres_tenant_backup.py \
+  "$action" \
+  --config "$config" \
+  --app-env "$app_env"

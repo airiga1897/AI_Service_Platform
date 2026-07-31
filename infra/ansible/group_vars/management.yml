@@ -10,6 +10,9 @@ grafana_port: 3000
 alertmanager_port: 9093
 loki_port: 3100
 monitoring_dir: /opt/monitoring
+# Set only at the approved VPS-change gate. It must resolve and route exclusively
+# through the platform VPN; leaving it empty omits MyCleanBot probes.
+mycleanbot_monitor_url: ""
 prometheus_retention: "30d"
 
 # Grafana

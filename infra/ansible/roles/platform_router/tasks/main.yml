@@ -92,6 +92,7 @@
     import ipaddress
     import json
     import os
+    import re
     import sys
 
     try:
@@ -293,8 +294,78 @@
             client_ip = ipaddress.ip_address(str(l3_link["client_ip"]))
             if server_ip not in vpn_subnet or client_ip not in vpn_subnet:
                 fail(f"softether_l3_vps link {link_name} VPN endpoint IPs must be inside {vpn_subnet}")
-            if not management_network.get("enabled"):
-                fail(f"softether_l3_vps link {link_name} server sidecar requires server management network")
+            access_mode = str(l3_link.get("access_mode") or "secure_nat").strip().lower()
+            if access_mode not in {"secure_nat", "routed_tap"}:
+                fail(f"softether_l3_vps link {link_name} has unsupported access_mode: {access_mode}")
+            tap_name = str(l3_link.get("tap_name") or "").strip()
+            client_pool_start = ipaddress.ip_address(str(l3_link.get("client_pool_start") or client_ip))
+            client_pool_end = ipaddress.ip_address(str(l3_link.get("client_pool_end") or client_ip))
+            pushed_routes = [
+                ipaddress.ip_network(str(item), strict=True)
+                for item in (l3_link.get("pushed_routes") or [])
+            ]
+            if access_mode == "routed_tap":
+                if not tap_name or len(tap_name) > 11 or not all(ch.isalnum() or ch in "_-" for ch in tap_name):
+                    fail(f"softether_l3_vps link {link_name} routed_tap requires a safe tap_name of at most 11 characters")
+                if client_pool_start not in vpn_subnet or client_pool_end not in vpn_subnet or client_pool_start > client_pool_end:
+                    fail(f"softether_l3_vps link {link_name} client pool must be ordered and inside {vpn_subnet}")
+                if server_ip >= client_pool_start and server_ip <= client_pool_end:
+                    fail(f"softether_l3_vps link {link_name} server IP must not be inside the client pool")
+                if not pushed_routes:
+                    fail(f"softether_l3_vps link {link_name} routed_tap requires at least one pushed route")
+            managed_client_user_prefix = str(
+                l3_link.get("managed_client_user_prefix") or ""
+            ).strip()
+            protected_client_users = [
+                str(value).strip()
+                for value in (l3_link.get("protected_client_users") or [])
+                if str(value).strip()
+            ]
+            managed_client_user_limit = int(
+                l3_link.get("managed_client_user_limit") or 0
+            )
+            if managed_client_user_prefix:
+                if not re.fullmatch(
+                    r"[A-Za-z][A-Za-z0-9_]{2,23}",
+                    managed_client_user_prefix,
+                ):
+                    fail(
+                        f"softether_l3_vps link {link_name} has unsafe "
+                        "managed_client_user_prefix"
+                    )
+                if managed_client_user_limit < 1 or managed_client_user_limit > 20:
+                    fail(
+                        f"softether_l3_vps link {link_name} managed client user "
+                        "limit must be between 1 and 20"
+                    )
+                if any(
+                    value.startswith(managed_client_user_prefix)
+                    for value in protected_client_users
+                ):
+                    fail(
+                        f"softether_l3_vps link {link_name} protected client users "
+                        "must be outside the managed prefix"
+                    )
+                if any(
+                    not re.fullmatch(r"[A-Za-z0-9_]{1,64}", value)
+                    for value in protected_client_users
+                ):
+                    fail(
+                        f"softether_l3_vps link {link_name} has an unsafe "
+                        "protected client username"
+                    )
+            admin_allowed_source = str(
+                l3_link.get("server_admin_allowed_source_ipv4")
+                or management_network.get("allowed_source_ipv4")
+                or "127.0.0.1"
+            )
+            if admin_allowed_source != "127.0.0.1":
+                parsed_admin_source = ipaddress.ip_address(admin_allowed_source)
+                if parsed_admin_source not in l3_network_subnet and not management_network.get("enabled"):
+                    fail(
+                        f"softether_l3_vps link {link_name} admin source {parsed_admin_source} "
+                        f"must be in the server transport network when no management network is configured"
+                    )
             softether_servers.append({
                 "enabled": True,
                 "name": str(link.get("name") or link_name),
@@ -307,10 +378,20 @@
                 "extra_listeners": [992],
                 "server_ip": str(server_ip),
                 "client_ip": str(client_ip),
+                "client_pool_start": str(client_pool_start),
+                "client_pool_end": str(client_pool_end),
                 "netmask": str(vpn_subnet.netmask),
+                "prefixlen": vpn_subnet.prefixlen,
+                "access_mode": access_mode,
+                "tap_name": tap_name,
+                "tap_iface": "tap_" + tap_name if tap_name else "",
+                "pushed_routes": [str(item) for item in pushed_routes],
                 "secret_file": os.path.join(l3_secrets_dir, str(l3_link["name"]) + ".json"),
                 "vpncmd_timeout_seconds": int(os.environ["SOFTETHER_CLIENT_VPNCMD_TIMEOUT_SECONDS"]),
-                "management_allowed_source_ipv4": management_network["allowed_source_ipv4"],
+                "management_allowed_source_ipv4": admin_allowed_source,
+                "managed_client_user_prefix": managed_client_user_prefix,
+                "managed_client_user_limit": managed_client_user_limit,
+                "protected_client_users": protected_client_users,
             })
 
         for policy in link.get("policies") or []:
@@ -328,8 +409,62 @@
             target_alias = str(policy.get("target_alias") or link.get("target_alias"))
             if alias not in {source_alias, target_alias}:
                 continue
+            policy_vpn_next_hop = client_server_ip
+            if (
+                alias == source_alias
+                and client_name
+                and target_alias != str(link.get("target_alias") or "")
+            ):
+                peer_clients = l3_link.get("standby_clients") or {}
+                peer_client = peer_clients.get(target_alias) if isinstance(peer_clients, dict) else {}
+                peer_client_ip_value = str((peer_client or {}).get("client_ip") or "")
+                if not peer_client_ip_value:
+                    fail(
+                        f"platform_router policy {policy.get('name')} target client "
+                        f"{target_alias} has no configured VPN client IP"
+                    )
+                peer_client_ip = ipaddress.ip_address(peer_client_ip_value)
+                if peer_client_ip not in vpn_subnet:
+                    fail(
+                        f"platform_router policy {policy.get('name')} target client "
+                        f"{target_alias} must have an IP inside {vpn_subnet}"
+                    )
+                policy_vpn_next_hop = str(peer_client_ip)
             target_source_cidr = ipaddress.ip_network(str(policy.get("target_source_cidr") or source_cidr), strict=False)
             effective_source_cidr = target_source_cidr if alias == target_alias else source_cidr
+            target_snat_ipv4 = ""
+            if alias == target_alias and policy.get("target_snat_ipv4"):
+                parsed_target_snat_ipv4 = ipaddress.ip_address(str(policy["target_snat_ipv4"]))
+                if parsed_target_snat_ipv4 not in {data_ipv4, app_ipv4}:
+                    fail(
+                        f"platform_router policy {policy.get('name')} target_snat_ipv4 "
+                        f"must equal the target router data_ipv4 or app_ipv4"
+                    )
+                target_snat_ipv4 = str(parsed_target_snat_ipv4)
+            return_route_cidr = ""
+            return_route_next_hop = ""
+            if (
+                alias == target_alias
+                and client_name
+                and target_source_cidr == source_cidr
+                and source_alias != str(link.get("target_alias") or "")
+            ):
+                peer_clients = l3_link.get("standby_clients") or {}
+                peer_client = peer_clients.get(source_alias) if isinstance(peer_clients, dict) else {}
+                peer_client_ip_value = str((peer_client or {}).get("client_ip") or "")
+                if not peer_client_ip_value:
+                    fail(
+                        f"platform_router policy {policy.get('name')} source client "
+                        f"{source_alias} has no configured VPN client IP"
+                    )
+                peer_client_ip = ipaddress.ip_address(peer_client_ip_value)
+                if peer_client_ip not in vpn_subnet:
+                    fail(
+                        f"platform_router policy {policy.get('name')} source client "
+                        f"{source_alias} must have an IP inside {vpn_subnet}"
+                    )
+                return_route_cidr = str(source_cidr)
+                return_route_next_hop = str(peer_client_ip)
             policies.append({
                 "name": str(policy.get("name") or f"{protocol}-{destination_ipv4}-{destination_port}"),
                 "link_name": str(link.get("name") or link_name),
@@ -342,7 +477,10 @@
                 "route_destination": alias == source_alias,
                 "softether_client_name": client_name or "",
                 "softether_client_iface": client_iface,
-                "softether_client_server_ip": client_server_ip,
+                "softether_client_next_hop": policy_vpn_next_hop,
+                "softether_return_cidr": return_route_cidr,
+                "softether_return_next_hop": return_route_next_hop,
+                "target_snat_ipv4": target_snat_ipv4,
             })
 
     if data_ipv4 is None or app_ipv4 is None:
@@ -489,6 +627,18 @@
         item["client_password"] = str(data.get("client_password") or "")
         item["client_users"] = data.get("client_users") or {}
         result[path] = item
+    server_paths = {
+        str(item.get("secret_file") or "")
+        for item in model.get("softether_servers", [])
+        if str(item.get("secret_file") or "")
+    }
+    server_passwords = {result[path]["server_password"] for path in server_paths}
+    if len(server_passwords) > 1:
+        print(
+            "all hubs in one per-node SoftEther server runtime must share its server_password",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     print(json.dumps(result, sort_keys=True))
     PY
   args:
@@ -817,7 +967,7 @@
 
 - name: Start platform_router container
   ansible.builtin.command:
-    cmd: docker compose -f "{{ platform_router_compose_file }}" up -d
+    cmd: docker compose -f "{{ platform_router_compose_file }}" up -d --remove-orphans
     chdir: "{{ platform_router_root_dir }}"
   register: platform_router_compose_up
   changed_when: >
@@ -829,7 +979,7 @@
 
 - name: Recreate platform_router stack when route reconciler changed
   ansible.builtin.command:
-    cmd: docker compose -f "{{ platform_router_compose_file }}" up -d --force-recreate
+    cmd: docker compose -f "{{ platform_router_compose_file }}" up -d --force-recreate --remove-orphans
     chdir: "{{ platform_router_root_dir }}"
   changed_when: true
   when:
@@ -1025,6 +1175,11 @@
     client_ip="{{ item.client_ip }}"
     netmask="{{ item.netmask }}"
     public_port="{{ item.public_port }}"
+    access_mode="{{ item.access_mode }}"
+    tap_name="{{ item.tap_name }}"
+    managed_client_user_prefix="{{ item.managed_client_user_prefix }}"
+    managed_client_user_limit="{{ item.managed_client_user_limit }}"
+    protected_client_users_json='{{ item.protected_client_users | to_json }}'
 
     cleanup_vpncmd() {
       docker exec "$server_container" sh -c 'pkill -KILL vpncmd 2>/dev/null || true' >/dev/null 2>&1 || true
@@ -1106,6 +1261,96 @@
       fi
     done < "$users_input"
 
+    if [ -n "$managed_client_user_prefix" ]; then
+      desired_managed_users="$(mktemp)"
+      existing_managed_users="$(mktemp)"
+      orphaned_managed_users="$(mktemp)"
+      user_list_output="$(mktemp)"
+      session_list_output="$(mktemp)"
+      session_names="$(mktemp)"
+      trap 'rm -f "$users_input" "$input" "$user_check_output" "$user_create_output" "$desired_managed_users" "$existing_managed_users" "$orphaned_managed_users" "$user_list_output" "$session_list_output" "$session_names"; cleanup_vpncmd' EXIT
+
+      python3 - "$users_input" "$managed_client_user_prefix" "$managed_client_user_limit" "$protected_client_users_json" <<'PY' > "$desired_managed_users"
+    import json
+    import sys
+
+    users_file, prefix, raw_limit, protected_json = sys.argv[1:]
+    protected = set(json.loads(protected_json or "[]"))
+    users = []
+    with open(users_file, encoding="utf-8") as handle:
+        for line in handle:
+            username = line.partition("|")[0].strip()
+            if username.startswith(prefix):
+                if not username[len(prefix):].isdigit():
+                    raise SystemExit("managed SoftEther username has an unsafe suffix")
+                if username in protected:
+                    raise SystemExit("protected SoftEther username cannot be managed")
+                users.append(username)
+    if len(users) > int(raw_limit):
+        raise SystemExit("managed SoftEther user limit exceeded")
+    print("\n".join(sorted(set(users))))
+    PY
+
+      {
+        printf 'Hub %s\n' "$hub"
+        printf 'UserList\n'
+      } | run_vpncmd_batch "$user_list_output"
+      python3 - "$user_list_output" "$managed_client_user_prefix" <<'PY' > "$existing_managed_users"
+    import re
+    import sys
+
+    path, prefix = sys.argv[1:]
+    safe = re.compile(r"^[A-Za-z0-9_]+$")
+    found = set()
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            for field in line.split("|"):
+                value = field.strip()
+                if value.startswith(prefix) and safe.fullmatch(value):
+                    found.add(value)
+    print("\n".join(sorted(found)))
+    PY
+      comm -23 "$existing_managed_users" "$desired_managed_users" > "$orphaned_managed_users"
+
+      while IFS= read -r orphaned_user; do
+        [ -n "$orphaned_user" ] || continue
+        {
+          printf 'Hub %s\n' "$hub"
+          printf 'SessionList\n'
+        } | run_vpncmd_batch "$session_list_output"
+        python3 - "$session_list_output" "$orphaned_user" <<'PY' > "$session_names"
+    import re
+    import sys
+
+    path, username = sys.argv[1:]
+    safe_session = re.compile(r"^[A-Za-z0-9_.:-]+$")
+    current_session = ""
+    sessions = set()
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            fields = [field.strip() for field in line.split("|")]
+            if len(fields) < 2:
+                continue
+            if fields[0] == "Session Name":
+                current_session = fields[1]
+            elif fields[0] == "User Name" and fields[1] == username:
+                if safe_session.fullmatch(current_session):
+                    sessions.add(current_session)
+            elif username in fields[1:] and safe_session.fullmatch(fields[0]):
+                sessions.add(fields[0])
+    print("\n".join(sorted(sessions)))
+    PY
+        {
+          printf 'Hub %s\n' "$hub"
+          while IFS= read -r session_name; do
+            [ -n "$session_name" ] || continue
+            printf 'SessionDisconnect %s\n' "$session_name"
+          done < "$session_names"
+          printf 'UserDelete %s\n' "$orphaned_user"
+        } | run_vpncmd_batch "$user_create_output"
+      done < "$orphaned_managed_users"
+    fi
+
     {
       printf 'Hub %s\n' "$hub"
       printf 'SetEnumDeny\n'
@@ -1113,9 +1358,11 @@
         [ -n "$client_user" ] || continue
         printf 'UserPasswordSet %s /PASSWORD:%s\n' "$client_user" "$client_password"
       done < "$users_input"
-      printf 'SecureNatEnable\n'
-      printf 'SecureNatHostSet /MAC:none /IP:%s /MASK:%s\n' "$server_ip" "$netmask"
-      printf 'DhcpSet /START:%s /END:%s /MASK:%s /EXPIRE:7200 /GW:%s /DNS:1.1.1.1 /DNS2:8.8.8.8 /DOMAIN:none /LOG:yes\n' "$client_ip" "$client_ip" "$netmask" "$server_ip"
+      if [ "$access_mode" = "secure_nat" ]; then
+        printf 'SecureNatEnable\n'
+        printf 'SecureNatHostSet /MAC:none /IP:%s /MASK:%s\n' "$server_ip" "$netmask"
+        printf 'DhcpSet /START:%s /END:%s /MASK:%s /EXPIRE:7200 /GW:%s /DNS:1.1.1.1 /DNS2:8.8.8.8 /DOMAIN:none /LOG:yes\n' "$client_ip" "$client_ip" "$netmask" "$server_ip"
+      fi
       printf 'Flush\n'
     } > "$input"
     run_vpncmd_batch /tmp/platform-router-softether-server-config.out < "$input" || {
@@ -1124,6 +1371,13 @@
       sed -E 's#/PASSWORD:[^[:space:]]+#/PASSWORD:<redacted>#g' /tmp/platform-router-softether-server-config.out >&2
       exit 1
     }
+
+    if [ "$access_mode" = "routed_tap" ]; then
+      run_vpncmd "$server_vpncmd_endpoint" /SERVER /PASSWORD:"$password" /HUB:"$hub" /CMD SecureNatDisable >/dev/null 2>&1 || true
+      bridges="$(run_vpncmd "$server_vpncmd_endpoint" /SERVER /PASSWORD:"$password" /CMD BridgeList 2>/dev/null || true)"
+      echo "$bridges" | grep -Fq "tap_${tap_name}" ||
+        run_vpncmd "$server_vpncmd_endpoint" /SERVER /PASSWORD:"$password" /CMD BridgeCreate "$hub" /DEVICE:"$tap_name" /TAP:yes >/dev/null
+    fi
   args:
     executable: /bin/bash
   environment:
@@ -1153,7 +1407,7 @@
     docker exec -u 0 "$container" iptables -t nat -C POSTROUTING -j PLATFORM_ROUTER_POSTROUTING 2>/dev/null ||
       docker exec -u 0 "$container" iptables -t nat -A POSTROUTING -j PLATFORM_ROUTER_POSTROUTING
     docker exec -u 0 "$container" iptables -t nat -F PLATFORM_ROUTER_POSTROUTING
-    python3 - "$policies_json" <<'PY' | while IFS='|' read -r proto source_cidr destination_ipv4 destination_port route_destination vpn_iface vpn_next_hop; do
+    python3 - "$policies_json" <<'PY' | while IFS='|' read -r proto source_cidr destination_ipv4 destination_port route_destination vpn_iface vpn_next_hop return_cidr return_next_hop target_snat_ipv4; do
     import json
     import sys
     for item in json.loads(sys.argv[1]):
@@ -1164,15 +1418,40 @@
             str(item["destination_port"]),
             "true" if item["route_destination"] else "false",
             item.get("softether_client_iface") or "",
-            item.get("softether_client_server_ip") or "",
+            item.get("softether_client_next_hop") or "",
+            item.get("softether_return_cidr") or "",
+            item.get("softether_return_next_hop") or "",
+            item.get("target_snat_ipv4") or "",
         ]))
     PY
       if [ "$route_destination" = "true" ]; then
         if [ -n "$vpn_iface" ]; then
-          docker exec -u 0 "$container" ip route replace "$destination_ipv4/32" via "$vpn_next_hop" dev "$vpn_iface"
+          vpn_ready=false
+          for _attempt in $(seq 1 30); do
+            if docker exec -u 0 "$container" sh -ceu \
+              'ip link show dev "$1" | grep -q "UP" && ip -4 addr show dev "$1" | grep -q "inet "' \
+              sh "$vpn_iface"; then
+              vpn_ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$vpn_ready" != "true" ]; then
+            echo "VPN route interface did not become ready: $vpn_iface" >&2
+            exit 1
+          fi
+          docker exec -u 0 "$container" ip route replace "$destination_ipv4/32" via "$vpn_next_hop" dev "$vpn_iface" onlink
         else
           docker exec -u 0 "$container" ip route replace "$destination_ipv4/32" via "$next_hop"
         fi
+      fi
+      if [ -n "$return_cidr" ]; then
+        docker exec -u 0 "$container" ip route replace "$return_cidr" via "$return_next_hop" dev "$vpn_iface" onlink
+      fi
+      if [ -n "$target_snat_ipv4" ]; then
+        docker exec -u 0 "$container" iptables -t nat -A PLATFORM_ROUTER_POSTROUTING \
+          -p "$proto" -s "$source_cidr" -d "$destination_ipv4/32" --dport "$destination_port" \
+          -j SNAT --to-source "$target_snat_ipv4"
       fi
       docker exec -u 0 "$container" iptables -A FORWARD -p "$proto" -s "$source_cidr" -d "$destination_ipv4/32" --dport "$destination_port" -j ACCEPT
       docker exec -u 0 "$container" iptables -A FORWARD -p "$proto" -s "$destination_ipv4/32" --sport "$destination_port" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT

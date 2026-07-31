@@ -1,8 +1,41 @@
 #!/bin/sh
 set -eu
 
+mkdir -p /var/lib/misc
+
 while true; do
   sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+{% for server in platform_router_model.softether_servers | default([]) %}
+{% if server.access_mode == "routed_tap" %}
+  if ip link show "{{ server.tap_iface }}" >/dev/null 2>&1; then
+    ip link set "{{ server.tap_iface }}" up || true
+    ip addr replace "{{ server.server_ip }}/{{ server.prefixlen }}" dev "{{ server.tap_iface }}" || true
+    dnsmasq_pid="/run/dnsmasq-{{ server.tap_name }}.pid"
+    dnsmasq_running=false
+    if [ -s "$dnsmasq_pid" ]; then
+      dnsmasq_process="$(cat "$dnsmasq_pid" 2>/dev/null || true)"
+      if [ -n "$dnsmasq_process" ] && kill -0 "$dnsmasq_process" 2>/dev/null; then
+        dnsmasq_running=true
+      fi
+    fi
+    if [ "$dnsmasq_running" != "true" ]; then
+      rm -f "$dnsmasq_pid"
+      dnsmasq \
+        --conf-file= \
+        --interface="{{ server.tap_iface }}" \
+        --bind-interfaces \
+        --dhcp-authoritative \
+        --dhcp-range="{{ server.client_pool_start }},{{ server.client_pool_end }},{{ server.netmask }},12h" \
+        --dhcp-option=option:router \
+{% for route in server.pushed_routes %}
+        --dhcp-option="option:classless-static-route,{{ route }},{{ server.server_ip }}" \
+{% endfor %}
+        --dhcp-leasefile="/var/lib/misc/dnsmasq-{{ server.tap_name }}.leases" \
+        --pid-file="$dnsmasq_pid"
+    fi
+  fi
+{% endif %}
+{% endfor %}
 {% for client in platform_router_model.softether_clients | default([]) %}
   if ip link show "{{ client.iface }}" >/dev/null 2>&1; then
     ip link set "{{ client.iface }}" up || true
@@ -11,7 +44,10 @@ while true; do
     ip addr replace "{{ client.client_ip }}/{{ client.prefixlen }}" dev "{{ client.iface }}" || true
 {% for policy in platform_router_model.policies %}
 {% if policy.route_destination and policy.softether_client_name == client.name %}
-    ip route replace "{{ policy.destination_ipv4 }}/32" via "{{ client.server_ip }}" dev "{{ client.iface }}" || true
+    ip route replace "{{ policy.destination_ipv4 }}/32" via "{{ policy.softether_client_next_hop }}" dev "{{ client.iface }}" || true
+{% endif %}
+{% if policy.softether_return_cidr and policy.softether_client_name == client.name %}
+    ip route replace "{{ policy.softether_return_cidr }}" via "{{ policy.softether_return_next_hop }}" dev "{{ client.iface }}" || true
 {% endif %}
 {% endfor %}
   fi

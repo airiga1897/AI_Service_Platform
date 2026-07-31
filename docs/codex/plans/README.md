@@ -50,6 +50,7 @@ these paths and installs log rotation on every current and future VPS. See
 ## Будущие Материалы
 
 - [Minimum VPS resource expansion](minimum-vps-resource-expansion.md) - approved pools, minimum profiles, safe resize order, and acceptance checks before `site_runtime`.
+- [MyCleanBot first VPN-only launch](mycleanbot-first-vpn-launch.md) - hosts bootstrap through a private TLS endpoint, explicit VPS and rollout gates, and rollback.
 - [Manual site runtime rollout before GitHub CD](manual-site-runtime-rollout-before-github-cd.md) - operator-first rollout contract, durable deployment journal, rehearsal gates, and the criteria for enabling GitHub CD.
 - [Site runtime vps3 network-anchor probe](site-runtime-vps3-network-probe.md) - the narrow phase-1 shared-netns and PostgreSQL TCP-path acceptance gate.
 - [AI Retail product database on postgres_runtime](ai-retail-product-database.md) - phase-2 database, role, pgvector, credential, and narrow HBA intent before product rollout.
@@ -68,6 +69,7 @@ these paths and installs log rotation on every current and future VPS. See
 - [Future operator state node retirement tool](future-operator-state-node-retirement-tool.md) - безопасное удаление VPS из service placement, cascade topology, inventory inputs и operator secrets.
 - [Future operator layout refactor](future-operator-layout-refactor.md) — возможное разнесение canonical CSV manifests и bootstrap public key по подкаталогам только как согласованная миграция tooling и удалённых путей.
 - [Future management control plane and knowledge retrieval](future-management-control-plane-and-knowledge-retrieval.md) - web control plane и AI semantic knowledge layer.
+- [Future platform-wide monitoring](future-platform-wide-monitoring.md) - единый private monitoring plane для хостов, сетей, PostgreSQL, backup и product runtimes без отдельных per-project monitoring stacks.
 - [Future data services and platform auth](future-data-services-and-platform-auth.md) - PostgreSQL, MariaDB reserved и platform auth.
 - [Controlled pgvector runtime migration](pgvector-runtime-migration.md) - standby-first PostgreSQL image migration required by AI_E_Retail.
 

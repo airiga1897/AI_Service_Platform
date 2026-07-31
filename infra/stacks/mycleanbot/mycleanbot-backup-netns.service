@@ -1,0 +1,13 @@
+[Unit]
+Description=MyCleanBot private backup network namespace
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/mycleanbot-backup-netns up
+ExecStop=/usr/local/sbin/mycleanbot-backup-netns down
+
+[Install]
+WantedBy=multi-user.target

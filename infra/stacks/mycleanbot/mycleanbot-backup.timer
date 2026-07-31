@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily MyCleanBot PostgreSQL backup
+
+[Timer]
+OnCalendar=*-*-* 02:20:00 UTC
+Persistent=true
+RandomizedDelaySec=10m
+Unit=mycleanbot-backup.service
+
+[Install]
+WantedBy=timers.target

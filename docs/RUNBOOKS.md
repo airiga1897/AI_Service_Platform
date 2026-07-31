@@ -186,6 +186,29 @@ CLI читает `services.yml`, формирует URL по `healthcheck.path`,
 
 См. также [`DEPLOYMENT.md`](DEPLOYMENT.md) и [ADR-0006](adr/0006-deploy-from-immutable-image-refs.md).
 
+### MyCleanBot production handoff
+
+`repository_dispatch` с типом `mycleanbot-image-published` выполняет только
+platform preflight и публикует candidate receipt. Production rollout возможен
+только отдельным ручным `workflow_dispatch` из `main` с
+`instance=mycleanbot`, `environment=prod` и полным GHCR digest.
+
+Персональные VPN-учётки приглашённых пользователей выпускаются и отзываются
+отдельно по [MyCleanBot VPN users runbook](MYCLEANBOT_VPN_USERS.md). Приложение
+не получает административный доступ к SoftEther.
+
+До первого запуска должны независимо пройти: platform CI, render-compose check,
+remote Compose config, проверка отдельной PostgreSQL role/database, encrypted
+backup, scratch restore rehearsal, VPN-only route, monitoring probes и rollback
+helper. Merge, создание credentials, изменение VPS и первый deployment — четыре
+отдельные operator approval gates.
+
+Rollback запускается вручную с предыдущим digest из
+`/opt/stacks/mycleanbot-prod/.deploy-state/previous`. Для первого deployment
+допускается `to_ref=undeployed`, который только останавливает application
+containers. Database restore требует отдельного явного подтверждения и
+остановленных writers.
+
 ### Legacy `ai-retail-dev` predeploy proof
 
 This procedure predates role-based product placement. Do not infer a target VPS
@@ -856,3 +879,9 @@ The role refuses unknown active swap sources, insufficient disk/memory
 headroom, and destructive `absent`/`purge` actions. After apply, verify
 `swapon --show`, `/etc/fstab`, `sysctl vm.swappiness`, and perform the first
 reboot persistence rehearsal on the `vps3` canary before continuing.
+
+Before the first MyCleanBot rollout, inventory VPS1 and reconcile its current
+512 MiB swap to the platform emergency baseline of 1024 MiB with
+`vm.swappiness=10`. Apply only through `host_resources`, only after its disk and
+available-memory gates pass. The role's atomic replacement restores the
+previous swapfile if activation of the replacement fails.
