@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import pathlib
+import tempfile
 import unittest
 from unittest import mock
 
 from tools.geo_policy.geo_policy import (
     ContractError,
+    atomic_write,
     build_dataset,
     classify_destination,
     rank_candidates,
@@ -16,6 +19,15 @@ from tools.geo_policy.geo_policy import (
 )
 from tools.geo_policy.prepare_transport_secrets import PATHS
 from tools.geo_policy.runtime import dataset_status, ensure_route_contract, safe_probe_path
+
+
+class AtomicWriteTests(unittest.TestCase):
+    def test_atomic_write_supports_the_operator_workstation(self) -> None:
+        with tempfile.TemporaryDirectory(dir=pathlib.Path.cwd()) as directory:
+            target = pathlib.Path(directory) / "data" / "receipt.json"
+            atomic_write(target, '{"ok": true}\n', 0o600)
+
+            self.assertEqual(target.read_text(encoding="utf-8"), '{"ok": true}\n')
 
 
 def config() -> dict:

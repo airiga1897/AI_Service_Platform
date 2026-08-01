@@ -602,11 +602,15 @@ def atomic_write(path: os.PathLike[str] | str, content: str, mode: int = 0o644) 
             os.fsync(handle.fileno())
         os.chmod(temporary, mode)
         os.replace(temporary, destination)
-        directory_fd = os.open(destination.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        # Windows does not expose a directory descriptor that can be opened
+        # and fsynced this way. The file itself is still flushed above and the
+        # final replace remains atomic; retain directory fsync on POSIX hosts.
+        if os.name != "nt":
+            directory_fd = os.open(destination.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
