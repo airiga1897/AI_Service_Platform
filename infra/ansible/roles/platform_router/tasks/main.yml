@@ -1330,7 +1330,10 @@
     nics="$(run_vpncmd localhost /CLIENT /CMD NicList 2>/dev/null || true)"
     if ! echo "$nics" | grep -Fq "$nic"; then
       set_phase nic_create
-      run_vpncmd localhost /CLIENT /CMD NicCreate "$nic" >/dev/null
+      # vpncmd output is not a stable machine-readable contract and can miss an
+      # already persisted adapter. Treat NicCreate as an idempotent ensure;
+      # interface_wait below remains the authoritative runtime acceptance.
+      run_vpncmd localhost /CLIENT /CMD NicCreate "$nic" >/dev/null 2>&1 || true
     fi
 
     set_phase account_list

@@ -184,6 +184,7 @@ class PlatformRouterRouteContractTests(unittest.TestCase):
         tasks = PLATFORM_ROUTER_TASKS.read_text(encoding="utf-8")
 
         self.assertIn("set_phase account_preserved", tasks)
+        self.assertIn('NicCreate "$nic" >/dev/null 2>&1 || true', tasks)
         self.assertIn("set_phase account_create", tasks)
         self.assertIn("set_phase account_connect", tasks)
         self.assertIn("set_phase interface_wait", tasks)
