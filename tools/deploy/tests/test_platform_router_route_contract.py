@@ -165,6 +165,11 @@ class PlatformRouterRouteContractTests(unittest.TestCase):
         self.assertIn('-i "$vpn_iface" -s "$source_cidr" -j SNAT', tasks)
         self.assertIn('"source_cidrs": [str(value) for value in source_cidrs]', tasks)
         self.assertIn('accepted["status"] = "ready"', tasks)
+        self.assertIn("iptables -t nat -C PLATFORM_ROUTER_POSTROUTING", tasks)
+        self.assertNotIn(
+            'grep -F -- "-i $vpn_iface -s $source_cidr -j SNAT',
+            tasks,
+        )
 
     def test_multiple_hubs_require_one_server_runtime_credential(self) -> None:
         tasks = PLATFORM_ROUTER_TASKS.read_text(encoding="utf-8")

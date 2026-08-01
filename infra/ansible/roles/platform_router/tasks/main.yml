@@ -1779,8 +1779,8 @@
     for item in json.loads(sys.argv[1]):
         print(item)
     PY
-          docker exec -u 0 "$container" iptables -t nat -S PLATFORM_ROUTER_POSTROUTING |
-            grep -F -- "-i $vpn_iface -s $source_cidr -j SNAT --to-source $target_snat" >/dev/null
+          docker exec -u 0 "$container" iptables -t nat -C PLATFORM_ROUTER_POSTROUTING \
+            -i "$vpn_iface" -s "$source_cidr" -j SNAT --to-source "$target_snat"
         done
       fi
     done
