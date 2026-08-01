@@ -78,6 +78,7 @@ geo_policy:
         country_code: ""
 
   health:
+    probe_network_container: site-runtime-ai-retail-mvp-anchor
     fail_after: 3
     recover_after: 5
     probe_interval_seconds: 15

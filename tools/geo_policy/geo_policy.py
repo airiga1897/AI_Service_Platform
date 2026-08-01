@@ -268,6 +268,13 @@ def validate_config(document: dict[str, Any], alias: str | None = None) -> GeoPo
         value = str(health.get(key) or "").strip()
         if not value.startswith("/") or "\r" in value or "\n" in value:
             raise ContractError(f"health.{key} must be an absolute HTTP path")
+    probe_network_container = str(health.get("probe_network_container") or "").strip()
+    if state == "accepted" and not probe_network_container:
+        raise ContractError("accepted GeoPolicy requires health.probe_network_container")
+    if probe_network_container and not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_.-]*", probe_network_container
+    ):
+        raise ContractError("health.probe_network_container is invalid")
     dataset = _require_mapping(policy.get("dataset"), "geo_policy.dataset")
     max_age_hours = int(dataset.get("max_age_hours") or 0)
     if max_age_hours != 72:

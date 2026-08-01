@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
 import hashlib
 import json
@@ -12,6 +13,7 @@ import pathlib
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Any
@@ -42,7 +44,61 @@ def run(command: list[str], *, check: bool = True, input_text: str | None = None
     )
 
 
-def marked_https_get(host: str, path: str, mark: int, timeout: float = 10.0) -> tuple[int, bytes, float]:
+def marked_https_get(
+    host: str,
+    path: str,
+    mark: int,
+    timeout: float = 10.0,
+    network_container: str = "",
+) -> tuple[int, bytes, float]:
+    if network_container:
+        inspected = run(
+            ["docker", "inspect", network_container, "--format", "{{.State.Pid}}"],
+            check=False,
+        )
+        pid = inspected.stdout.strip()
+        if inspected.returncode != 0 or not pid.isdigit() or int(pid) < 1:
+            raise ContractError(
+                f"probe network container is not running: {network_container}"
+            )
+        probe_script = (
+            "import base64,json,sys;"
+            "from tools.geo_policy.runtime import marked_https_get;"
+            "status,body,latency=marked_https_get("
+            "sys.argv[1],sys.argv[2],int(sys.argv[3]),float(sys.argv[4]));"
+            "print(json.dumps({'status':status,'body':base64.b64encode(body).decode(),"
+            "'latency_ms':latency}))"
+        )
+        completed = run(
+            [
+                "nsenter",
+                "--target",
+                pid,
+                "--net",
+                sys.executable,
+                "-c",
+                probe_script,
+                host,
+                path,
+                str(mark),
+                str(timeout),
+            ],
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise ContractError(
+                f"marked HTTPS probe failed in network namespace of {network_container}"
+            )
+        try:
+            payload = json.loads(completed.stdout)
+            return (
+                int(payload["status"]),
+                base64.b64decode(payload["body"], validate=True),
+                float(payload["latency_ms"]),
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ContractError("network namespace probe returned invalid JSON") from exc
+
     started = time.monotonic()
     addresses = socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_STREAM)
     if not addresses:
@@ -87,10 +143,12 @@ def path_mark(policy: Any, path: str) -> int:
 def probe_path(config: dict[str, Any], policy: Any, path: str) -> dict[str, Any]:
     health = config["geo_policy"]["health"]
     mark = path_mark(policy, path)
+    network_container = str(health.get("probe_network_container") or "").strip()
     country_status, country_body, country_latency = marked_https_get(
         str(health["country_probe_host"]),
         str(health["country_probe_path"]),
         mark,
+        network_container=network_container,
     )
     country = ""
     if country_status == 200:
@@ -102,6 +160,7 @@ def probe_path(config: dict[str, Any], policy: Any, path: str) -> dict[str, Any]
         str(health["openai_probe_host"]),
         str(health["openai_probe_path"]),
         mark,
+        network_container=network_container,
     )
     unsupported = b"unsupported_country_region_territory" in openai_body
     openai_ok = openai_status in {200, 401} and not unsupported

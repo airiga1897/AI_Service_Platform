@@ -48,6 +48,8 @@ class ServiceContractTests(unittest.TestCase):
 
     def test_check_is_mutation_free_and_guards_ipv6(self) -> None:
         role = text("infra/ansible/roles/geo_policy/tasks/main.yml")
+        runtime = text("tools/geo_policy/runtime.py")
+        config = text("operator/geo_policy/config.yml.example")
         self.assertIn("Run mutation-free GeoPolicy runtime preflight", role)
         self.assertIn("changed_when: false", role)
         self.assertIn("Global IPv6 bypass detected", role)
@@ -56,6 +58,10 @@ class ServiceContractTests(unittest.TestCase):
         self.assertNotIn("grep -Eq '[0-9a-fA-F:]'", role)
         self.assertIn("--transport-receipt", role)
         self.assertIn("not ansible_check_mode", role)
+        self.assertIn("probe_network_container: site-runtime-ai-retail-mvp-anchor", config)
+        self.assertIn('"nsenter"', runtime)
+        self.assertIn('"--net"', runtime)
+        self.assertIn("network_container=network_container", runtime)
 
     def test_refresh_uses_lock_atomic_moves_and_reapplies_dataset(self) -> None:
         refresh = text(

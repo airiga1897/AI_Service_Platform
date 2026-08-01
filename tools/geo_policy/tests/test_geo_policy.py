@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import pathlib
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -18,7 +19,12 @@ from tools.geo_policy.geo_policy import (
     validate_config,
 )
 from tools.geo_policy.prepare_transport_secrets import PATHS
-from tools.geo_policy.runtime import dataset_status, ensure_route_contract, safe_probe_path
+from tools.geo_policy.runtime import (
+    dataset_status,
+    ensure_route_contract,
+    marked_https_get,
+    safe_probe_path,
+)
 
 
 class AtomicWriteTests(unittest.TestCase):
@@ -28,6 +34,45 @@ class AtomicWriteTests(unittest.TestCase):
             atomic_write(target, '{"ok": true}\n', 0o600)
 
             self.assertEqual(target.read_text(encoding="utf-8"), '{"ok": true}\n')
+
+
+class NetworkNamespaceProbeTests(unittest.TestCase):
+    @mock.patch("tools.geo_policy.runtime.run")
+    def test_marked_probe_uses_source_container_network_namespace(
+        self, run_command: mock.Mock
+    ) -> None:
+        run_command.side_effect = [
+            mock.Mock(returncode=0, stdout="1234\n"),
+            mock.Mock(
+                returncode=0,
+                stdout='{"status": 200, "body": "e30=", "latency_ms": 12.5}\n',
+            ),
+        ]
+
+        status, body, latency = marked_https_get(
+            "api.country.is",
+            "/",
+            0x530003,
+            network_container="site-runtime-ai-retail-mvp-anchor",
+        )
+
+        self.assertEqual((status, body, latency), (200, b"{}", 12.5))
+        self.assertEqual(
+            run_command.call_args_list[0].args[0],
+            [
+                "docker",
+                "inspect",
+                "site-runtime-ai-retail-mvp-anchor",
+                "--format",
+                "{{.State.Pid}}",
+            ],
+        )
+        namespace_command = run_command.call_args_list[1].args[0]
+        self.assertEqual(
+            namespace_command[:5],
+            ["nsenter", "--target", "1234", "--net", sys.executable],
+        )
+        self.assertEqual(namespace_command[-4:], ["api.country.is", "/", "5439491", "10.0"])
 
 
 def config() -> dict:
@@ -87,6 +132,7 @@ def config() -> dict:
                 ],
             },
             "health": {
+                "probe_network_container": "site-runtime-ai-retail-mvp-anchor",
                 "fail_after": 3,
                 "recover_after": 5,
                 "probe_interval_seconds": 15,
