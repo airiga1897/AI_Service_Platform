@@ -95,6 +95,7 @@ class RenderHappyPathTests(unittest.TestCase):
         )
         self.assertNotIn("ports", doc["services"]["mycleanbot-worker"])
         redis = doc["services"]["mycleanbot-redis"]
+        self.assertEqual(redis["user"], "999:1000")
         self.assertEqual(redis["network_mode"], "service:mycleanbot-route")
         self.assertNotIn("ports", redis)
         self.assertNotIn("volumes", redis)

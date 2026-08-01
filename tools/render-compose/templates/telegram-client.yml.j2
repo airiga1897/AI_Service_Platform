@@ -68,6 +68,7 @@ services:
 
   << redis_name_service >>:
     image: << redis_image >>
+    user: "999:1000"
     network_mode: service:<< route_name >>
     command:
       - redis-server
