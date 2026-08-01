@@ -1336,19 +1336,20 @@
     set_phase account_list
     accounts="$(run_vpncmd localhost /CLIENT /CMD AccountList 2>/dev/null || true)"
     if echo "$accounts" | grep -Fq "$account"; then
-      set_phase account_disconnect
-      run_vpncmd localhost /CLIENT /CMD AccountDisconnect "$account" >/dev/null 2>&1 || true
-      set_phase account_delete
-      run_vpncmd localhost /CLIENT /CMD AccountDelete "$account" >/dev/null
+      # Existing accounts can carry unrelated, already accepted transport flows
+      # (for example PostgreSQL). Preserve them during cumulative GeoPolicy
+      # rollout instead of interrupting and recreating every client account.
+      set_phase account_preserved
+    else
+      set_phase account_create
+      run_vpncmd localhost /CLIENT /CMD AccountCreate "$account" /SERVER:"$server" /HUB:"$hub" /USERNAME:"$user" /NICNAME:"$nic" >/dev/null
+      set_phase account_password
+      run_vpncmd localhost /CLIENT /CMD AccountPasswordSet "$account" /PASSWORD:"$password" /TYPE:standard >/dev/null
+      set_phase account_startup
+      run_vpncmd localhost /CLIENT /CMD AccountStartupSet "$account" >/dev/null
     fi
-    set_phase account_create
-    run_vpncmd localhost /CLIENT /CMD AccountCreate "$account" /SERVER:"$server" /HUB:"$hub" /USERNAME:"$user" /NICNAME:"$nic" >/dev/null
-    set_phase account_password
-    run_vpncmd localhost /CLIENT /CMD AccountPasswordSet "$account" /PASSWORD:"$password" /TYPE:standard >/dev/null
-    set_phase account_startup
-    run_vpncmd localhost /CLIENT /CMD AccountStartupSet "$account" >/dev/null
     set_phase account_connect
-    run_vpncmd localhost /CLIENT /CMD AccountConnect "$account" >/dev/null
+    run_vpncmd localhost /CLIENT /CMD AccountConnect "$account" >/dev/null 2>&1 || true
 
     set_phase interface_wait
     for attempt in $(seq 1 30); do
