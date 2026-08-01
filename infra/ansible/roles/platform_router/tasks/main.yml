@@ -1290,6 +1290,7 @@
 - name: Configure platform_router SoftEther client sidecar
   ansible.builtin.shell: |
     set -euo pipefail
+    umask 077
     router_container="{{ platform_router_model.container_name }}"
     client_container="{{ item.container_name }}"
     timeout_s="{{ item.vpncmd_timeout_seconds }}"
@@ -1302,6 +1303,12 @@
     prefix="{{ item.prefixlen }}"
     user="${CLIENT_USER}"
     password="${CLIENT_PASSWORD}"
+    status_file="/tmp/platform-router-client-config-{{ item.name }}.status"
+
+    set_phase() {
+      printf '%s\n' "$1" > "$status_file"
+    }
+    set_phase starting
 
     cleanup_vpncmd() {
       docker exec "$client_container" sh -c 'pkill -KILL vpncmd 2>/dev/null || true' >/dev/null 2>&1 || true
@@ -1317,20 +1324,33 @@
     trap cleanup_vpncmd EXIT
     cleanup_vpncmd
 
+    set_phase client_check
     run_vpncmd localhost /CLIENT /CMD Check >/dev/null
+    set_phase nic_list
     nics="$(run_vpncmd localhost /CLIENT /CMD NicList 2>/dev/null || true)"
-    echo "$nics" | grep -Fq "$nic" || run_vpncmd localhost /CLIENT /CMD NicCreate "$nic" >/dev/null
+    if ! echo "$nics" | grep -Fq "$nic"; then
+      set_phase nic_create
+      run_vpncmd localhost /CLIENT /CMD NicCreate "$nic" >/dev/null
+    fi
 
+    set_phase account_list
     accounts="$(run_vpncmd localhost /CLIENT /CMD AccountList 2>/dev/null || true)"
     if echo "$accounts" | grep -Fq "$account"; then
+      set_phase account_disconnect
       run_vpncmd localhost /CLIENT /CMD AccountDisconnect "$account" >/dev/null 2>&1 || true
+      set_phase account_delete
       run_vpncmd localhost /CLIENT /CMD AccountDelete "$account" >/dev/null
     fi
+    set_phase account_create
     run_vpncmd localhost /CLIENT /CMD AccountCreate "$account" /SERVER:"$server" /HUB:"$hub" /USERNAME:"$user" /NICNAME:"$nic" >/dev/null
+    set_phase account_password
     run_vpncmd localhost /CLIENT /CMD AccountPasswordSet "$account" /PASSWORD:"$password" /TYPE:standard >/dev/null
+    set_phase account_startup
     run_vpncmd localhost /CLIENT /CMD AccountStartupSet "$account" >/dev/null
+    set_phase account_connect
     run_vpncmd localhost /CLIENT /CMD AccountConnect "$account" >/dev/null
 
+    set_phase interface_wait
     for attempt in $(seq 1 30); do
       if docker exec -u 0 "$router_container" ip link show "$iface" >/dev/null 2>&1; then
         break
@@ -1341,16 +1361,52 @@
         exit 1
       fi
     done
+    set_phase interface_up
     docker exec -u 0 "$router_container" ip link set "$iface" up
+    set_phase address
     docker exec -u 0 "$router_container" ip addr replace "$client_ip/$prefix" dev "$iface"
+    set_phase succeeded
   args:
     executable: /bin/bash
   environment:
     CLIENT_USER: "{{ ((platform_router_softether_secrets[item.secret_file]).client_users[item.client_alias].client_user | default('')) or item.client_user or (platform_router_softether_secrets[item.secret_file]).client_user | default('') }}"
     CLIENT_PASSWORD: "{{ ((platform_router_softether_secrets[item.secret_file]).client_users[item.client_alias].client_password | default('')) or (platform_router_softether_secrets[item.secret_file]).client_password | default('') }}"
   no_log: true
+  failed_when: false
   changed_when: false
   loop: "{{ platform_router_model.softether_clients | default([]) }}"
+  when:
+    - platform_router_state == 'present'
+    - (platform_router_model.softether_clients | default([])) | length > 0
+    - not ansible_check_mode
+
+- name: Accept safe platform_router SoftEther client configure phases
+  ansible.builtin.shell: |
+    set -euo pipefail
+    clients_json='{{ platform_router_model.softether_clients | default([]) | map(attribute="name") | list | to_json }}'
+    failed=false
+    while IFS= read -r client_name; do
+      status_file="/tmp/platform-router-client-config-${client_name}.status"
+      phase="missing"
+      if [ -f "$status_file" ]; then
+        phase="$(cat "$status_file")"
+      fi
+      rm -f "$status_file"
+      if [ "$phase" != "succeeded" ]; then
+        echo "platform_router SoftEther client configure failed: client=${client_name}, phase=${phase}" >&2
+        failed=true
+      fi
+    done < <(python3 - "$clients_json" <<'PY'
+    import json
+    import sys
+    for item in json.loads(sys.argv[1]):
+        print(item)
+    PY
+    )
+    [ "$failed" = "false" ]
+  args:
+    executable: /bin/bash
+  changed_when: false
   when:
     - platform_router_state == 'present'
     - (platform_router_model.softether_clients | default([])) | length > 0

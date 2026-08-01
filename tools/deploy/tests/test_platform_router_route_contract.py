@@ -180,6 +180,17 @@ class PlatformRouterRouteContractTests(unittest.TestCase):
         self.assertIn("unique_networks(transport_networks", tasks)
         self.assertIn("dhcp_enabled must be boolean", tasks)
 
+    def test_client_configuration_reports_only_safe_failure_phase(self) -> None:
+        tasks = PLATFORM_ROUTER_TASKS.read_text(encoding="utf-8")
+
+        self.assertIn("set_phase account_create", tasks)
+        self.assertIn("set_phase account_connect", tasks)
+        self.assertIn("set_phase interface_wait", tasks)
+        self.assertIn("set_phase address", tasks)
+        self.assertIn("Accept safe platform_router SoftEther client configure phases", tasks)
+        self.assertIn("client=${client_name}, phase=${phase}", tasks)
+        self.assertIn("no_log: true", tasks)
+
 
 if __name__ == "__main__":
     unittest.main()
