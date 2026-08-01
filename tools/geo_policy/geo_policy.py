@@ -275,6 +275,13 @@ def validate_config(document: dict[str, Any], alias: str | None = None) -> GeoPo
         r"[A-Za-z0-9][A-Za-z0-9_.-]*", probe_network_container
     ):
         raise ContractError("health.probe_network_container is invalid")
+    probe_source_ipv4 = _ipv4_address(
+        health.get("probe_source_ipv4"), "health.probe_source_ipv4"
+    )
+    if any(str(probe_source_ipv4) != item.gateway_ipv4 for item in paths):
+        raise ContractError(
+            "health.probe_source_ipv4 must equal every egress path gateway_ipv4"
+        )
     dataset = _require_mapping(policy.get("dataset"), "geo_policy.dataset")
     max_age_hours = int(dataset.get("max_age_hours") or 0)
     if max_age_hours != 72:

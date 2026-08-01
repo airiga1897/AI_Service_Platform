@@ -50,6 +50,7 @@ def marked_https_get(
     mark: int,
     timeout: float = 10.0,
     network_container: str = "",
+    source_ipv4: str = "",
 ) -> tuple[int, bytes, float]:
     if network_container:
         inspected = run(
@@ -65,7 +66,8 @@ def marked_https_get(
             "import base64,json,sys;"
             "from tools.geo_policy.runtime import marked_https_get;"
             "status,body,latency=marked_https_get("
-            "sys.argv[1],sys.argv[2],int(sys.argv[3]),float(sys.argv[4]));"
+            "sys.argv[1],sys.argv[2],int(sys.argv[3]),float(sys.argv[4]),"
+            "source_ipv4=sys.argv[5]);"
             "print(json.dumps({'status':status,'body':base64.b64encode(body).decode(),"
             "'latency_ms':latency}))"
         )
@@ -82,6 +84,7 @@ def marked_https_get(
                 path,
                 str(mark),
                 str(timeout),
+                source_ipv4,
             ],
             check=False,
         )
@@ -107,6 +110,8 @@ def marked_https_get(
     try:
         raw.settimeout(timeout)
         raw.setsockopt(socket.SOL_SOCKET, SO_MARK, mark)
+        if source_ipv4:
+            raw.bind((source_ipv4, 0))
         raw.connect(addresses[0][4])
         context = ssl.create_default_context()
         with context.wrap_socket(raw, server_hostname=host) as tls:
@@ -144,11 +149,13 @@ def probe_path(config: dict[str, Any], policy: Any, path: str) -> dict[str, Any]
     health = config["geo_policy"]["health"]
     mark = path_mark(policy, path)
     network_container = str(health.get("probe_network_container") or "").strip()
+    source_ipv4 = str(health.get("probe_source_ipv4") or "").strip()
     country_status, country_body, country_latency = marked_https_get(
         str(health["country_probe_host"]),
         str(health["country_probe_path"]),
         mark,
         network_container=network_container,
+        source_ipv4=source_ipv4,
     )
     country = ""
     if country_status == 200:
@@ -161,6 +168,7 @@ def probe_path(config: dict[str, Any], policy: Any, path: str) -> dict[str, Any]
         str(health["openai_probe_path"]),
         mark,
         network_container=network_container,
+        source_ipv4=source_ipv4,
     )
     unsupported = b"unsupported_country_region_territory" in openai_body
     openai_ok = openai_status in {200, 401} and not unsupported

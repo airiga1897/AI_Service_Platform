@@ -58,10 +58,12 @@ class ServiceContractTests(unittest.TestCase):
         self.assertNotIn("grep -Eq '[0-9a-fA-F:]'", role)
         self.assertIn("--transport-receipt", role)
         self.assertIn("not ansible_check_mode", role)
-        self.assertIn("probe_network_container: site-runtime-ai-retail-mvp-anchor", config)
+        self.assertIn("probe_network_container: platform-router", config)
+        self.assertIn("probe_source_ipv4: 172.31.3.2", config)
         self.assertIn('"nsenter"', runtime)
         self.assertIn('"--net"', runtime)
         self.assertIn("network_container=network_container", runtime)
+        self.assertIn("source_ipv4=source_ipv4", runtime)
 
     def test_refresh_uses_lock_atomic_moves_and_reapplies_dataset(self) -> None:
         refresh = text(

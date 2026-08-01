@@ -592,6 +592,24 @@
         route_table = int(item["route_table"])
         source_gateway = ipaddress.ip_address(str(item.get("source_gateway_ipv4") or ""))
         target_snat = ipaddress.ip_address(str(item.get("target_snat_ipv4") or ""))
+        probe_source = ipaddress.ip_network(
+            str(item.get("probe_source_cidr") or ""), strict=True
+        )
+        if (
+            probe_source.version != 4
+            or probe_source.prefixlen != 32
+            or probe_source.network_address != source_gateway
+        ):
+            fail(
+                f"platform_router egress path {path_alias} probe_source_cidr "
+                "must be the source gateway /32"
+            )
+        if probe_source in source_cidrs:
+            fail(
+                f"platform_router egress path {path_alias} probe_source_cidr "
+                "must remain separate from production source_cidrs"
+            )
+        transport_source_cidrs = source_cidrs + [probe_source]
         role = "source" if alias == source_alias else "target"
         path = {
             "alias": path_alias,
@@ -606,6 +624,8 @@
             "gateway_ipv4": str(source_gateway),
             "target_snat_ipv4": str(target_snat),
             "source_cidrs": [str(value) for value in source_cidrs],
+            "probe_source_cidr": str(probe_source),
+            "transport_source_cidrs": [str(value) for value in transport_source_cidrs],
             "tunnel_next_hop": str(matching_l3["server_ip"]),
             "status": "planned",
         }
@@ -1788,7 +1808,7 @@
             item["role"],
             item["tunnel_iface"],
             item["target_snat_ipv4"],
-            json.dumps(item["source_cidrs"], separators=(",", ":")),
+            json.dumps(item["transport_source_cidrs"], separators=(",", ":")),
         ]))
     PY
       vpn_ready=false
@@ -1889,7 +1909,7 @@
             str(item["route_rule_priority"]), item["gateway_ipv4"],
             item["tunnel_iface"], item["tunnel_next_hop"],
             item["target_snat_ipv4"],
-            json.dumps(item["source_cidrs"], separators=(",", ":")),
+            json.dumps(item["transport_source_cidrs"], separators=(",", ":")),
         ]))
     PY
       if [ "$role" = "source" ]; then

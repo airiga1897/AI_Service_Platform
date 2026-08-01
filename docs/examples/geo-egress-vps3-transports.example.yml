@@ -13,6 +13,7 @@ defaults:
   access_mode: routed_tap
   dhcp_enabled: false
   public_port: 443
+  probe_source_cidr: 172.31.3.2/32
   source_cidrs:
     - 172.31.3.10/32
     - 172.20.0.2/32

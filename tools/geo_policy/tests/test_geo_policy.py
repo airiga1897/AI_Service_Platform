@@ -53,7 +53,8 @@ class NetworkNamespaceProbeTests(unittest.TestCase):
             "api.country.is",
             "/",
             0x530003,
-            network_container="site-runtime-ai-retail-mvp-anchor",
+            network_container="platform-router",
+            source_ipv4="172.31.3.2",
         )
 
         self.assertEqual((status, body, latency), (200, b"{}", 12.5))
@@ -62,7 +63,7 @@ class NetworkNamespaceProbeTests(unittest.TestCase):
             [
                 "docker",
                 "inspect",
-                "site-runtime-ai-retail-mvp-anchor",
+                "platform-router",
                 "--format",
                 "{{.State.Pid}}",
             ],
@@ -72,7 +73,10 @@ class NetworkNamespaceProbeTests(unittest.TestCase):
             namespace_command[:5],
             ["nsenter", "--target", "1234", "--net", sys.executable],
         )
-        self.assertEqual(namespace_command[-4:], ["api.country.is", "/", "5439491", "10.0"])
+        self.assertEqual(
+            namespace_command[-5:],
+            ["api.country.is", "/", "5439491", "10.0", "172.31.3.2"],
+        )
 
 
 def config() -> dict:
@@ -132,7 +136,8 @@ def config() -> dict:
                 ],
             },
             "health": {
-                "probe_network_container": "site-runtime-ai-retail-mvp-anchor",
+                "probe_network_container": "platform-router",
+                "probe_source_ipv4": "172.31.3.2",
                 "fail_after": 3,
                 "recover_after": 5,
                 "probe_interval_seconds": 15,

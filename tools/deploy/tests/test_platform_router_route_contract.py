@@ -107,6 +107,10 @@ class PlatformRouterRouteContractTests(unittest.TestCase):
             },
         )
         self.assertEqual({item["source_gateway_ipv4"] for item in paths}, {"172.31.3.2"})
+        self.assertEqual(
+            {item["probe_source_cidr"] for item in paths},
+            {"172.31.3.2/32"},
+        )
         self.assertEqual(len({item["route_mark"] for item in paths}), len(paths))
         self.assertEqual(len({item["route_table"] for item in paths}), len(paths))
         self.assertEqual(len({item["l3_vps_link"] for item in paths}), len(paths))
@@ -167,6 +171,11 @@ class PlatformRouterRouteContractTests(unittest.TestCase):
         tasks = PLATFORM_ROUTER_TASKS.read_text(encoding="utf-8")
         self.assertIn('-i "$vpn_iface" -s "$source_cidr" -j SNAT', tasks)
         self.assertIn('"source_cidrs": [str(value) for value in source_cidrs]', tasks)
+        self.assertIn(
+            '"transport_source_cidrs": [str(value) for value in transport_source_cidrs]',
+            tasks,
+        )
+        self.assertIn('json.dumps(item["transport_source_cidrs"]', tasks)
         self.assertIn('accepted["status"] = "ready"', tasks)
         self.assertIn("iptables -t nat -C PLATFORM_ROUTER_POSTROUTING", tasks)
         self.assertNotIn(
