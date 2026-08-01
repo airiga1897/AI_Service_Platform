@@ -170,6 +170,17 @@ class PlatformRouterRouteContractTests(unittest.TestCase):
             'grep -F -- "-i $vpn_iface -s $source_cidr -j SNAT',
             tasks,
         )
+        self.assertIn("path=${path_alias}, role=${role}, phase=$1", tasks)
+        for phase in (
+            "host_rule",
+            "host_route",
+            "host_route_get",
+            "router_rule",
+            "router_route",
+            "target_interface",
+            "target_snat",
+        ):
+            self.assertIn(f"fail_phase {phase}", tasks)
 
     def test_multiple_hubs_require_one_server_runtime_credential(self) -> None:
         tasks = PLATFORM_ROUTER_TASKS.read_text(encoding="utf-8")

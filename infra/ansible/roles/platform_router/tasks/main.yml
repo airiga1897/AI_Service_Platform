@@ -1812,6 +1812,10 @@
     set -euo pipefail
     container="{{ platform_router_model.container_name }}"
     paths_json='{{ platform_router_model.egress_paths | default([]) | to_json }}'
+    fail_phase() {
+      echo "platform_router marked transport verification failed: path=${path_alias}, role=${role}, phase=$1" >&2
+      exit 1
+    }
     python3 - "$paths_json" <<'PY' | while IFS='|' read -r path_alias role route_mark route_mark_decimal route_table priority gateway vpn_iface vpn_next_hop target_snat source_cidrs_json; do
     import json
     import sys
@@ -1826,21 +1830,35 @@
         ]))
     PY
       if [ "$role" = "source" ]; then
-        ip -4 rule show | grep -F "fwmark $route_mark lookup $route_table" >/dev/null
-        ip -4 route show table "$route_table" | grep -F "default via $gateway" >/dev/null
-        ip -4 route get 1.1.1.1 mark "$route_mark_decimal" | grep -F "via $gateway" >/dev/null
-        docker exec -u 0 "$container" ip -4 rule show | grep -F "fwmark $route_mark lookup $route_table" >/dev/null
-        docker exec -u 0 "$container" ip -4 route show table "$route_table" | grep -F "default via $vpn_next_hop dev $vpn_iface" >/dev/null
+        if ! ip -4 rule show | grep -F "fwmark $route_mark lookup $route_table" >/dev/null; then
+          fail_phase host_rule
+        fi
+        if ! ip -4 route show table "$route_table" | grep -F "default via $gateway" >/dev/null; then
+          fail_phase host_route
+        fi
+        if ! ip -4 route get 1.1.1.1 mark "$route_mark_decimal" | grep -F "via $gateway" >/dev/null; then
+          fail_phase host_route_get
+        fi
+        if ! docker exec -u 0 "$container" ip -4 rule show | grep -F "fwmark $route_mark lookup $route_table" >/dev/null; then
+          fail_phase router_rule
+        fi
+        if ! docker exec -u 0 "$container" ip -4 route show table "$route_table" | grep -F "default via $vpn_next_hop dev $vpn_iface" >/dev/null; then
+          fail_phase router_route
+        fi
       else
-        docker exec -u 0 "$container" ip -4 addr show dev "$vpn_iface" | grep -F "inet $vpn_next_hop/" >/dev/null
+        if ! docker exec -u 0 "$container" ip -4 addr show dev "$vpn_iface" | grep -F "inet $vpn_next_hop/" >/dev/null; then
+          fail_phase target_interface
+        fi
         python3 - "$source_cidrs_json" <<'PY' | while IFS= read -r source_cidr; do
     import json
     import sys
     for item in json.loads(sys.argv[1]):
         print(item)
     PY
-          docker exec -u 0 "$container" iptables -t nat -C PLATFORM_ROUTER_POSTROUTING \
-            -i "$vpn_iface" -s "$source_cidr" -j SNAT --to-source "$target_snat"
+          if ! docker exec -u 0 "$container" iptables -t nat -C PLATFORM_ROUTER_POSTROUTING \
+            -i "$vpn_iface" -s "$source_cidr" -j SNAT --to-source "$target_snat"; then
+            fail_phase target_snat
+          fi
         done
       fi
     done
