@@ -707,6 +707,7 @@ runtime_instances:
     containers:
       future:
         - mycleanbot-route
+        - mycleanbot-redis
         - mycleanbot-web
         - mycleanbot-worker
     healthcheck:
@@ -717,6 +718,14 @@ runtime_instances:
       worker_heartbeat_max_age_seconds: 45
     data:
       database: mycleanbot
+      cache:
+        ownership: platform
+        engine: redis
+        image: docker.io/library/redis@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+        persistence: false
+        backup: none
+        maxmemory: 64mb
+        policy: allkeys-lru
       postgres:
         ownership: platform
         connection: DATABASE_URL

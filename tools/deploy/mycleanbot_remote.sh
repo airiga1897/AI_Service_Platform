@@ -11,6 +11,7 @@ STATE_DIR="${STATE_DIR:-.deploy-state}"
 BACKUP_COMMAND="${BACKUP_COMMAND:-sudo -n /usr/local/bin/ai-service-mycleanbot-backup backup}"
 IMAGE_PATTERN='^ghcr\.io/airiga1897/mycleanbot@sha256:[0-9a-f]{64}$'
 ROUTE_CONTAINER="${ROUTE_CONTAINER:-platform-router}"
+REDIS_IMAGE='docker.io/library/redis@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99'
 
 fail() {
   printf 'mycleanbot deploy error: %s\n' "$*" >&2
@@ -78,6 +79,17 @@ verify_runtime() {
     configured="$(compose "$image_ref" ps -q "$service" | xargs -r docker inspect --format '{{.Config.Image}}')"
     [[ "$configured" == "$image_ref" ]] || fail "$service does not use the accepted digest"
   done
+  configured="$(compose "$image_ref" ps -q mycleanbot-redis | xargs -r docker inspect --format '{{.Config.Image}}')"
+  [[ "$configured" == "$REDIS_IMAGE" ]] || fail "mycleanbot-redis does not use the accepted digest"
+  [[ -z "$(compose "$image_ref" port mycleanbot-redis 6379 2>/dev/null || true)" ]] ||
+    fail "mycleanbot-redis must not publish a host port"
+  [[ "$(compose "$image_ref" ps -q mycleanbot-redis | xargs -r docker inspect --format '{{.State.Health.Status}}')" == "healthy" ]] ||
+    fail "mycleanbot-redis is not healthy"
+  compose "$image_ref" exec -T mycleanbot-redis redis-cli -h 127.0.0.1 ping |
+    grep -Fx PONG >/dev/null || fail "mycleanbot-redis ping failed"
+  compose "$image_ref" exec -T mycleanbot-web python manage.py shell -c \
+    "from django.core.cache import cache; cache.set('deployment-check','ok',15); assert cache.get('deployment-check') == 'ok'; cache.delete('deployment-check')" ||
+    fail "Django cache roundtrip failed"
 
   local attempt
   for attempt in $(seq 1 20); do
@@ -145,6 +157,8 @@ deploy() {
     fail "DATABASE_URL must target the isolated mycleanbot database"
   [[ "$(env_value DJANGO_DEBUG)" == "false" ]] ||
     fail "DJANGO_DEBUG=false is required"
+  [[ "$(env_value CACHE_URL)" == "redis://127.0.0.1:6379/0" ]] ||
+    fail "CACHE_URL must target only the stack-local Redis"
   local django_csrf
   local image_csrf
   django_csrf="$(env_value DJANGO_CSRF_TRUSTED_ORIGINS)"
@@ -177,8 +191,8 @@ deploy() {
 
   docker_login
 
-  compose "$image_ref" pull mycleanbot-web mycleanbot-worker
-  compose "$image_ref" up -d mycleanbot-route
+  compose "$image_ref" pull mycleanbot-web mycleanbot-worker mycleanbot-redis
+  compose "$image_ref" up -d mycleanbot-route mycleanbot-redis
   verify_postgres_route "$image_ref"
   compose "$image_ref" run --rm --no-deps mycleanbot-web \
     python manage.py migrate --noinput

@@ -826,6 +826,7 @@ def validate_runtime_instances(
 
         if instance_data.get("type") == "telegram-client":
             postgres = data_block.get("postgres") if isinstance(data_block, dict) else {}
+            cache = data_block.get("cache") if isinstance(data_block, dict) else {}
             backup = data_block.get("backup") if isinstance(data_block, dict) else {}
             vpn = instance_data.get("vpn") or {}
             monitoring = instance_data.get("monitoring") or {}
@@ -846,6 +847,18 @@ def validate_runtime_instances(
                 fail(errors, f"{node_path}.data.postgres.connection must be DATABASE_URL")
             if not isinstance(postgres, dict) or postgres.get("container_in_stack") is not False:
                 fail(errors, f"{node_path}.data.postgres.container_in_stack must be false")
+            expected_cache = {
+                "ownership": "platform",
+                "engine": "redis",
+                "image": "docker.io/library/redis@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99",
+                "persistence": False,
+                "backup": "none",
+                "maxmemory": "64mb",
+                "policy": "allkeys-lru",
+            }
+            for field, expected in expected_cache.items():
+                if not isinstance(cache, dict) or cache.get(field) != expected:
+                    fail(errors, f"{node_path}.data.cache.{field} must be {expected!r}")
             expected_postgres_network = {
                 "app_network": "ai_service_app_vps1",
                 "route_anchor_ipv4": "172.31.1.10",
