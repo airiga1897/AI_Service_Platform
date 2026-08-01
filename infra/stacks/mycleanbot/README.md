@@ -9,6 +9,9 @@ sessions. Он использует pinned immutable image, разделяет n
 volume. Persistence отключён, память ограничена 64 MB с `allkeys-lru`; Redis не
 входит в backup. Долговечные session rows и все application data остаются в
 PostgreSQL, поэтому потеря Redis приводит только к cache miss.
+Контейнер сразу запускается как штатный непривилегированный пользователь
+`999:1000`; это сохраняет `cap_drop: ALL` и не требует `SETUID`/`SETGID` для
+перехода с root внутри entrypoint.
 
 Оба процесса разделяют network namespace platform-owned контейнера
 `mycleanbot-route`. Он использует локальный image уже принятого
