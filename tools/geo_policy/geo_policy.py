@@ -485,6 +485,13 @@ def rank_candidates(document: dict[str, Any]) -> dict[str, Any]:
         if alias in seen_aliases:
             raise ContractError(f"candidate alias is duplicated: {alias}")
         seen_aliases.add(alias)
+        try:
+            external_ipv4 = ipaddress.ip_address(str(item.get("external_ipv4") or ""))
+        except ValueError as exc:
+            raise ContractError(f"candidate {alias} requires a public external_ipv4") from exc
+        if external_ipv4.version != 4 or not external_ipv4.is_global:
+            raise ContractError(f"candidate {alias} requires a public external_ipv4")
+        item["external_ipv4"] = str(external_ipv4)
         if item.get("country") == "RU":
             continue
         if item.get("openai_supported_country") is not True:

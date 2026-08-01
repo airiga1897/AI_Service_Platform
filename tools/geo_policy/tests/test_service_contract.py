@@ -38,6 +38,14 @@ class ServiceContractTests(unittest.TestCase):
         self.assertIn('"geo_policy", "site_runtime"', runner)
         self.assertIn("GeoPolicyActivePath", runner)
 
+    def test_ranking_records_validated_external_ipv4(self) -> None:
+        collector = text("tools/geo_policy/collect_candidates.py")
+        model = text("tools/geo_policy/geo_policy.py")
+
+        self.assertIn('"external_ipv4": external_ipv4', collector)
+        self.assertIn("returned no valid external IPv4", collector)
+        self.assertIn("requires a public external_ipv4", model)
+
     def test_check_is_mutation_free_and_guards_ipv6(self) -> None:
         role = text("infra/ansible/roles/geo_policy/tasks/main.yml")
         self.assertIn("Run mutation-free GeoPolicy runtime preflight", role)

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import csv
+import ipaddress
 import json
 import os
 import pathlib
@@ -16,6 +17,7 @@ from tools.geo_policy.geo_policy import ContractError, atomic_write, rank_candid
 
 
 REMOTE_PROBE = r"""
+import ipaddress
 import json
 import time
 import urllib.error
@@ -34,9 +36,13 @@ def request(url):
 
 country_status, country_body, _ = request("https://api.country.is/")
 try:
-    country = json.loads(country_body.decode("utf-8")).get("country", "").upper()
+    country_payload = json.loads(country_body.decode("utf-8"))
+    country = country_payload.get("country", "").upper()
+    external_address = ipaddress.ip_address(str(country_payload.get("ip", "")))
+    external_ipv4 = str(external_address) if external_address.version == 4 and external_address.is_global else ""
 except Exception:
     country = ""
+    external_ipv4 = ""
 latencies = []
 statuses = []
 unsupported = False
@@ -48,6 +54,7 @@ for _ in range(5):
 print(json.dumps({
     "country": country,
     "country_status": country_status,
+    "external_ipv4": external_ipv4,
     "latency_ms": latencies,
     "openai_statuses": statuses,
     "openai_probe": "succeeded" if all(item in (200, 401) for item in statuses) and not unsupported else "failed",
@@ -102,6 +109,13 @@ def collect(alias: str, node: dict[str, str], operator_dir: str, ssh_user: str) 
     except json.JSONDecodeError as exc:
         raise ContractError(f"{alias} returned invalid probe JSON") from exc
     result["alias"] = alias
+    try:
+        external = ipaddress.ip_address(str(result.get("external_ipv4") or ""))
+    except ValueError as exc:
+        raise ContractError(f"{alias} returned no valid external IPv4") from exc
+    if external.version != 4 or not external.is_global:
+        raise ContractError(f"{alias} returned no public external IPv4")
+    result["external_ipv4"] = str(external)
     return result
 
 

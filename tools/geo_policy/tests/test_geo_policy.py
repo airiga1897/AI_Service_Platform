@@ -235,6 +235,7 @@ class RankingTests(unittest.TestCase):
             return {
                 "alias": alias,
                 "country": country,
+                "external_ipv4": f"8.8.8.{len(alias)}",
                 "openai_supported_country": country != "RU",
                 "openai_probe": probe,
                 "latency_ms": [latency] * 5,
@@ -255,12 +256,24 @@ class RankingTests(unittest.TestCase):
         result = rank_candidates({"candidates": [{
             "alias": "vps1",
             "country": "NL",
+            "external_ipv4": "8.8.4.4",
             "openai_supported_country": True,
             "openai_probe": "succeeded",
             "latency_ms": [20] * 5,
         }]})
         self.assertEqual([item["alias"] for item in result["paths"]], ["vps1"])
         self.assertEqual(result["redundancy"], "unavailable")
+
+    def test_rejects_candidate_without_public_external_ipv4(self) -> None:
+        with self.assertRaisesRegex(ContractError, "public external_ipv4"):
+            rank_candidates({"candidates": [{
+                "alias": "vps1",
+                "country": "NL",
+                "external_ipv4": "10.0.0.1",
+                "openai_supported_country": True,
+                "openai_probe": "succeeded",
+                "latency_ms": [20] * 5,
+            }]})
 
 
 class TransportSecretTests(unittest.TestCase):
