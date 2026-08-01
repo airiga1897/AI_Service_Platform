@@ -201,7 +201,10 @@ class DeploymentContractTests(unittest.TestCase):
             public,
         )
         self.assertIn("MINI_APP_RECONCILE_SECONDS=300", public)
-        self.assertIn("MINI_APP_ADMIN_EMAILS=", public)
+        self.assertNotIn("MINI_APP_ADMIN_EMAILS=", public)
+        self.assertIn("CACHE_URL=redis://127.0.0.1:6379/0", public)
+        self.assertIn("DB_CONN_MAX_AGE=300", public)
+        self.assertIn("MINI_APP_DISCOVERY_SECONDS=21600", public)
 
     def test_remote_script_has_valid_bash_syntax(self) -> None:
         if os.name == "nt":
@@ -234,6 +237,9 @@ class DeploymentContractTests(unittest.TestCase):
             "platform route container is missing",
             "socket.create_connection(('172.30.8.10', 5432), 5)",
             "up -d mycleanbot-route",
+            "mycleanbot-redis",
+            "Django cache roundtrip failed",
+            "must not publish a host port",
         ):
             self.assertIn(required, text)
         self.assertNotIn("ssh-keyscan", text)
