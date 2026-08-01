@@ -322,6 +322,7 @@
             transport_networks.append({
                 "compose_name": compose_network_name("l3_transport", suffix),
                 "name": l3_network_name,
+                "subnet": str(l3_network_subnet),
                 "container_ipv4": str(transport_ipv4),
             })
         if transport_network_enabled and runtime_mode != "platform_router_sidecar" and next_hop_ipv4 not in l3_network_subnet:
@@ -988,6 +989,48 @@
   when:
     - platform_router_state == 'present'
     - not ansible_check_mode
+
+- name: Ensure platform_router external Docker networks exist
+  ansible.builtin.shell: |
+    set -euo pipefail
+    name="{{ item.name }}"
+    subnet="{{ item.subnet }}"
+    current="$(docker network inspect -f {% raw %}'{{ (index .IPAM.Config 0).Subnet }}'{% endraw %} "$name" 2>/dev/null || true)"
+    if [ -n "$current" ] && [ "$current" != "$subnet" ]; then
+      echo "platform_router external Docker network $name has subnet $current; expected $subnet" >&2
+      exit 1
+    fi
+    if [ -z "$current" ]; then
+      if [ "$MODE" = "check" ]; then
+        echo "platform_router external Docker network creation planned: $name ($subnet)"
+      else
+        docker network create --subnet "$subnet" "$name" >/dev/null
+        echo "created platform_router external Docker network: $name ($subnet)"
+      fi
+    else
+      echo "platform_router external Docker network accepted: $name ($subnet)"
+    fi
+  args:
+    executable: /bin/bash
+  environment:
+    MODE: "{{ ansible_check_mode | ternary('check', 'apply') }}"
+  loop: "{{ (platform_router_model.transport_networks | default([])) + (platform_router_model.management_networks | default([])) }}"
+  register: platform_router_external_networks
+  check_mode: false
+  changed_when: >
+    (platform_router_external_networks.stdout | default(''))
+    is search('created platform_router external Docker network')
+  when:
+    - platform_router_state == 'present'
+    - ((platform_router_model.transport_networks | default([])) + (platform_router_model.management_networks | default([]))) | length > 0
+
+- name: Show safe platform_router external network preflight
+  ansible.builtin.debug:
+    msg: "{{ platform_router_external_networks.results | default([]) | map(attribute='stdout') | list }}"
+  when:
+    - platform_router_state == 'present'
+    - ansible_check_mode
+    - ((platform_router_model.transport_networks | default([])) + (platform_router_model.management_networks | default([]))) | length > 0
 
 - name: Build platform_router SoftEther runtime image on orchestration controller
   ansible.builtin.shell: |

@@ -194,6 +194,16 @@ class PlatformRouterRouteContractTests(unittest.TestCase):
         self.assertIn("unique_networks(transport_networks", tasks)
         self.assertIn("dhcp_enabled must be boolean", tasks)
 
+    def test_sidecar_external_networks_are_checked_before_compose(self) -> None:
+        tasks = PLATFORM_ROUTER_TASKS.read_text(encoding="utf-8")
+
+        self.assertIn('"subnet": str(l3_network_subnet)', tasks)
+        self.assertIn("Ensure platform_router external Docker networks exist", tasks)
+        self.assertIn('docker network create --subnet "$subnet" "$name"', tasks)
+        self.assertIn("external Docker network creation planned", tasks)
+        self.assertIn("has subnet $current; expected $subnet", tasks)
+        self.assertIn("Show safe platform_router external network preflight", tasks)
+
     def test_client_configuration_reports_only_safe_failure_phase(self) -> None:
         tasks = PLATFORM_ROUTER_TASKS.read_text(encoding="utf-8")
 

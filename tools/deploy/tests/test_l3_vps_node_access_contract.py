@@ -17,6 +17,7 @@ class L3VpnNodeAccessContractTests(unittest.TestCase):
                 {
                     "compose_name": "l3_transport_node1",
                     "name": "ai_service_softether_l3_vps_node1_transport",
+                    "subnet": "172.27.1.0/24",
                     "container_ipv4": "172.27.1.2",
                 }
             ],
@@ -24,6 +25,7 @@ class L3VpnNodeAccessContractTests(unittest.TestCase):
                 {
                     "compose_name": "l3_mgmt_node1",
                     "name": "ai_service_softether_l3_vps_node1_mgmt",
+                    "subnet": "172.29.1.0/24",
                     "container_ipv4": "172.29.1.2",
                 }
             ],
