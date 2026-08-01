@@ -1786,11 +1786,31 @@
     - platform_router_state == 'present'
     - not ansible_check_mode
 
+- name: Check live platform_router host marked routes before reconciliation
+  ansible.builtin.shell: |
+    set -euo pipefail
+    {% for path in platform_router_model.egress_paths | default([]) %}
+    {% if path.role == "source" %}
+    ip -4 rule show | grep -F "fwmark {{ path.route_mark }} lookup {{ path.route_table }}" >/dev/null
+    ip -4 route show table "{{ path.route_table }}" | grep -F "default via {{ path.gateway_ipv4 }}" >/dev/null
+    ip -4 route get 1.1.1.1 mark "{{ path.route_mark_decimal }}" | grep -F "via {{ path.gateway_ipv4 }}" >/dev/null
+    {% endif %}
+    {% endfor %}
+  args:
+    executable: /bin/bash
+  register: platform_router_host_routes_live
+  changed_when: false
+  failed_when: false
+  when:
+    - platform_router_state == 'present'
+    - (platform_router_model.egress_paths | default([]) | selectattr('role', 'equalto', 'source') | list | length) > 0
+    - not ansible_check_mode
+
 - name: Enable persistent platform_router host marked routes
   ansible.builtin.systemd:
     name: "{{ platform_router_host_routes_service }}"
     enabled: true
-    state: "{{ (platform_router_host_routes_template.changed | default(false)) | ternary('restarted', 'started') }}"
+    state: "{{ ((platform_router_host_routes_template.changed | default(false)) or ((platform_router_host_routes_live.rc | default(1)) != 0)) | ternary('restarted', 'started') }}"
   when:
     - platform_router_state == 'present'
     - (platform_router_model.egress_paths | default([]) | selectattr('role', 'equalto', 'source') | list | length) > 0
