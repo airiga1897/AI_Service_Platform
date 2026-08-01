@@ -66,6 +66,19 @@ class ServiceContractTests(unittest.TestCase):
         self.assertNotIn('"$root/tools/geo_policy/runtime.py" reconcile', refresh)
         self.assertIn("/usr/bin/flock", service)
 
+    def test_operator_dataset_refresh_retries_transport_and_has_ripe_fallback(self) -> None:
+        refresh = text("tools/geo_policy/refresh_dataset.ps1")
+
+        self.assertIn("function Invoke-GeoPolicyDownload", refresh)
+        self.assertIn("--retry 3", refresh)
+        self.assertIn("--fail", refresh)
+        self.assertIn("[Net.SecurityProtocolType]::Tls12", refresh)
+        self.assertIn(
+            "https://ftp.ripe.net/ripe/stats/delegated-ripencc-extended-latest",
+            refresh,
+        )
+        self.assertIn("returned an empty file", refresh)
+
     def test_absent_removes_policy_but_preserves_transport_contract(self) -> None:
         role = text("infra/ansible/roles/geo_policy/tasks/main.yml")
         runtime = text("tools/geo_policy/runtime.py")
