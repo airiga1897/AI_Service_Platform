@@ -9,6 +9,8 @@ PLATFORM_ROUTER_TASKS = (
     ROOT / "infra" / "ansible" / "roles" / "platform_router" / "tasks" / "main.yml"
 )
 PLATFORM_ROUTER_CONFIG = ROOT / "operator" / "platform_router" / "config.yml"
+SERVICE_RUNNER = ROOT / "tools" / "services" / "service.sh"
+REMOTE_RUNNER = ROOT / "tools" / "services" / "service_remote.ps1"
 HOST_ROUTE_TEMPLATE = (
     ROOT
     / "infra"
@@ -121,6 +123,17 @@ class PlatformRouterRouteContractTests(unittest.TestCase):
         self.assertEqual(len({item["subnet"] for item in links}), 3)
         self.assertFalse(example["defaults"]["dhcp_enabled"])
         self.assertEqual(example["defaults"]["access_mode"], "routed_tap")
+
+    def test_canary_cli_supports_cumulative_egress_path_selection(self) -> None:
+        tasks = PLATFORM_ROUTER_TASKS.read_text(encoding="utf-8")
+        service = SERVICE_RUNNER.read_text(encoding="utf-8")
+        remote = REMOTE_RUNNER.read_text(encoding="utf-8")
+
+        self.assertIn("platform_router_egress_path_aliases", tasks)
+        self.assertIn('os.environ.get("EGRESS_PATH_ALIASES", "")', tasks)
+        self.assertIn("unknown platform_router egress aliases", tasks)
+        self.assertIn("--platform-router-egress-paths", service)
+        self.assertIn("PlatformRouterEgressPaths", remote)
 
     def test_host_and_router_tables_use_the_same_mark_contract(self) -> None:
         host = HOST_ROUTE_TEMPLATE.read_text(encoding="utf-8")

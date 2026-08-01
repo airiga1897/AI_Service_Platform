@@ -101,6 +101,24 @@ otherwise it selects the first path. Removing an alias therefore requires a
 green replacement preflight, and rollback to that removed alias requires
 temporarily restoring its accepted path contract.
 
+The shared VPS3 namespace is rolled out cumulatively. The path selector grows,
+while each remote target is limited independently:
+
+```powershell
+.\tools\services\service_remote.ps1 platform_router apply `
+  -Limit vps1,vps3 -PlatformRouterEgressPaths vps1 -Check
+
+.\tools\services\service_remote.ps1 platform_router apply `
+  -Limit vps2,vps3 -PlatformRouterEgressPaths vps1+vps2 -Check
+
+.\tools\services\service_remote.ps1 platform_router apply `
+  -Limit vps4,vps3 -PlatformRouterEgressPaths vps1+vps2+vps4 -Check
+```
+
+Each real apply uses the same limit and cumulative selector only after its
+matching check is accepted. Omitting the selector means all configured paths
+and is reserved for final steady-state reconciliation.
+
 ## Acceptance sequence
 
 First run only:

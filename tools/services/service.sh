@@ -25,6 +25,7 @@ POLICY_ROUTER_IMAGE_REF=""
 BUILD_POLICY_ROUTER_IMAGE="false"
 REINIT_STANDBY="false"
 PLATFORM_ROUTER_SOFTETHER_DEBUG="false"
+PLATFORM_ROUTER_EGRESS_PATHS=""
 GEO_POLICY_ACTIVE_PATH="auto"
 CHECK="false"
 SITE_RUNTIME_LOCK_HELD="false"
@@ -122,6 +123,8 @@ Options:
   --reinit-standby      postgres_runtime only: destructively reinitialize a target standby volume from primary.
   --platform-router-softether-debug
                         platform_router only: show SoftEther server configure task output for diagnostics.
+  --platform-router-egress-paths ALIAS[+ALIAS...]
+                        platform_router only: cumulative egress aliases to reconcile for a canary rollout.
   --geo-policy-active-path PATH
                         geo_policy only: explicit configured egress alias. Default: auto.
   --check                Pass --check to ansible-playbook.
@@ -328,6 +331,9 @@ service_extra_vars() {
             ;;
         platform_router)
             printf '%s\n' "-e" "platform_router_state=$state" "-e" "platform_router_purge_data=$purge"
+            if [ -n "$PLATFORM_ROUTER_EGRESS_PATHS" ]; then
+                printf '%s\n' "-e" "platform_router_egress_path_aliases=$PLATFORM_ROUTER_EGRESS_PATHS"
+            fi
             if [ "$PLATFORM_ROUTER_SOFTETHER_DEBUG" = "true" ]; then
                 printf '%s\n' "-e" "platform_router_softether_debug_no_log=false"
             fi
@@ -539,6 +545,10 @@ while [ "$#" -gt 0 ]; do
             PLATFORM_ROUTER_SOFTETHER_DEBUG="true"
             shift
             ;;
+        --platform-router-egress-paths)
+            PLATFORM_ROUTER_EGRESS_PATHS="${2:-}"
+            shift 2
+            ;;
         --geo-policy-active-path)
             GEO_POLICY_ACTIVE_PATH="${2:-}"
             shift 2
@@ -634,6 +644,11 @@ if [ "$REINIT_STANDBY" = "true" ] && [ -z "$LIMIT" ]; then
 fi
 if [ "$PLATFORM_ROUTER_SOFTETHER_DEBUG" = "true" ] && [ "$SERVICE" != "platform_router" ]; then
     fail "--platform-router-softether-debug is supported only for service platform_router"
+fi
+if [ -n "$PLATFORM_ROUTER_EGRESS_PATHS" ]; then
+    [ "$SERVICE" = "platform_router" ] || fail "--platform-router-egress-paths is supported only for service platform_router"
+    printf '%s' "$PLATFORM_ROUTER_EGRESS_PATHS" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]*(\+[A-Za-z0-9][A-Za-z0-9_.-]*)*$' || \
+        fail "--platform-router-egress-paths must be a plus-separated list of safe aliases"
 fi
 if [ "$BUILD_POLICY_ROUTER_IMAGE" = "true" ] && [ -n "$POLICY_ROUTER_IMAGE_REF" ]; then
     fail "--build-policy-router-image and --policy-router-image-ref are mutually exclusive"

@@ -80,6 +80,9 @@ param(
 
     [switch]$PlatformRouterSoftetherDebug,
 
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*(\+[A-Za-z0-9][A-Za-z0-9_.-]*)*$')]
+    [string]$PlatformRouterEgressPaths = "",
+
     [ValidatePattern('^(auto|[A-Za-z0-9][A-Za-z0-9_.-]*)$')]
     [string]$GeoPolicyActivePath = "auto",
 
@@ -434,6 +437,13 @@ function Read-BatchPlan($Path) {
         if ([bool]$step.platform_router_softether_debug -and $step.service -ne "platform_router") {
             Fail "BatchPlanFile step $index uses platform_router_softether_debug outside platform_router"
         }
+        $platformRouterEgressPaths = [string]$step.platform_router_egress_paths
+        if ($platformRouterEgressPaths -and $step.service -ne "platform_router") {
+            Fail "BatchPlanFile step $index uses platform_router_egress_paths outside platform_router"
+        }
+        if ($platformRouterEgressPaths -and $platformRouterEgressPaths -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*(\+[A-Za-z0-9][A-Za-z0-9_.-]*)*$') {
+            Fail "BatchPlanFile step ${index}: platform_router_egress_paths must be a plus-separated list of safe aliases"
+        }
         $geoPolicyActivePath = [string]$step.geo_policy_active_path
         if (-not $geoPolicyActivePath) { $geoPolicyActivePath = "auto" }
         if ($step.service -eq "geo_policy" -and $geoPolicyActivePath -notmatch '^(auto|[A-Za-z0-9][A-Za-z0-9_.-]*)$') {
@@ -455,6 +465,7 @@ function Read-BatchPlan($Path) {
             ConfirmPurge = [bool]$step.confirm_purge
             ReinitStandby = [bool]$step.reinit_standby
             PlatformRouterSoftetherDebug = [bool]$step.platform_router_softether_debug
+            PlatformRouterEgressPaths = $platformRouterEgressPaths
             GeoPolicyActivePath = $geoPolicyActivePath
             Label = $label
         }) | Out-Null
@@ -493,6 +504,9 @@ function New-ServiceCommand($Step, $RemoteRepoDir, $RemoteNodesFile, $RemoteStat
     if ($Step.ConfirmPurge) { $args += "--confirm-purge" }
     if ($Step.ReinitStandby) { $args += "--reinit-standby" }
     if ($Step.PlatformRouterSoftetherDebug) { $args += "--platform-router-softether-debug" }
+    if ($Step.PlatformRouterEgressPaths) {
+        $args += @("--platform-router-egress-paths", (Quote-BashArg $Step.PlatformRouterEgressPaths))
+    }
     if ($Step.Service -eq "geo_policy") {
         $args += @("--geo-policy-active-path", (Quote-BashArg $Step.GeoPolicyActivePath))
     }
@@ -737,6 +751,9 @@ if ($ReinitStandby) {
 if ($PlatformRouterSoftetherDebug -and $Service -ne "platform_router") {
     Fail "-PlatformRouterSoftetherDebug is supported only for service platform_router"
 }
+if ($PlatformRouterEgressPaths -and $Service -ne "platform_router") {
+    Fail "-PlatformRouterEgressPaths is supported only for service platform_router"
+}
 if ($GeoPolicyActivePath -ne "auto" -and $Service -ne "geo_policy") {
     Fail "-GeoPolicyActivePath is supported only for service geo_policy"
 }
@@ -936,6 +953,7 @@ if ($isBatch) {
         ConfirmPurge = [bool]$ConfirmPurge
         ReinitStandby = [bool]$ReinitStandby
         PlatformRouterSoftetherDebug = [bool]$PlatformRouterSoftetherDebug
+        PlatformRouterEgressPaths = $PlatformRouterEgressPaths
         GeoPolicyActivePath = $GeoPolicyActivePath
         PolicyRouterImageRef = $PolicyRouterImageRef
         BuildPolicyRouterImage = [bool]$BuildPolicyRouterImage
@@ -1080,6 +1098,7 @@ $remoteServiceDisplay = if ($isBatch) { "batch plan: $($batchSteps.Count) steps"
     if ($ConfirmPurge) { $remoteServiceDisplayArgs += "--confirm-purge" }
     if ($ReinitStandby) { $remoteServiceDisplayArgs += "--reinit-standby" }
     if ($PlatformRouterSoftetherDebug) { $remoteServiceDisplayArgs += "--platform-router-softether-debug" }
+    if ($PlatformRouterEgressPaths) { $remoteServiceDisplayArgs += @("--platform-router-egress-paths", $PlatformRouterEgressPaths) }
     if ($Service -eq "geo_policy") { $remoteServiceDisplayArgs += @("--geo-policy-active-path", $GeoPolicyActivePath) }
     $remoteServiceDisplayArgs -join " "
 }

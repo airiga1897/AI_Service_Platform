@@ -1,6 +1,7 @@
 ---
 platform_router_state: present
 platform_router_purge_data: false
+platform_router_egress_path_aliases: ""
 
 platform_router_operator_config_file: "{{ playbook_dir }}/../../operator/platform_router/config.yml"
 platform_router_operator_platform_networks_file: "{{ playbook_dir }}/../../operator/platform_networks/networks.yml"

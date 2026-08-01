@@ -121,10 +121,37 @@
         item for item in (load_yaml(l3_links_file).get("links") or [])
         if str(item.get("state", "present")).lower() == "present"
     ]
-    configured_egress_paths = [
+    all_configured_egress_paths = [
         item for item in (config.get("egress_paths") or [])
         if str(item.get("state", "present")).lower() == "present"
     ]
+    requested_egress_aliases = [
+        item for item in os.environ.get("EGRESS_PATH_ALIASES", "").split("+")
+        if item
+    ]
+    all_egress_aliases = {
+        str(item.get("alias") or "").strip()
+        for item in all_configured_egress_paths
+    }
+    unknown_egress_aliases = set(requested_egress_aliases) - all_egress_aliases
+    if unknown_egress_aliases:
+        fail(
+            "unknown platform_router egress aliases: "
+            + ", ".join(sorted(unknown_egress_aliases))
+        )
+    configured_egress_paths = [
+        item for item in all_configured_egress_paths
+        if not requested_egress_aliases
+        or str(item.get("alias") or "").strip() in requested_egress_aliases
+    ]
+    selected_egress_links = {
+        str(item.get("l3_vps_link") or "").strip()
+        for item in configured_egress_paths
+    }
+    all_egress_links = {
+        str(item.get("l3_vps_link") or "").strip()
+        for item in all_configured_egress_paths
+    }
 
     def parse_mark(value, label):
         try:
@@ -140,7 +167,7 @@
     seen_egress_tables = set()
     seen_egress_links = set()
     seen_egress_subnets = set()
-    for item in configured_egress_paths:
+    for item in all_configured_egress_paths:
         path_alias = str(item.get("alias") or "").strip()
         link_name = str(item.get("l3_vps_link") or "").strip()
         source_alias = str(item.get("source_alias") or "").strip()
@@ -172,6 +199,10 @@
     selected = [
         link for link in (config.get("links") or [])
         if str(link.get("state", "present")).lower() == "present"
+        and (
+            str(link.get("l3_vps_link") or link.get("name") or "") not in all_egress_links
+            or str(link.get("l3_vps_link") or link.get("name") or "") in selected_egress_links
+        )
         and alias in (
             {str(link.get("source_alias") or ""), str(link.get("target_alias") or "")}
             | {str(item) for item in (link.get("source_aliases") or [])}
@@ -666,6 +697,7 @@
     PLATFORM_NETWORKS_FILE: "{{ platform_router_operator_platform_networks_file }}"
     L3_LINKS_FILE: "{{ platform_router_operator_l3_vps_links_file }}"
     L3_SECRETS_DIR: "{{ platform_router_operator_l3_vps_secrets_dir }}"
+    EGRESS_PATH_ALIASES: "{{ platform_router_egress_path_aliases | default('') }}"
     DEFAULT_CONTAINER_NAME: "{{ platform_router_container_name }}"
     SOFTETHER_CLIENT_IMAGE: "{{ platform_router_softether_client_image }}"
     SOFTETHER_CLIENT_CONTAINER: "{{ platform_router_softether_client_container_name }}"
