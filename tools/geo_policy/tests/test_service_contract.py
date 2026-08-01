@@ -51,6 +51,9 @@ class ServiceContractTests(unittest.TestCase):
         self.assertIn("Run mutation-free GeoPolicy runtime preflight", role)
         self.assertIn("changed_when: false", role)
         self.assertIn("Global IPv6 bypass detected", role)
+        self.assertIn("ipaddress.ip_address", role)
+        self.assertIn("parsed.is_global", role)
+        self.assertNotIn("grep -Eq '[0-9a-fA-F:]'", role)
         self.assertIn("--transport-receipt", role)
         self.assertIn("not ansible_check_mode", role)
 

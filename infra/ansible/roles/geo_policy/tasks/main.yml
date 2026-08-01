@@ -122,11 +122,31 @@
             print(item)
         PY
           docker inspect "$container" >/dev/null
-          if docker inspect "$container" --format '{{ "{{" }}range .NetworkSettings.Networks{{ "}}" }}{{ "{{" }}.GlobalIPv6Address{{ "}}" }}{{ "{{" }}end{{ "}}" }}' |
-             grep -Eq '[0-9a-fA-F:]'; then
-            echo "Global IPv6 bypass detected in $container" >&2
-            exit 1
-          fi
+          networks_json="$(docker inspect "$container" --format '{{ "{{" }}json .NetworkSettings.Networks{{ "}}" }}')"
+          python3 - "$container" "$networks_json" <<'PY'
+        import ipaddress
+        import json
+        import sys
+
+        container = sys.argv[1]
+        networks = json.loads(sys.argv[2])
+        for network_name, details in networks.items():
+            address = str(details.get("GlobalIPv6Address") or "").strip()
+            if not address:
+                continue
+            try:
+                parsed = ipaddress.ip_address(address.split("%", 1)[0])
+            except ValueError as exc:
+                raise SystemExit(
+                    f"Invalid IPv6 address reported by Docker for "
+                    f"{container}/{network_name}: {address}"
+                ) from exc
+            if parsed.version == 6 and parsed.is_global:
+                raise SystemExit(
+                    f"Global IPv6 bypass detected in "
+                    f"{container}/{network_name}: {address}"
+                )
+        PY
         done
       args:
         executable: /bin/bash
