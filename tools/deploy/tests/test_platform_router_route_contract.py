@@ -134,6 +134,9 @@ class PlatformRouterRouteContractTests(unittest.TestCase):
         self.assertIn("unknown platform_router egress aliases", tasks)
         self.assertIn("--platform-router-egress-paths", service)
         self.assertIn("PlatformRouterEgressPaths", remote)
+        self.assertIn("Show safe platform_router preflight contract", tasks)
+        self.assertIn("check_mode_mutations: false", tasks)
+        self.assertIn("receipt_written: false", tasks)
 
     def test_host_and_router_tables_use_the_same_mark_contract(self) -> None:
         host = HOST_ROUTE_TEMPLATE.read_text(encoding="utf-8")

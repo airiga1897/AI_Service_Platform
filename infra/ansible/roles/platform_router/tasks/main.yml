@@ -720,6 +720,41 @@
     platform_router_model: "{{ platform_router_model_command.stdout | from_json }}"
   when: platform_router_state == 'present'
 
+- name: Accept cumulative platform_router egress selector
+  ansible.builtin.assert:
+    that:
+      - >-
+        (
+          platform_router_model.egress_paths
+          | default([])
+          | map(attribute='alias')
+          | reject('in', platform_router_egress_path_aliases.split('+'))
+          | list
+          | length
+        ) == 0
+    fail_msg: "Resolved platform_router model contains an egress path outside the cumulative selector."
+  when:
+    - platform_router_state == 'present'
+    - platform_router_egress_path_aliases | default('') | length > 0
+
+- name: Show safe platform_router preflight contract
+  ansible.builtin.debug:
+    msg:
+      action: platform-router
+      alias: "{{ inventory_hostname }}"
+      check_mode: "{{ ansible_check_mode | bool }}"
+      check_mode_mutations: false
+      runtime_mutations: false
+      receipt_written: false
+      cumulative_selector: "{{ platform_router_egress_path_aliases | default('') }}"
+      egress_paths: "{{ platform_router_model.egress_paths | default([]) }}"
+      softether_clients: "{{ platform_router_model.softether_clients | default([]) | map(attribute='name') | list }}"
+      softether_hubs: "{{ platform_router_model.softether_servers | default([]) | map(attribute='hub') | list }}"
+      existing_policy_links: "{{ platform_router_model.policies | default([]) | map(attribute='link_name') | unique | list }}"
+  when:
+    - platform_router_state == 'present'
+    - ansible_check_mode
+
 - name: Validate platform_router SoftEther client secret presence
   ansible.builtin.shell: |
     set -euo pipefail
