@@ -3,6 +3,16 @@
 Приватный Telegram self-filter разворачивается на VPS1 двумя процессами одного
 immutable-образа: `mycleanbot-web` и `mycleanbot-worker`.
 
+Platform-owned `mycleanbot-redis` служит только для Django cache и cached DB
+sessions. Он использует pinned immutable image, разделяет network namespace с
+`mycleanbot-route`, слушает только `127.0.0.1:6379`, не публикует порт и не имеет
+volume. Persistence отключён, память ограничена 64 MB с `allkeys-lru`; Redis не
+входит в backup. Долговечные session rows и все application data остаются в
+PostgreSQL, поэтому потеря Redis приводит только к cache miss.
+Контейнер сразу запускается как штатный непривилегированный пользователь
+`999:1000`; это сохраняет `cap_drop: ALL` и не требует `SETUID`/`SETGID` для
+перехода с root внутри entrypoint.
+
 Оба процесса разделяют network namespace platform-owned контейнера
 `mycleanbot-route`. Он использует локальный image уже принятого
 `platform-router`, подключается к `ai_service_app_vps1` с адресом
@@ -89,6 +99,8 @@ image, принимает TLS на `172.31.1.11:443` внутри `ai_service_ap
 разрешает только routed-hub source `10.89.1.0/24` и проксирует к
 `mycleanbot-route` `172.31.1.10:8000` через локальную app-сеть.
 Public ingress для instance запрещён validator'ом.
+Ingress использует HTTP/2, keepalive к backend и ограниченный ephemeral cache
+только для `/static/`; авторизованные HTML/API responses не кэшируются Nginx.
 
 Роль `mycleanbot_vpn_access` не создаёт сертификат или L3 hub и не меняет VPS
 без `mycleanbot_vpn_access_change_approved=true`. До apply оператор должен по
@@ -104,7 +116,8 @@ platform-wide monitoring, а не в отдельный monitoring stack про�
 `mycleanbot_remote.sh` сериализует операции через `flock`, требует успешный
 pre-migration backup, использует временный Docker config и принимает только
 `ghcr.io/airiga1897/mycleanbot@sha256:<64 hex>`. После успешных `/livez`,
-`/healthz` и heartbeat checks он атомарно обновляет `.deploy-state/current` и
+`/healthz`, heartbeat, Redis health/PING и Django cache roundtrip checks он
+атомарно обновляет `.deploy-state/current` и
 `.deploy-state/previous`.
 
 Rollback повторно принимает только digest. Для первого rollout специальная цель

@@ -65,7 +65,12 @@ class RenderHappyPathTests(unittest.TestCase):
         doc = yaml.safe_load(render_stack("mycleanbot", REGISTRY))
         self.assertEqual(
             set(doc["services"]),
-            {"mycleanbot-route", "mycleanbot-web", "mycleanbot-worker"},
+            {
+                "mycleanbot-route",
+                "mycleanbot-redis",
+                "mycleanbot-web",
+                "mycleanbot-worker",
+            },
         )
         self.assertNotIn("postgres", str(doc).lower())
         route = doc["services"]["mycleanbot-route"]
@@ -89,6 +94,15 @@ class RenderHappyPathTests(unittest.TestCase):
             ["python", "manage.py", "run_telegram_worker"],
         )
         self.assertNotIn("ports", doc["services"]["mycleanbot-worker"])
+        redis = doc["services"]["mycleanbot-redis"]
+        self.assertEqual(redis["user"], "999:1000")
+        self.assertEqual(redis["network_mode"], "service:mycleanbot-route")
+        self.assertNotIn("ports", redis)
+        self.assertNotIn("volumes", redis)
+        self.assertTrue(redis["read_only"])
+        self.assertIn("--appendonly", redis["command"])
+        self.assertIn("no", redis["command"])
+        self.assertEqual(redis["mem_limit"], "96m")
         self.assertEqual(
             doc["services"]["mycleanbot-web"]["env_file"],
             ["./mycleanbot.env", "../../.env.mycleanbot.secrets"],

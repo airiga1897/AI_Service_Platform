@@ -208,6 +208,21 @@ def _build_context(
             "containers.future[*-route]",
             instance_name,
         )
+        cache = data.get("cache") or {}
+        ctx["redis_name_service"] = _required(
+            _container_with_suffix(containers_future, "redis"),
+            "containers.future[*-redis]",
+            instance_name,
+        )
+        ctx["redis_image"] = _required(
+            cache.get("image"), "data.cache.image", instance_name
+        )
+        ctx["redis_maxmemory"] = _required(
+            cache.get("maxmemory"), "data.cache.maxmemory", instance_name
+        )
+        ctx["redis_policy"] = _required(
+            cache.get("policy"), "data.cache.policy", instance_name
+        )
         ctx["app_network"] = _required(
             postgres.get("app_network"),
             "data.postgres.app_network",

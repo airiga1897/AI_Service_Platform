@@ -30,7 +30,8 @@ services:
       - ./mycleanbot.env
       - ../../.env.mycleanbot.secrets
     depends_on:
-      - mycleanbot-route
+      mycleanbot-redis:
+        condition: service_healthy
     healthcheck:
       test:
         - CMD
@@ -51,7 +52,8 @@ services:
       - ./mycleanbot.env
       - ../../.env.mycleanbot.secrets
     depends_on:
-      - mycleanbot-route
+      mycleanbot-redis:
+        condition: service_healthy
     healthcheck:
       test:
         - CMD
@@ -62,6 +64,44 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+    restart: unless-stopped
+
+  mycleanbot-redis:
+    image: docker.io/library/redis@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+    user: "999:1000"
+    network_mode: service:mycleanbot-route
+    command:
+      - redis-server
+      - --bind
+      - 127.0.0.1
+      - --protected-mode
+      - "yes"
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 64mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --dir
+      - /tmp
+    depends_on:
+      - mycleanbot-route
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 96m
+    pids_limit: 64
+    healthcheck:
+      test: [CMD, redis-cli, -h, 127.0.0.1, ping]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
     restart: unless-stopped
 
 networks:

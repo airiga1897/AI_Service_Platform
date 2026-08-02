@@ -66,10 +66,14 @@ class MyCleanBotVpnAccessContractTests(unittest.TestCase):
         self.assertIn("allow {{ mycleanbot_vpn_access_router_ipv4 }};", nginx)
         self.assertIn("deny all;", nginx)
         self.assertIn(
-            "proxy_pass http://{{ mycleanbot_vpn_access_backend_ipv4 }}:"
+            "server {{ mycleanbot_vpn_access_backend_ipv4 }}:"
             "{{ mycleanbot_vpn_access_backend_port }};",
             nginx,
         )
+        self.assertIn("proxy_pass http://mycleanbot_backend;", nginx)
+        self.assertIn("http2 on;", nginx)
+        self.assertIn("proxy_cache mycleanbot_static;", nginx)
+        self.assertIn('proxy_set_header Connection "";', nginx)
         self.assertNotIn("0.0.0.0", nginx)
 
     def test_role_requires_approval_existing_network_and_tls(self) -> None:

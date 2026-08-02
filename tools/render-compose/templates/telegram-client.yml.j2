@@ -30,7 +30,8 @@ services:
       - ./<< public_env_file >>
       - ../../<< env_file >>
     depends_on:
-      - << route_name >>
+      << redis_name_service >>:
+        condition: service_healthy
     healthcheck:
       test:
         - CMD
@@ -51,7 +52,8 @@ services:
       - ./<< public_env_file >>
       - ../../<< env_file >>
     depends_on:
-      - << route_name >>
+      << redis_name_service >>:
+        condition: service_healthy
     healthcheck:
       test:
         - CMD
@@ -62,6 +64,44 @@ services:
       timeout: << healthcheck_timeout >>s
       retries: 3
       start_period: 60s
+    restart: unless-stopped
+
+  << redis_name_service >>:
+    image: << redis_image >>
+    user: "999:1000"
+    network_mode: service:<< route_name >>
+    command:
+      - redis-server
+      - --bind
+      - 127.0.0.1
+      - --protected-mode
+      - "yes"
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - << redis_maxmemory >>
+      - --maxmemory-policy
+      - << redis_policy >>
+      - --dir
+      - /tmp
+    depends_on:
+      - << route_name >>
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 96m
+    pids_limit: 64
+    healthcheck:
+      test: [CMD, redis-cli, -h, 127.0.0.1, ping]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
     restart: unless-stopped
 
 networks:
