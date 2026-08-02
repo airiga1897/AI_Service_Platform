@@ -128,13 +128,20 @@
                 return True
         return False
 
-    present_routes = [
-        row.get("name")
-        for row in rows
-        if row.get("kind") == "edge_route"
-        and row.get("state") == "present"
-        and alias in split_aliases(row.get("active_aliases"))
-    ]
+    present_routes = []
+    route_states = {}
+    for row in rows:
+        if row.get("kind") != "edge_route" or row.get("state") != "present":
+            continue
+        name = row.get("name")
+        active_aliases = split_aliases(row.get("active_aliases"))
+        candidate_aliases = split_aliases(row.get("candidate_aliases"))
+        if alias in active_aliases:
+            present_routes.append(name)
+            route_states[name] = "active"
+        elif name == "softether_l3_vps" and alias in candidate_aliases:
+            present_routes.append(name)
+            route_states[name] = "candidate"
 
     if present_routes and not present_on("service", "edge_haproxy", alias):
         fail(f"edge_route present on {alias}, but service edge_haproxy is not present on the same alias")
@@ -154,6 +161,7 @@
 
     model = {
         "present_routes": present_routes,
+        "route_states": route_states,
         "vpn_ingress_enabled": False,
         "vpn_cascade_enabled": False,
         "softether_l3_vps_enabled": False,
@@ -388,6 +396,19 @@
 - name: Store edge_haproxy route model
   ansible.builtin.set_fact:
     edge_haproxy_route_model: "{{ edge_haproxy_route_model_command.stdout | trim | from_json }}"
+  when: edge_haproxy_state == 'present'
+
+- name: Show safe edge_haproxy route contract
+  ansible.builtin.debug:
+    msg:
+      action: edge-haproxy
+      alias: "{{ inventory_hostname }}"
+      check_mode: "{{ ansible_check_mode }}"
+      check_mode_mutations: false
+      present_routes: "{{ edge_haproxy_route_model.present_routes }}"
+      route_states: "{{ edge_haproxy_route_model.route_states }}"
+      softether_l3_vps_published: "{{ edge_haproxy_route_model.softether_l3_vps_enabled | default(false) }}"
+  changed_when: false
   when: edge_haproxy_state == 'present'
 
 - name: Select per-node SoftEther L3 backend networks
@@ -883,6 +904,99 @@
   when:
     - edge_haproxy_state == 'present'
     - not ansible_check_mode
+
+- name: Verify edge_haproxy SoftEther L3 backend is UP
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if ! python3 - {{ edge_haproxy_run_dir }}/admin.sock <<'PY'
+    import csv
+    import io
+    import socket
+    import sys
+
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(5)
+    client.connect(sys.argv[1])
+    client.sendall(b"show stat\n")
+    client.shutdown(socket.SHUT_WR)
+    chunks = []
+    while True:
+        chunk = client.recv(65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    client.close()
+    rows = csv.DictReader(io.StringIO(b"".join(chunks).decode("utf-8")))
+    accepted = any(
+        row.get("# pxname") == "be_softether_l3_vps_https"
+        and row.get("svname") == "softether-l3-vps"
+        and row.get("status") == "UP"
+        for row in rows
+    )
+    raise SystemExit(0 if accepted else 1)
+    PY
+    then
+      echo "edge_haproxy acceptance failed: phase=backend_unavailable" >&2
+      exit 1
+    fi
+  args:
+    executable: /bin/bash
+  register: edge_haproxy_softether_l3_backend_ready
+  changed_when: false
+  until: edge_haproxy_softether_l3_backend_ready.rc == 0
+  retries: 15
+  delay: 2
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.softether_l3_vps_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Verify edge_haproxy local SoftEther L3 SNI handshake
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if ! python3 - {{ (edge_haproxy_route_model.softether_l3_vps.sni | first) | quote }} <<'PY'
+    import socket
+    import ssl
+    import sys
+
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    with socket.create_connection(("127.0.0.1", 443), timeout=10) as raw:
+        with context.wrap_socket(raw, server_hostname=sys.argv[1]) as tls:
+            if not tls.version():
+                raise RuntimeError("TLS handshake returned no protocol version")
+    PY
+    then
+      echo "edge_haproxy acceptance failed: phase=local_sni_unavailable" >&2
+      exit 1
+    fi
+  args:
+    executable: /bin/bash
+  register: edge_haproxy_softether_l3_sni_ready
+  changed_when: false
+  until: edge_haproxy_softether_l3_sni_ready.rc == 0
+  retries: 5
+  delay: 2
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.softether_l3_vps_enabled | default(false)
+    - not ansible_check_mode
+
+- name: Show safe edge_haproxy SoftEther L3 acceptance
+  ansible.builtin.debug:
+    msg:
+      action: edge-haproxy
+      alias: "{{ inventory_hostname }}"
+      route: softether_l3_vps
+      route_state: "{{ edge_haproxy_route_model.route_states.softether_l3_vps }}"
+      backend_status: "{{ 'not_checked' if ansible_check_mode else 'up' }}"
+      local_sni_status: "{{ 'not_checked' if ansible_check_mode else 'succeeded' }}"
+      check_mode_mutations: false
+  changed_when: false
+  when:
+    - edge_haproxy_state == 'present'
+    - edge_haproxy_route_model.softether_l3_vps_enabled | default(false)
 
 - name: Verify cascade SNI surface is absent when vpn_cascade route is disabled
   ansible.builtin.shell: |

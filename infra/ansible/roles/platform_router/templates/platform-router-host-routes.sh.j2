@@ -2,41 +2,92 @@
 set -eu
 
 action="${1:-apply}"
-state_dir={{ platform_router_receipt_dir | quote }}
-state_file="$state_dir/host-routes.state"
-mkdir -p "$state_dir"
-chmod 0700 "$state_dir"
+guard_table=ai_sp_source_gateway_guard
 
-if [ -f "$state_file" ]; then
-  while IFS='|' read -r old_mark old_table old_priority; do
-    [ -n "$old_mark" ] || continue
-    while ip rule del fwmark "$old_mark"/0xffffffff table "$old_table" priority "$old_priority" 2>/dev/null; do :; done
-    ip -4 route flush table "$old_table" 2>/dev/null || true
-  done < "$state_file"
-fi
+container_pid() {
+  docker inspect "$1" --format '{{ "{{" }}.State.Pid{{ "}}" }}' 2>/dev/null || true
+}
+
+set_default_route() {
+  container="$1"
+  gateway="$2"
+  pid="$(container_pid "$container")"
+  case "$pid" in
+    ''|0|*[!0-9]*) return 1 ;;
+  esac
+  nsenter --target "$pid" --net ip -4 route replace default via "$gateway"
+}
+
+install_guard() {
+  transaction="$(mktemp /run/platform-router-source-guard.XXXXXX)"
+  trap 'rm -f "$transaction"' EXIT INT TERM
+  if nft list table inet "$guard_table" >/dev/null 2>&1; then
+    printf 'flush table inet %s\n' "$guard_table" > "$transaction"
+  fi
+  cat >> "$transaction" <<'NFT'
+table inet ai_sp_source_gateway_guard {
+  set scoped_sources {
+    type ipv4_addr
+    flags interval
+    elements = {
+{% for gateway in platform_router_model.source_gateways | default([]) %}
+      {{ gateway.source_cidr }},
+{% endfor %}
+    }
+  }
+  set internal_destinations {
+    type ipv4_addr
+    flags interval
+    elements = {
+      0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8,
+      169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24,
+      192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24,
+      203.0.113.0/24, 224.0.0.0/4, 240.0.0.0/4
+    }
+  }
+  chain prevent_direct_public_egress {
+    type filter hook forward priority -5; policy accept;
+    ip saddr @scoped_sources ip daddr @internal_destinations accept
+    ip saddr @scoped_sources drop
+  }
+}
+NFT
+  nft -f "$transaction"
+  rm -f "$transaction"
+  trap - EXIT INT TERM
+}
+
+remove_guard() {
+  nft delete table inet "$guard_table" >/dev/null 2>&1 || true
+}
+
+remove_legacy_host_marks() {
+{% for path in platform_router_model.egress_paths | default([]) %}
+{% if path.role == "source" %}
+  while ip rule del fwmark {{ path.route_mark }}/0xffffffff table {{ path.route_table }} priority {{ path.route_rule_priority }} 2>/dev/null; do :; done
+  ip -4 route flush table {{ path.route_table }} 2>/dev/null || true
+{% endif %}
+{% endfor %}
+}
+
+restore_docker_defaults() {
+{% for gateway in platform_router_model.configured_source_gateways | default([]) %}
+  set_default_route {{ gateway.source_container | quote }} {{ gateway.docker_gateway_ipv4 | quote }} || true
+{% endfor %}
+}
 
 if [ "$action" = "remove" ]; then
-  rm -f "$state_file"
+  restore_docker_defaults
+  remove_guard
+  remove_legacy_host_marks
   exit 0
 fi
 
-temporary="$(mktemp "$state_dir/.host-routes.XXXXXX")"
-trap 'rm -f "$temporary"' EXIT
-
-sysctl -w net.ipv4.conf.all.src_valid_mark=1 >/dev/null
-sysctl -w net.ipv4.conf.all.rp_filter=2 >/dev/null
-sysctl -w net.ipv4.conf.default.rp_filter=2 >/dev/null
-
-{% for path in platform_router_model.egress_paths | default([]) %}
-{% if path.role == "source" %}
-ip -4 route get {{ path.gateway_ipv4 }} >/dev/null
-ip -4 route replace table {{ path.route_table }} default via {{ path.gateway_ipv4 }}
-ip rule add fwmark {{ path.route_mark }}/0xffffffff table {{ path.route_table }} priority {{ path.route_rule_priority }}
-ip -4 route get 1.1.1.1 mark {{ path.route_mark_decimal }} | grep -F "via {{ path.gateway_ipv4 }}" >/dev/null
-printf '%s|%s|%s\n' '{{ path.route_mark }}' '{{ path.route_table }}' '{{ path.route_rule_priority }}' >> "$temporary"
-{% endif %}
+install_guard
+remove_legacy_host_marks
+while true; do
+{% for gateway in platform_router_model.source_gateways | default([]) %}
+  set_default_route {{ gateway.source_container | quote }} {{ gateway.router_ipv4 | quote }} || true
 {% endfor %}
-
-chmod 0600 "$temporary"
-mv -f "$temporary" "$state_file"
-trap - EXIT
+  sleep 2
+done

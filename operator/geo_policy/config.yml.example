@@ -13,7 +13,7 @@ geo_policy:
     site_runtime:
       - 172.31.3.10/32
     vpn_ingress:
-      - 172.20.0.2/32
+      - 172.22.252.2/32
 
   # These ranges always retain the ordinary VPS3 path.
   excluded_destinations:
@@ -80,6 +80,12 @@ geo_policy:
   health:
     probe_network_container: platform-router
     probe_source_ipv4: 172.31.3.2
+    application_probe_container: ai-retail-mvp-web-1
+    application_gateway_container: site-runtime-ai-retail-mvp-anchor
+    application_gateway_ipv4: 172.31.3.2
+    vpn_probe_network_container: softether-edge
+    vpn_probe_source_ipv4: 172.22.252.2
+    vpn_gateway_ipv4: 172.22.252.4
     fail_after: 3
     recover_after: 5
     probe_interval_seconds: 15

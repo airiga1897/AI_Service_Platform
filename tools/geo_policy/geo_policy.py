@@ -275,6 +275,16 @@ def validate_config(document: dict[str, Any], alias: str | None = None) -> GeoPo
         r"[A-Za-z0-9][A-Za-z0-9_.-]*", probe_network_container
     ):
         raise ContractError("health.probe_network_container is invalid")
+    for key in (
+        "application_probe_container",
+        "application_gateway_container",
+        "vpn_probe_network_container",
+    ):
+        value = str(health.get(key) or "").strip()
+        if state == "accepted" and not value:
+            raise ContractError(f"accepted GeoPolicy requires health.{key}")
+        if value and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
+            raise ContractError(f"health.{key} is invalid")
     probe_source_ipv4 = _ipv4_address(
         health.get("probe_source_ipv4"), "health.probe_source_ipv4"
     )
@@ -282,6 +292,25 @@ def validate_config(document: dict[str, Any], alias: str | None = None) -> GeoPo
         raise ContractError(
             "health.probe_source_ipv4 must equal every egress path gateway_ipv4"
         )
+    application_gateway_ipv4 = _ipv4_address(
+        health.get("application_gateway_ipv4"), "health.application_gateway_ipv4"
+    )
+    vpn_probe_source_ipv4 = _ipv4_address(
+        health.get("vpn_probe_source_ipv4"), "health.vpn_probe_source_ipv4"
+    )
+    vpn_gateway_ipv4 = _ipv4_address(
+        health.get("vpn_gateway_ipv4"), "health.vpn_gateway_ipv4"
+    )
+    if str(application_gateway_ipv4) != str(probe_source_ipv4):
+        raise ContractError(
+            "health.application_gateway_ipv4 must equal health.probe_source_ipv4"
+        )
+    if f"{vpn_probe_source_ipv4}/32" not in source_classes.get("vpn_ingress", ()):
+        raise ContractError(
+            "health.vpn_probe_source_ipv4 must belong to vpn_ingress source class"
+        )
+    if vpn_gateway_ipv4 == vpn_probe_source_ipv4:
+        raise ContractError("health.vpn_gateway_ipv4 must differ from VPN source")
     dataset = _require_mapping(policy.get("dataset"), "geo_policy.dataset")
     max_age_hours = int(dataset.get("max_age_hours") or 0)
     if max_age_hours != 72:
@@ -468,7 +497,8 @@ def render_nft(policy: GeoPolicy, ru_cidrs: Iterable[str], active_path: str) -> 
         "  }\n"
         "  chain prerouting {\n"
         "    type filter hook prerouting priority mangle; policy accept;\n"
-        "    ct state established,related meta mark set ct mark\n"
+        "    ct state established,related ip saddr @scoped_sources meta mark set ct mark\n"
+        "    ct state established,related ip daddr @scoped_sources meta mark set 0\n"
         "    ct state new ip saddr @scoped_sources jump classify_new\n"
         "  }\n"
         "}\n"

@@ -3,6 +3,7 @@
   ansible.builtin.assert:
     that:
       - platform_router_state in ['present', 'absent']
+      - platform_router_source_gateway_state in ['preserve', 'enabled', 'disabled']
       - platform_router_purge_data in [true, false, 'true', 'false', 'True', 'False']
       - (platform_router_build_image | default(false)) in [true, false, 'true', 'false', 'True', 'False']
       - (platform_router_softether_runtime_build_image | default(false)) in [true, false, 'true', 'false', 'True', 'False']
@@ -84,6 +85,32 @@
   when:
     - platform_router_state == 'present'
     - platform_router_softether_runtime_build_image | bool
+
+- name: Inspect current platform_router source gateway service state
+  ansible.builtin.shell: |
+    set -euo pipefail
+    systemctl is-active {{ platform_router_host_routes_service | quote }} >/dev/null
+    systemctl show {{ platform_router_host_routes_service | quote }} \
+      --property Environment --value | grep -F 'AI_SP_SOURCE_GATEWAY=1' >/dev/null
+  args:
+    executable: /bin/bash
+  register: platform_router_source_gateway_service_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: platform_router_state == 'present'
+
+- name: Resolve effective platform_router source gateway state
+  ansible.builtin.set_fact:
+    platform_router_effective_source_gateway_state: >-
+      {{
+        (
+          (platform_router_source_gateway_service_state.rc | default(3)) == 0
+        ) | ternary('enabled', 'disabled')
+        if platform_router_source_gateway_state == 'preserve'
+        else platform_router_source_gateway_state
+      }}
+  when: platform_router_state == 'present'
 
 - name: Build platform_router model
   ansible.builtin.shell: |
@@ -350,7 +377,7 @@
             softether_clients.append({
                 "enabled": True,
                 "name": client_name,
-                "container_name": sidecar_value(os.environ["SOFTETHER_CLIENT_CONTAINER"], suffix, "pg48"),
+                "container_name": os.environ["SOFTETHER_CLIENT_CONTAINER"],
                 "image": os.environ["SOFTETHER_CLIENT_IMAGE"],
                 "legacy_container_name": os.environ["LEGACY_SOFTETHER_CLIENT_CONTAINER"],
                 "account_name": sidecar_value(os.environ["SOFTETHER_CLIENT_ACCOUNT"], suffix, "pg48"),
@@ -365,7 +392,7 @@
                 "prefixlen": vpn_subnet.prefixlen,
                 "secret_file": os.path.join(l3_secrets_dir, str(l3_link["name"]) + ".json"),
                 "vpncmd_timeout_seconds": int(os.environ["SOFTETHER_CLIENT_VPNCMD_TIMEOUT_SECONDS"]),
-                "data_dir": sidecar_value("softether_client_data", suffix, "pg48"),
+                "data_dir": "softether_client_data",
             })
 
         if alias == str(link.get("target_alias") or "") and runtime_mode == "platform_router_sidecar":
@@ -627,6 +654,7 @@
             "probe_source_cidr": str(probe_source),
             "transport_source_cidrs": [str(value) for value in transport_source_cidrs],
             "tunnel_next_hop": str(matching_l3["server_ip"]),
+            "tunnel_peer_ipv4": str(matching_l3["client_ip"]),
             "status": "planned",
         }
         if path["route_rule_priority"] > 32765:
@@ -649,6 +677,60 @@
 
     if data_ipv4 is None or app_ipv4 is None:
         fail(f"platform_router {alias} has no data/app router addresses")
+
+    configured_source_gateways = []
+    source_networks = []
+    seen_source_classes = set()
+    seen_source_networks = set()
+    for item in config.get("source_gateways") or []:
+        if str(item.get("state", "present")).lower() != "present":
+            continue
+        if str(item.get("alias") or "") != alias:
+            continue
+        name = str(item.get("name") or "").strip()
+        source_class = str(item.get("source_class") or "").strip()
+        source_container = str(item.get("source_container") or "").strip()
+        network_name = str(item.get("network_name") or "").strip()
+        if not all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value) for value in (
+            name, source_class, source_container, network_name
+        )):
+            fail("platform_router source gateway identifiers are invalid")
+        subnet = ipaddress.ip_network(str(item.get("network_subnet") or ""), strict=True)
+        source_ip = ipaddress.ip_address(str(item.get("source_ipv4") or ""))
+        router_ip = ipaddress.ip_address(str(item.get("router_ipv4") or ""))
+        docker_gateway = ipaddress.ip_address(str(item.get("docker_gateway_ipv4") or ""))
+        if any(value not in subnet for value in (source_ip, router_ip, docker_gateway)):
+            fail(f"platform_router source gateway {name} addresses must be inside {subnet}")
+        if len({source_ip, router_ip, docker_gateway}) != 3:
+            fail(f"platform_router source gateway {name} addresses must be unique")
+        if source_class in seen_source_classes:
+            fail(f"platform_router source gateway class is duplicated: {source_class}")
+        if network_name in seen_source_networks:
+            fail(f"platform_router source gateway network is duplicated: {network_name}")
+        if source_class == "site_runtime" and router_ip != app_ipv4:
+            fail("site_runtime source gateway must use the platform_router app IP")
+        seen_source_classes.add(source_class)
+        seen_source_networks.add(network_name)
+        compose_name = "source_" + source_class.replace("-", "_").replace(".", "_")
+        configured_source_gateways.append({
+            "name": name,
+            "source_class": source_class,
+            "source_container": source_container,
+            "network_name": network_name,
+            "network_subnet": str(subnet),
+            "source_ipv4": str(source_ip),
+            "source_cidr": f"{source_ip}/32",
+            "router_ipv4": str(router_ip),
+            "docker_gateway_ipv4": str(docker_gateway),
+            "compose_name": compose_name,
+        })
+        if os.environ["SOURCE_GATEWAY_STATE"] == "enabled" and router_ip != app_ipv4:
+            source_networks.append({
+                "compose_name": compose_name,
+                "name": network_name,
+                "subnet": str(subnet),
+                "container_ipv4": str(router_ip),
+            })
 
     def unique_networks(values, label):
         result = []
@@ -675,6 +757,19 @@
         "logs_dir": "softether_server_logs",
         "adminip_file": "softether_server_adminip.txt",
     }
+    if len({item["account_name"] for item in softether_clients}) != len(softether_clients):
+        fail(f"platform_router {alias} SoftEther client account names must be unique")
+    if len({item["nic_name"] for item in softether_clients}) != len(softether_clients):
+        fail(f"platform_router {alias} SoftEther client NIC names must be unique")
+    softether_client_runtime = {
+        "enabled": bool(softether_clients),
+        "container_name": os.environ["SOFTETHER_CLIENT_CONTAINER"],
+        "image": os.environ["SOFTETHER_CLIENT_IMAGE"],
+        "legacy_container_name": os.environ["LEGACY_SOFTETHER_CLIENT_CONTAINER"],
+        "data_dir": "softether_client_data",
+        "management_endpoint": "localhost:5555",
+        "account_count": len(softether_clients),
+    }
     softether_client = softether_clients[0] if len(softether_clients) == 1 else {"enabled": False}
     softether_server = softether_server_runtime if softether_servers else {"enabled": False}
     management_network = management_networks[0] if len(management_networks) == 1 else {"enabled": False}
@@ -682,6 +777,9 @@
     transport_network_name = transport_networks[0]["name"] if len(transport_networks) == 1 else ""
     transport_ipv4 = transport_networks[0]["container_ipv4"] if len(transport_networks) == 1 else ""
     next_hop_ipv4 = ""
+
+    source_gateway_enabled = os.environ["SOURCE_GATEWAY_STATE"] == "enabled"
+    source_gateways = configured_source_gateways if source_gateway_enabled else []
 
     model = {
         "alias": alias,
@@ -696,6 +794,10 @@
         "management_network": management_network,
         "transport_networks": transport_networks,
         "management_networks": management_networks,
+        "source_networks": source_networks,
+        "source_gateways": source_gateways,
+        "configured_source_gateways": configured_source_gateways,
+        "source_gateway_enabled": source_gateway_enabled,
         "data_network_name": str(node_networks["data"]["name"]),
         "data_ipv4": str(data_ipv4),
         "app_network_name": str(node_networks["app"]["name"]),
@@ -703,6 +805,7 @@
         "policies": policies,
         "egress_paths": egress_paths,
         "softether_client": softether_client,
+        "softether_client_runtime": softether_client_runtime,
         "softether_server": softether_server,
         "softether_server_runtime": softether_server_runtime,
         "softether_clients": softether_clients,
@@ -719,6 +822,7 @@
     L3_LINKS_FILE: "{{ platform_router_operator_l3_vps_links_file }}"
     L3_SECRETS_DIR: "{{ platform_router_operator_l3_vps_secrets_dir }}"
     EGRESS_PATH_ALIASES: "{{ platform_router_egress_path_aliases | default('') }}"
+    SOURCE_GATEWAY_STATE: "{{ platform_router_effective_source_gateway_state }}"
     DEFAULT_CONTAINER_NAME: "{{ platform_router_container_name }}"
     SOFTETHER_CLIENT_IMAGE: "{{ platform_router_softether_client_image }}"
     SOFTETHER_CLIENT_CONTAINER: "{{ platform_router_softether_client_container_name }}"
@@ -758,6 +862,68 @@
     - platform_router_state == 'present'
     - platform_router_egress_path_aliases | default('') | length > 0
 
+- name: Verify platform_router source-gateway containers and networks
+  ansible.builtin.shell: |
+    set -euo pipefail
+    network_json="$(docker network inspect {{ item.network_name | quote }} 2>/dev/null || true)"
+    container_json="$(docker inspect {{ item.source_container | quote }})"
+    python3 - "$network_json" "$container_json" \
+      {{ item.network_name | quote }} {{ item.network_subnet | quote }} \
+      {{ item.source_ipv4 | quote }} {{ item.router_ipv4 | quote }} \
+      {{ platform_router_model.container_name | quote }} "$MODE" <<'PY'
+    import ipaddress
+    import json
+    import sys
+    network_raw, container_raw = sys.argv[1:3]
+    network_name, expected_subnet = sys.argv[3:5]
+    source_ip, router_ip_text, expected_router, mode = sys.argv[5:9]
+    container = json.loads(container_raw)[0]
+    if not container.get("State", {}).get("Running"):
+        raise SystemExit("source gateway container is not running")
+    networks = container.get("NetworkSettings", {}).get("Networks", {})
+    if any(
+        ipaddress.ip_address(str(item.get("GlobalIPv6Address"))).is_global
+        for item in networks.values()
+        if item.get("GlobalIPv6Address")
+    ):
+        raise SystemExit("source gateway container has a global IPv6 bypass")
+    network_items = json.loads(network_raw) if network_raw.strip() else []
+    if not network_items:
+        if mode == "check":
+            print(f"source gateway network creation and attachment planned: {network_name}")
+            raise SystemExit(0)
+        raise SystemExit(f"source gateway network is absent: {network_name}")
+    data = network_items[0]
+    actual = str((data.get("IPAM", {}).get("Config") or [{}])[0].get("Subnet") or "")
+    if actual != expected_subnet:
+        raise SystemExit(f"source gateway network subnet mismatch: {actual} != {expected_subnet}")
+    router_ip = ipaddress.ip_address(router_ip_text)
+    for attached in (data.get("Containers") or {}).values():
+        raw = str(attached.get("IPv4Address") or "")
+        if raw and ipaddress.ip_interface(raw).ip == router_ip:
+            owner = str(attached.get("Name") or "")
+            if owner != expected_router:
+                raise SystemExit(
+                    f"source gateway address {router_ip} is occupied by {owner}"
+                )
+    source_network = networks.get(network_name, {})
+    if not source_network and mode == "check":
+        print(f"source gateway container attachment planned: {network_name}")
+        raise SystemExit(0)
+    if source_network.get("IPAddress") != source_ip:
+        raise SystemExit("source gateway container network identity mismatch")
+    PY
+  args:
+    executable: /bin/bash
+  environment:
+    MODE: "{{ ansible_check_mode | ternary('check', 'apply') }}"
+  loop: "{{ platform_router_model.source_gateways | default([]) }}"
+  changed_when: false
+  check_mode: false
+  when:
+    - platform_router_state == 'present'
+    - (platform_router_model.source_gateways | default([]) | length) > 0
+
 - name: Show safe platform_router preflight contract
   ansible.builtin.debug:
     msg:
@@ -769,7 +935,12 @@
       receipt_written: false
       cumulative_selector: "{{ platform_router_egress_path_aliases | default('') }}"
       egress_paths: "{{ platform_router_model.egress_paths | default([]) }}"
+      source_gateways: "{{ platform_router_model.source_gateways | default([]) }}"
       softether_clients: "{{ platform_router_model.softether_clients | default([]) | map(attribute='name') | list }}"
+      softether_client_runtime:
+        container_name: "{{ platform_router_model.softether_client_runtime.container_name }}"
+        account_count: "{{ platform_router_model.softether_client_runtime.account_count }}"
+        management_endpoint: "{{ platform_router_model.softether_client_runtime.management_endpoint }}"
       softether_hubs: "{{ platform_router_model.softether_servers | default([]) | map(attribute='hub') | list }}"
       existing_policy_links: "{{ platform_router_model.policies | default([]) | map(attribute='link_name') | unique | list }}"
   when:
@@ -953,7 +1124,7 @@
   register: platform_router_reconcile_template
   when: platform_router_state == 'present'
 
-- name: Render platform_router host marked-route reconciler
+- name: Render platform_router source-gateway reconciler
   ansible.builtin.template:
     src: platform-router-host-routes.sh.j2
     dest: "{{ platform_router_host_routes_script }}"
@@ -961,7 +1132,7 @@
   register: platform_router_host_routes_template
   when: platform_router_state == 'present'
 
-- name: Render platform_router host marked-route systemd unit
+- name: Render platform_router source-gateway systemd unit
   ansible.builtin.template:
     src: platform-router-host-routes.service.j2
     dest: "/etc/systemd/system/{{ platform_router_host_routes_service }}"
@@ -969,12 +1140,23 @@
   register: platform_router_host_routes_unit
   when: platform_router_state == 'present'
 
-- name: Reload systemd after platform_router host-route unit change
+- name: Reload systemd after platform_router source-gateway unit change
   ansible.builtin.systemd:
     daemon_reload: true
   when:
     - platform_router_state == 'present'
     - platform_router_host_routes_unit.changed | default(false)
+    - not ansible_check_mode
+
+- name: Restore source Docker defaults before explicit gateway rollback
+  ansible.builtin.systemd:
+    name: "{{ platform_router_host_routes_service }}"
+    enabled: false
+    state: stopped
+  failed_when: false
+  when:
+    - platform_router_state == 'present'
+    - platform_router_source_gateway_state == 'disabled'
     - not ansible_check_mode
 
 - name: Render platform_router SoftEther server admin IP allowlist
@@ -1034,7 +1216,7 @@
     executable: /bin/bash
   environment:
     MODE: "{{ ansible_check_mode | ternary('check', 'apply') }}"
-  loop: "{{ (platform_router_model.transport_networks | default([])) + (platform_router_model.management_networks | default([])) }}"
+  loop: "{{ (platform_router_model.transport_networks | default([])) + (platform_router_model.management_networks | default([])) + (platform_router_model.source_networks | default([])) }}"
   register: platform_router_external_networks
   check_mode: false
   changed_when: >
@@ -1042,7 +1224,7 @@
     is search('created platform_router external Docker network')
   when:
     - platform_router_state == 'present'
-    - ((platform_router_model.transport_networks | default([])) + (platform_router_model.management_networks | default([]))) | length > 0
+    - ((platform_router_model.transport_networks | default([])) + (platform_router_model.management_networks | default([])) + (platform_router_model.source_networks | default([]))) | length > 0
 
 - name: Show safe platform_router external network preflight
   ansible.builtin.debug:
@@ -1050,7 +1232,7 @@
   when:
     - platform_router_state == 'present'
     - ansible_check_mode
-    - ((platform_router_model.transport_networks | default([])) + (platform_router_model.management_networks | default([]))) | length > 0
+    - ((platform_router_model.transport_networks | default([])) + (platform_router_model.management_networks | default([])) + (platform_router_model.source_networks | default([]))) | length > 0
 
 - name: Build platform_router SoftEther runtime image on orchestration controller
   ansible.builtin.shell: |
@@ -1253,6 +1435,9 @@
     cmd: docker compose -f "{{ platform_router_compose_file }}" up -d --remove-orphans
     chdir: "{{ platform_router_root_dir }}"
   register: platform_router_compose_up
+  until: platform_router_compose_up.rc == 0
+  retries: 4
+  delay: 3
   changed_when: >
     (platform_router_compose_up.stdout ~ platform_router_compose_up.stderr)
     is search('(?i)(creating|created|recreating|recreated|starting|started|pulling|pulled|building|built)')
@@ -1288,8 +1473,13 @@
     if os.environ["MGMT_NETWORK_ENABLED"] == "true":
         for item in json.loads(os.environ["MGMT_NETWORKS_JSON"]):
             expected[item["name"]] = item["container_ipv4"]
+    for item in json.loads(os.environ["SOURCE_NETWORKS_JSON"]):
+        expected[item["name"]] = item["container_ipv4"]
     running = data.get("State", {}).get("Running")
     ok = bool(running)
+    if "ai_service_edge" in data.get("NetworkSettings", {}).get("Networks", {}):
+        print("platform_router must not attach the shared edge network", file=sys.stderr)
+        sys.exit(1)
     for network, ip in expected.items():
         ok = ok and networks.get(network, {}).get("IPAddress") == ip
     sys.exit(0 if ok else 1)
@@ -1302,6 +1492,7 @@
     TRANSPORT_NETWORKS_JSON: "{{ platform_router_model.transport_networks | default([]) | to_json }}"
     MGMT_NETWORK_ENABLED: "{{ (((platform_router_model.management_networks | default([])) | length) > 0) | ternary('true', 'false') }}"
     MGMT_NETWORKS_JSON: "{{ platform_router_model.management_networks | default([]) | to_json }}"
+    SOURCE_NETWORKS_JSON: "{{ platform_router_model.source_networks | default([]) | to_json }}"
     DATA_NETWORK: "{{ platform_router_model.data_network_name }}"
     DATA_IP: "{{ platform_router_model.data_ipv4 }}"
     APP_NETWORK: "{{ platform_router_model.app_network_name }}"
@@ -1317,14 +1508,13 @@
 
 - name: Remove legacy standalone softether_l3_vps client for platform_router sidecar
   ansible.builtin.command:
-    cmd: docker rm -f "{{ item.legacy_container_name }}"
+    cmd: docker rm -f "{{ platform_router_model.softether_client_runtime.legacy_container_name }}"
   register: platform_router_legacy_softether_client_stop
   failed_when: false
   changed_when: platform_router_legacy_softether_client_stop.rc == 0
-  loop: "{{ platform_router_model.softether_clients | default([]) }}"
   when:
     - platform_router_state == 'present'
-    - (platform_router_model.softether_clients | default([])) | length > 0
+    - platform_router_model.softether_client_runtime.enabled | default(false)
     - not ansible_check_mode
 
 - name: Verify platform_router SoftEther client sidecar is running
@@ -1338,16 +1528,15 @@
   args:
     executable: /bin/bash
   environment:
-    CONTAINER: "{{ item.container_name }}"
+    CONTAINER: "{{ platform_router_model.softether_client_runtime.container_name }}"
   changed_when: false
   register: platform_router_softether_client_ready
   until: platform_router_softether_client_ready.rc == 0
   retries: 15
   delay: 2
-  loop: "{{ platform_router_model.softether_clients | default([]) }}"
   when:
     - platform_router_state == 'present'
-    - (platform_router_model.softether_clients | default([])) | length > 0
+    - platform_router_model.softether_client_runtime.enabled | default(false)
     - not ansible_check_mode
 
 - name: Configure platform_router SoftEther client sidecar
@@ -1364,6 +1553,7 @@
     hub="{{ item.hub }}"
     client_ip="{{ item.client_ip }}"
     prefix="{{ item.prefixlen }}"
+    server_host="${server%:*}"
     user="${CLIENT_USER}"
     password="${CLIENT_PASSWORD}"
     status_file="/tmp/platform-router-client-config-{{ item.name }}.status"
@@ -1389,6 +1579,19 @@
 
     set_phase client_check
     run_vpncmd localhost /CLIENT /CMD Check >/dev/null
+
+    set_phase public_transport_probe
+    transport_probe="$(
+      timeout 10s docker exec "$client_container" \
+        openssl s_client -connect "$server" -servername "$server_host" -brief \
+        2>&1 || true
+    )"
+    if ! printf '%s\n' "$transport_probe" |
+       grep -Eiq 'CONNECTION ESTABLISHED|Protocol version:|Ciphersuite:'; then
+      set_phase public_transport_unavailable
+      echo "SoftEther public transport is unavailable: server=$server" >&2
+      exit 1
+    fi
     set_phase nic_list
     nics="$(run_vpncmd localhost /CLIENT /CMD NicList 2>/dev/null || true)"
     if ! echo "$nics" | grep -Fq "$nic"; then
@@ -1411,11 +1614,39 @@
       run_vpncmd localhost /CLIENT /CMD AccountCreate "$account" /SERVER:"$server" /HUB:"$hub" /USERNAME:"$user" /NICNAME:"$nic" >/dev/null
       set_phase account_password
       run_vpncmd localhost /CLIENT /CMD AccountPasswordSet "$account" /PASSWORD:"$password" /TYPE:standard >/dev/null
-      set_phase account_startup
-      run_vpncmd localhost /CLIENT /CMD AccountStartupSet "$account" >/dev/null
     fi
+    # AccountConnect only starts an asynchronous connection attempt. Persist
+    # startup and retry policy for both new and preserved accounts, then accept
+    # the account only after AccountStatusGet reports an established session.
+    set_phase account_retry
+    run_vpncmd localhost /CLIENT /CMD AccountRetrySet "$account" /NUM:999 /INTERVAL:5 >/dev/null
+    set_phase account_startup
+    run_vpncmd localhost /CLIENT /CMD AccountStartupSet "$account" >/dev/null
     set_phase account_connect
     run_vpncmd localhost /CLIENT /CMD AccountConnect "$account" >/dev/null 2>&1 || true
+
+    set_phase account_session_wait
+    session_ready=false
+    for attempt in $(seq 1 30); do
+      account_status="$(run_vpncmd localhost /CLIENT /CMD AccountStatusGet "$account" 2>/dev/null || true)"
+      if printf '%s\n' "$account_status" |
+         grep -Eiq 'Connection Completed|Session Established'; then
+        session_ready=true
+        break
+      fi
+      sleep 2
+    done
+    if [ "$session_ready" != "true" ]; then
+      client_diagnostics="$(docker logs --since 5m --tail 200 "$client_container" 2>&1 || true)"
+      if printf '%s\n%s\n' "$account_status" "$client_diagnostics" |
+         grep -Eiq 'authentication[^[:alnum:]]+(failed|failure)|ERR_AUTH_FAILED|error code:[[:space:]]*9'; then
+        set_phase authentication_failed
+      else
+        set_phase session_not_established
+      fi
+      echo "SoftEther client account session is not established: account=$account" >&2
+      exit 1
+    fi
 
     set_phase interface_wait
     for attempt in $(seq 1 30); do
@@ -1744,6 +1975,7 @@
     next_hop="{{ platform_router_model.next_hop_ipv4 }}"
     policies_json='{{ platform_router_model.policies | to_json }}'
     egress_paths_json='{{ platform_router_model.egress_paths | default([]) | to_json }}'
+    source_gateways_json='{{ platform_router_model.source_gateways | default([]) | to_json }}'
     docker exec -u 0 "$container" sh -ceu 'sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true'
     docker exec -u 0 "$container" iptables -P FORWARD DROP
     docker exec -u 0 "$container" iptables -F FORWARD
@@ -1751,6 +1983,24 @@
     docker exec -u 0 "$container" iptables -t nat -C POSTROUTING -j PLATFORM_ROUTER_POSTROUTING 2>/dev/null ||
       docker exec -u 0 "$container" iptables -t nat -A POSTROUTING -j PLATFORM_ROUTER_POSTROUTING
     docker exec -u 0 "$container" iptables -t nat -F PLATFORM_ROUTER_POSTROUTING
+    app_iface="$(docker exec -u 0 "$container" ip -o -4 addr show |
+      awk -v wanted='{{ platform_router_model.app_ipv4 }}' 'split($4, address, "/") && address[1] == wanted {print $2; exit}')"
+    if [ -z "$app_iface" ]; then
+      echo "platform_router app egress interface is unavailable" >&2
+      exit 1
+    fi
+    python3 - "$source_gateways_json" <<'PY' | while IFS='|' read -r source_cidr; do
+    import json
+    import sys
+    for item in json.loads(sys.argv[1]):
+        print(item["source_cidr"])
+    PY
+      docker exec -u 0 "$container" iptables -t nat -A PLATFORM_ROUTER_POSTROUTING \
+        -s "$source_cidr" -o "$app_iface" -j SNAT --to-source "{{ platform_router_model.app_ipv4 }}"
+      docker exec -u 0 "$container" iptables -A FORWARD -s "$source_cidr" -o "$app_iface" -j ACCEPT
+      docker exec -u 0 "$container" iptables -A FORWARD -i "$app_iface" -d "$source_cidr" \
+        -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    done
     python3 - "$policies_json" <<'PY' | while IFS='|' read -r proto source_cidr destination_ipv4 destination_port route_destination vpn_iface vpn_next_hop return_cidr return_next_hop target_snat_ipv4; do
     import json
     import sys
@@ -1800,13 +2050,15 @@
       docker exec -u 0 "$container" iptables -A FORWARD -p "$proto" -s "$source_cidr" -d "$destination_ipv4/32" --dport "$destination_port" -j ACCEPT
       docker exec -u 0 "$container" iptables -A FORWARD -p "$proto" -s "$destination_ipv4/32" --sport "$destination_port" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
     done
-    python3 - "$egress_paths_json" <<'PY' | while IFS='|' read -r role vpn_iface target_snat source_cidrs_json; do
+    python3 - "$egress_paths_json" <<'PY' | while IFS='|' read -r path_alias role vpn_iface vpn_peer target_snat source_cidrs_json; do
     import json
     import sys
     for item in json.loads(sys.argv[1]):
         print("|".join([
+            item["alias"],
             item["role"],
             item["tunnel_iface"],
+            item["tunnel_peer_ipv4"],
             item["target_snat_ipv4"],
             json.dumps(item["transport_source_cidrs"], separators=(",", ":")),
         ]))
@@ -1822,7 +2074,12 @@
         sleep 1
       done
       if [ "$vpn_ready" != "true" ]; then
-        echo "GeoPolicy egress interface did not become ready: $vpn_iface" >&2
+        if [ "$role" = "source" ]; then
+          phase=tunnel_interface_unavailable
+        else
+          phase=target_interface
+        fi
+        echo "platform_router marked transport verification failed: path=${path_alias}, role=${role}, phase=${phase}" >&2
         exit 1
       fi
       python3 - "$source_cidrs_json" <<'PY' | while IFS= read -r source_cidr; do
@@ -1835,6 +2092,8 @@
           docker exec -u 0 "$container" iptables -A FORWARD -s "$source_cidr" -o "$vpn_iface" -j ACCEPT
           docker exec -u 0 "$container" iptables -A FORWARD -d "$source_cidr" -i "$vpn_iface" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
         else
+          docker exec -u 0 "$container" ip route replace "$source_cidr" \
+            via "$vpn_peer" dev "$vpn_iface" onlink
           docker exec -u 0 "$container" iptables -t nat -A PLATFORM_ROUTER_POSTROUTING \
             -i "$vpn_iface" -s "$source_cidr" -j SNAT --to-source "$target_snat"
           docker exec -u 0 "$container" iptables -A FORWARD -i "$vpn_iface" -s "$source_cidr" -j ACCEPT
@@ -1849,37 +2108,36 @@
     - platform_router_state == 'present'
     - not ansible_check_mode
 
-- name: Check live platform_router host marked routes before reconciliation
+- name: Check live platform_router source gateways before reconciliation
   ansible.builtin.shell: |
     set -euo pipefail
-    {% for path in platform_router_model.egress_paths | default([]) %}
-    {% if path.role == "source" %}
-    ip -4 rule show | grep -F "fwmark {{ path.route_mark }} lookup {{ path.route_table }}" >/dev/null
-    ip -4 route show table "{{ path.route_table }}" | grep -F "default via {{ path.gateway_ipv4 }}" >/dev/null
-    ip -4 route get 1.1.1.1 mark "{{ path.route_mark_decimal }}" | grep -F "via {{ path.gateway_ipv4 }}" >/dev/null
-    {% endif %}
+    nft list table inet ai_sp_source_gateway_guard >/dev/null
+    {% for gateway in platform_router_model.source_gateways | default([]) %}
+    pid="$(docker inspect {{ gateway.source_container | quote }} --format {% raw %}'{{.State.Pid}}'{% endraw %})"
+    nsenter --target "$pid" --net ip -4 route show default |
+      grep -F "default via {{ gateway.router_ipv4 }}" >/dev/null
     {% endfor %}
   args:
     executable: /bin/bash
-  register: platform_router_host_routes_live
+  register: platform_router_source_gateways_live
   changed_when: false
   failed_when: false
   when:
     - platform_router_state == 'present'
-    - (platform_router_model.egress_paths | default([]) | selectattr('role', 'equalto', 'source') | list | length) > 0
+    - (platform_router_model.source_gateways | default([]) | length) > 0
     - not ansible_check_mode
 
-- name: Enable persistent platform_router host marked routes
+- name: Enable persistent platform_router source gateways
   ansible.builtin.systemd:
     name: "{{ platform_router_host_routes_service }}"
     enabled: true
-    state: "{{ ((platform_router_host_routes_template.changed | default(false)) or ((platform_router_host_routes_live.rc | default(1)) != 0)) | ternary('restarted', 'started') }}"
+    state: "{{ ((platform_router_host_routes_template.changed | default(false)) or ((platform_router_source_gateways_live.rc | default(1)) != 0)) | ternary('restarted', 'started') }}"
   when:
     - platform_router_state == 'present'
-    - (platform_router_model.egress_paths | default([]) | selectattr('role', 'equalto', 'source') | list | length) > 0
+    - (platform_router_model.source_gateways | default([]) | length) > 0
     - not ansible_check_mode
 
-- name: Disable stale platform_router host marked routes without source paths
+- name: Disable stale platform_router source gateways without source contracts
   ansible.builtin.systemd:
     name: "{{ platform_router_host_routes_service }}"
     enabled: false
@@ -1887,7 +2145,35 @@
   failed_when: false
   when:
     - platform_router_state == 'present'
-    - (platform_router_model.egress_paths | default([]) | selectattr('role', 'equalto', 'source') | list | length) == 0
+    - (platform_router_model.source_gateways | default([]) | length) == 0
+    - not ansible_check_mode
+
+- name: Verify platform_router source gateways and host fail-closed guard
+  ansible.builtin.shell: |
+    set -euo pipefail
+    nft list table inet ai_sp_source_gateway_guard >/dev/null
+    {% for gateway in platform_router_model.source_gateways | default([]) %}
+    pid="$(docker inspect {{ gateway.source_container | quote }} --format {% raw %}'{{.State.Pid}}'{% endraw %})"
+    nsenter --target "$pid" --net ip -4 route show default |
+      grep -F "default via {{ gateway.router_ipv4 }}" >/dev/null
+    docker exec -u 0 {{ platform_router_model.container_name | quote }} iptables -t nat -S PLATFORM_ROUTER_POSTROUTING |
+      grep -F -- "-s {{ gateway.source_cidr }}" |
+      grep -F -- "--to-source {{ platform_router_model.app_ipv4 }}" >/dev/null
+    {% endfor %}
+    {% for path in platform_router_model.egress_paths | default([]) %}
+    {% if path.role == "source" %}
+    if ip -4 rule show | grep -F "fwmark {{ path.route_mark }} lookup {{ path.route_table }}" >/dev/null; then
+      echo "legacy host mark rule remains for {{ path.alias }}" >&2
+      exit 1
+    fi
+    {% endif %}
+    {% endfor %}
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - platform_router_state == 'present'
+    - (platform_router_model.source_gateways | default([]) | length) > 0
     - not ansible_check_mode
 
 - name: Verify platform_router marked egress transport
@@ -1899,7 +2185,7 @@
       echo "platform_router marked transport verification failed: path=${path_alias}, role=${role}, phase=$1" >&2
       exit 1
     }
-    python3 - "$paths_json" <<'PY' | while IFS='|' read -r path_alias role route_mark route_mark_decimal route_table priority gateway vpn_iface vpn_next_hop target_snat source_cidrs_json; do
+    python3 - "$paths_json" <<'PY' | while IFS='|' read -r path_alias role route_mark route_mark_decimal route_table priority gateway vpn_iface vpn_next_hop vpn_peer target_snat source_cidrs_json; do
     import json
     import sys
     for item in json.loads(sys.argv[1]):
@@ -1908,25 +2194,34 @@
             str(item["route_mark_decimal"]), str(item["route_table"]),
             str(item["route_rule_priority"]), item["gateway_ipv4"],
             item["tunnel_iface"], item["tunnel_next_hop"],
+            item["tunnel_peer_ipv4"],
             item["target_snat_ipv4"],
             json.dumps(item["transport_source_cidrs"], separators=(",", ":")),
         ]))
     PY
       if [ "$role" = "source" ]; then
-        if ! ip -4 rule show | grep -F "fwmark $route_mark lookup $route_table" >/dev/null; then
-          fail_phase host_rule
-        fi
-        if ! ip -4 route show table "$route_table" | grep -F "default via $gateway" >/dev/null; then
-          fail_phase host_route
-        fi
-        if ! ip -4 route get 1.1.1.1 mark "$route_mark_decimal" | grep -F "via $gateway" >/dev/null; then
-          fail_phase host_route_get
-        fi
         if ! docker exec -u 0 "$container" ip -4 rule show | grep -F "fwmark $route_mark lookup $route_table" >/dev/null; then
           fail_phase router_rule
         fi
+        if ! docker exec -u 0 "$container" ip -4 route show table "$route_table" |
+          grep -F "unreachable default metric 32767" >/dev/null; then
+          fail_phase marked_route_fail_closed
+        fi
+        if ! docker exec -u 0 "$container" ip -4 link show dev "$vpn_iface" >/dev/null 2>&1; then
+          failed_lookup="$(docker exec -u 0 "$container" ip -4 route get 1.1.1.1 \
+            mark "$route_mark_decimal" from "$gateway" 2>&1 || true)"
+          if ! grep -qi "unreachable" <<< "$failed_lookup"; then
+            fail_phase marked_route_fail_closed
+          fi
+          fail_phase tunnel_interface_unavailable
+        fi
         if ! docker exec -u 0 "$container" ip -4 route show table "$route_table" | grep -F "default via $vpn_next_hop dev $vpn_iface" >/dev/null; then
           fail_phase router_route
+        fi
+        if ! docker exec -u 0 "$container" ip -4 route get 1.1.1.1 \
+          mark "$route_mark_decimal" from "$gateway" |
+          grep -F "via $vpn_next_hop dev $vpn_iface" >/dev/null; then
+          fail_phase router_route_get
         fi
       else
         if ! docker exec -u 0 "$container" ip -4 addr show dev "$vpn_iface" | grep -F "inet $vpn_next_hop/" >/dev/null; then
@@ -1938,6 +2233,10 @@
     for item in json.loads(sys.argv[1]):
         print(item)
     PY
+          if ! docker exec -u 0 "$container" ip -4 route show "$source_cidr" |
+            grep -F "via $vpn_peer dev $vpn_iface" >/dev/null; then
+            fail_phase target_return_route
+          fi
           if ! docker exec -u 0 "$container" iptables -t nat -C PLATFORM_ROUTER_POSTROUTING \
             -i "$vpn_iface" -s "$source_cidr" -j SNAT --to-source "$target_snat"; then
             fail_phase target_snat
@@ -1981,12 +2280,14 @@
     for item in model.get("egress_paths", []):
         accepted = dict(item)
         accepted["status"] = "ready"
+        accepted["route_scope"] = "platform_router_netns"
         paths.append(accepted)
     payload = {
         "schema_version": 1,
         "alias": model["alias"],
         "final_status": "succeeded",
         "egress_paths": paths,
+        "source_gateways": model.get("source_gateways", []),
         "accepted_at": dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
     }
     receipt.parent.mkdir(parents=True, exist_ok=True)
@@ -2041,7 +2342,7 @@
     - platform_router_compose_stat.stat.exists | default(false)
     - not ansible_check_mode
 
-- name: Disable platform_router host marked routes during removal
+- name: Disable platform_router source gateways during removal
   ansible.builtin.systemd:
     name: "{{ platform_router_host_routes_service }}"
     enabled: false

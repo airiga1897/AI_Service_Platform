@@ -32,6 +32,12 @@ class ServiceContractTests(unittest.TestCase):
         self.assertNotIn("primary:", config)
         self.assertNotIn("backup:", config)
 
+    def test_preflight_keeps_exact_operator_approved_country(self) -> None:
+        runtime = text("tools/geo_policy/runtime.py")
+
+        self.assertIn('probe["country"] != expected_country', runtime)
+        self.assertIn("openai_status={probe['openai_status']}", runtime)
+
     def test_remote_runner_bundles_geo_policy_tools_and_operator_intent(self) -> None:
         runner = text("tools/services/service_remote.ps1")
         self.assertIn('[string]$GeoPolicyToolsDir = "tools/geo_policy"', runner)
@@ -60,6 +66,9 @@ class ServiceContractTests(unittest.TestCase):
         self.assertIn("not ansible_check_mode", role)
         self.assertIn("probe_network_container: platform-router", config)
         self.assertIn("probe_source_ipv4: 172.31.3.2", config)
+        self.assertIn("application_probe_container: ai-retail-mvp-web-1", config)
+        self.assertIn("vpn_probe_network_container: softether-edge", config)
+        self.assertIn("vpn_probe_source_ipv4: 172.22.252.2", config)
         self.assertIn('"nsenter"', runtime)
         self.assertIn('"--net"', runtime)
         self.assertIn("network_container=network_container", runtime)
@@ -97,6 +106,27 @@ class ServiceContractTests(unittest.TestCase):
         self.assertIn('"transport_contract_preserved": True', runtime)
         self.assertNotIn('"route", "flush", "table"', runtime)
         self.assertIn("Remove GeoPolicy systemd units", role)
+
+    def test_gateway_rollout_has_check_apply_and_explicit_rollback(self) -> None:
+        rollout = text("tools/geo_policy/rollout_gateway.ps1")
+        remote = text("tools/services/service_remote.ps1")
+        service = text("tools/services/service.sh")
+
+        self.assertIn("ValidateSet('Check', 'Apply', 'Rollback')", rollout)
+        self.assertIn("PlatformRouterSourceGatewayState", rollout)
+        self.assertIn("TargetAliases", rollout)
+        self.assertIn("'vpn_edge', 'apply'", rollout)
+        self.assertLess(
+            rollout.index("Preflight VPN policy handoff network"),
+            rollout.index("Preflight target VPN policy handoff"),
+        )
+        self.assertIn("target VPN policy handoff forwarding and SNAT", rollout)
+        self.assertIn("'geo_policy', 'absent'", rollout)
+        self.assertIn("PlatformRouterSourceGatewayState", remote)
+        self.assertIn("--platform-router-source-gateway-state", service)
+        self.assertIn("[string]$PlatformRouterSourceGatewayState = 'preserve'", remote)
+        self.assertIn('PLATFORM_ROUTER_SOURCE_GATEWAY_STATE="preserve"', service)
+        self.assertIn("(@($rollbackArgs) + '-Check')", rollout)
 
 
 if __name__ == "__main__":

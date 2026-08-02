@@ -205,8 +205,8 @@ platform:
       address_family: ipv4
       source_classes:
         site_runtime: 172.31.3.10/32
-        vpn_ingress: 172.20.0.2/32
-      enforcement: host-nftables-connmark-policy-routing
+        vpn_ingress: 172.22.252.2/32
+      enforcement: platform-router-netns-nftables-connmark-policy-routing
       fail_mode: scoped-non-ru-fail-closed
       production_applied: false
     dataset:

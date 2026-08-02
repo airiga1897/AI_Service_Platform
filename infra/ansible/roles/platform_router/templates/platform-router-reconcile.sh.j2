@@ -1,20 +1,54 @@
 #!/bin/sh
-set -eu
+set -u
 
 mkdir -p /var/lib/misc
+ready_file=/run/platform-router-reconcile.ready
+rm -f "$ready_file"
 
-while true; do
+reconcile_once() (
+  set -e
   sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+  iptables -P FORWARD DROP
+  iptables -t nat -N PLATFORM_ROUTER_POSTROUTING 2>/dev/null || true
+  iptables -t nat -C POSTROUTING -j PLATFORM_ROUTER_POSTROUTING 2>/dev/null ||
+    iptables -t nat -A POSTROUTING -j PLATFORM_ROUTER_POSTROUTING
+  app_iface="$(ip -o -4 addr show |
+    awk -v wanted='{{ platform_router_model.app_ipv4 }}' 'split($4, address, "/") && address[1] == wanted {print $2; exit}')"
+  if [ -n "$app_iface" ]; then
+    :
+{% for gateway in platform_router_model.source_gateways | default([]) %}
+    iptables -t nat -C PLATFORM_ROUTER_POSTROUTING -s {{ gateway.source_cidr }} -o "$app_iface" -j SNAT --to-source {{ platform_router_model.app_ipv4 }} 2>/dev/null ||
+      iptables -t nat -A PLATFORM_ROUTER_POSTROUTING -s {{ gateway.source_cidr }} -o "$app_iface" -j SNAT --to-source {{ platform_router_model.app_ipv4 }}
+    iptables -C FORWARD -s {{ gateway.source_cidr }} -o "$app_iface" -j ACCEPT 2>/dev/null ||
+      iptables -A FORWARD -s {{ gateway.source_cidr }} -o "$app_iface" -j ACCEPT
+    iptables -C FORWARD -i "$app_iface" -d {{ gateway.source_cidr }} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null ||
+      iptables -A FORWARD -i "$app_iface" -d {{ gateway.source_cidr }} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+{% endfor %}
+  fi
   egress_state=/run/platform-router-egress-routes.state
+  egress_state_next="$egress_state.$$"
+  : > "$egress_state_next"
+{% for path in platform_router_model.egress_paths | default([]) %}
+{% if path.role == "source" %}
+  ip -4 route replace table {{ path.route_table }} unreachable default metric 32767
+  if ! ip -4 rule show | grep -F '{{ path.route_rule_priority }}:' | grep -F 'fwmark {{ path.route_mark }} lookup {{ path.route_table }}' >/dev/null; then
+    ip rule add fwmark {{ path.route_mark }}/0xffffffff table {{ path.route_table }} priority {{ path.route_rule_priority }}
+  fi
+  printf '%s|%s|%s\n' '{{ path.route_mark }}' '{{ path.route_table }}' '{{ path.route_rule_priority }}' >> "$egress_state_next"
+{% endif %}
+{% endfor %}
   if [ -f "$egress_state" ]; then
     while IFS='|' read -r old_mark old_table old_priority; do
       [ -n "$old_mark" ] || continue
-      while ip rule del fwmark "$old_mark"/0xffffffff table "$old_table" priority "$old_priority" 2>/dev/null; do :; done
-      ip -4 route flush table "$old_table" 2>/dev/null || true
+      old_signature="$old_mark|$old_table|$old_priority"
+      if ! grep -Fqx "$old_signature" "$egress_state_next"; then
+        while ip rule del fwmark "$old_mark"/0xffffffff table "$old_table" priority "$old_priority" 2>/dev/null; do :; done
+        if ! awk -F '|' -v table="$old_table" '$2 == table { found = 1 } END { exit !found }' "$egress_state_next"; then
+          ip -4 route flush table "$old_table" 2>/dev/null || true
+        fi
+      fi
     done < "$egress_state"
   fi
-  egress_state_next="$egress_state.$$"
-  : > "$egress_state_next"
 {% for server in platform_router_model.softether_servers | default([]) %}
 {% if server.access_mode == "routed_tap" %}
   if ip link show "{{ server.tap_iface }}" >/dev/null 2>&1; then
@@ -22,6 +56,13 @@ while true; do
     sysctl -w "net.ipv6.conf.{{ server.tap_iface }}.disable_ipv6=1" >/dev/null 2>&1 || true
     ip -6 addr flush dev "{{ server.tap_iface }}" scope link >/dev/null 2>&1 || true
     ip addr replace "{{ server.server_ip }}/{{ server.prefixlen }}" dev "{{ server.tap_iface }}" || true
+{% for path in platform_router_model.egress_paths | default([]) %}
+{% if path.role == "target" and path.tunnel_iface == server.tap_iface %}
+{% for source_cidr in path.transport_source_cidrs %}
+    ip route replace "{{ source_cidr }}" via "{{ path.tunnel_peer_ipv4 }}" dev "{{ path.tunnel_iface }}" onlink || true
+{% endfor %}
+{% endif %}
+{% endfor %}
 {% if server.dhcp_enabled | default(true) %}
     dnsmasq_pid="/run/dnsmasq-{{ server.tap_name }}.pid"
     dnsmasq_running=false
@@ -56,14 +97,6 @@ while true; do
     sysctl -w "net.ipv6.conf.{{ client.iface }}.disable_ipv6=1" >/dev/null 2>&1 || true
     ip -6 addr flush dev "{{ client.iface }}" scope link >/dev/null 2>&1 || true
     ip addr replace "{{ client.client_ip }}/{{ client.prefixlen }}" dev "{{ client.iface }}" || true
-{% for path in platform_router_model.egress_paths | default([]) %}
-{% if path.role == "source" and path.tunnel_iface == client.iface %}
-    while ip rule del fwmark {{ path.route_mark }}/0xffffffff table {{ path.route_table }} priority {{ path.route_rule_priority }} 2>/dev/null; do :; done
-    ip rule add fwmark {{ path.route_mark }}/0xffffffff table {{ path.route_table }} priority {{ path.route_rule_priority }}
-    ip route replace table {{ path.route_table }} default via {{ path.tunnel_next_hop }} dev "{{ path.tunnel_iface }}" onlink
-    printf '%s|%s|%s\n' '{{ path.route_mark }}' '{{ path.route_table }}' '{{ path.route_rule_priority }}' >> "$egress_state_next"
-{% endif %}
-{% endfor %}
 {% for policy in platform_router_model.policies %}
 {% if policy.route_destination and policy.softether_client_name == client.name %}
     ip route replace "{{ policy.destination_ipv4 }}/32" via "{{ policy.softether_client_next_hop }}" dev "{{ client.iface }}" || true
@@ -74,6 +107,43 @@ while true; do
 {% endfor %}
   fi
 {% endfor %}
+{% for path in platform_router_model.egress_paths | default([]) %}
+{% if path.role == "source" %}
+  if ip link show "{{ path.tunnel_iface }}" >/dev/null 2>&1; then
+    ip -4 route replace table {{ path.route_table }} default via {{ path.tunnel_next_hop }} dev "{{ path.tunnel_iface }}" onlink metric 10
+{% for source_cidr in path.transport_source_cidrs %}
+    iptables -C FORWARD -s {{ source_cidr }} -o "{{ path.tunnel_iface }}" -j ACCEPT 2>/dev/null ||
+      iptables -A FORWARD -s {{ source_cidr }} -o "{{ path.tunnel_iface }}" -j ACCEPT
+    iptables -C FORWARD -d {{ source_cidr }} -i "{{ path.tunnel_iface }}" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null ||
+      iptables -A FORWARD -d {{ source_cidr }} -i "{{ path.tunnel_iface }}" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+{% endfor %}
+  else
+    ip -4 route del table {{ path.route_table }} default metric 10 2>/dev/null || true
+  fi
+{% else %}
+  if ip link show "{{ path.tunnel_iface }}" >/dev/null 2>&1; then
+{% for source_cidr in path.transport_source_cidrs %}
+    ip route replace {{ source_cidr }} via {{ path.tunnel_peer_ipv4 }} dev "{{ path.tunnel_iface }}" onlink || true
+    iptables -t nat -C PLATFORM_ROUTER_POSTROUTING -i "{{ path.tunnel_iface }}" -s {{ source_cidr }} -j SNAT --to-source {{ path.target_snat_ipv4 }} 2>/dev/null ||
+      iptables -t nat -A PLATFORM_ROUTER_POSTROUTING -i "{{ path.tunnel_iface }}" -s {{ source_cidr }} -j SNAT --to-source {{ path.target_snat_ipv4 }}
+    iptables -C FORWARD -i "{{ path.tunnel_iface }}" -s {{ source_cidr }} -j ACCEPT 2>/dev/null ||
+      iptables -A FORWARD -i "{{ path.tunnel_iface }}" -s {{ source_cidr }} -j ACCEPT
+    iptables -C FORWARD -o "{{ path.tunnel_iface }}" -d {{ source_cidr }} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null ||
+      iptables -A FORWARD -o "{{ path.tunnel_iface }}" -d {{ source_cidr }} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+{% endfor %}
+  fi
+{% endif %}
+{% endfor %}
   mv -f "$egress_state_next" "$egress_state"
+)
+
+while true; do
+  reconcile_once
+  reconcile_status=$?
+  if [ "$reconcile_status" -eq 0 ]; then
+    touch "$ready_file"
+  else
+    rm -f "$ready_file"
+  fi
   sleep 5
 done

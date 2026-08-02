@@ -1,6 +1,6 @@
 # 0008. VPS3 destination-based GeoPolicy egress canary
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-0010
 - **Date:** 2026-07-28
 
 ## Context
@@ -47,3 +47,6 @@ the actual path without exposing an API key.
 
 OSPF is deferred to a separate transport milestone. It may distribute internal
 routes but will not replace GeoPolicy decisions. BGP remains out of scope.
+
+ADR-0010 replaces the host-side classifier with a single `platform-router`
+gateway namespace for both scoped sources.

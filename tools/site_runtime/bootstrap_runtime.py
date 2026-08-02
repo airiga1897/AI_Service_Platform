@@ -24,6 +24,58 @@ class BootstrapError(RuntimeError):
     """A safe bootstrap failure suitable for operator output."""
 
 
+_PRIVATE_HEALTH_PROBE = """\
+import json
+import sys
+import urllib.error
+import urllib.request
+
+endpoint = sys.argv[1]
+result = {"endpoint": endpoint, "status": None, "error": None, "checks": {}}
+body = b""
+try:
+    response = urllib.request.urlopen(
+        "http://127.0.0.1:8080" + endpoint,
+        timeout=5,
+    )
+    result["status"] = getattr(response, "status", 200)
+    body = response.read()
+    response.close()
+except urllib.error.HTTPError as exc:
+    result["status"] = exc.code
+    result["error"] = "http_error"
+    body = exc.read()
+except urllib.error.URLError as exc:
+    result["error"] = type(exc.reason).__name__
+except Exception as exc:
+    result["error"] = type(exc).__name__
+
+try:
+    payload = json.loads(body.decode("utf-8")) if body else {}
+except (UnicodeDecodeError, json.JSONDecodeError):
+    payload = {}
+allowed = {
+    "status": {"ok", "error", "pending", "skipped", "degraded"},
+    "db": {"ok", "error"},
+    "migrations": {"ok", "error", "pending"},
+    "celery": {"ok", "error", "skipped"},
+    "broker_type": {"redis", "sqla", "memory", "unknown"},
+}
+if isinstance(payload, dict):
+    for key, values in allowed.items():
+        value = payload.get(key)
+        if value in values:
+            result["checks"][key] = value
+
+print(json.dumps(result, sort_keys=True))
+sys.exit(
+    0
+    if result["error"] is None and result["status"] == 200
+    else 1
+)
+"""
+
+
 def _run(command: list[str], *, env: dict[str, str] | None = None) -> None:
     completed = subprocess.run(
         command,
@@ -36,6 +88,47 @@ def _run(command: list[str], *, env: dict[str, str] | None = None) -> None:
     if completed.returncode != 0:
         raise BootstrapError(
             f"bootstrap subprocess failed with exit code {completed.returncode}"
+        )
+
+
+def _check_private_health(compose: Path) -> None:
+    for endpoint in ("/healthz/", "/readyz/", "/worker-healthz/"):
+        completed = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "-f",
+                str(compose),
+                "exec",
+                "-T",
+                "web",
+                "python",
+                "-c",
+                _PRIVATE_HEALTH_PROBE,
+                endpoint,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if completed.returncode == 0:
+            continue
+        try:
+            result = json.loads(completed.stdout.strip().splitlines()[-1])
+        except (IndexError, json.JSONDecodeError):
+            raise BootstrapError(
+                f"private health check failed: endpoint={endpoint}, "
+                f"probe_exit_code={completed.returncode}"
+            ) from None
+        status = result.get("status")
+        error = result.get("error") or "unexpected_status"
+        checks = result.get("checks")
+        safe_checks = checks if isinstance(checks, dict) else {}
+        raise BootstrapError(
+            f"private health check failed: endpoint={endpoint}, "
+            f"status={status}, error={error}, "
+            f"checks={json.dumps(safe_checks, sort_keys=True, separators=(',', ':'))}"
         )
 
 
@@ -95,24 +188,7 @@ def main() -> int:
                 ("--entrypoint", "/bin/sh", "web", "-ec", f"exec {command}")
             )
             _run(compose_command, env=process_env)
-        _run(
-            [
-                "docker",
-                "compose",
-                "-f",
-                str(args.compose),
-                "exec",
-                "-T",
-                "web",
-                "python",
-                "-c",
-                (
-                    "import urllib.request;"
-                    "[urllib.request.urlopen('http://127.0.0.1:8080'+p,timeout=5).read() "
-                    "for p in ('/healthz/','/readyz/','/worker-healthz/')]"
-                ),
-            ]
-        )
+        _check_private_health(args.compose)
         print(
             json.dumps(
                 {

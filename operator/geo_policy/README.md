@@ -25,18 +25,31 @@ data are not secrets, but they are generated and accepted separately from code.
    [official OpenAI supported-country list](https://help.openai.com/en/articles/5347006-openai-api-supported-countries-and-territories/).
    Record the source URL, UTC check time, accepted codes, and each path's exact
    country code in `config.yml`.
-6. Provision and accept every ranked transport gateway on the VPS3 policy
-   network. For the current three-node canary, the platform-router contract
-   must expose exact defaults and rules for marks
+6. Provision and accept every ranked transport gateway inside the VPS3
+   `platform-router` namespace. For the current three-node canary, the
+   transport contract must expose exact defaults and rules for marks
    `0x530003`/`0x530004`/`0x530005` and tables `5301`/`5302`/`5303`.
    Each remote egress must have a return path and NAT. Copy the ordered paths
    into `config.yml`, set `approval_id` to the exact proposal ID, then change
    `state` to `accepted`. The `paths` list may later grow or shrink without a
    code change; one accepted path is valid but has no redundancy.
-   The three paths intentionally share source gateway `172.31.3.2`; their
-   explicit marks and tables are stable per alias. GeoPolicy also requires the
-   accepted `/var/lib/ai-service-platform/platform_router/current.json` receipt.
-7. Run only the mutation-free preflight:
+   The explicit marks and tables are stable per alias and never exist on the
+   VPS3 host. GeoPolicy also requires the accepted
+   `/var/lib/ai-service-platform/platform_router/current.json` receipt, including
+   `172.31.3.10 -> 172.31.3.2` and `172.22.252.2 -> 172.22.252.4` source gateways.
+7. Prepare the shared gateway without applying GeoPolicy:
+
+   ```powershell
+   .\tools\geo_policy\rollout_gateway.ps1 -Mode Check
+   ```
+
+   After accepting it, run the same command with `-Mode Apply`. It first creates
+   the VPS3 VPN policy handoff network and attaches `softether-edge`, then
+   updates scoped FORWARD/SNAT for `172.22.252.2/32` on the configured target
+   aliases, applies the source gateway and host bypass guard, and finally ends
+   with GeoPolicy check mode. The default target set is `vps1,vps2,vps4` and
+   remains operator-selectable as the accepted path set changes.
+8. Run only the mutation-free GeoPolicy preflight when diagnosing it separately:
 
    ```powershell
    .\tools\services\service_remote.ps1 geo_policy apply -Limit vps3 -Check

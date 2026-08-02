@@ -1,7 +1,10 @@
 # Non-secret operator contract for three isolated VPS3 GeoPolicy egress paths.
-# The authoritative platform_router fragment is tracked in
-# operator/platform_router/config.yml. Merge the l3_links and HAProxy fragments
-# into ignored operator files before remote preflight; never commit real secrets.
+# Merge these fragments into the ignored operator platform_router and SoftEther
+# files before remote preflight; never commit real secrets.
+
+source_gateways:
+  - { name: ai-retail-mvp, alias: vps3, source_class: site_runtime, source_container: site-runtime-ai-retail-mvp-anchor, network_name: ai_service_app_vps3, network_subnet: 172.31.3.0/24, source_ipv4: 172.31.3.10, router_ipv4: 172.31.3.2, docker_gateway_ipv4: 172.31.3.1 }
+  - { name: vpn-ingress-vps3, alias: vps3, source_class: vpn_ingress, source_container: softether-edge, network_name: ai_service_vpn_policy, network_subnet: 172.22.252.0/24, source_ipv4: 172.22.252.2, router_ipv4: 172.22.252.4, docker_gateway_ipv4: 172.22.252.1 }
 
 l3_links:
   - { name: geo-egress-vps3-vps1, server_alias: vps1, client_alias: vps3, hub: GeoEgressVps3Vps1, subnet: 10.88.31.0/30, server_ip: 10.88.31.1, client_ip: 10.88.31.2, tap_name: ge31 }
@@ -16,7 +19,7 @@ defaults:
   probe_source_cidr: 172.31.3.2/32
   source_cidrs:
     - 172.31.3.10/32
-    - 172.20.0.2/32
+    - 172.22.252.2/32
 
 stable_route_contract:
   vps1: { gateway_ipv4: 172.31.3.2, route_mark: "0x530003", route_table: 5301, target_snat_ipv4: 172.31.1.2 }

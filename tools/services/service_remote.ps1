@@ -83,6 +83,9 @@ param(
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*(\+[A-Za-z0-9][A-Za-z0-9_.-]*)*$')]
     [string]$PlatformRouterEgressPaths = "",
 
+    [ValidateSet('preserve', 'enabled', 'disabled')]
+    [string]$PlatformRouterSourceGatewayState = 'preserve',
+
     [ValidatePattern('^(auto|[A-Za-z0-9][A-Za-z0-9_.-]*)$')]
     [string]$GeoPolicyActivePath = "auto",
 
@@ -507,6 +510,9 @@ function New-ServiceCommand($Step, $RemoteRepoDir, $RemoteNodesFile, $RemoteStat
     if ($Step.PlatformRouterEgressPaths) {
         $args += @("--platform-router-egress-paths", (Quote-BashArg $Step.PlatformRouterEgressPaths))
     }
+    if ($Step.PlatformRouterSourceGatewayState) {
+        $args += @("--platform-router-source-gateway-state", (Quote-BashArg $Step.PlatformRouterSourceGatewayState))
+    }
     if ($Step.Service -eq "geo_policy") {
         $args += @("--geo-policy-active-path", (Quote-BashArg $Step.GeoPolicyActivePath))
     }
@@ -754,6 +760,9 @@ if ($PlatformRouterSoftetherDebug -and $Service -ne "platform_router") {
 if ($PlatformRouterEgressPaths -and $Service -ne "platform_router") {
     Fail "-PlatformRouterEgressPaths is supported only for service platform_router"
 }
+if ($PlatformRouterSourceGatewayState -ne 'preserve' -and $Service -ne "platform_router") {
+    Fail "-PlatformRouterSourceGatewayState is supported only for service platform_router"
+}
 if ($GeoPolicyActivePath -ne "auto" -and $Service -ne "geo_policy") {
     Fail "-GeoPolicyActivePath is supported only for service geo_policy"
 }
@@ -954,6 +963,7 @@ if ($isBatch) {
         ReinitStandby = [bool]$ReinitStandby
         PlatformRouterSoftetherDebug = [bool]$PlatformRouterSoftetherDebug
         PlatformRouterEgressPaths = $PlatformRouterEgressPaths
+        PlatformRouterSourceGatewayState = $PlatformRouterSourceGatewayState
         GeoPolicyActivePath = $GeoPolicyActivePath
         PolicyRouterImageRef = $PolicyRouterImageRef
         BuildPolicyRouterImage = [bool]$BuildPolicyRouterImage
@@ -1099,6 +1109,7 @@ $remoteServiceDisplay = if ($isBatch) { "batch plan: $($batchSteps.Count) steps"
     if ($ReinitStandby) { $remoteServiceDisplayArgs += "--reinit-standby" }
     if ($PlatformRouterSoftetherDebug) { $remoteServiceDisplayArgs += "--platform-router-softether-debug" }
     if ($PlatformRouterEgressPaths) { $remoteServiceDisplayArgs += @("--platform-router-egress-paths", $PlatformRouterEgressPaths) }
+    if ($Service -eq "platform_router") { $remoteServiceDisplayArgs += @("--platform-router-source-gateway-state", $PlatformRouterSourceGatewayState) }
     if ($Service -eq "geo_policy") { $remoteServiceDisplayArgs += @("--geo-policy-active-path", $GeoPolicyActivePath) }
     $remoteServiceDisplayArgs -join " "
 }

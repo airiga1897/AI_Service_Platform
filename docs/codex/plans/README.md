@@ -62,6 +62,7 @@ these paths and installs log rotation on every current and future VPS. See
 - [Future VPS transport](future-vps-transport-softether-s2s-and-ssh-tunnel.md) - SoftEther site-to-site/cascade и SSH tunnel fallback.
 - [Future SD-WAN-like egress controller](future-sd-wan-like-egress-controller.md) - direct/cascade path selection for approved targets with health checks and safe route reconciliation.
 - [GeoPolicy egress canary on VPS3](geo-policy-vps3-canary.md) - destination GeoIP routing for scoped site_runtime and VPN sources, accepted dual egress, failover, fail-closed, and rollback gates.
+- [Future VPN ingress routing through platform_router egress](future-vpn-ingress-transport-egress.md) - destination-based direct/remote egress selection for VPS3 VPN clients through the shared variable-length transport path set.
 - [Future platform_router OSPF transport](future-platform-router-ospf.md) - later FRR/OSPF distribution of internal transport routes; GeoPolicy remains a separate policy layer and BGP stays out of scope.
 - [Future security checks](future-security-sast-sca-dast.md) - SAST, SCA/OSA и DAST в report-only режиме.
 - [Future site_runtime GitHub Actions CD](future-site-runtime-github-actions-cd.md) — approved deployment exact product digest через ограниченный gateway на orchestration node после приёмки ручного MVP.

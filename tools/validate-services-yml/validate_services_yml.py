@@ -349,8 +349,8 @@ def validate_platform(errors: list[str], data: dict[str, Any]) -> None:
         )
         if source_classes.get("site_runtime") != "172.31.3.10/32":
             fail(errors, "platform.geo_policy site_runtime source must be 172.31.3.10/32")
-        if source_classes.get("vpn_ingress") != "172.20.0.2/32":
-            fail(errors, "platform.geo_policy vpn_ingress source must be 172.20.0.2/32")
+        if source_classes.get("vpn_ingress") != "172.22.252.2/32":
+            fail(errors, "platform.geo_policy vpn_ingress source must be 172.22.252.2/32")
         egress = require_mapping(errors, geo_policy.get("egress"), "platform.geo_policy.egress")
         if egress.get("selection") != "approved-ordered-paths":
             fail(errors, "platform.geo_policy.egress.selection must be approved-ordered-paths")

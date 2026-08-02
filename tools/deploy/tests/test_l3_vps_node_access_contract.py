@@ -34,6 +34,9 @@ class L3VpnNodeAccessContractTests(unittest.TestCase):
             "app_network_name": "ai_service_app_vps1",
             "app_ipv4": "172.31.1.2",
             "softether_clients": [],
+            "softether_client_runtime": {
+                "enabled": False,
+            },
             "softether_server_runtime": {
                 "enabled": True,
                 "container_name": "platform-router-softether-server",
@@ -131,6 +134,30 @@ class L3VpnNodeAccessContractTests(unittest.TestCase):
         self.assertIn("management_sni", tasks)
         self.assertIn("ai_service_softether_l3_vps_node${nodeNumber}_transport", rollout)
         self.assertIn("ai_service_softether_l3_vps_node${nodeNumber}_mgmt", rollout)
+
+    def test_l3_edge_route_publishes_candidates_without_changing_other_routes(self) -> None:
+        tasks = (
+            ROOT / "infra/ansible/roles/edge_haproxy/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('name == "softether_l3_vps" and alias in candidate_aliases', tasks)
+        self.assertIn('route_states[name] = "candidate"', tasks)
+        self.assertIn('route_states[name] = "active"', tasks)
+        self.assertNotIn('elif alias in candidate_aliases:', tasks)
+
+    def test_l3_edge_route_requires_backend_and_local_sni_acceptance(self) -> None:
+        tasks = (
+            ROOT / "infra/ansible/roles/edge_haproxy/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Verify edge_haproxy SoftEther L3 backend is UP", tasks)
+        self.assertIn('row.get("status") == "UP"', tasks)
+        self.assertIn("socket.AF_UNIX", tasks)
+        self.assertIn("phase=backend_unavailable", tasks)
+        self.assertIn("Verify edge_haproxy local SoftEther L3 SNI handshake", tasks)
+        self.assertIn("context.wrap_socket", tasks)
+        self.assertIn("phase=local_sni_unavailable", tasks)
+        self.assertIn("route_state:", tasks)
 
 
 if __name__ == "__main__":

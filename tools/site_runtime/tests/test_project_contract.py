@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -276,11 +277,12 @@ class ProjectContractTests(unittest.TestCase):
             ),
             patch.object(Path, "is_file", return_value=True),
             patch.object(bootstrap_runtime, "_run") as run,
+            patch.object(bootstrap_runtime, "_check_private_health") as health,
             redirect_stdout(output),
         ):
             self.assertEqual(bootstrap_runtime.main(), 0)
-        self.assertEqual(run.call_count, 1)
-        self.assertIn("exec", run.call_args.args[0])
+        run.assert_not_called()
+        health.assert_called_once_with(Path("docker-compose.yml"))
         report = json.loads(output.getvalue())
         self.assertFalse(report["command_invoked"])
         self.assertFalse(report["check_command_invoked"])
@@ -313,16 +315,41 @@ class ProjectContractTests(unittest.TestCase):
             ),
             patch.object(Path, "is_file", return_value=True),
             patch.object(bootstrap_runtime, "_run") as run,
+            patch.object(bootstrap_runtime, "_check_private_health") as health,
             redirect_stdout(StringIO()),
         ):
             self.assertEqual(bootstrap_runtime.main(), 0)
-        bootstrap_command = run.call_args_list[0].args[0]
+        bootstrap_command = run.call_args.args[0]
         self.assertIn("DJANGO_SUPERUSER_PASSWORD", bootstrap_command)
         self.assertNotIn("bootstrap-secret", bootstrap_command)
         self.assertEqual(
-            run.call_args_list[0].kwargs["env"]["DJANGO_SUPERUSER_PASSWORD"],
+            run.call_args.kwargs["env"]["DJANGO_SUPERUSER_PASSWORD"],
             "bootstrap-secret",
         )
+        health.assert_called_once_with(Path("docker-compose.yml"))
+
+    def test_bootstrap_private_health_reports_endpoint_without_body(self) -> None:
+        compile(bootstrap_runtime._PRIVATE_HEALTH_PROBE, "<private-health-probe>", "exec")
+        responses = [
+            subprocess.CompletedProcess([], 0, '{"endpoint":"/healthz/","status":200,"error":null}\n', ""),
+            subprocess.CompletedProcess(
+                [],
+                1,
+                '{"endpoint":"/readyz/","status":503,"error":"http_error",'
+                '"checks":{"status":"error","db":"ok","migrations":"ok",'
+                '"celery":"error"}}\n',
+                "sensitive body",
+            ),
+        ]
+        with patch.object(bootstrap_runtime.subprocess, "run", side_effect=responses):
+            with self.assertRaisesRegex(
+                bootstrap_runtime.BootstrapError,
+                r'endpoint=/readyz/, status=503, error=http_error, '
+                r'checks=\{"celery":"error","db":"ok","migrations":"ok",'
+                r'"status":"error"\}',
+            ) as raised:
+                bootstrap_runtime._check_private_health(Path("docker-compose.yml"))
+        self.assertNotIn("sensitive body", str(raised.exception))
 
     def test_platform_exposes_serialized_contract_driven_bootstrap(self) -> None:
         shell = (ROOT / "tools/services/service.sh").read_text(encoding="utf-8")
