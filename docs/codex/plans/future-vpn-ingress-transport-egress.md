@@ -113,4 +113,3 @@ addresses.
 - No public exposure of private health or management endpoints.
 - No automatic inclusion of new VPN source ranges or new egress VPS nodes.
 - No coupling of VPN client lifecycle to transport-container recreation.
-
