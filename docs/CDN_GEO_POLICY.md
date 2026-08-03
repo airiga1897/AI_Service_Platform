@@ -101,8 +101,23 @@ SSTP использует `TCP/443`, поэтому его можно отдел
 ## Текущее решение
 
 - CDN для сайтов: будущая опция для публичных сайтов.
-- GeoPolicy: запланированный общий платформенный сервис.
+- GeoPolicy: общий контракт принят; VPS3 egress canary реализован, но ещё не
+  применён.
 - Ближайший вход VPN: сначала через GeoDNS.
 - Ускорение VPN: будущее исследование через Anycast/L4 TCP proxy, не через
   обычный web-CDN.
 - SoftEther остаётся платформенным VPN-сервисом на VPS1, VPS2 и VPS3.
+
+## VPS3 destination-egress canary (2026-07-28)
+
+Первый реализованный потребитель GeoPolicy — узкий, пока не применённый canary
+на VPS3. Он классифицирует новые IPv4-соединения от `172.31.3.10/32`
+(`site_runtime`) и `172.20.0.2/32` (VPN после SecureNAT). RU и внутренние
+назначения идут напрямую, остальные публичные назначения — через явно принятую
+упорядоченный набор egress-путей переменной длины. Для первого canary это
+`vps1`, `vps2` и `vps4`.
+
+Этот рубеж не включает ingress GeoDNS, CDN policy, OSPF или BGP. Полный контракт
+preflight, failover, last-known-good dataset, manual override и rollback
+зафиксирован в
+[`geo-policy-vps3-canary.md`](codex/plans/geo-policy-vps3-canary.md).

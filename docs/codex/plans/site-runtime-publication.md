@@ -146,5 +146,150 @@ HTTPS-route не создаётся, публичный root приложени�
 3. Принять внешние health endpoints и доказать отсутствие публичного доступа к
    внутренним сервисам и `private_media`.
 
+## Подготовка Certbot support image
+
+Перед certificate tooling повторяется существующий support-image staging:
+
+```powershell
+.\tools\services\service_remote.ps1 site_runtime stage-support-images `
+  -Limit vps3 `
+  -Check
+```
+
+Bundle теперь содержит Redis, Nginx и Certbot, причём все три source ref
+закреплены по принятым exact digest. Это исключает незапланированную смену
+Nginx или Redis при добавлении Certbot. Manifest фиксирует полный distribution
+digest, config image ID и `linux/amd64`, после чего tar передаётся через `vps6`.
+`vps3` не обращается к registry. Реальный staging и его идемпотентный повтор
+приняты до certificate preflight.
+
+Contact email Let’s Encrypt хранится только в ignored operator model
+`publication.acme_contact_email`; для `ai-retail-mvp` принят
+`airiga1897@gmail.com`.
+
+## Read-only preflight TLS-сертификата
+
+После принятого support-image staging выполняется:
+
+```powershell
+.\tools\services\service_remote.ps1 site_runtime publication-certificate `
+  -Instance ai-retail-mvp `
+  -Limit vps3 `
+  -Check
+```
+
+Action разрешён только с `-Check` и сериализован общим lock экземпляра. Он
+проверяет:
+
+- exact Certbot receipt, config image ID и `linux/amd64`;
+- существующие ACME/TLS volumes и canonical ownership labels;
+- read-only ACME/TLS mounts работающего Nginx;
+- действующий anchor для будущего network namespace Certbot;
+- точное наличие принятого host-scoped HTTP-01 route и edge network attachment;
+- HTTP redirect закрытого root на точный HTTPS URL без перехода к ещё не
+  включённому TLS endpoint, а также `404` для отсутствующего challenge;
+- неизменность списка контейнеров, volumes, `current.json`, Compose и HAProxy.
+
+Проверка может сообщить наличие уже выпущенного `fullchain.pem`, но не читает
+закрытый ключ и не выводит contact email. Контракт будущего запуска фиксирует
+webroot, TLS path, non-interactive mode, согласие с ToS и
+`--keep-until-expiring`, но Certbot в check-mode не запускается. Сертификат,
+HTTPS/SNI route и публичный root приложения не создаются.
+
+После отдельного подтверждения реальный выпуск выполняется тем же интерфейсом
+без `-Check`:
+
+```powershell
+.\tools\services\service_remote.ps1 site_runtime publication-certificate `
+  -Instance ai-retail-mvp `
+  -Limit vps3
+```
+
+Транзакция использует только принятый локальный Certbot image с `--pull never`,
+без host ports и Linux capabilities, через network namespace anchor. ACME
+webroot и TLS volume подключаются Certbot read-write; Nginx продолжает видеть
+их read-only. После `certonly --webroot` отдельный one-shot validation проверяет
+домен, наличие private key без вывода содержимого и остаточный срок не менее
+14 дней. Затем повторяются private health, внешний HTTP-01 `404`, точный
+HTTP→HTTPS redirect и проверки неизменности контейнеров, volume identities,
+`current.json`, Compose и HAProxy.
+
+Успех записывается в append-only certificate journal и publication
+`current.json`. Повтор идемпотентен благодаря `--keep-until-expiring`: если
+сертификат действителен, Certbot не выпускает новый. При ошибке известные
+временные Certbot containers удаляются, TLS volume сохраняется для диагностики
+и записывается failed journal. Автоматического отката или повторного запроса в
+том же запуске нет.
+
+Этот action не записывает HTTPS/SNI fragment, не перезапускает HAProxy/Nginx и
+не публикует application root. Включение HTTPS остаётся следующим отдельным
+рубежом.
+
+## Read-only preflight HTTPS/SNI
+
+После принятого сертификата будущая production-конфигурация проверяется без
+записи:
+
+```powershell
+.\tools\services\service_remote.ps1 site_runtime publication-https `
+  -Instance ai-retail-mvp `
+  -Limit vps3 `
+  -Check
+```
+
+В режиме `-Check` действие:
+
+- принимает действующий certificate receipt и наличие chain/private key без
+  вывода их содержимого;
+- строит в памяти будущий HAProxy SNI route, добавляя домен в fail-closed
+  allow-condition до `silent-drop`, и запускает `haproxy -c` через stdin;
+- проверяет будущий Nginx TLS config через закрытый временный файл внутри
+  контейнера; `trap` удаляет его при любом завершении, а отдельная проверка
+  подтверждает удаление. Действующий ACME-only файл не заменяется;
+- строит prospective `runtime.env`: сохраняет внутренний host и все секретные
+  значения, добавляет `retail.travelltickets.ru` в `ALLOWED_HOSTS` и точный
+  `https://retail.travelltickets.ru` в `CSRF_TRUSTED_ORIGINS`;
+- подтверждает неизменность контейнеров, volumes, `current.json`, Compose,
+  `runtime.env`, Nginx и HAProxy;
+- подтверждает, что HTTP root только перенаправляет на HTTPS, отсутствующий
+  challenge возвращает `404`; до первого rollout SNI route и application root
+  ещё не опубликованы, а после rollout проверка принимает их точное
+  согласованное состояние.
+
+Результат содержит только checksums и безопасные host/origin identities.
+После принятого `publication-https -Check` реальная публикация выполняется
+отдельно:
+
+```powershell
+.\tools\services\service_remote.ps1 site_runtime publication-https `
+  -Instance ai-retail-mvp `
+  -Limit vps3
+```
+
+Единая транзакция сохраняет закрытые snapshots `runtime.env`, Nginx и HAProxy,
+атомарно добавляет production host/CSRF, пересоздаёт только
+`web/worker/beat/nginx`, принимает private health и лишь затем открывает
+fail-closed SNI route. Публичной точкой остаётся Nginx: `/static/` и
+`/media/` он обслуживает сам, а `/`, SPA-маршруты, API, auth и admin передаёт
+Django. Gunicorn, Redis и PostgreSQL не получают host ports; `private_media` и
+`worker-healthz` извне возвращают `404`.
+
+HAProxy config проходит отдельный byte-exact контракт: Python-writer
+нормализует переносы, оставляет ровно один завершающий LF, записывает candidate
+с `fsync`, а работающий HAProxy проверяет именно candidate из bind-mounted
+каталога. Только после совпадения SHA-256 candidate атомарно заменяет production
+config. В `-Check` тот же candidate создаётся временно, валидируется и
+гарантированно удаляется без изменения production-файла.
+
+После открытия route проверяются HTTPS root, `/healthz/`, `/readyz/`,
+статический файл, HTTP→HTTPS redirect и закрытость публичных портов внутренних
+сервисов. Успех записывается в append-only HTTPS journal и publication
+`current.json`. При ошибке восстанавливаются предыдущие environment, Nginx и
+HAProxy, runtime возвращается к закрытой конфигурации и записывается failed
+journal без секретов. Journal содержит фазу ошибки и фактический
+`rollback_status`; успешное восстановление фиксируется только после private
+health и повторной проверки HAProxy. Повтор принятого rollout идемпотентен и
+выполняет только health/security acceptance.
+
 Каждый реальный шаг требует отдельного подтверждения. Seed, superuser и S3-копия
 в этот контракт не входят.

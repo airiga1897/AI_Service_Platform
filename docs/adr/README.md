@@ -21,6 +21,9 @@ ADR фиксируют значимые архитектурные решени�
 | [0005](0005-edge-haproxy-nginx-softether.md) | Платформенный edge: HAProxy + per-site Nginx + SoftEther | Accepted |
 | [0006](0006-deploy-from-immutable-image-refs.md) | Деплой из неизменяемых Docker image refs | Accepted |
 | [0007](0007-shared-geo-policy-service.md) | Единый общий источник данных GeoPolicy | Accepted |
+| [0008](0008-vps3-destination-geo-egress-canary.md) | VPS3 destination-based GeoPolicy egress canary | Accepted |
+| [0009](0009-single-softether-client-daemon-per-router.md) | One multi-account SoftEther client daemon per platform router | Accepted |
+| [0010](0010-single-geopolicy-gateway-on-vps3.md) | Single GeoPolicy gateway namespace on VPS3 | Accepted |
 
 ## Как добавить новый ADR
 

@@ -1,0 +1,742 @@
+---
+- name: Зафиксировать параметры реального HTTPS/SNI rollout
+  ansible.builtin.set_fact:
+    site_runtime_publication_https_id: "{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}-https"
+    site_runtime_publication_https_journal_root: >-
+      {{ site_runtime_publication_journal_root }}/{{ site_runtime_instance }}
+    site_runtime_publication_https_instance_root: >-
+      {{ site_runtime_publication_runtime_root }}/{{ site_runtime_instance }}
+    site_runtime_publication_https_nginx_path: >-
+      {{ site_runtime_publication_runtime_root }}/{{ site_runtime_instance }}/nginx-publication-acme.conf
+    site_runtime_publication_https_environment_path: >-
+      {{ site_runtime_publication_runtime_root }}/{{ site_runtime_instance }}/runtime.env
+    site_runtime_publication_https_override_path: >-
+      {{ site_runtime_publication_runtime_root }}/{{ site_runtime_instance }}/docker-compose.publication.yml
+    site_runtime_publication_https_already_applied: >-
+      {{
+        site_runtime_publication_https_route_already_applied | bool
+        and (
+          (site_runtime_publication_https_environment.stdout | from_json).current_checksum
+          == (site_runtime_publication_https_environment.stdout | from_json).prospective_checksum
+        )
+        and (
+          site_runtime_publication_https_files_before.results[3].stat.checksum
+          == site_runtime_publication_model.render.https.checksums.nginx_public_fragment
+        )
+      }}
+
+- name: Зафиксировать пути byte-exact HAProxy candidate реального rollout
+  ansible.builtin.set_fact:
+    site_runtime_publication_https_candidate_path: >-
+      {{ site_runtime_publication_edge_config | dirname }}/.{{
+        site_runtime_publication_https_id
+      }}.haproxy.cfg.candidate
+    site_runtime_publication_https_writer_path: >-
+      /tmp/{{ site_runtime_publication_https_id }}-atomic-config.py
+
+- name: Применить HTTPS/SNI publication transaction
+  block:
+    - name: Подготовить каталог HTTPS/SNI journal
+      ansible.builtin.file:
+        path: "{{ site_runtime_publication_https_journal_root }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Сохранить закрытый snapshot production environment
+      ansible.builtin.copy:
+        src: "{{ site_runtime_publication_https_environment_path }}"
+        dest: >-
+          {{ site_runtime_publication_https_journal_root }}/{{ site_runtime_publication_https_id }}.runtime.env
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+        force: false
+      no_log: true
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Сохранить snapshot Nginx перед HTTPS publication
+      ansible.builtin.copy:
+        src: "{{ site_runtime_publication_https_nginx_path }}"
+        dest: >-
+          {{ site_runtime_publication_https_journal_root }}/{{ site_runtime_publication_https_id }}.nginx.conf
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0640"
+        force: false
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Сохранить snapshot HAProxy перед SNI route
+      ansible.builtin.copy:
+        src: "{{ site_runtime_publication_edge_config }}"
+        dest: >-
+          {{ site_runtime_publication_https_journal_root }}/{{ site_runtime_publication_https_id }}.haproxy.cfg
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0640"
+        force: false
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Доставить byte-exact writer для реального HTTPS rollout
+      ansible.builtin.copy:
+        src: "{{ site_runtime_publication_atomic_writer }}"
+        dest: "{{ site_runtime_publication_https_writer_path }}"
+        owner: root
+        group: root
+        mode: "0700"
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Подготовить byte-exact HAProxy candidate реального rollout
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ site_runtime_publication_https_writer_path }}"
+          - prepare
+          - --candidate
+          - "{{ site_runtime_publication_https_candidate_path }}"
+        stdin: "{{ site_runtime_publication_https_haproxy_future.stdout }}"
+        stdin_add_newline: false
+      register: site_runtime_publication_https_candidate_prepare
+      changed_when: false
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Принять метаданные byte-exact HAProxy candidate
+      ansible.builtin.assert:
+        that:
+          - >-
+            (site_runtime_publication_https_candidate_prepare.stdout | from_json).sha256
+            == site_runtime_publication_https_haproxy_metadata.sha256
+          - >-
+            (site_runtime_publication_https_candidate_prepare.stdout | from_json).size | int
+            == site_runtime_publication_https_haproxy_metadata.size | int
+        fail_msg: Реальный HAProxy candidate расходится с принятым preflight candidate.
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Проверить реальный HAProxy candidate до production mutation
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ site_runtime_publication_edge_container }}"
+          - haproxy
+          - -c
+          - -f
+          - >-
+            /usr/local/etc/haproxy/{{
+              site_runtime_publication_https_candidate_path | basename
+            }}
+      changed_when: false
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Атомарно применить production host и CSRF environment
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import json
+            import os
+            import pathlib
+            import re
+            import sys
+
+            path = pathlib.Path(sys.argv[1])
+            expected = json.loads(sys.argv[2])
+            transaction_id = sys.argv[3]
+            raw = path.read_text(encoding="utf-8")
+            lines = raw.splitlines()
+            output = []
+            replaced = set()
+            for line in lines:
+                key = line.split("=", 1)[0] if "=" in line else ""
+                if key in expected:
+                    output.append(key + "=" + expected[key])
+                    replaced.add(key)
+                else:
+                    output.append(line)
+            for key in ("CSRF_TRUSTED_ORIGINS",):
+                if key not in replaced:
+                    output.append(key + "=" + expected[key])
+            future = "\n".join(output) + "\n"
+            temporary = path.with_name(path.name + "." + transaction_id + ".tmp")
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+                    handle.write(future)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, path)
+                os.chmod(path, 0o600)
+            finally:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+          - "{{ site_runtime_publication_https_environment_path }}"
+          - "{{ site_runtime_publication_model.application.environment | to_json }}"
+          - "{{ site_runtime_publication_https_id }}"
+      no_log: true
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Атомарно применить Nginx TLS publication config
+      ansible.builtin.copy:
+        content: "{{ site_runtime_publication_model.render.https.documents.nginx_public_fragment }}"
+        dest: "{{ site_runtime_publication_https_nginx_path }}"
+        owner: root
+        group: root
+        mode: "0640"
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Пересоздать только runtime-компоненты, использующие production environment
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-name
+          - "{{ site_runtime_instance }}"
+          - -f
+          - "{{ site_runtime_publication_https_instance_root }}/docker-compose.yml"
+          - -f
+          - "{{ site_runtime_publication_https_override_path }}"
+          - up
+          - -d
+          - --no-build
+          - --pull
+          - never
+          - --no-deps
+          - --force-recreate
+          - web
+          - worker
+          - beat
+          - nginx
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Дождаться private health до открытия SNI route
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ site_runtime_instance }}-web-1"
+          - python
+          - -c
+          - >-
+            import urllib.request;
+            [urllib.request.urlopen('http://127.0.0.1:8080' + path, timeout=5).read()
+            for path in ('/healthz/','/readyz/','/worker-healthz/')]
+      register: site_runtime_publication_https_private_health
+      retries: 20
+      delay: 3
+      until: site_runtime_publication_https_private_health.rc == 0
+      check_mode: false
+      changed_when: false
+
+    - name: Принять локальный TLS endpoint до открытия SNI route
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ site_runtime_instance }}-web-1"
+          - python
+          - -c
+          - |
+            import socket
+            import ssl
+            import sys
+
+            domain = sys.argv[1]
+            context = ssl.create_default_context()
+            with socket.create_connection(("127.0.0.1", 8443), timeout=5) as raw:
+                with context.wrap_socket(raw, server_hostname=domain) as secure:
+                    secure.sendall(
+                        (
+                            "GET /healthz/ HTTP/1.1\r\n"
+                            f"Host: {domain}\r\n"
+                            "Connection: close\r\n\r\n"
+                        ).encode()
+                    )
+                    status = secure.recv(128).split(b"\r\n", 1)[0]
+            if b" 200 " not in status:
+                raise SystemExit("local TLS health did not return 200")
+          - "{{ site_runtime_publication_model.domain }}"
+      register: site_runtime_publication_https_local_tls
+      retries: 20
+      delay: 3
+      until: site_runtime_publication_https_local_tls.rc == 0
+      check_mode: false
+      changed_when: false
+
+    - name: Атомарно активировать проверенный HAProxy SNI candidate
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ site_runtime_publication_https_writer_path }}"
+          - activate
+          - --candidate
+          - "{{ site_runtime_publication_https_candidate_path }}"
+          - --target
+          - "{{ site_runtime_publication_edge_config }}"
+          - --expected-sha256
+          - "{{ site_runtime_publication_https_haproxy_metadata.sha256 }}"
+          - --mode
+          - "0644"
+      register: site_runtime_publication_https_haproxy_apply
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Принять метаданные активированного HAProxy config
+      ansible.builtin.assert:
+        that:
+          - >-
+            (site_runtime_publication_https_haproxy_apply.stdout | from_json).sha256
+            == site_runtime_publication_https_haproxy_metadata.sha256
+          - >-
+            (site_runtime_publication_https_haproxy_apply.stdout | from_json).size | int
+            == site_runtime_publication_https_haproxy_metadata.size | int
+        fail_msg: Активированный HAProxy config расходится с принятым candidate.
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Перезапустить HAProxy после применения SNI route
+      ansible.builtin.command:
+        argv:
+          - docker
+          - restart
+          - "{{ site_runtime_publication_edge_container }}"
+      when: >-
+        (site_runtime_publication_https_haproxy_apply | default({'changed': false})).changed
+
+    - name: Принять запущенный HAProxy после применения SNI route
+      ansible.builtin.shell: |
+        set -euo pipefail
+        test "$(docker inspect "{{ site_runtime_publication_edge_container }}" \
+          --format '{{ '{{.State.Running}}' }}')" = "true"
+        docker exec "{{ site_runtime_publication_edge_container }}" \
+          haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
+        test -n "$(docker port "{{ site_runtime_publication_edge_container }}" 443/tcp)"
+      args:
+        executable: /bin/bash
+      register: site_runtime_publication_https_edge_ready
+      retries: 20
+      delay: 2
+      until: site_runtime_publication_https_edge_ready.rc == 0
+      check_mode: false
+      changed_when: false
+
+    - name: Проверить внешний HTTPS health и закрытые endpoints
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import json
+            import socket
+            import sys
+            import urllib.error
+            import urllib.request
+
+            domain = sys.argv[1]
+            def status(url):
+                try:
+                    with urllib.request.urlopen(url, timeout=15) as response:
+                        response.read(4096)
+                        return response.status
+                except urllib.error.HTTPError as exc:
+                    return exc.code
+            result = {
+                "root": status("https://" + domain + "/"),
+                "live": status("https://" + domain + "/healthz/"),
+                "ready": status("https://" + domain + "/readyz/"),
+                "static": status("https://" + domain + "/static/admin/css/base.css"),
+                "worker": status("https://" + domain + "/worker-healthz/"),
+                "private_media": status("https://" + domain + "/private_media/platform-probe"),
+                "closed_ports": {},
+            }
+            for port in (5432, 6379, 8000):
+                sock = socket.socket()
+                sock.settimeout(3)
+                result["closed_ports"][str(port)] = sock.connect_ex((domain, port)) != 0
+                sock.close()
+            print(json.dumps(result, sort_keys=True))
+            assert result["root"] == 200
+            assert result["live"] == 200
+            assert result["ready"] == 200
+            assert result["static"] == 200
+            assert result["worker"] == 404
+            assert result["private_media"] == 404
+            assert all(result["closed_ports"].values())
+          - "{{ site_runtime_publication_model.domain }}"
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      changed_when: false
+      register: site_runtime_publication_https_external_acceptance
+      retries: 15
+      delay: 3
+      until: site_runtime_publication_https_external_acceptance.rc == 0
+
+    - name: Проверить HTTP redirect и HTTP-01 после HTTPS publication
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import json
+            import sys
+            import urllib.error
+            import urllib.request
+
+            class NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    return None
+            domain = sys.argv[1]
+            opener = urllib.request.build_opener(NoRedirect)
+            def request(path):
+                try:
+                    response = opener.open("http://" + domain + path, timeout=10)
+                    return response.status, response.headers.get("Location")
+                except urllib.error.HTTPError as exc:
+                    return exc.code, exc.headers.get("Location")
+            root, location = request("/")
+            challenge, _ = request("/.well-known/acme-challenge/platform-published-probe")
+            print(json.dumps({"root": root, "location": location, "challenge": challenge}))
+            assert root == 301
+            assert location == "https://" + domain + "/"
+            assert challenge == 404
+          - "{{ site_runtime_publication_model.domain }}"
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      changed_when: false
+      register: site_runtime_publication_https_http_acceptance
+
+    - name: Проверить runtime identities после HTTPS publication
+      ansible.builtin.shell: |
+        set -euo pipefail
+        python3 - \
+          "{{ site_runtime_publication_https_environment_path }}" \
+          "{{ site_runtime_publication_https_nginx_path }}" \
+          "{{ site_runtime_publication_edge_config }}" \
+          "{{ (site_runtime_publication_https_environment.stdout | from_json).prospective_checksum }}" \
+          "{{ site_runtime_publication_model.render.https.checksums.nginx_public_fragment }}" \
+          "{{ site_runtime_publication_https_haproxy_metadata.sha256 }}" <<'PY'
+        import hashlib
+        from pathlib import Path
+        import sys
+
+        paths = [Path(item) for item in sys.argv[1:4]]
+        expected = sys.argv[4:7]
+        actual = [hashlib.sha256(path.read_bytes()).hexdigest() for path in paths]
+        if actual != expected:
+            raise SystemExit("production environment/Nginx/HAProxy checksum drift")
+        PY
+        for name in \
+          site-runtime-{{ site_runtime_instance }}-anchor \
+          {{ site_runtime_instance }}-redis-1 \
+          {{ site_runtime_instance }}-web-1 \
+          {{ site_runtime_instance }}-worker-1 \
+          {{ site_runtime_instance }}-beat-1 \
+          {{ site_runtime_instance }}-nginx-1;
+        do
+          test "$(docker inspect "$name" --format '{{ '{{.State.Running}}' }}')" = "true"
+          bindings="$(docker inspect "$name" --format '{{ '{{json .HostConfig.PortBindings}}' }}')"
+          test "$bindings" = "null" || test "$bindings" = "{}"
+        done
+      args:
+        executable: /bin/bash
+      check_mode: false
+      changed_when: false
+
+    - name: Проверить неизменность application current.json и базового Compose
+      ansible.builtin.stat:
+        path: "{{ item.item }}"
+        checksum_algorithm: sha256
+      loop: "{{ site_runtime_publication_https_files_before.results[0:2] }}"
+      loop_control:
+        label: "{{ item.item }}"
+      check_mode: false
+      changed_when: false
+      register: site_runtime_publication_https_application_files_after
+
+    - name: Принять неизменность deployment identity
+      ansible.builtin.assert:
+        that:
+          - >-
+            site_runtime_publication_https_application_files_after.results[0].stat.checksum
+            == site_runtime_publication_https_files_before.results[0].stat.checksum
+          - >-
+            site_runtime_publication_https_application_files_after.results[1].stat.checksum
+            == site_runtime_publication_https_files_before.results[1].stat.checksum
+        fail_msg: HTTPS publication не должна менять application current.json или базовый Compose.
+
+    - name: Записать успешный HTTPS/SNI journal
+      ansible.builtin.copy:
+        content: >-
+          {{
+            {
+              'https_id': site_runtime_publication_https_id,
+              'time_utc': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ'),
+              'action': 'publication-https',
+              'instance': site_runtime_instance,
+              'domain': site_runtime_publication_model.domain,
+              'deployment_id': site_runtime_publication_https_current.deployment_id,
+              'deployment_digest': site_runtime_publication_https_current.digest,
+              'compose_checksum': site_runtime_publication_https_current.compose_checksum,
+              'certificate_id': site_runtime_publication_https_receipt.certificate_id,
+              'environment_checksum': (site_runtime_publication_https_environment.stdout | from_json).prospective_checksum,
+              'nginx_checksum': site_runtime_publication_model.render.https.checksums.nginx_public_fragment,
+              'haproxy_checksum': site_runtime_publication_https_haproxy_metadata.sha256,
+              'render_checksums': site_runtime_publication_model.render.https.checksums,
+              'private_health': 'succeeded',
+              'external_health': 'succeeded',
+              'security_acceptance': 'succeeded',
+              'https_route_enabled': true,
+              'application_published': true,
+              'final_status': 'succeeded'
+            } | to_nice_json
+          }}
+        dest: >-
+          {{ site_runtime_publication_https_journal_root }}/{{ site_runtime_publication_https_id }}.json
+        owner: root
+        group: root
+        mode: "0640"
+        force: false
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Обновить publication current receipt после HTTPS/SNI acceptance
+      ansible.builtin.copy:
+        content: >-
+          {{
+            site_runtime_publication_https_receipt | combine({
+              'https_id': site_runtime_publication_https_id,
+              'deployment_id': site_runtime_publication_https_current.deployment_id,
+              'deployment_digest': site_runtime_publication_https_current.digest,
+              'compose_checksum': site_runtime_publication_https_current.compose_checksum,
+              'environment_checksum': (site_runtime_publication_https_environment.stdout | from_json).prospective_checksum,
+              'nginx_checksum': site_runtime_publication_model.render.https.checksums.nginx_public_fragment,
+              'haproxy_checksum': site_runtime_publication_https_haproxy_metadata.sha256,
+              'https_render_checksums': site_runtime_publication_model.render.https.checksums,
+              'https_route_enabled': true,
+              'application_published': true,
+              'external_health': 'succeeded',
+              'security_acceptance': 'succeeded',
+              'final_status': 'succeeded'
+            }, recursive=True) | to_nice_json
+          }}
+        dest: "{{ site_runtime_publication_https_journal_root }}/current.json"
+        owner: root
+        group: root
+        mode: "0640"
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Сформировать безопасный результат реальной HTTPS/SNI публикации
+      ansible.builtin.set_fact:
+        site_runtime_publication_https_result: >-
+          {{ site_runtime_publication_https_result | combine({
+            'https_id': (
+              site_runtime_publication_https_receipt.https_id
+              if site_runtime_publication_https_already_applied | bool
+              else site_runtime_publication_https_id
+            ),
+            'already_applied': site_runtime_publication_https_already_applied | bool,
+            'sni_route_applied': true,
+            'application_published': true,
+            'private_health': 'succeeded',
+            'external_health': 'succeeded',
+            'security_acceptance': 'succeeded',
+            'final_status': 'succeeded',
+            'mutation_performed': not site_runtime_publication_https_already_applied | bool,
+            'containers_changed': not site_runtime_publication_https_already_applied | bool,
+            'volumes_changed': false,
+            'runtime_changed': not site_runtime_publication_https_already_applied | bool,
+            'edge_changed': not site_runtime_publication_https_already_applied | bool,
+            'check_mode_mutations': false
+          }, recursive=True) }}
+
+  rescue:
+    - name: Восстановить закрытый production environment после ошибки
+      ansible.builtin.copy:
+        src: >-
+          {{ site_runtime_publication_https_journal_root }}/{{ site_runtime_publication_https_id }}.runtime.env
+        dest: "{{ site_runtime_publication_https_environment_path }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      failed_when: false
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Восстановить ACME-only Nginx config после ошибки
+      ansible.builtin.copy:
+        src: >-
+          {{ site_runtime_publication_https_journal_root }}/{{ site_runtime_publication_https_id }}.nginx.conf
+        dest: "{{ site_runtime_publication_https_nginx_path }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0640"
+      failed_when: false
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Восстановить HAProxy config после ошибки HTTPS/SNI
+      ansible.builtin.copy:
+        src: >-
+          {{ site_runtime_publication_https_journal_root }}/{{ site_runtime_publication_https_id }}.haproxy.cfg
+        dest: "{{ site_runtime_publication_edge_config }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+      failed_when: false
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Перезапустить runtime после аварийного восстановления
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-name
+          - "{{ site_runtime_instance }}"
+          - -f
+          - "{{ site_runtime_publication_https_instance_root }}/docker-compose.yml"
+          - -f
+          - "{{ site_runtime_publication_https_override_path }}"
+          - up
+          - -d
+          - --no-build
+          - --pull
+          - never
+          - --no-deps
+          - --force-recreate
+          - web
+          - worker
+          - beat
+          - nginx
+      failed_when: false
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Перезапустить HAProxy после аварийного восстановления
+      ansible.builtin.command:
+        argv:
+          - docker
+          - restart
+          - "{{ site_runtime_publication_edge_container }}"
+      failed_when: false
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Принять private health после аварийного восстановления
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ site_runtime_instance }}-web-1"
+          - python
+          - -c
+          - >-
+            import urllib.request;
+            [urllib.request.urlopen('http://127.0.0.1:8080' + path, timeout=5).read()
+            for path in ('/healthz/','/readyz/','/worker-healthz/')]
+      register: site_runtime_publication_https_rollback_private_health
+      retries: 20
+      delay: 3
+      until: site_runtime_publication_https_rollback_private_health.rc == 0
+      changed_when: false
+      failed_when: false
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Принять HAProxy после аварийного восстановления
+      ansible.builtin.shell: |
+        set -euo pipefail
+        test "$(docker inspect "{{ site_runtime_publication_edge_container }}" \
+          --format '{{ '{{.State.Running}}' }}')" = "true"
+        docker exec "{{ site_runtime_publication_edge_container }}" \
+          haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
+        test -n "$(docker port "{{ site_runtime_publication_edge_container }}" 443/tcp)"
+      args:
+        executable: /bin/bash
+      register: site_runtime_publication_https_rollback_edge
+      retries: 20
+      delay: 2
+      until: site_runtime_publication_https_rollback_edge.rc == 0
+      changed_when: false
+      failed_when: false
+      when: not site_runtime_publication_https_already_applied | bool
+
+    - name: Зафиксировать фактический статус аварийного восстановления
+      ansible.builtin.set_fact:
+        site_runtime_publication_https_rollback_status: >-
+          {{
+            'not_required'
+            if site_runtime_publication_https_already_applied | bool
+            else (
+              'succeeded'
+              if (
+                (
+                  site_runtime_publication_https_rollback_private_health
+                  | default({'rc': 1})
+                ).rc == 0
+                and (
+                  site_runtime_publication_https_rollback_edge
+                  | default({'rc': 1})
+                ).rc == 0
+              )
+              else 'failed'
+            )
+          }}
+
+    - name: Записать failed HTTPS/SNI journal
+      ansible.builtin.copy:
+        content: >-
+          {{
+            {
+              'https_id': site_runtime_publication_https_id,
+              'time_utc': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ'),
+              'action': 'publication-https',
+              'instance': site_runtime_instance,
+              'domain': site_runtime_publication_model.domain,
+              'deployment_id': site_runtime_publication_https_current.deployment_id,
+              'deployment_digest': site_runtime_publication_https_current.digest,
+              'compose_checksum': site_runtime_publication_https_current.compose_checksum,
+              'certificate_id': site_runtime_publication_https_receipt.certificate_id,
+              'failure_phase': (
+                ansible_failed_task | default({'name': 'unknown'})
+              ).name,
+              'rollback_attempted': not site_runtime_publication_https_already_applied | bool,
+              'rollback_status': site_runtime_publication_https_rollback_status,
+              'previous_configuration_preserved': (
+                site_runtime_publication_https_rollback_status
+                in ['succeeded', 'not_required']
+              ),
+              'final_status': 'failed'
+            } | to_nice_json
+          }}
+        dest: >-
+          {{ site_runtime_publication_https_journal_root }}/{{ site_runtime_publication_https_id }}.failed.json
+        owner: root
+        group: root
+        mode: "0640"
+        force: false
+      failed_when: false
+
+    - name: Остановить HTTPS/SNI rollout после аварийного восстановления
+      ansible.builtin.fail:
+        msg: >-
+          HTTPS/SNI publication не принята. Rollback status={{
+          site_runtime_publication_https_rollback_status }}; failed journal
+          сохранён без секретов.
+
+  always:
+    - name: Удалить HAProxy candidate после HTTPS/SNI transaction
+      ansible.builtin.file:
+        path: "{{ site_runtime_publication_https_candidate_path }}"
+        state: absent
+      changed_when: false
+
+    - name: Удалить byte-exact writer после HTTPS/SNI transaction
+      ansible.builtin.file:
+        path: "{{ site_runtime_publication_https_writer_path }}"
+        state: absent
+      changed_when: false

@@ -52,7 +52,7 @@
 - name: Проверить контракт manifest образа
   ansible.builtin.assert:
     that:
-      - site_runtime_manifest.schema_version | int == 1
+      - site_runtime_manifest.schema_version | int == 2
       - site_runtime_manifest.instance == site_runtime_model.instance
       - site_runtime_manifest.target_alias == site_runtime_model.target_alias
       - site_runtime_manifest.image_ref == site_runtime_model.image_ref
@@ -61,6 +61,11 @@
       - site_runtime_manifest.platform == site_runtime_model.platform
       - site_runtime_manifest.config_image_id is match('^sha256:[0-9a-f]{64}$')
       - site_runtime_manifest.archive_sha256 is match('^[0-9a-f]{64}$')
+      - site_runtime_manifest.project_contract.path == '/app/deploy/site-runtime.contract.yml'
+      - site_runtime_manifest.project_contract.sha256 is match('^[0-9a-f]{64}$')
+      - site_runtime_manifest.project_contract.schema_version | int == 1
+      - site_runtime_manifest.project_contract.frontend_endpoint is match('^/')
+      - "'superuser' in site_runtime_manifest.project_contract.bootstrap_operations"
     fail_msg: "Manifest образа site_runtime не соответствует каноническому идентификатору развёртывания."
 
 - name: Вычислить checksum архива на orchestration-узле
@@ -174,6 +179,31 @@
       - (site_runtime_loaded_image.stdout | from_json | first).Architecture == 'amd64'
   when: not ansible_check_mode
 
+- name: Проверить checksum встроенного project deployment contract
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --network
+      - none
+      - --entrypoint
+      - python
+      - "{{ site_runtime_model.transport_tag }}"
+      - -c
+      - "import hashlib, pathlib; print(hashlib.sha256(pathlib.Path('/app/deploy/site-runtime.contract.yml').read_bytes()).hexdigest())"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_loaded_project_contract
+  when: not ansible_check_mode
+
+- name: Принять встроенный project deployment contract
+  ansible.builtin.assert:
+    that:
+      - site_runtime_loaded_project_contract.stdout | trim == site_runtime_manifest.project_contract.sha256
+    fail_msg: "Встроенный project deployment contract не совпадает с принятым staging manifest."
+  when: not ansible_check_mode
+
 - name: Записать неизменяемый receipt образа
   ansible.builtin.copy:
     content: "{{ site_runtime_manifest | to_nice_json }}"
@@ -203,4 +233,10 @@
       config_image_id: "{{ site_runtime_manifest.config_image_id }}"
       transport_tag: "{{ site_runtime_model.transport_tag }}"
       already_loaded: "{{ site_runtime_image_already_loaded }}"
+      project_contract:
+        path: "{{ site_runtime_manifest.project_contract.path }}"
+        sha256: "{{ site_runtime_manifest.project_contract.sha256 }}"
+        schema_version: "{{ site_runtime_manifest.project_contract.schema_version }}"
+        frontend_endpoint: "{{ site_runtime_manifest.project_contract.frontend_endpoint }}"
+        bootstrap_operations: "{{ site_runtime_manifest.project_contract.bootstrap_operations }}"
       product_containers_started: false

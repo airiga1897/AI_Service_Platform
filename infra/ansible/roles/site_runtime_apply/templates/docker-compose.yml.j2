@@ -97,6 +97,10 @@ services:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - release_static_data:/srv/static:ro
       - public_media_data:/srv/media:ro
+{% if site_runtime_publication_preserved | bool %}
+      - acme_webroot_data:{{ site_runtime_model.runtime_contract.publication.storage.acme_webroot.container_path }}:ro
+      - tls_data:{{ site_runtime_model.runtime_contract.publication.storage.tls.container_path }}:ro
+{% endif %}
     depends_on: { web: { condition: service_started } }
 
 networks:
@@ -109,3 +113,7 @@ volumes:
   release_static_data: { name: {{ site_runtime_model.runtime_contract.storage.release_static.volume }} }
   public_media_data: { name: {{ site_runtime_model.runtime_contract.storage.public_media.volume }} }
   private_media_data: { name: {{ site_runtime_model.runtime_contract.storage.private_media.volume }} }
+{% if site_runtime_publication_preserved | bool %}
+  acme_webroot_data: { name: {{ site_runtime_model.runtime_contract.publication.storage.acme_webroot.volume }} }
+  tls_data: { name: {{ site_runtime_model.runtime_contract.publication.storage.tls.volume }} }
+{% endif %}

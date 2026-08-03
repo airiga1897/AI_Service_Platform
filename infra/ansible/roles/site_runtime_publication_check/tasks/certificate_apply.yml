@@ -1,0 +1,366 @@
+---
+- name: Подготовить идентификатор и каталог certificate journal
+  ansible.builtin.set_fact:
+    site_runtime_certificate_id: "{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}-certificate"
+    site_runtime_certificate_journal_root: >-
+      {{ site_runtime_publication_journal_root }}/{{ site_runtime_instance }}
+    site_runtime_certificate_container: >-
+      ai-service-platform-certbot-{{ site_runtime_instance }}
+    site_runtime_certificate_validation_container: >-
+      ai-service-platform-certbot-validate-{{ site_runtime_instance }}
+
+- name: Подготовить каталог certificate journal
+  ansible.builtin.file:
+    path: "{{ site_runtime_certificate_journal_root }}"
+    state: directory
+    mode: "0750"
+
+- name: Проверить отсутствие незавершённых Certbot containers
+  ansible.builtin.command:
+    argv: [docker, container, inspect, "{{ item }}"]
+  loop:
+    - "{{ site_runtime_certificate_container }}"
+    - "{{ site_runtime_certificate_validation_container }}"
+  check_mode: false
+  changed_when: false
+  failed_when: false
+  register: site_runtime_certificate_stale_containers
+
+- name: Запретить автоматическое удаление неизвестного Certbot state
+  ansible.builtin.assert:
+    that:
+      - site_runtime_certificate_stale_containers.results | selectattr('rc', 'equalto', 0) | list | length == 0
+    fail_msg: >-
+      Обнаружен незавершённый Certbot container. Требуется отдельная диагностика;
+      автоматическое удаление запрещено.
+
+- name: Выпустить и проверить сертификат с аварийным journal
+  block:
+    - name: Запустить exact Certbot без registry pull и host ports
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --name
+          - "{{ site_runtime_certificate_container }}"
+          - --pull
+          - never
+          - --network
+          - "{{ site_runtime_publication_model.acme.issuance.network_mode }}"
+          - --cap-drop
+          - ALL
+          - --security-opt
+          - no-new-privileges:true
+          - --label
+          - ai-service-platform.managed=site_runtime-certificate
+          - --label
+          - "ai-service-platform.instance={{ site_runtime_instance }}"
+          - --volume
+          - "{{ site_runtime_publication_model.storage.acme_webroot.volume }}:{{ site_runtime_publication_model.acme.issuance.webroot_path }}:rw"
+          - --volume
+          - "{{ site_runtime_publication_model.storage.tls.volume }}:{{ site_runtime_publication_model.acme.issuance.tls_path }}:rw"
+          - "{{ site_runtime_certificate_certbot.transport_tag }}"
+          - certonly
+          - --webroot
+          - --webroot-path
+          - "{{ site_runtime_publication_model.acme.issuance.webroot_path }}"
+          - --domain
+          - "{{ site_runtime_publication_model.acme.issuance.domain }}"
+          - --cert-name
+          - "{{ site_runtime_publication_model.acme.issuance.certificate_name }}"
+          - --email
+          - "{{ site_runtime_publication_model.acme.contact_email }}"
+          - --agree-tos
+          - --non-interactive
+          - --keep-until-expiring
+      no_log: true
+      register: site_runtime_certificate_certbot_run
+      changed_when: site_runtime_certificate_certbot_run.rc == 0
+
+    - name: Проверить домен, срок и файлы сертификата из exact image
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --name
+          - "{{ site_runtime_certificate_validation_container }}"
+          - --pull
+          - never
+          - --network
+          - none
+          - --cap-drop
+          - ALL
+          - --security-opt
+          - no-new-privileges:true
+          - --volume
+          - "{{ site_runtime_publication_model.storage.tls.volume }}:{{ site_runtime_publication_model.acme.issuance.tls_path }}:ro"
+          - --entrypoint
+          - python3
+          - "{{ site_runtime_certificate_certbot.transport_tag }}"
+          - -c
+          - |
+            import json
+            import os
+            import ssl
+            import sys
+            import time
+
+            domain, tls_path = sys.argv[1:]
+            live = os.path.join(tls_path, "live", domain)
+            fullchain = os.path.join(live, "fullchain.pem")
+            private_key = os.path.join(live, "privkey.pem")
+            certificate = ssl._ssl._test_decode_cert(fullchain)
+            names = sorted(
+                value
+                for kind, value in certificate.get("subjectAltName", ())
+                if kind == "DNS"
+            )
+            expires_at = ssl.cert_time_to_seconds(certificate["notAfter"])
+            days_remaining = int((expires_at - time.time()) // 86400)
+            result = {
+                "domain_present": domain in names,
+                "private_key_present": os.path.isfile(private_key),
+                "not_after": certificate["notAfter"],
+                "days_remaining": days_remaining,
+            }
+            print(json.dumps(result, sort_keys=True))
+            assert result["domain_present"]
+            assert result["private_key_present"]
+            assert days_remaining >= 14
+          - "{{ site_runtime_publication_model.acme.issuance.domain }}"
+          - "{{ site_runtime_publication_model.acme.issuance.tls_path }}"
+      check_mode: false
+      changed_when: false
+      register: site_runtime_certificate_validation
+
+    - name: Проверить private health после Certbot
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ site_runtime_instance }}-web-1"
+          - python
+          - -c
+          - >-
+            import urllib.request;
+            [urllib.request.urlopen('http://127.0.0.1:8080' + path, timeout=5).read()
+            for path in ('/healthz/','/readyz/','/worker-healthz/')]
+      check_mode: false
+      changed_when: false
+
+    - name: Повторно проверить внешний HTTP-01 path и закрытый root
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import json
+            import sys
+            import urllib.error
+            import urllib.request
+
+            class NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    return None
+
+            domain = sys.argv[1]
+            opener = urllib.request.build_opener(NoRedirect)
+
+            def probe(path):
+                request = urllib.request.Request("http://" + domain + path)
+                try:
+                    response = opener.open(request, timeout=10)
+                    return response.status, response.headers.get("Location", "")
+                except urllib.error.HTTPError as exc:
+                    return exc.code, exc.headers.get("Location", "")
+
+            root_status, root_location = probe("/")
+            challenge_status, _ = probe(
+                "/.well-known/acme-challenge/platform-certificate-acceptance"
+            )
+            result = {
+                "root": root_status,
+                "root_location": root_location,
+                "challenge": challenge_status,
+            }
+            print(json.dumps(result, sort_keys=True))
+            assert root_status in {301, 302, 307, 308}
+            assert root_location == "https://" + domain + "/"
+            assert challenge_status == 404
+          - "{{ site_runtime_publication_model.domain }}"
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      changed_when: false
+      register: site_runtime_certificate_external_after
+
+    - name: Проверить отсутствие Certbot containers после выпуска
+      ansible.builtin.command:
+        argv: [docker, container, inspect, "{{ item }}"]
+      loop:
+        - "{{ site_runtime_certificate_container }}"
+        - "{{ site_runtime_certificate_validation_container }}"
+      check_mode: false
+      changed_when: false
+      failed_when: false
+      register: site_runtime_certificate_containers_after
+
+    - name: Зафиксировать контейнеры и volumes после выпуска сертификата
+      ansible.builtin.shell: >-
+        set -euo pipefail;
+        printf '{"containers":';
+        docker ps -aq | sort | python3 -c 'import json,sys; print(json.dumps([line.strip() for line in sys.stdin if line.strip()]))';
+        printf ',"volumes":';
+        docker volume ls -q | sort | python3 -c 'import json,sys; print(json.dumps([line.strip() for line in sys.stdin if line.strip()]))';
+        printf '}\n'
+      args:
+        executable: /bin/bash
+      check_mode: false
+      changed_when: false
+      register: site_runtime_certificate_inventory_real_after
+
+    - name: Повторно проверить current.json, Compose и HAProxy после выпуска
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: sha256
+      loop:
+        - "{{ site_runtime_publication_stage_root }}/deployments/{{ site_runtime_instance }}/current.json"
+        - "{{ site_runtime_publication_runtime_root }}/{{ site_runtime_instance }}/docker-compose.yml"
+        - "{{ site_runtime_publication_edge_config }}"
+      check_mode: false
+      changed_when: false
+      register: site_runtime_certificate_files_real_after
+
+    - name: Принять сертификат и неизменность runtime/edge
+      ansible.builtin.assert:
+        that:
+          - site_runtime_certificate_containers_after.results | selectattr('rc', 'equalto', 0) | list | length == 0
+          - (site_runtime_certificate_inventory_real_after.stdout | from_json) == (site_runtime_certificate_inventory_before.stdout | from_json)
+          - site_runtime_certificate_files_real_after.results[0].stat.checksum == site_runtime_certificate_current_stat.stat.checksum
+          - site_runtime_certificate_files_real_after.results[1].stat.checksum == site_runtime_certificate_compose_stat.stat.checksum
+          - site_runtime_certificate_files_real_after.results[2].stat.checksum == (site_runtime_certificate_haproxy | hash('sha256'))
+          - (site_runtime_certificate_validation.stdout | from_json).domain_present | bool
+          - (site_runtime_certificate_validation.stdout | from_json).private_key_present | bool
+          - (site_runtime_certificate_validation.stdout | from_json).days_remaining | int >= 14
+        fail_msg: Сертификат или неизменность runtime/edge не прошли приёмку.
+
+    - name: Записать успешный certificate journal
+      ansible.builtin.copy:
+        content: >-
+          {{
+            {
+              'certificate_id': site_runtime_certificate_id,
+              'time_utc': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ'),
+              'action': 'publication-certificate',
+              'instance': site_runtime_instance,
+              'domain': site_runtime_publication_model.domain,
+              'deployment_id': site_runtime_certificate_current.deployment_id,
+              'compose_checksum': site_runtime_certificate_current.compose_checksum,
+              'certbot_distribution_digest': site_runtime_certificate_certbot.distribution_digest,
+              'certificate_present_before': site_runtime_certificate_present.rc == 0,
+              'certificate_present': true,
+              'certificate_accepted': true,
+              'days_remaining': (site_runtime_certificate_validation.stdout | from_json).days_remaining,
+              'not_after': (site_runtime_certificate_validation.stdout | from_json).not_after,
+              'private_health': 'succeeded',
+              'http01_route_applied': true,
+              'https_route_enabled': false,
+              'application_published': false,
+              'final_status': 'succeeded'
+            } | to_nice_json
+          }}
+        dest: "{{ site_runtime_certificate_journal_root }}/{{ site_runtime_certificate_id }}.json"
+        owner: root
+        group: root
+        mode: "0640"
+        force: false
+
+    - name: Обновить publication current receipt после сертификата
+      ansible.builtin.copy:
+        content: >-
+          {{
+            site_runtime_certificate_publication_receipt | combine({
+              'certificate_id': site_runtime_certificate_id,
+              'certificate_present': true,
+              'certificate_accepted': true,
+              'certificate_not_after': (site_runtime_certificate_validation.stdout | from_json).not_after,
+              'certbot_distribution_digest': site_runtime_certificate_certbot.distribution_digest,
+              'https_route_enabled': false,
+              'application_published': false,
+              'final_status': 'succeeded'
+            }, recursive=True) | to_nice_json
+          }}
+        dest: "{{ site_runtime_certificate_journal_root }}/current.json"
+        owner: root
+        group: root
+        mode: "0640"
+
+    - name: Сформировать безопасный результат реального выпуска сертификата
+      ansible.builtin.set_fact:
+        site_runtime_publication_certificate_result: >-
+          {{ site_runtime_publication_certificate_result | combine({
+            'certificate_id': site_runtime_certificate_id,
+            'certificate_present_before': site_runtime_certificate_present.rc == 0,
+            'certificate_present': true,
+            'certificate_requested': site_runtime_certificate_present.rc != 0,
+            'certbot_invoked': true,
+            'certificate_accepted': true,
+            'days_remaining': (site_runtime_certificate_validation.stdout | from_json).days_remaining,
+            'not_after': (site_runtime_certificate_validation.stdout | from_json).not_after,
+            'private_health': 'succeeded',
+            'external_root_status': (site_runtime_certificate_external_after.stdout | from_json).root,
+            'external_root_redirect': (site_runtime_certificate_external_after.stdout | from_json).root_location,
+            'external_challenge_status': (site_runtime_certificate_external_after.stdout | from_json).challenge,
+            'final_status': 'succeeded',
+            'mutation_performed': true,
+            'tls_content_changed': site_runtime_certificate_present.rc != 0,
+            'check_mode_mutations': false,
+            'containers_changed': false,
+            'volumes_changed': false,
+            'runtime_changed': false,
+            'edge_changed': false,
+            'application_published': false
+          }, recursive=True) }}
+
+  rescue:
+    - name: Удалить только известные временные Certbot containers после ошибки
+      ansible.builtin.command:
+        argv: [docker, container, rm, --force, "{{ item }}"]
+      loop:
+        - "{{ site_runtime_certificate_container }}"
+        - "{{ site_runtime_certificate_validation_container }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Записать failed certificate journal без секретов
+      ansible.builtin.copy:
+        content: >-
+          {{
+            {
+              'certificate_id': site_runtime_certificate_id,
+              'time_utc': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ'),
+              'action': 'publication-certificate',
+              'instance': site_runtime_instance,
+              'domain': site_runtime_publication_model.domain,
+              'deployment_id': site_runtime_certificate_current.deployment_id,
+              'compose_checksum': site_runtime_certificate_current.compose_checksum,
+              'certbot_distribution_digest': site_runtime_certificate_certbot.distribution_digest,
+              'tls_preserved_for_diagnostics': true,
+              'https_route_enabled': false,
+              'application_published': false,
+              'final_status': 'failed'
+            } | to_nice_json
+          }}
+        dest: "{{ site_runtime_certificate_journal_root }}/{{ site_runtime_certificate_id }}.failed.json"
+        owner: root
+        group: root
+        mode: "0640"
+        force: false
+
+    - name: Остановить публикацию после ошибки сертификата
+      ansible.builtin.fail:
+        msg: >-
+          Выпуск или приёмка сертификата завершились ошибкой. TLS volume
+          сохранён для диагностики; HTTPS route и приложение не опубликованы.

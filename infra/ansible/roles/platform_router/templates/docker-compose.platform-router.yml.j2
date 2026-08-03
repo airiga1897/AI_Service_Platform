@@ -8,6 +8,12 @@ services:
     sysctls:
       net.ipv4.ip_forward: "1"
     command: ["/bin/sh", "/usr/local/bin/platform-router-reconcile.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /run/platform-router-reconcile.ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
     volumes:
       - ./platform-router-reconcile.sh:/usr/local/bin/platform-router-reconcile.sh:ro
     restart: always
@@ -20,15 +26,19 @@ services:
       {{ network.compose_name }}:
         ipv4_address: {{ network.container_ipv4 }}
 {% endfor %}
+{% for network in platform_router_model.source_networks | default([]) %}
+      {{ network.compose_name }}:
+        ipv4_address: {{ network.container_ipv4 }}
+{% endfor %}
       data:
         ipv4_address: {{ platform_router_model.data_ipv4 }}
       app:
         ipv4_address: {{ platform_router_model.app_ipv4 }}
-{% for client in platform_router_model.softether_clients | default([]) %}
+{% if platform_router_model.softether_client_runtime.enabled | default(false) %}
 
-  {{ client.container_name }}:
-    image: {{ client.image }}
-    container_name: {{ client.container_name }}
+  {{ platform_router_model.softether_client_runtime.container_name }}:
+    image: {{ platform_router_model.softether_client_runtime.image }}
+    container_name: {{ platform_router_model.softether_client_runtime.container_name }}
     command: ["/usr/local/bin/softether-entrypoint.sh", "client"]
     network_mode: "service:{{ platform_router_model.container_name }}"
     cap_add:
@@ -36,12 +46,13 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     volumes:
-      - ./{{ client.data_dir }}:/mnt
+      - ./{{ platform_router_model.softether_client_runtime.data_dir }}:/mnt
       - /etc/localtime:/etc/localtime:ro
     depends_on:
-      - platform-router
+      platform-router:
+        condition: service_healthy
     restart: always
-{% endfor %}
+{% endif %}
 {% if platform_router_model.softether_server_runtime.enabled | default(false) %}
 
   {{ platform_router_model.softether_server_runtime.container_name }}:
@@ -59,7 +70,8 @@ services:
       - ./{{ platform_router_model.softether_server_runtime.adminip_file }}:/mnt/adminip.txt:ro
       - /etc/localtime:/etc/localtime:ro
     depends_on:
-      - platform-router
+      platform-router:
+        condition: service_healthy
     restart: always
 {% endif %}
 
@@ -70,6 +82,11 @@ networks:
     name: {{ network.name }}
 {% endfor %}
 {% for network in platform_router_model.management_networks | default([]) %}
+  {{ network.compose_name }}:
+    external: true
+    name: {{ network.name }}
+{% endfor %}
+{% for network in platform_router_model.source_networks | default([]) %}
   {{ network.compose_name }}:
     external: true
     name: {{ network.name }}

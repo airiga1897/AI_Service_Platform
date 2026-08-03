@@ -1,0 +1,9 @@
+---
+site_runtime_bootstrap_instance: ""
+site_runtime_bootstrap_operation: ""
+site_runtime_bootstrap_check: false
+site_runtime_bootstrap_runner_source: /opt/ai-service-platform/tools/site_runtime/bootstrap_runtime.py
+site_runtime_bootstrap_project_contract_source: /opt/ai-service-platform/tools/site_runtime/project_contract.py
+site_runtime_bootstrap_secret_root: /opt/ai-service-platform/operator/site_runtime/bootstrap-secrets
+site_runtime_bootstrap_stage_root: /var/lib/ai-service-platform/site-runtime
+site_runtime_bootstrap_runtime_root: /opt/ai-service-platform/site-runtime

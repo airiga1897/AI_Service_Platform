@@ -12,6 +12,7 @@
     product_image_id = os.environ["EXPECTED_PRODUCT_IMAGE_ID"]
     support_image_ids = json.loads(os.environ["EXPECTED_SUPPORT_IMAGE_IDS"])
     storage = json.loads(os.environ["EXPECTED_STORAGE"])
+    publication = json.loads(os.environ["EXPECTED_PUBLICATION"])
 
     def run(args):
         proc = subprocess.run(args, capture_output=True, text=True, check=False)
@@ -83,6 +84,19 @@
         for mount in inspections["nginx"].get("Mounts", [])
     ):
         raise SystemExit("Nginx не должен получать private_media")
+    if publication["preserved"]:
+        assert_volume(
+            "nginx",
+            publication["acme_webroot"]["container_path"],
+            publication["acme_webroot"]["volume"],
+            False,
+        )
+        assert_volume(
+            "nginx",
+            publication["tls"]["container_path"],
+            publication["tls"]["volume"],
+            False,
+        )
 
     print(json.dumps({
         "instance": instance,
@@ -91,6 +105,7 @@
         "host_ports_absent": True,
         "product_config_image_id": product_image_id,
         "storage_mounts_valid": True,
+        "publication_preserved": publication["preserved"],
     }, sort_keys=True))
     PY
   args:
@@ -102,6 +117,14 @@
       {{ {'redis': site_runtime_support_images.redis.config_image_id,
           'nginx': site_runtime_support_images.nginx.config_image_id} | to_json }}
     EXPECTED_STORAGE: "{{ site_runtime_model.runtime_contract.storage | to_json }}"
+    EXPECTED_PUBLICATION: >-
+      {{
+        {
+          'preserved': site_runtime_publication_preserved | bool,
+          'acme_webroot': site_runtime_model.runtime_contract.publication.storage.acme_webroot,
+          'tls': site_runtime_model.runtime_contract.publication.storage.tls
+        } | to_json
+      }}
   check_mode: false
   changed_when: false
   register: site_runtime_acceptance_runtime_command

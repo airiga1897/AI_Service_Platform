@@ -1,0 +1,505 @@
+---
+- name: Зафиксировать контейнеры и volumes до HTTPS/SNI preflight
+  ansible.builtin.shell: >-
+    set -euo pipefail;
+    printf '{"containers":';
+    docker ps -aq | sort | python3 -c 'import json,sys; print(json.dumps([line.strip() for line in sys.stdin if line.strip()]))';
+    printf ',"volumes":';
+    docker volume ls -q | sort | python3 -c 'import json,sys; print(json.dumps([line.strip() for line in sys.stdin if line.strip()]))';
+    printf '}\n'
+  args:
+    executable: /bin/bash
+  check_mode: false
+  changed_when: false
+  register: site_runtime_publication_https_inventory_before
+
+- name: Проверить неизменяемые файлы перед HTTPS/SNI preflight
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    checksum_algorithm: sha256
+  loop:
+    - "{{ site_runtime_publication_stage_root }}/deployments/{{ site_runtime_instance }}/current.json"
+    - "{{ site_runtime_publication_runtime_root }}/{{ site_runtime_instance }}/docker-compose.yml"
+    - "{{ site_runtime_publication_runtime_root }}/{{ site_runtime_instance }}/runtime.env"
+    - "{{ site_runtime_publication_runtime_root }}/{{ site_runtime_instance }}/nginx-publication-acme.conf"
+    - "{{ site_runtime_publication_edge_config }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_publication_https_files_before
+
+- name: Прочитать принятый certificate receipt
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_publication_journal_root }}/{{ site_runtime_instance }}/current.json"
+  check_mode: false
+  register: site_runtime_publication_https_receipt_slurp
+
+- name: Прочитать канонический application current перед HTTPS/SNI preflight
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_publication_https_files_before.results[0].item }}"
+  check_mode: false
+  register: site_runtime_publication_https_current_slurp
+
+- name: Принять certificate receipt и application current перед HTTPS/SNI preflight
+  ansible.builtin.set_fact:
+    site_runtime_publication_https_receipt: >-
+      {{ site_runtime_publication_https_receipt_slurp.content | b64decode | from_json }}
+    site_runtime_publication_https_current: >-
+      {{ site_runtime_publication_https_current_slurp.content | b64decode | from_json }}
+
+- name: Проверить принятый сертификат перед HTTPS/SNI preflight
+  ansible.builtin.assert:
+    that:
+      - site_runtime_publication_https_receipt.final_status == 'succeeded'
+      - site_runtime_publication_https_receipt.domain == site_runtime_publication_model.domain
+      - >-
+        site_runtime_publication_https_receipt.deployment_id
+        == site_runtime_publication_https_current.deployment_id
+      - >-
+        site_runtime_publication_https_current.compose_checksum
+        == site_runtime_publication_https_files_before.results[1].stat.checksum
+      - site_runtime_publication_https_receipt.certificate_present | bool
+      - site_runtime_publication_https_receipt.certificate_accepted | bool
+      - site_runtime_publication_https_receipt.certbot_distribution_digest == 'sha256:34ee91d2f43008eb78a007d22f23ed4b2eaa9a454cb27ca2c042b49527a695b4'
+    fail_msg: Для publication-https требуется принятый сертификат.
+
+- name: Проверить наличие certificate chain и private key без вывода содержимого
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - "{{ site_runtime_instance }}-nginx-1"
+      - test
+      - -s
+      - "/etc/letsencrypt/live/{{ site_runtime_publication_model.domain }}/{{ item }}"
+  loop:
+    - fullchain.pem
+    - privkey.pem
+  check_mode: false
+  changed_when: false
+  no_log: true
+
+- name: Прочитать текущую HAProxy конфигурацию
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_publication_edge_config }}"
+  check_mode: false
+  register: site_runtime_publication_https_haproxy_slurp
+
+- name: Сформировать prospective fail-closed HAProxy config в памяти
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import json
+        import sys
+
+        current = sys.argv[1]
+        contract = json.loads(sys.argv[2])
+        documents = contract["documents"]
+        fragments = [
+            documents["haproxy_frontend_acl"],
+            documents["haproxy_frontend_use_backend"],
+            documents["haproxy_backend"],
+        ]
+        counts = [current.count(fragment) for fragment in fragments]
+        if any(count not in (0, 1) for count in counts):
+            raise SystemExit("prospective HTTPS HAProxy fragments duplicated")
+        if len(set(counts)) != 1:
+            raise SystemExit("partial prospective HTTPS HAProxy configuration")
+        lines = current.splitlines(keepends=True)
+        starts = [
+            index for index, line in enumerate(lines)
+            if line.rstrip("\r\n") == "frontend https_in"
+        ]
+        if len(starts) != 1:
+            raise SystemExit("frontend https_in not found exactly once")
+        start = starts[0]
+        end = len(lines)
+        for index in range(start + 1, len(lines)):
+            line = lines[index]
+            if line and not line[0].isspace() and line.split(None, 1)[0] in {
+                "frontend", "backend", "listen", "global", "defaults",
+            }:
+                end = index
+                break
+        section = "".join(lines[start:end])
+        allow_prefix = contract["allow_condition_prefix"]
+        allow_lines = [
+            line for line in section.splitlines(keepends=True)
+            if line.startswith(allow_prefix)
+        ]
+        if len(allow_lines) != 1:
+            raise SystemExit("fail-closed HTTPS allow condition not found exactly once in frontend https_in")
+        allow_line = allow_lines[0]
+        acl = contract["sni_acl"]
+        anchor = contract["accept_anchor"] + "\n"
+        if counts[0] == 1:
+            if (" or " + acl) not in allow_line:
+                raise SystemExit("existing HTTPS/SNI ACL is outside fail-closed allow condition")
+            if section.count(documents["haproxy_frontend_acl"]) != 1:
+                raise SystemExit("existing HTTPS/SNI ACL is outside frontend https_in")
+            if section.count(documents["haproxy_frontend_use_backend"]) != 1:
+                raise SystemExit("existing HTTPS/SNI backend rule is outside frontend https_in")
+            if section.count(anchor) != 1:
+                raise SystemExit("HTTPS accept anchor not found exactly once in frontend https_in")
+            sys.stdout.write(current)
+            raise SystemExit(0)
+        future_allow = allow_line.rstrip("\r\n") + " or " + acl + "\n"
+        future_section = section.replace(
+            allow_line,
+            documents["haproxy_frontend_acl"] + future_allow,
+            1,
+        )
+        if future_section.count(anchor) != 1:
+            raise SystemExit("HTTPS accept anchor not found exactly once in frontend https_in")
+        future_section = future_section.replace(
+            anchor,
+            anchor + documents["haproxy_frontend_use_backend"],
+            1,
+        )
+        future = "".join(lines[:start]) + future_section + "".join(lines[end:])
+        future = future.rstrip() + "\n" + documents["haproxy_backend"].lstrip("\n")
+        sys.stdout.write(future)
+      - "{{ site_runtime_publication_https_haproxy_slurp.content | b64decode }}"
+      - "{{ site_runtime_publication_model.render.https | to_json }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_publication_https_haproxy_future
+
+- name: Зафиксировать идентификатор byte-exact HAProxy preflight
+  ansible.builtin.set_fact:
+    site_runtime_publication_https_preflight_id: >-
+      {{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}-https-preflight
+
+- name: Зафиксировать пути byte-exact HAProxy preflight candidate
+  ansible.builtin.set_fact:
+    site_runtime_publication_https_preflight_candidate: >-
+      {{ site_runtime_publication_edge_config | dirname }}/.{{
+        site_runtime_publication_https_preflight_id
+      }}.haproxy.cfg.candidate
+    site_runtime_publication_https_preflight_writer: >-
+      /tmp/{{ site_runtime_publication_https_preflight_id }}-atomic-config.py
+
+- name: Проверить byte-exact prospective HAProxy candidate без production mutation
+  block:
+    - name: Доставить byte-exact writer для HAProxy preflight
+      ansible.builtin.copy:
+        src: "{{ site_runtime_publication_atomic_writer }}"
+        dest: "{{ site_runtime_publication_https_preflight_writer }}"
+        owner: root
+        group: root
+        mode: "0700"
+      check_mode: false
+      changed_when: false
+
+    - name: Подготовить byte-exact HAProxy preflight candidate
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ site_runtime_publication_https_preflight_writer }}"
+          - prepare
+          - --candidate
+          - "{{ site_runtime_publication_https_preflight_candidate }}"
+        stdin: "{{ site_runtime_publication_https_haproxy_future.stdout }}"
+        stdin_add_newline: false
+      check_mode: false
+      changed_when: false
+      register: site_runtime_publication_https_preflight_candidate_result
+
+    - name: Прочитать безопасные метаданные HAProxy preflight candidate
+      ansible.builtin.set_fact:
+        site_runtime_publication_https_haproxy_metadata: >-
+          {{ site_runtime_publication_https_preflight_candidate_result.stdout | from_json }}
+
+    - name: Принять byte-level контракт HAProxy preflight candidate
+      ansible.builtin.assert:
+        that:
+          - site_runtime_publication_https_haproxy_metadata.size | int > 0
+          - site_runtime_publication_https_haproxy_metadata.sha256 | length == 64
+        fail_msg: Prospective HAProxy candidate не прошёл byte-level контракт.
+
+    - name: Проверить exact HAProxy candidate через bind-mounted каталог
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ site_runtime_publication_edge_container }}"
+          - haproxy
+          - -c
+          - -f
+          - >-
+            /usr/local/etc/haproxy/{{
+              site_runtime_publication_https_preflight_candidate | basename
+            }}
+      check_mode: false
+      changed_when: false
+
+  always:
+    - name: Удалить временный HAProxy preflight candidate
+      ansible.builtin.file:
+        path: "{{ site_runtime_publication_https_preflight_candidate }}"
+        state: absent
+      check_mode: false
+      changed_when: false
+
+    - name: Удалить временный byte-exact writer после HAProxy preflight
+      ansible.builtin.file:
+        path: "{{ site_runtime_publication_https_preflight_writer }}"
+        state: absent
+      check_mode: false
+      changed_when: false
+
+- name: Определить состояние HTTPS/SNI route
+  ansible.builtin.set_fact:
+    site_runtime_publication_https_route_already_applied: >-
+      {{
+        (site_runtime_publication_https_haproxy_slurp.content | b64decode).count(
+          site_runtime_publication_model.render.https.documents.haproxy_frontend_acl
+        ) == 1
+        and (site_runtime_publication_https_haproxy_slurp.content | b64decode).count(
+          site_runtime_publication_model.render.https.documents.haproxy_frontend_use_backend
+        ) == 1
+        and (site_runtime_publication_https_haproxy_slurp.content | b64decode).count(
+          site_runtime_publication_model.render.https.documents.haproxy_backend
+        ) == 1
+      }}
+
+- name: Принять согласованность publication receipt и HTTPS/SNI route
+  ansible.builtin.assert:
+    that:
+      - >-
+        site_runtime_publication_https_receipt.https_route_enabled | bool
+        == site_runtime_publication_https_route_already_applied | bool
+      - >-
+        site_runtime_publication_https_receipt.application_published | bool
+        == site_runtime_publication_https_route_already_applied | bool
+    fail_msg: Publication receipt и фактический HTTPS/SNI route расходятся.
+
+- name: Проверить prospective HAProxy config без записи
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - -i
+      - "{{ site_runtime_publication_edge_container }}"
+      - haproxy
+      - -c
+      - -f
+      - /dev/stdin
+    stdin: "{{ site_runtime_publication_https_haproxy_future.stdout }}"
+    stdin_add_newline: true
+  check_mode: false
+  changed_when: false
+
+- name: Проверить prospective Nginx TLS config с гарантированной очисткой
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - -i
+      - "{{ site_runtime_instance }}-nginx-1"
+      - sh
+      - -ec
+      - >-
+        test ! -e /tmp/site-runtime-publication-https-check.conf;
+        cleanup(){ rm -f /tmp/site-runtime-publication-https-check.conf; };
+        trap cleanup EXIT HUP INT TERM;
+        umask 077;
+        cat >/tmp/site-runtime-publication-https-check.conf;
+        nginx -t -c /tmp/site-runtime-publication-https-check.conf;
+        test -s /tmp/site-runtime-publication-https-check.conf
+    stdin: |-
+      events {}
+      http {
+      {{ site_runtime_publication_model.render.https.documents.nginx_public_fragment | indent(2, true) }}
+      }
+  check_mode: false
+  changed_when: false
+
+- name: Подтвердить удаление временного prospective Nginx config
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - "{{ site_runtime_instance }}-nginx-1"
+      - test
+      - "!"
+      - -e
+      - /tmp/site-runtime-publication-https-check.conf
+  check_mode: false
+  changed_when: false
+
+- name: Проверить prospective production environment без записи и секретов
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import hashlib
+        import json
+        import pathlib
+        import re
+        import sys
+
+        path = pathlib.Path(sys.argv[1])
+        expected = json.loads(sys.argv[2])
+        raw = path.read_text(encoding="utf-8")
+        lines = raw.splitlines()
+        parsed = {}
+        for line in lines:
+            if not line or line.lstrip().startswith("#"):
+                continue
+            if "=" not in line:
+                raise SystemExit("runtime.env contains an invalid line")
+            key, value = line.split("=", 1)
+            if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key) or key in parsed:
+                raise SystemExit("runtime.env contains an invalid or duplicate key")
+            parsed[key] = value
+        if parsed.get("ENVIRONMENT") != "prod" or parsed.get("DEBUG") != "false":
+            raise SystemExit("runtime.env is not production")
+        current_hosts = parsed.get("ALLOWED_HOSTS", "").split(",")
+        if expected["ALLOWED_HOSTS"].split(",")[0] not in current_hosts:
+            raise SystemExit("runtime.env lost the internal host")
+        future_lines = []
+        replaced = set()
+        for line in lines:
+            key = line.split("=", 1)[0] if "=" in line else ""
+            if key in expected:
+                future_lines.append(key + "=" + expected[key])
+                replaced.add(key)
+            else:
+                future_lines.append(line)
+        for key in ("CSRF_TRUSTED_ORIGINS",):
+            if key not in replaced:
+                future_lines.append(key + "=" + expected[key])
+        future = "\n".join(future_lines) + "\n"
+        safe = {
+            "current_checksum": hashlib.sha256(raw.encode()).hexdigest(),
+            "prospective_checksum": hashlib.sha256(future.encode()).hexdigest(),
+            "allowed_hosts": expected["ALLOWED_HOSTS"].split(","),
+            "csrf_trusted_origins": expected["CSRF_TRUSTED_ORIGINS"].split(","),
+            "other_keys_unchanged": all(
+                parsed.get(key) == dict(
+                    item.split("=", 1) for item in future_lines if "=" in item
+                ).get(key)
+                for key in parsed
+                if key not in expected
+            ),
+        }
+        print(json.dumps(safe, sort_keys=True))
+      - "{{ site_runtime_publication_runtime_root }}/{{ site_runtime_instance }}/runtime.env"
+      - "{{ site_runtime_publication_model.application.environment | to_json }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_publication_https_environment
+
+- name: Проверить закрытый HTTP root и действующий HTTP-01 route
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import json
+        import sys
+        import urllib.error
+        import urllib.request
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        domain = sys.argv[1]
+        opener = urllib.request.build_opener(NoRedirect)
+        def request(path):
+            try:
+                response = opener.open("http://" + domain + path, timeout=10)
+                return response.status, response.headers.get("Location")
+            except urllib.error.HTTPError as exc:
+                return exc.code, exc.headers.get("Location")
+        root, location = request("/")
+        challenge, _ = request("/.well-known/acme-challenge/platform-https-preflight")
+        print(json.dumps({"root": root, "root_location": location, "challenge": challenge}))
+      - "{{ site_runtime_publication_model.domain }}"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  register: site_runtime_publication_https_external
+
+- name: Зафиксировать текущие edge networks
+  ansible.builtin.set_fact:
+    site_runtime_publication_https_edge_networks: >-
+      {{ site_runtime_publication_edge_networks.stdout | from_json }}
+
+- name: Повторно проверить неизменяемые файлы после HTTPS/SNI preflight
+  ansible.builtin.stat:
+    path: "{{ item.item }}"
+    checksum_algorithm: sha256
+  loop: "{{ site_runtime_publication_https_files_before.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  check_mode: false
+  changed_when: false
+  register: site_runtime_publication_https_files_after
+
+- name: Зафиксировать контейнеры и volumes после HTTPS/SNI preflight
+  ansible.builtin.shell: >-
+    set -euo pipefail;
+    printf '{"containers":';
+    docker ps -aq | sort | python3 -c 'import json,sys; print(json.dumps([line.strip() for line in sys.stdin if line.strip()]))';
+    printf ',"volumes":';
+    docker volume ls -q | sort | python3 -c 'import json,sys; print(json.dumps([line.strip() for line in sys.stdin if line.strip()]))';
+    printf '}\n'
+  args:
+    executable: /bin/bash
+  check_mode: false
+  changed_when: false
+  register: site_runtime_publication_https_inventory_after
+
+- name: Принять отсутствие mutations во время HTTPS/SNI preflight
+  ansible.builtin.assert:
+    that:
+      - site_runtime_publication_https_inventory_before.stdout == site_runtime_publication_https_inventory_after.stdout
+      - >-
+        site_runtime_publication_https_files_before.results
+        | map(attribute='stat.checksum')
+        | list
+        ==
+        site_runtime_publication_https_files_after.results
+        | map(attribute='stat.checksum')
+        | list
+      - (site_runtime_publication_https_environment.stdout | from_json).other_keys_unchanged | bool
+      - (site_runtime_publication_https_external.stdout | from_json).root | int == 301
+      - (site_runtime_publication_https_external.stdout | from_json).root_location == 'https://' ~ site_runtime_publication_model.domain ~ '/'
+      - (site_runtime_publication_https_external.stdout | from_json).challenge | int == 404
+    fail_msg: publication-https -Check изменил runtime/edge либо обнаружил открытый HTTP application route.
+
+- name: Сформировать безопасный HTTPS/SNI preflight result
+  ansible.builtin.set_fact:
+    site_runtime_publication_https_result:
+      prerequisites_accepted: true
+      certificate_accepted: true
+      nginx_config_valid: true
+      haproxy_config_valid: true
+      environment_valid: true
+      current_haproxy_checksum: >-
+        {{ (site_runtime_publication_https_haproxy_slurp.content | b64decode) | hash('sha256') }}
+      prospective_haproxy_checksum: >-
+        {{ site_runtime_publication_https_haproxy_metadata.sha256 }}
+      current_environment_checksum: >-
+        {{ (site_runtime_publication_https_environment.stdout | from_json).current_checksum }}
+      prospective_environment_checksum: >-
+        {{ (site_runtime_publication_https_environment.stdout | from_json).prospective_checksum }}
+      render_checksums: "{{ site_runtime_publication_model.render.https.checksums }}"
+      allowed_hosts: >-
+        {{ (site_runtime_publication_https_environment.stdout | from_json).allowed_hosts }}
+      csrf_trusted_origins: >-
+        {{ (site_runtime_publication_https_environment.stdout | from_json).csrf_trusted_origins }}
+      sni_route_applied: "{{ site_runtime_publication_https_route_already_applied | bool }}"
+      application_published: "{{ site_runtime_publication_https_route_already_applied | bool }}"
+      mutation_performed: false
+      containers_changed: false
+      volumes_changed: false
+      runtime_changed: false
+      edge_changed: false
+      check_mode_mutations: false

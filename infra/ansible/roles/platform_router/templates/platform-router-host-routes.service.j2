@@ -1,0 +1,15 @@
+[Unit]
+Description=AI Service Platform source gateway and direct-egress guard
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=AI_SP_SOURCE_GATEWAY=1
+ExecStart={{ platform_router_host_routes_script }} apply
+ExecStop={{ platform_router_host_routes_script }} remove
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

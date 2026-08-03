@@ -1,6 +1,8 @@
 ---
 platform_router_state: present
 platform_router_purge_data: false
+platform_router_egress_path_aliases: ""
+platform_router_source_gateway_state: preserve
 
 platform_router_operator_config_file: "{{ playbook_dir }}/../../operator/platform_router/config.yml"
 platform_router_operator_platform_networks_file: "{{ playbook_dir }}/../../operator/platform_networks/networks.yml"
@@ -9,6 +11,10 @@ platform_router_operator_l3_vps_secrets_dir: "{{ playbook_dir }}/../../operator/
 
 platform_router_root_dir: /opt/ai-service-platform/platform_router
 platform_router_compose_file: "{{ platform_router_root_dir }}/docker-compose.yml"
+platform_router_host_routes_script: "{{ platform_router_root_dir }}/platform-router-host-routes.sh"
+platform_router_host_routes_service: ai-service-platform-router-host-routes.service
+platform_router_receipt_dir: /var/lib/ai-service-platform/platform_router
+platform_router_receipt_file: "{{ platform_router_receipt_dir }}/current.json"
 platform_router_container_name: platform-router
 platform_router_image_repository: ai-service-platform/platform-router
 platform_router_image: ai-service-platform/platform-router:local

@@ -13,6 +13,7 @@ INSTANCE=""
 IMAGE_REF=""
 SNAPSHOT_ID=""
 REHEARSAL_ID=""
+OPERATION=""
 SERVICES_REGISTRY="./services.yml"
 SITE_RUNTIME_INSTANCES="./operator/site_runtime/instances.yml"
 SITE_RUNTIME_RESOLVER="./tools/site_runtime/resolve.py"
@@ -24,6 +25,9 @@ POLICY_ROUTER_IMAGE_REF=""
 BUILD_POLICY_ROUTER_IMAGE="false"
 REINIT_STANDBY="false"
 PLATFORM_ROUTER_SOFTETHER_DEBUG="false"
+PLATFORM_ROUTER_EGRESS_PATHS=""
+PLATFORM_ROUTER_SOURCE_GATEWAY_STATE="preserve"
+GEO_POLICY_ACTIVE_PATH="auto"
 CHECK="false"
 SITE_RUNTIME_LOCK_HELD="false"
 CONFIRM_PURGE="false"
@@ -58,6 +62,9 @@ Usage:
   bash tools/services/service.sh site_runtime publication-check --instance NAME --limit ALIAS --check
   bash tools/services/service.sh site_runtime publication-prepare --instance NAME --limit ALIAS --check
   bash tools/services/service.sh site_runtime publication-http01 --instance NAME --limit ALIAS [--check]
+  bash tools/services/service.sh site_runtime publication-certificate --instance NAME --limit ALIAS [--check]
+  bash tools/services/service.sh site_runtime publication-https --instance NAME --limit ALIAS [--check]
+  bash tools/services/service.sh site_runtime bootstrap --instance NAME --operation NAME --limit ALIAS [--check]
   bash tools/services/service.sh site_runtime backup-init --instance NAME --limit ALIAS [--check]
   bash tools/services/service.sh site_runtime backup-schedule --instance NAME --limit ALIAS [--check]
   bash tools/services/service.sh site_runtime backup --instance NAME --limit ALIAS [--check]
@@ -94,6 +101,10 @@ Usage:
   bash tools/services/service.sh platform_router apply [options]
   bash tools/services/service.sh platform_router absent [options]
   bash tools/services/service.sh platform_router purge --confirm-purge [options]
+  bash tools/services/service.sh geo_policy plan --limit vps3
+  bash tools/services/service.sh geo_policy apply --limit vps3 [--geo-policy-active-path ALIAS] [--check]
+  bash tools/services/service.sh geo_policy rollback --limit vps3
+  bash tools/services/service.sh geo_policy absent --limit vps3
 
 Options:
   --nodes-file PATH      Operator nodes.csv. Default: ./operator/nodes.csv
@@ -103,6 +114,7 @@ Options:
   --limit VALUE          Ansible --limit. Default: service ansible_group.
   --instance NAME        site_runtime instance name.
   --image-ref REF        site_runtime immutable repository@sha256 reference.
+  --operation NAME       Contract-declared site_runtime bootstrap operation.
   --snapshot-id ID       Restic snapshot для site_runtime restore-rehearsal.
   --rehearsal-id ID      Точный failed rehearsal для site_runtime restore-cleanup.
   --policy-router-image-ref REF
@@ -112,6 +124,12 @@ Options:
   --reinit-standby      postgres_runtime only: destructively reinitialize a target standby volume from primary.
   --platform-router-softether-debug
                         platform_router only: show SoftEther server configure task output for diagnostics.
+  --platform-router-egress-paths ALIAS[+ALIAS...]
+                        platform_router only: cumulative egress aliases to reconcile for a canary rollout.
+  --platform-router-source-gateway-state preserve|enabled|disabled
+                        platform_router only: explicit source-gateway apply or rollback override.
+  --geo-policy-active-path PATH
+                        geo_policy only: explicit configured egress alias. Default: auto.
   --check                Pass --check to ansible-playbook.
   --confirm-purge        Required for purge.
   -h, --help             Show help.
@@ -248,6 +266,7 @@ service_playbook() {
         platform_networks) echo "infra/ansible/platform_networks.yml" ;;
         host_resources) echo "infra/ansible/host_resources.yml" ;;
         platform_router) echo "infra/ansible/platform_router.yml" ;;
+        geo_policy) echo "infra/ansible/geo_policy.yml" ;;
         site_runtime)
             if [ "$ACTION" = "probe" ]; then
                 echo "infra/ansible/site_runtime_network_probe.yml"
@@ -255,7 +274,9 @@ service_playbook() {
                 echo "infra/ansible/site_runtime_image_stage.yml"
             elif [ "$ACTION" = "stage-support-images" ]; then
                 echo "infra/ansible/site_runtime_support_images_stage.yml"
-            elif [ "$ACTION" = "publication-check" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ]; then
+            elif [ "$ACTION" = "bootstrap" ]; then
+                echo "infra/ansible/site_runtime_bootstrap.yml"
+            elif [ "$ACTION" = "publication-check" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "publication-certificate" ] || [ "$ACTION" = "publication-https" ]; then
                 echo "infra/ansible/site_runtime_publication_check.yml"
             elif [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; then
                 echo "infra/ansible/site_runtime_backup.yml"
@@ -313,9 +334,19 @@ service_extra_vars() {
             ;;
         platform_router)
             printf '%s\n' "-e" "platform_router_state=$state" "-e" "platform_router_purge_data=$purge"
+            if [ -n "$PLATFORM_ROUTER_EGRESS_PATHS" ]; then
+                printf '%s\n' "-e" "platform_router_egress_path_aliases=$PLATFORM_ROUTER_EGRESS_PATHS"
+            fi
+            printf '%s\n' "-e" "platform_router_source_gateway_state=$PLATFORM_ROUTER_SOURCE_GATEWAY_STATE"
             if [ "$PLATFORM_ROUTER_SOFTETHER_DEBUG" = "true" ]; then
                 printf '%s\n' "-e" "platform_router_softether_debug_no_log=false"
             fi
+            ;;
+        geo_policy)
+            printf '%s\n' \
+                "-e" "geo_policy_state=$state" \
+                "-e" "geo_policy_action=$ACTION" \
+                "-e" "geo_policy_active_path=$GEO_POLICY_ACTIVE_PATH"
             ;;
         site_runtime)
             if [ "$ACTION" = "probe" ]; then
@@ -336,6 +367,13 @@ service_extra_vars() {
                     "-e" "site_runtime_state_file=$STATE_FILE" \
                     "-e" "site_runtime_resolver=$SITE_RUNTIME_RESOLVER" \
                     "-e" "site_runtime_env_resolver=$(dirname "$SITE_RUNTIME_RESOLVER")/resolve_env.py"
+            elif [ "$ACTION" = "bootstrap" ]; then
+                printf '%s\n' \
+                    "-e" "site_runtime_bootstrap_instance=$INSTANCE" \
+                    "-e" "site_runtime_bootstrap_operation=$OPERATION" \
+                    "-e" "site_runtime_bootstrap_check=$CHECK" \
+                    "-e" "site_runtime_bootstrap_runner_source=$(dirname "$SITE_RUNTIME_RESOLVER")/bootstrap_runtime.py" \
+                    "-e" "site_runtime_bootstrap_project_contract_source=$(dirname "$SITE_RUNTIME_RESOLVER")/project_contract.py"
             elif [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; then
                 printf '%s\n' \
                     "-e" "site_runtime_backup_action=$ACTION" \
@@ -350,7 +388,7 @@ service_extra_vars() {
                     "-e" "site_runtime_state_file=$STATE_FILE" \
                     "-e" "site_runtime_backup_resolver=$(dirname "$SITE_RUNTIME_RESOLVER")/resolve_backup.py" \
                     "-e" "site_runtime_backup_runner=$(dirname "$SITE_RUNTIME_RESOLVER")/backup_runtime.py"
-            elif [ "$ACTION" = "publication-check" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ]; then
+            elif [ "$ACTION" = "publication-check" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "publication-certificate" ] || [ "$ACTION" = "publication-https" ]; then
                 printf '%s\n' \
                     "-e" "site_runtime_publication_action=$ACTION" \
                     "-e" "site_runtime_instance=$INSTANCE" \
@@ -395,20 +433,29 @@ if [ "$SERVICE" = "vpn" ]; then
     fail "Unsupported service 'vpn'. Use canonical service name: vpn_edge"
 fi
 case "$SERVICE" in
-    edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector|edge_banlist|postgres_runtime|softether_l3_vps|platform_networks|host_resources|platform_router|site_runtime) ;;
-    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks, host_resources, platform_router, site_runtime." ;;
+    edge_haproxy|vpn_edge|vpn_cascade|policy_gateway|edge_candidate_collector|edge_banlist|postgres_runtime|softether_l3_vps|platform_networks|host_resources|platform_router|geo_policy|site_runtime) ;;
+    *) fail "Unsupported service '$SERVICE'. Supported now: edge_haproxy, vpn_edge, vpn_cascade, policy_gateway, edge_candidate_collector, edge_banlist, postgres_runtime, softether_l3_vps, platform_networks, host_resources, platform_router, geo_policy, site_runtime." ;;
 esac
 case "$ACTION" in
-    plan|apply|absent|purge|reseed|probe|stage-image|stage-support-images|publication-check|publication-prepare|publication-http01|backup-init|backup-schedule|backup|restore-rehearsal|restore-cleanup) ;;
-    *) usage; fail "Action must be one of: plan, apply, absent, purge, reseed, probe, stage-image, stage-support-images, publication-check, publication-prepare, publication-http01, backup-init, backup-schedule, backup, restore-rehearsal, restore-cleanup" ;;
+    plan|apply|rollback|absent|purge|reseed|probe|stage-image|stage-support-images|publication-check|publication-prepare|publication-http01|publication-certificate|publication-https|bootstrap|backup-init|backup-schedule|backup|restore-rehearsal|restore-cleanup) ;;
+    *) usage; fail "Action must be one of: plan, apply, rollback, absent, purge, reseed, probe, stage-image, stage-support-images, publication-check, publication-prepare, publication-http01, publication-certificate, publication-https, bootstrap, backup-init, backup-schedule, backup, restore-rehearsal, restore-cleanup" ;;
 esac
 shift 2
 
-if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" != "plan" ] && [ "$ACTION" != "probe" ] && [ "$ACTION" != "stage-image" ] && [ "$ACTION" != "stage-support-images" ] && [ "$ACTION" != "publication-check" ] && [ "$ACTION" != "publication-prepare" ] && [ "$ACTION" != "publication-http01" ] && [ "$ACTION" != "apply" ] && [ "$ACTION" != "backup-init" ] && [ "$ACTION" != "backup-schedule" ] && [ "$ACTION" != "backup" ] && [ "$ACTION" != "restore-rehearsal" ] && [ "$ACTION" != "restore-cleanup" ]; then
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" != "plan" ] && [ "$ACTION" != "probe" ] && [ "$ACTION" != "stage-image" ] && [ "$ACTION" != "stage-support-images" ] && [ "$ACTION" != "publication-check" ] && [ "$ACTION" != "publication-prepare" ] && [ "$ACTION" != "publication-http01" ] && [ "$ACTION" != "publication-certificate" ] && [ "$ACTION" != "publication-https" ] && [ "$ACTION" != "bootstrap" ] && [ "$ACTION" != "apply" ] && [ "$ACTION" != "backup-init" ] && [ "$ACTION" != "backup-schedule" ] && [ "$ACTION" != "backup" ] && [ "$ACTION" != "restore-rehearsal" ] && [ "$ACTION" != "restore-cleanup" ]; then
     fail "site_runtime action is not supported"
 fi
 if [ "$SERVICE" != "site_runtime" ] && [ "$ACTION" = "probe" ]; then
     fail "probe is supported only for site_runtime"
+fi
+if [ "$SERVICE" = "geo_policy" ]; then
+    case "$ACTION" in
+        plan|apply|rollback|absent) ;;
+        *) fail "geo_policy supports only plan, apply, rollback, and absent" ;;
+    esac
+fi
+if [ "$ACTION" = "rollback" ] && [ "$SERVICE" != "geo_policy" ]; then
+    fail "rollback is supported only for geo_policy"
 fi
 
 if [ "$SERVICE" = "host_resources" ] && [ "$ACTION" != "plan" ] && [ "$ACTION" != "apply" ]; then
@@ -452,6 +499,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --rehearsal-id)
             REHEARSAL_ID="${2:-}"
+            shift 2
+            ;;
+        --operation)
+            OPERATION="${2:-}"
             shift 2
             ;;
         --services-registry)
@@ -498,6 +549,18 @@ while [ "$#" -gt 0 ]; do
             PLATFORM_ROUTER_SOFTETHER_DEBUG="true"
             shift
             ;;
+        --platform-router-egress-paths)
+            PLATFORM_ROUTER_EGRESS_PATHS="${2:-}"
+            shift 2
+            ;;
+        --platform-router-source-gateway-state)
+            PLATFORM_ROUTER_SOURCE_GATEWAY_STATE="${2:-}"
+            shift 2
+            ;;
+        --geo-policy-active-path)
+            GEO_POLICY_ACTIVE_PATH="${2:-}"
+            shift 2
+            ;;
         --check)
             CHECK="true"
             shift
@@ -519,6 +582,18 @@ done
 if [ "$SERVICE" = "site_runtime" ] && [ -z "$LIMIT" ]; then
     fail "site_runtime requires exactly one --limit alias"
 fi
+if [ "$SERVICE" = "geo_policy" ] && [ "$LIMIT" != "vps3" ]; then
+    fail "geo_policy canary requires exactly --limit vps3"
+fi
+if [ "$SERVICE" = "geo_policy" ]; then
+    [[ "$GEO_POLICY_ACTIVE_PATH" =~ ^(auto|[A-Za-z0-9][A-Za-z0-9_.-]*)$ ]] ||
+        fail "--geo-policy-active-path must be auto or a safe configured egress alias"
+elif [ "$GEO_POLICY_ACTIVE_PATH" != "auto" ]; then
+    fail "--geo-policy-active-path is supported only for geo_policy"
+fi
+if [ "$SERVICE" = "geo_policy" ] && [ "$ACTION" = "rollback" ] && [ "$CHECK" = "true" ]; then
+    fail "geo_policy rollback does not support --check"
+fi
 if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "probe" ] && [ "$LIMIT" != "vps3" ]; then
     fail "site_runtime probe requires exactly --limit vps3"
 fi
@@ -528,8 +603,15 @@ fi
 if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; } && [ -z "$INSTANCE" ]; then
     fail "site_runtime $ACTION requires --instance"
 fi
-if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "publication-check" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ]; }; then
+if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "publication-check" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "publication-certificate" ] || [ "$ACTION" = "publication-https" ]; }; then
     [ -n "$INSTANCE" ] || fail "site_runtime $ACTION requires --instance"
+fi
+if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "bootstrap" ]; then
+    [ -n "$INSTANCE" ] || fail "site_runtime bootstrap requires --instance"
+    [[ "$OPERATION" =~ ^[a-z0-9]+([_-][a-z0-9]+)*$ ]] || fail "site_runtime bootstrap requires normalized --operation"
+fi
+if [ -n "$OPERATION" ] && { [ "$SERVICE" != "site_runtime" ] || [ "$ACTION" != "bootstrap" ]; }; then
+    fail "--operation is supported only for site_runtime bootstrap"
 fi
 if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "publication-check" ]; then
     [ "$CHECK" = "true" ] || fail "site_runtime publication-check requires --check"
@@ -571,6 +653,16 @@ fi
 if [ "$PLATFORM_ROUTER_SOFTETHER_DEBUG" = "true" ] && [ "$SERVICE" != "platform_router" ]; then
     fail "--platform-router-softether-debug is supported only for service platform_router"
 fi
+if [ -n "$PLATFORM_ROUTER_EGRESS_PATHS" ]; then
+    [ "$SERVICE" = "platform_router" ] || fail "--platform-router-egress-paths is supported only for service platform_router"
+    printf '%s' "$PLATFORM_ROUTER_EGRESS_PATHS" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]*(\+[A-Za-z0-9][A-Za-z0-9_.-]*)*$' || \
+        fail "--platform-router-egress-paths must be a plus-separated list of safe aliases"
+fi
+printf '%s' "$PLATFORM_ROUTER_SOURCE_GATEWAY_STATE" | grep -Eq '^(preserve|enabled|disabled)$' ||
+    fail "--platform-router-source-gateway-state must be preserve, enabled, or disabled"
+if [ "$PLATFORM_ROUTER_SOURCE_GATEWAY_STATE" != "preserve" ] && [ "$SERVICE" != "platform_router" ]; then
+    fail "--platform-router-source-gateway-state is supported only for service platform_router"
+fi
 if [ "$BUILD_POLICY_ROUTER_IMAGE" = "true" ] && [ -n "$POLICY_ROUTER_IMAGE_REF" ]; then
     fail "--build-policy-router-image and --policy-router-image-ref are mutually exclusive"
 fi
@@ -580,7 +672,7 @@ first_line="$(head -n 1 "$NODES_FILE" | tr -d '\r')"
 [ "$first_line" = "$EXPECTED_HEADER" ] || fail "nodes.csv header must be exactly: $EXPECTED_HEADER"
 state_first_line="$(head -n 1 "$STATE_FILE" | tr -d '\r')"
 [ "$state_first_line" = "$EXPECTED_STATE_HEADER" ] || fail "state.csv header must be exactly: $EXPECTED_STATE_HEADER"
-if [ "$SERVICE" = "vpn_edge" ] || [ "$SERVICE" = "vpn_cascade" ] || [ "$SERVICE" = "policy_gateway" ] || [ "$SERVICE" = "softether_l3_vps" ]; then
+if [ "$SERVICE" = "vpn_edge" ] || [ "$SERVICE" = "vpn_cascade" ] || [ "$SERVICE" = "policy_gateway" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "geo_policy" ]; then
     [ -f "$NETWORKS_FILE" ] || fail "networks.csv not found next to state.csv: $NETWORKS_FILE. Run sync_to_orchestration before $SERVICE $ACTION."
     networks_first_line="$(head -n 1 "$NETWORKS_FILE" | tr -d '\r')"
     [ "$networks_first_line" = "$EXPECTED_NETWORKS_HEADER" ] || fail "networks.csv header must be exactly: $EXPECTED_NETWORKS_HEADER. Run sync_to_orchestration before $SERVICE $ACTION."
@@ -599,6 +691,9 @@ state_lookup_service="$SERVICE"
 if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "probe" ]; then
     state_lookup_service="platform_router"
 fi
+if [ "$SERVICE" = "geo_policy" ]; then
+    state_lookup_service="platform_router"
+fi
 while IFS=, read -r kind name ansible_group active_aliases candidate_aliases old_aliases row_state extra || [ -n "${kind:-}" ]; do
     kind="${kind//$'\r'/}"
     name="${name//$'\r'/}"
@@ -615,7 +710,7 @@ while IFS=, read -r kind name ansible_group active_aliases candidate_aliases old
 
     if [ -n "$LIMIT" ]; then
         target_aliases="$active_aliases"
-        if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ] || [ "$SERVICE" = "site_runtime" ]; } && [ -n "$candidate_aliases" ]; then
+        if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ] || [ "$SERVICE" = "geo_policy" ] || [ "$SERVICE" = "site_runtime" ]; } && [ -n "$candidate_aliases" ]; then
             target_aliases="$(append_aliases_unique "$target_aliases" "$candidate_aliases")"
         fi
         selected_aliases="$(limit_aliases_in_row "$LIMIT" "$target_aliases")"
@@ -690,7 +785,7 @@ fi
 [ "$service_found" = "true" ] || fail "state.csv must contain a service row for $SERVICE matching --limit $(limit_display_for_error "$LIMIT")"
 if [ -n "$LIMIT" ]; then
     limit_match_aliases="$service_active_aliases"
-    if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ] || [ "$SERVICE" = "site_runtime" ]; } && [ -n "$service_candidate_aliases" ]; then
+    if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ] || [ "$SERVICE" = "geo_policy" ] || [ "$SERVICE" = "site_runtime" ]; } && [ -n "$service_candidate_aliases" ]; then
         limit_match_aliases="$(append_aliases_unique "$limit_match_aliases" "$service_candidate_aliases")"
     fi
     while IFS= read -r limit_alias; do
@@ -737,7 +832,7 @@ if [ "$ACTION" = "plan" ]; then
         current_alias="${current_alias//$'\r'/}"
         [ -n "$current_alias" ] || continue
         plan_present_aliases="$service_active_aliases"
-        if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ] || [ "$SERVICE" = "site_runtime" ]; } && [ -n "$service_candidate_aliases" ]; then
+        if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ] || [ "$SERVICE" = "geo_policy" ] || [ "$SERVICE" = "site_runtime" ]; } && [ -n "$service_candidate_aliases" ]; then
             plan_present_aliases="$(append_aliases_unique "$plan_present_aliases" "$service_candidate_aliases")"
         fi
         if [ "$service_row_state" = "present" ] && alias_in_list "$current_alias" "$plan_present_aliases"; then
@@ -775,14 +870,14 @@ fi
 if [ "$ACTION" = "reseed" ] && [ "$service_row_state" != "present" ]; then
     fail "$SERVICE reseed requires state=present in $STATE_FILE"
 fi
-if { [ "$ACTION" = "apply" ] || [ "$ACTION" = "probe" ] || [ "$ACTION" = "stage-image" ] || [ "$ACTION" = "stage-support-images" ] || [ "$ACTION" = "publication-check" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; } && [ "$service_row_state" != "present" ]; then
+if { [ "$ACTION" = "apply" ] || [ "$ACTION" = "rollback" ] || [ "$ACTION" = "probe" ] || [ "$ACTION" = "stage-image" ] || [ "$ACTION" = "stage-support-images" ] || [ "$ACTION" = "publication-check" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "publication-certificate" ] || [ "$ACTION" = "publication-https" ] || [ "$ACTION" = "bootstrap" ] || [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; } && [ "$service_row_state" != "present" ]; then
     fail "$SERVICE $ACTION requires state=present in $STATE_FILE"
 fi
 service_target_aliases="$service_active_aliases"
-if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ] || [ "$SERVICE" = "site_runtime" ]; } && [ -n "$service_candidate_aliases" ]; then
+if { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ] || [ "$SERVICE" = "geo_policy" ] || [ "$SERVICE" = "site_runtime" ]; } && [ -n "$service_candidate_aliases" ]; then
     service_target_aliases="$(append_aliases_unique "$service_target_aliases" "$service_candidate_aliases")"
 fi
-if { [ "$ACTION" = "apply" ] || [ "$ACTION" = "probe" ] || [ "$ACTION" = "stage-image" ] || [ "$ACTION" = "stage-support-images" ] || [ "$ACTION" = "publication-check" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; } && [ -z "$service_target_aliases" ]; then
+if { [ "$ACTION" = "apply" ] || [ "$ACTION" = "rollback" ] || [ "$ACTION" = "probe" ] || [ "$ACTION" = "stage-image" ] || [ "$ACTION" = "stage-support-images" ] || [ "$ACTION" = "publication-check" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "publication-certificate" ] || [ "$ACTION" = "publication-https" ] || [ "$ACTION" = "bootstrap" ] || [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; } && [ -z "$service_target_aliases" ]; then
     fail "No active/candidate aliases for $SERVICE found in $STATE_FILE"
 fi
 if [ "$SERVICE" = "site_runtime" ] && [ "$ACTION" = "stage-image" ]; then
@@ -809,7 +904,7 @@ fi
 
 if [ -n "$LIMIT" ]; then
     limit_args=(--limit "$(ansible_limit_pattern "$LIMIT")")
-elif { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ] || [ "$SERVICE" = "site_runtime" ]; } && [ -n "$service_candidate_aliases" ]; then
+elif { [ "$SERVICE" = "postgres_runtime" ] || [ "$SERVICE" = "softether_l3_vps" ] || [ "$SERVICE" = "platform_networks" ] || [ "$SERVICE" = "platform_router" ] || [ "$SERVICE" = "geo_policy" ] || [ "$SERVICE" = "site_runtime" ]; } && [ -n "$service_candidate_aliases" ]; then
     limit_args=(--limit "$service_group:candidate_$service_group")
 else
     limit_args=(--limit "$service_group")
@@ -818,7 +913,7 @@ check_args=()
 if [ "$CHECK" = "true" ]; then
     check_args=(--check)
 fi
-if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "apply" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; }; then
+if [ "$SERVICE" = "site_runtime" ] && { [ "$ACTION" = "apply" ] || [ "$ACTION" = "publication-prepare" ] || [ "$ACTION" = "publication-http01" ] || [ "$ACTION" = "publication-certificate" ] || [ "$ACTION" = "publication-https" ] || [ "$ACTION" = "bootstrap" ] || [ "$ACTION" = "backup-init" ] || [ "$ACTION" = "backup-schedule" ] || [ "$ACTION" = "backup" ] || [ "$ACTION" = "restore-rehearsal" ] || [ "$ACTION" = "restore-cleanup" ]; }; then
     [[ "$INSTANCE" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || fail "site_runtime instance is not normalized"
     command -v flock >/dev/null 2>&1 || fail "flock not found in PATH"
     site_runtime_lock="/var/lock/ai-service-platform-site-runtime-$INSTANCE.lock"

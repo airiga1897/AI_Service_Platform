@@ -1,0 +1,214 @@
+---
+- name: Проверить durable receipt опубликованного runtime
+  ansible.builtin.stat:
+    path: "{{ site_runtime_publication_journal_root }}/{{ site_runtime_instance }}/current.json"
+    checksum_algorithm: sha256
+  check_mode: false
+  changed_when: false
+  register: site_runtime_apply_publication_receipt_stat
+
+- name: Прочитать durable receipt опубликованного runtime
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_publication_journal_root }}/{{ site_runtime_instance }}/current.json"
+  when: site_runtime_apply_publication_receipt_stat.stat.exists
+  check_mode: false
+  register: site_runtime_apply_publication_receipt_slurp
+
+- name: Определить обязательность сохранения публикации
+  ansible.builtin.set_fact:
+    site_runtime_publication_receipt: >-
+      {{
+        (site_runtime_apply_publication_receipt_slurp.content | b64decode | from_json)
+        if site_runtime_apply_publication_receipt_stat.stat.exists
+        else {}
+      }}
+    site_runtime_publication_preserved: >-
+      {{
+        site_runtime_apply_publication_receipt_stat.stat.exists
+        and (
+          (site_runtime_apply_publication_receipt_slurp.content | b64decode | from_json).get('https_route_enabled', false) | bool
+          or (site_runtime_apply_publication_receipt_slurp.content | b64decode | from_json).get('application_published', false) | bool
+        )
+      }}
+
+- name: Найти journal предыдущей попытки exact deployment
+  ansible.builtin.find:
+    paths: "{{ site_runtime_stage_root }}/deployments/{{ site_runtime_instance }}"
+    patterns: "*-{{ site_runtime_model.distribution_digest | regex_replace('^sha256:', '') | truncate(12, true, '') }}.json"
+    file_type: file
+    recurse: false
+  check_mode: false
+  changed_when: false
+  register: site_runtime_apply_failed_candidates
+
+- name: Прочитать последний journal exact deployment
+  ansible.builtin.slurp:
+    src: "{{ (site_runtime_apply_failed_candidates.files | sort(attribute='mtime') | last).path }}"
+  when: site_runtime_apply_failed_candidates.matched | int > 0
+  check_mode: false
+  register: site_runtime_apply_failed_candidate_slurp
+
+- name: Разобрать последний journal exact deployment
+  ansible.builtin.set_fact:
+    site_runtime_apply_failed_candidate: >-
+      {{
+        (site_runtime_apply_failed_candidate_slurp.content | b64decode | from_json)
+        if site_runtime_apply_failed_candidates.matched | int > 0
+        else {}
+      }}
+
+- name: Определить безопасное продолжение failed deployment
+  ansible.builtin.set_fact:
+    site_runtime_apply_resume_failed: >-
+      {{
+        site_runtime_publication_preserved | bool
+        and site_runtime_apply_failed_candidate.get('final_status') == 'failed'
+        and site_runtime_apply_failed_candidate.get('current_digest') == site_runtime_model.distribution_digest
+        and site_runtime_apply_failed_candidate.get('previous_digest') == site_runtime_publication_receipt.get('deployment_digest')
+        and site_runtime_apply_failed_candidate.get('static_status') == 'succeeded'
+        and site_runtime_apply_failed_candidate.get('migration_status') == 'succeeded'
+        and site_runtime_apply_failed_candidate.get('publication_preserved', false) | bool
+      }}
+
+- name: Запретить неоднозначный publication receipt
+  ansible.builtin.assert:
+    that:
+      - >-
+        not site_runtime_apply_publication_receipt_stat.stat.exists or
+        (
+          site_runtime_publication_receipt.get('https_route_enabled', false) | bool
+          ==
+          site_runtime_publication_receipt.get('application_published', false) | bool
+        )
+      - >-
+        not site_runtime_publication_preserved | bool or
+        site_runtime_publication_receipt.get('final_status') == 'succeeded'
+      - >-
+        not site_runtime_publication_preserved | bool or
+        site_runtime_publication_receipt.get('external_health') == 'succeeded'
+      - >-
+        not site_runtime_publication_preserved | bool or
+        site_runtime_publication_receipt.get('security_acceptance') == 'succeeded'
+      - >-
+        not site_runtime_publication_preserved | bool or
+        site_runtime_publication_receipt.get('domain') == site_runtime_model.runtime_contract.publication.domain
+    fail_msg: >-
+      Durable publication receipt неоднозначен или не принят. Apply остановлен до runtime mutations.
+
+- name: Проверить publication artifacts и edge config
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    checksum_algorithm: sha256
+  loop:
+    - "{{ site_runtime_instance_root }}/runtime.env"
+    - "{{ site_runtime_instance_root }}/nginx-publication-acme.conf"
+    - "{{ site_runtime_instance_root }}/docker-compose.publication.yml"
+    - "{{ site_runtime_edge_config }}"
+    - "{{ site_runtime_instance_root }}/docker-compose.yml"
+    - "{{ site_runtime_instance_root }}/nginx.conf"
+  when: site_runtime_publication_preserved | bool
+  check_mode: false
+  changed_when: false
+  register: site_runtime_apply_publication_artifacts
+
+- name: Проверить publication volumes
+  ansible.builtin.command:
+    argv: [docker, volume, inspect, "{{ item.value.volume }}"]
+  loop: "{{ site_runtime_model.runtime_contract.publication.storage | dict2items }}"
+  when: site_runtime_publication_preserved | bool
+  check_mode: false
+  changed_when: false
+  register: site_runtime_apply_publication_volumes
+
+- name: Принять фактические publication identities
+  ansible.builtin.assert:
+    that:
+      - site_runtime_apply_publication_artifacts.results | length == 6
+      - site_runtime_apply_publication_artifacts.results | map(attribute='stat.exists') | list | min
+      - >-
+        site_runtime_apply_publication_artifacts.results[0].stat.checksum
+        == site_runtime_publication_receipt.environment_checksum
+        or site_runtime_apply_resume_failed | bool
+      - site_runtime_apply_publication_artifacts.results[1].stat.checksum == site_runtime_publication_receipt.nginx_checksum
+      - site_runtime_apply_publication_artifacts.results[3].stat.checksum == site_runtime_publication_receipt.haproxy_checksum
+      - site_runtime_apply_publication_volumes.results | length == 2
+      - site_runtime_apply_publication_volumes.results | map(attribute='rc') | list | max == 0
+    fail_msg: >-
+      Publication artifacts, volumes или HAProxy config расходятся с durable receipt.
+      Apply остановлен до runtime mutations.
+  when: site_runtime_publication_preserved | bool
+
+- name: Проверить exact product containers при продолжении failed deployment
+  ansible.builtin.command:
+    argv:
+      - docker
+      - inspect
+      - "{{ site_runtime_instance }}-web-1"
+      - "{{ site_runtime_instance }}-worker-1"
+      - "{{ site_runtime_instance }}-beat-1"
+  when: site_runtime_apply_resume_failed | bool
+  check_mode: false
+  changed_when: false
+  no_log: true
+  register: site_runtime_apply_resume_containers
+
+- name: Принять exact product containers failed deployment
+  ansible.builtin.assert:
+    that:
+      - site_runtime_apply_resume_containers.stdout | from_json | length == 3
+      - >-
+        site_runtime_apply_resume_containers.stdout | from_json
+        | map(attribute='Image') | unique | list
+        == [site_runtime_product_receipt.config_image_id]
+      - >-
+        site_runtime_apply_resume_containers.stdout | from_json
+        | map(attribute='State.Running') | list | min
+    fail_msg: >-
+      Failed deployment нельзя продолжить: product containers не соответствуют exact staged image.
+  when: site_runtime_apply_resume_failed | bool
+
+- name: Прочитать принятый public Nginx config
+  ansible.builtin.slurp:
+    src: "{{ site_runtime_instance_root }}/nginx-publication-acme.conf"
+  when: site_runtime_publication_preserved | bool
+  check_mode: false
+  no_log: true
+  register: site_runtime_apply_public_nginx_slurp
+
+- name: Проверить работающий HAProxy и локальный TLS endpoint
+  ansible.builtin.shell: |
+    set -euo pipefail
+    test "$(docker inspect "{{ site_runtime_edge_container }}" \
+      --format '{{ '{{.State.Running}}' }}')" = "true"
+    docker exec "{{ site_runtime_edge_container }}" \
+      haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
+    test -n "$(docker port "{{ site_runtime_edge_container }}" 443/tcp)"
+    docker exec "{{ site_runtime_instance }}-web-1" python -c '
+    import socket, ssl, sys
+    domain = sys.argv[1]
+    context = ssl.create_default_context()
+    with socket.create_connection(("127.0.0.1", 8443), timeout=5) as raw:
+        with context.wrap_socket(raw, server_hostname=domain) as secure:
+            secure.sendall(("GET /healthz/ HTTP/1.1\r\nHost: " + domain + "\r\nConnection: close\r\n\r\n").encode())
+            status = secure.recv(128).split(b"\r\n", 1)[0]
+    raise SystemExit(0 if b" 200 " in status else 1)
+    ' "{{ site_runtime_model.runtime_contract.publication.domain }}"
+  args:
+    executable: /bin/bash
+  when: site_runtime_publication_preserved | bool
+  check_mode: false
+  changed_when: false
+
+- name: Зафиксировать принятый public Nginx config
+  ansible.builtin.set_fact:
+    site_runtime_public_nginx_content: >-
+      {{
+        (site_runtime_apply_public_nginx_slurp.content | b64decode)
+        if site_runtime_publication_preserved | bool
+        else ''
+      }}
+  no_log: true
+
+- name: Принять текущий опубликованный runtime до apply
+  ansible.builtin.include_tasks: publication_runtime_acceptance.yml
+  when: site_runtime_publication_preserved | bool

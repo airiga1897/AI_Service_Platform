@@ -1,0 +1,7 @@
+---
+- name: GeoPolicy VPS3 canary
+  hosts: platform_routers:candidate_platform_routers
+  become: true
+  gather_facts: false
+  roles:
+    - geo_policy

@@ -1,0 +1,36 @@
+# Non-secret operator contract for three isolated VPS3 GeoPolicy egress paths.
+# Merge these fragments into the ignored operator platform_router and SoftEther
+# files before remote preflight; never commit real secrets.
+
+source_gateways:
+  - { name: ai-retail-mvp, alias: vps3, source_class: site_runtime, source_container: site-runtime-ai-retail-mvp-anchor, network_name: ai_service_app_vps3, network_subnet: 172.31.3.0/24, source_ipv4: 172.31.3.10, router_ipv4: 172.31.3.2, docker_gateway_ipv4: 172.31.3.1 }
+  - { name: vpn-ingress-vps3, alias: vps3, source_class: vpn_ingress, source_container: softether-edge, network_name: ai_service_vpn_policy, network_subnet: 172.22.252.0/24, source_ipv4: 172.22.252.2, router_ipv4: 172.22.252.4, docker_gateway_ipv4: 172.22.252.1 }
+
+l3_links:
+  - { name: geo-egress-vps3-vps1, server_alias: vps1, client_alias: vps3, hub: GeoEgressVps3Vps1, subnet: 10.88.31.0/30, server_ip: 10.88.31.1, client_ip: 10.88.31.2, tap_name: ge31 }
+  - { name: geo-egress-vps3-vps2, server_alias: vps2, client_alias: vps3, hub: GeoEgressVps3Vps2, subnet: 10.88.32.0/30, server_ip: 10.88.32.1, client_ip: 10.88.32.2, tap_name: ge32 }
+  - { name: geo-egress-vps3-vps4, server_alias: vps4, client_alias: vps3, hub: GeoEgressVps3Vps4, subnet: 10.88.34.0/30, server_ip: 10.88.34.1, client_ip: 10.88.34.2, tap_name: ge34 }
+
+defaults:
+  runtime_mode: platform_router_sidecar
+  access_mode: routed_tap
+  dhcp_enabled: false
+  public_port: 443
+  probe_source_cidr: 172.31.3.2/32
+  source_cidrs:
+    - 172.31.3.10/32
+    - 172.22.252.2/32
+
+stable_route_contract:
+  vps1: { gateway_ipv4: 172.31.3.2, route_mark: "0x530003", route_table: 5301, target_snat_ipv4: 172.31.1.2 }
+  vps2: { gateway_ipv4: 172.31.3.2, route_mark: "0x530004", route_table: 5302, target_snat_ipv4: 172.31.2.2 }
+  vps4: { gateway_ipv4: 172.31.3.2, route_mark: "0x530005", route_table: 5303, target_snat_ipv4: 172.31.4.2 }
+
+secret_preparation:
+  command: >-
+    python tools/geo_policy/prepare_transport_secrets.py
+  guarantees:
+    - values are written only to ignored per-link JSON files
+    - the existing vps1 server credential is reused
+    - hub and vps3 client credentials remain path-specific
+    - secret values are never printed

@@ -21,6 +21,7 @@ instances:
       backend_ipv4: 172.31.3.10
       http_port: 8080
       https_port: 8443
+      acme_contact_email: operator@example.com
       public_route_enabled: false
     backup:
       target_role: backup

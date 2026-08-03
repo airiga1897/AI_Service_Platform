@@ -1,0 +1,11 @@
+[Unit]
+Description=Run GeoPolicy egress health reconciliation
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=15s
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
