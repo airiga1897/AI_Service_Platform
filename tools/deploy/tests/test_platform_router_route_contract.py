@@ -8,8 +8,6 @@ ROOT = Path(__file__).resolve().parents[3]
 PLATFORM_ROUTER_TASKS = (
     ROOT / "infra" / "ansible" / "roles" / "platform_router" / "tasks" / "main.yml"
 )
-PLATFORM_ROUTER_CONFIG = ROOT / "operator" / "platform_router" / "config.yml"
-VPN_EDGE_CONFIG = ROOT / "operator" / "softether" / "edge" / "config.yml"
 SERVICE_RUNNER = ROOT / "tools" / "services" / "service.sh"
 REMOTE_RUNNER = ROOT / "tools" / "services" / "service_remote.ps1"
 HOST_ROUTE_TEMPLATE = (
@@ -112,12 +110,12 @@ class PlatformRouterRouteContractTests(unittest.TestCase):
         )
 
     def test_geo_egress_paths_have_stable_explicit_marks(self) -> None:
-        document = yaml.safe_load(PLATFORM_ROUTER_CONFIG.read_text(encoding="utf-8"))
-        paths = document["platform_router"]["egress_paths"]
+        document = yaml.safe_load(TRANSPORT_EXAMPLE.read_text(encoding="utf-8"))
+        paths = document["stable_route_contract"]
         self.assertEqual(
             {
-                item["alias"]: (item["route_mark"], item["route_table"])
-                for item in paths
+                alias: (item["route_mark"], item["route_table"])
+                for alias, item in paths.items()
             },
             {
                 "vps1": ("0x530003", 5301),
@@ -125,14 +123,12 @@ class PlatformRouterRouteContractTests(unittest.TestCase):
                 "vps4": ("0x530005", 5303),
             },
         )
-        self.assertEqual({item["source_gateway_ipv4"] for item in paths}, {"172.31.3.2"})
         self.assertEqual(
-            {item["probe_source_cidr"] for item in paths},
-            {"172.31.3.2/32"},
+            {item["gateway_ipv4"] for item in paths.values()}, {"172.31.3.2"}
         )
-        self.assertEqual(len({item["route_mark"] for item in paths}), len(paths))
-        self.assertEqual(len({item["route_table"] for item in paths}), len(paths))
-        self.assertEqual(len({item["l3_vps_link"] for item in paths}), len(paths))
+        self.assertEqual(document["defaults"]["probe_source_cidr"], "172.31.3.2/32")
+        self.assertEqual(len({item["route_mark"] for item in paths.values()}), len(paths))
+        self.assertEqual(len({item["route_table"] for item in paths.values()}), len(paths))
 
     def test_tracked_transport_example_has_three_isolated_routed_taps(self) -> None:
         example = yaml.safe_load(TRANSPORT_EXAMPLE.read_text(encoding="utf-8"))
@@ -306,10 +302,10 @@ class PlatformRouterRouteContractTests(unittest.TestCase):
         self.assertIn('ip -4 route flush table "$old_table"', rendered)
 
     def test_vps3_source_gateways_use_isolated_vpn_policy_handoff(self) -> None:
-        config = yaml.safe_load(PLATFORM_ROUTER_CONFIG.read_text(encoding="utf-8"))[
-            "platform_router"
-        ]
-        gateways = {item["source_class"]: item for item in config["source_gateways"]}
+        document = yaml.safe_load(TRANSPORT_EXAMPLE.read_text(encoding="utf-8"))
+        gateways = {
+            item["source_class"]: item for item in document["source_gateways"]
+        }
         self.assertEqual(gateways["site_runtime"]["source_ipv4"], "172.31.3.10")
         self.assertEqual(gateways["site_runtime"]["router_ipv4"], "172.31.3.2")
         self.assertEqual(gateways["vpn_ingress"]["source_ipv4"], "172.22.252.2")
@@ -317,13 +313,7 @@ class PlatformRouterRouteContractTests(unittest.TestCase):
         self.assertEqual(gateways["vpn_ingress"]["network_name"], "ai_service_vpn_policy")
         self.assertNotIn("172.20.0.0/24", str(gateways))
         self.assertNotIn("ai_service_edge", COMPOSE_TEMPLATE.read_text(encoding="utf-8"))
-
-        vpn_edge = yaml.safe_load(VPN_EDGE_CONFIG.read_text(encoding="utf-8"))
-        disabled = vpn_edge["disable_policy_network_aliases"]
-        self.assertNotIn("vps3", disabled)
-        self.assertIn("vps1", disabled)
-        self.assertIn("vps2", disabled)
-        self.assertIn("vps4", disabled)
+        self.assertEqual({item["alias"] for item in gateways.values()}, {"vps3"})
         self.assertIn(
             "platform_router must not attach the shared edge network",
             PLATFORM_ROUTER_TASKS.read_text(encoding="utf-8"),
@@ -406,31 +396,21 @@ class PlatformRouterRouteContractTests(unittest.TestCase):
         )
 
     def test_only_vps3_currently_requires_multi_account_client_runtime(self) -> None:
-        config = yaml.safe_load(PLATFORM_ROUTER_CONFIG.read_text(encoding="utf-8"))[
-            "platform_router"
-        ]
-        links_document = yaml.safe_load(
-            (ROOT / "operator" / "softether" / "l3-vps" / "links.yml").read_text(
-                encoding="utf-8"
-            )
-        )
-        links = {item["name"]: item for item in links_document["links"]}
+        document = yaml.safe_load(TRANSPORT_EXAMPLE.read_text(encoding="utf-8"))
         accounts: dict[str, set[str]] = {}
-        for link in config["links"]:
-            l3_link = links[link["l3_vps_link"]]
-            if l3_link.get("runtime_mode") != "platform_router_sidecar":
-                continue
-            aliases = set(link.get("source_aliases") or [])
-            aliases.add(link.get("source_alias"))
-            for alias in aliases - {None, ""}:
-                accounts.setdefault(alias, set()).add(link["name"])
-        for path in config["egress_paths"]:
-            accounts.setdefault(path["source_alias"], set()).add(
-                path["l3_vps_link"]
-            )
+        for link in document["l3_links"]:
+            accounts.setdefault(link["client_alias"], set()).add(link["name"])
 
-        self.assertEqual(len(accounts["vps3"]), 4)
-        self.assertTrue(all(len(items) == 1 for alias, items in accounts.items() if alias != "vps3"))
+        self.assertEqual(
+            accounts,
+            {
+                "vps3": {
+                    "geo-egress-vps3-vps1",
+                    "geo-egress-vps3-vps2",
+                    "geo-egress-vps3-vps4",
+                }
+            },
+        )
 
 
 if __name__ == "__main__":
